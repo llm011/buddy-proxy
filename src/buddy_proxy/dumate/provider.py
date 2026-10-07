@@ -325,10 +325,44 @@ class DumateProvider(BaseProvider):
     # ------------------------------------------------------------------
 
     def checkin_status(self) -> dict[str, Any] | None:
-        """今日签到状态；未登录 / App 未装时返回 None（该通道不参与打卡）。"""
+        """今日签到状态。
+
+        查询走 bceConsole cookie（``dumate/checkin.fetch_checkin_status``）——
+        这条链路**依赖本机 DuMate 的登录态**（``~/Library/Application Support/
+        qianfan-desktop-app`` 里的 ``.cookie-key`` + ``auth.json``）。所以查不到
+        有两种截然不同的原因，必须分开说：
+
+        - **本机未登录 / App 没装**：上一条签到是**另一台机器**打的，本机这份
+          cookie 根本不存在。上游 ``hasIssued`` 是「这个登录态今天领没领」的
+          口径，别的机器领过不影响本机 cookie——若这里直接回 ``None``，面板会
+          把它渲染成「未签到」+ 可点的「立即打卡」，看起来像今天还没打
+          （用户实测报障：另一台已自动签到，本机却显示未打卡）。
+        - **网络 / 上游失败**：同理不能谎报「未签到」。
+
+        两种情况都返回带 ``query_failed`` 的失败结构（与 codebuddy/trae 一致，
+        见 ``benefits._is_failure``）：面板显示「状态未知」而不是「未签到」，
+        ``benefits`` 也会用短 TTL 缓存、网络恢复后自愈。**不返回裸 ``None``**
+        ——裸 ``None`` 在 ``snapshot`` 里等于「没有状态」，会静默退化成
+        「未签到」的可点状态，正是这次报障的成因。
+        """
         from . import checkin as dumate_checkin
 
-        return dumate_checkin.fetch_checkin_status()
+        status = dumate_checkin.fetch_checkin_status()
+        if isinstance(status, dict):
+            return status
+        # 区分「本机根本没有登录态」与「有登录态但查询失败」——前者给用户
+        # 可操作提示（去装/登录另一台机？本机装 App），后者是临时网络问题。
+        if dumate_checkin.resolve_bceconsole_auth() is None:
+            msg = "本机无 DuMate 登录态（未安装/未登录），签到状态未知——若在别的机器打过卡，本机不会同步"
+        else:
+            msg = "DuMate 签到状态查询失败（网络或上游异常）"
+        return {
+            "checked_in": False,
+            "claimable": False,
+            "inactive": False,
+            "query_failed": True,
+            "message": msg,
+        }
 
     def checkin_claim(self) -> dict[str, Any] | None:
         from . import checkin as dumate_checkin

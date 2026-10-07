@@ -509,6 +509,15 @@ class BenefitsManager:
                 "done_today": done_today,
                 **(status or {}),
             })
+            # 声明支持打卡却查不出状态（返回裸 None / 非 dict）：必须标成
+            # 「查询失败」而不是让它退化成「未签到」。缺了这个标记，前端只在
+            # ``c.error``/``query_failed`` 下才显示「状态未知」，否则会画成
+            # 「未签到」+ 可点的「立即打卡」——看起来像今天还没打，实际是
+            # 拿不到状态（dumate 在无本机登录态时就是这条路径）。
+            if not isinstance(status, dict):
+                entry["checkin"]["query_failed"] = True
+                entry["checkin"].setdefault(
+                    "message", "签到状态查询失败（未登录/网络异常）")
         # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
         # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
         epoch_fn = getattr(p, "quota_epoch", None)
@@ -703,7 +712,9 @@ class BenefitsManager:
             # 活动」，继续往下会对着一个查不通的通道反复 claim，把失败记录
             # 写进 checkin.jsonl 污染日历。失败结果只短缓存 30s，网络恢复后
             # 下一轮自然重试。
-            if status.get("error"):
+            # ``query_failed`` 是 provider 自己标的失败（如 dumate 无本机登录态
+            # 时返回的失败结构，不经 ``_cached`` 兜错），与 ``error`` 同一语义。
+            if status.get("error") or status.get("query_failed"):
                 continue
             # 「今天已打过」要以上游实况为准（见 :func:`claimable_now`）：
             # 本地历史按日历日去重，而 qoder 这类通道按「10:00 窗口」轮换，
