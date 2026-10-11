@@ -120,8 +120,8 @@ BENEFITS.providers = [{
   ]},
 }];
 TRAE_ACCTS = [
-  {index: 1, id: 'u1', nickname: 'ethan', alias: '主力号', region: 'cn', cooling: []},
-  {index: 2, id: 'u2', nickname: 'ethan0', alias: '', region: 'cn', cooling: []},
+  {index: 1, id: 'u1', nickname: 'main', alias: '主力号', region: 'cn', cooling: []},
+  {index: 2, id: 'u2', nickname: 'backup0', alias: '', region: 'cn', cooling: []},
 ];
 globalThis.__ACCTS = TRAE_ACCTS;
 renderTraePanel();
@@ -132,7 +132,7 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
 
     # 标题：alias 优先，无 alias 回落 nickname
     assert "主力号" in html, "账号标题应显示 alias"
-    assert "ethan0" in html, "无 alias 的账号回落 nickname"
+    assert "backup0" in html, "无 alias 的账号回落 nickname"
 
     # head_only「总额度」不进明细（quotaItemsHtml 的 qbody 里没有它）。
     # qbody 到下一个组卡的边界用「Trae #2」锚定（div 嵌套，</div> 截太早）。
