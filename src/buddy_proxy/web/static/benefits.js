@@ -328,7 +328,9 @@ function renderBenefitsNav() {
   };
   nav.innerHTML = labels.map(([label, pid], i) =>
     `<a data-i="${i}" title="${esc(label)}"><span class="sn-dot" style="background:${pcolor(pid)}"></span><span class="sn-label">${esc(shortLabel(label))}</span></a>`).join('');
-  // 点击不用 hash 跳转（会改地址栏且默认硬跳）：scrollIntoView 平滑滚。
+  // 点击不用 hash 跳转（会改地址栏且默认硬跳）。不用 scrollIntoView：
+  // block:'start' 会把卡片顶到视口 0，被 sticky 的 .topbar（tab 头）盖住
+  // 一截（2026-10-12 用户实报）——手动滚，目标位置扣掉 topbar 实际高度。
   // 滚动动画期间（~800ms）把高亮锁到目标卡——中途经过的卡片会轮流进
   // IntersectionObserver 的视口，不锁的话高亮会从上到下逐个闪过去。
   nav.querySelectorAll('a').forEach(a => {
@@ -337,8 +339,11 @@ function renderBenefitsNav() {
       const card = cards[+a.dataset.i];
       nav.querySelectorAll('a').forEach(x =>
         x.classList.toggle('active', x === a));
+      const bar = document.querySelector('.topbar');
+      const top = bar ? bar.getBoundingClientRect().bottom : 0;
+      const y = card.getBoundingClientRect().top + window.scrollY - top - 6;
       _navLockUntil = Date.now() + 800;
-      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      window.scrollTo({ top: Math.max(0, y), behavior: 'smooth' });
     });
   });
   // 滚动高亮：每张卡进入/离开视口时回调，取「离视口顶最近且已进入」的那张
