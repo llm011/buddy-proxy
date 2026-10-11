@@ -319,11 +319,15 @@ function renderBenefitsNav() {
   if (!labels.length) { nav.innerHTML = ''; _navDisconnect(); return; }
   // rail 标签剥掉通道名里的括注（「Antigravity (Gemini/Claude/GPT free tier)」→
   // 「Antigravity」）：导航宽度钉死 132px（style.css .sidenav），长名只会被
-  // 省略号截断；完整名挂 title，悬停可见。
-  nav.innerHTML = labels.map(([label, pid], i) => {
-    const short = String(label).replace(/\s*[（(][^()（）]*[)）]\s*/g, "").trim() || label;
-    return `<a data-i="${i}" title="${esc(label)}"><span class="sn-dot" style="background:${pcolor(pid)}"></span><span class="sn-label">${esc(short)}</span></a>`;
-  }).join('');
+  // 省略号截断；完整名挂 title，悬停可见。循环剥到不动为止——单趟正则
+  // 穿不透嵌套括号（「A (B (C))」会剩个悬空括号，review 指出）。
+  const shortLabel = (l) => {
+    let s = String(l), prev;
+    do { prev = s; s = s.replace(/[（(][^()（）]*[)）]/g, ""); } while (s !== prev);
+    return s.trim() || l;
+  };
+  nav.innerHTML = labels.map(([label, pid], i) =>
+    `<a data-i="${i}" title="${esc(label)}"><span class="sn-dot" style="background:${pcolor(pid)}"></span><span class="sn-label">${esc(shortLabel(label))}</span></a>`).join('');
   // 点击不用 hash 跳转（会改地址栏且默认硬跳）：scrollIntoView 平滑滚。
   // 滚动动画期间（~800ms）把高亮锁到目标卡——中途经过的卡片会轮流进
   // IntersectionObserver 的视口，不锁的话高亮会从上到下逐个闪过去。
