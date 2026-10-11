@@ -223,3 +223,56 @@ def test_proxy_sh_login_whitelist_covers_python_side():
         f"proxy.sh login 白名单缺少: {sorted(missing)}——"
         f"python 侧认的名字 shell 层不认，`buddy login` 会直接报未知参数"
     )
+
+
+# ---------------------------------------------------------------------------
+# codebuddy 登录的区域选择（PR #139 review 补的）
+# ---------------------------------------------------------------------------
+
+def test_login_codebuddy_picks_region_via_pick_region(monkeypatch, tmp_path):
+    """_login_codebuddy 的区域必须经 _pick_region 决定，不许静默默认 cn。
+
+    proxy.sh/buddy/README 三处 usage 和 argparse help 都写了「--region 不给
+    且是交互终端时会问一句」，trae/qoder 一直是这样；codebuddy 曾是
+    ``region = region or "cn"``——交互终端不问、静默落 CN，想登海外版的
+    用户拿到一套 CN uid 很难察觉（两区账号连错域必 401）。这条测试钉住
+    「选区走 _pick_region 且后续按选出的区域接端点/落 session」。
+    """
+    import json
+
+    recorded: dict = {}
+
+    def fake_pick(label, cli_region, *, default_key):
+        recorded["label"], recorded["cli"], recorded["default"] = label, cli_region, default_key
+        return "global"  # 模拟交互 prompt 里用户选了海外版
+
+    monkeypatch.setattr(auth_login, "_pick_region", fake_pick)
+    monkeypatch.setenv("CODEBUDDY_INTL_SESSION", str(tmp_path / "intl-session.json"))
+    monkeypatch.delenv("CODEBUDDY_INTL_ENDPOINT", raising=False)
+
+    class FakeClient:
+        """替身 CodeBuddyClient：login() 往 session_file 写一份合法 session。"""
+
+        def __init__(self, endpoint, session_file=None):
+            recorded["endpoint"] = endpoint
+            self.session_file = pathlib.Path(
+                session_file or pathlib.Path.home() / ".codebuddy-session.json")
+
+        def login(self, open_browser=True):
+            self.session_file.write_text(json.dumps({
+                "auth": {"accessToken": "tok-x", "refreshToken": "r", "expiresAt": 1},
+                "account": {"uid": "u1", "nickname": "tester"},
+                "machineId": "m1",
+            }), encoding="utf-8")
+
+    monkeypatch.setattr("buddy_proxy.codebuddy_provider.client.CodeBuddyClient", FakeClient)
+
+    rc = auth_login._login_codebuddy(open_browser=False, region=None)
+
+    assert rc == 0
+    # 选区确实走了 _pick_region（label 正确、无 --region、默认 cn）
+    assert recorded["label"] == "CodeBuddy"
+    assert recorded["cli"] is None and recorded["default"] == "cn"
+    # 选出的 global 贯穿到端点与海外独立 session 文件
+    assert recorded["endpoint"] == "https://www.codebuddy.ai"
+    assert (tmp_path / "intl-session.json").exists()
