@@ -295,7 +295,7 @@
           1000000
         ]
       },
-      "credits": "x0.03 credits",
+      "credits": "x0.08 credits",
       "descriptionEn": "Blazing-fast, anonymous model with strong coding skills and native multimodal input.",
       "descriptionZh": "推理速度极快，编码能力强劲，并支持原生多模态输入的匿名大模型",
       "id": "space-bunny",
@@ -326,6 +326,18 @@
       "supportsToolCall": true,
       "temperature": 1,
       "vendor": "f"
+    },
+    {
+      "id": "step-5-preview",
+      "name": "Step-5-Preview",
+      "vendor": "stepfun",
+      "max_input": 128000,
+      "max_output": 32000,
+      "tool_call": true,
+      "images": false,
+      "reasoning": true,
+      "credits": "x0.43 credits",
+      "desc": "阶跃 StepFun 面向真实任务的新一代旗舰基模（2026-10-12 实测上游接受 step-5-preview，真实出 usage）"
     },
     {
       "credits": "x0.17 credits",

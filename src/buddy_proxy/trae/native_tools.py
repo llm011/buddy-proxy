@@ -224,7 +224,14 @@ def _send_native_chat(
                 # Go schema 拒绝的另一种壳：原样返回文本，交给 _native_rejected
                 # 判定回落（文本协议兜底是对 4001 的正确响应）
                 return detail or '{"code":4001}'
-            raise HTTPException(status_code=502, detail=f"trae native chat failed: {e.code} {detail}")
+            # 401/403 = 凭据级失败：透传真实状态码——provider 的 failover
+            # 闸门按形态码判「换号可能好转」，包成 502 会被当通道级错误直接
+            # 透传，坏账号永远不被冷却跳过（2026-10-12 实测：账号 #1 token
+            # 被服务端吊销，native/work 两条通道都把它包成 502，failover
+            # 失灵，所有请求都先撞它一次）。其余错误码维持 502 不变。
+            raise HTTPException(
+                status_code=e.code if e.code in (401, 403) else 502,
+                detail=f"trae native chat failed: {e.code} {detail}")
         except _NonStreamTimeout:
             # 总时长到点主动插断：不进下面的瞬态重试（3 × 上限会把挂死放大三倍）。
             raise HTTPException(

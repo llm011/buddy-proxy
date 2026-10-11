@@ -244,6 +244,9 @@ MODEL_IDS: list[str] = [
     "doubao-seed-2.1-pro", "deepseek-v4-pro", "qwen3.8-max",
     "doubao-seed-2.1-turbo", "minimax-m3", "kimi-k2.6", "glm-5.1",
     "step-5-preview", "doubao-seed-code",
+    # 2026-10-12 probe 实测收录（见下注）
+    "mimo-v2.6-flash", "mimo-v2.6-pro", "qwen-3.7-plus",
+    "kimi-k2.8-preview", "qwen3.8-flash",
 ]
 
 # 模型积分倍率：整理自知识库《模型及成本整理-workbuddy-trae-含选用建议》
@@ -269,9 +272,11 @@ MODEL_IDS: list[str] = [
 # 4001 就是这么来的）。与 deepseek-v4.1-flash 同款「上游精确匹配小写字面量」，
 # **不得**凭面板显示名加大写映射——那会把能用的名字改死。面板显示的
 # "Step-5-Preview" 只是展示名。
-# 图中另有 Kimi-K2.8-Preview(0.98) / Qwen3.8-Flash(0.08) 未接入 trae 目录——
-# 可用性未实测，**勿只凭价目表收录**（deepseek-v4.1-pro 就是反例：价目之外
-# 的「名字被上游接受」才是收录依据）。
+# 2026-10-12 面板更新后 probe 补实测收录 5 个：mimo-v2.6-flash / mimo-v2.6-pro /
+# qwen-3.7-plus（**带连字符**——qwen3.7-plus 精确匹配 4001，上游只认连字符名）
+# 三个 solo_work_lite 直通；kimi-k2.8-preview / qwen3.8-flash 两个 solo_work_lite
+# 4001、chat_v3 出流（进覆盖表）。仍拒收：qwen3.7-plus(无连字符) / kimi-k2.8 /
+# 大写变体全 4001——名字以实测为准，勿照面板显示名抄。
 MODEL_CREDITS: dict[str, str] = {
     "doubao-seed-evolving": "x0.08",
     "doubao-seed-2.1-pro": "x0.08",
@@ -280,12 +285,20 @@ MODEL_CREDITS: dict[str, str] = {
     "step-5-preview": "x0.48",
     "glm-5.3-flash": "x0.06",
     "glm-5.3-flashx": "x0.31",
-    "glm-5.3": "x0.40",
+    "glm-5.3": "x0.39",
     "deepseek-v4.1-flash": "x0.08",
     "kimi-k3": "x1.83",
     "deepseek-v4-pro": "x0.72",
     "minimax-m3": "x0.26",
     "qwen3.8-max": "x1.50",
+    # 2026-10-12 用户从客户端「模型倍率」面板截图跟价/收录
+    "mimo-v2.6-flash": "x0.06",
+    "mimo-v2.6-pro": "x0.15",
+    "kimi-k2.8-preview": "x0.98",
+    "qwen3.8-flash": "x0.08",
+    "qwen-3.7-plus": "x0.25",
+    # glm-5.3 面板 0.39（带「会员5折」徽章，原 0.40 小差）；deepseek-v4-flash
+    # 0.10（「闲时折扣」）不进表——内部目录只有 deepseek-v4.1-flash
 }
 
 # 支持图片输入的模型（内部 config_name 口径）。
@@ -338,7 +351,19 @@ MODEL_SUPPORTS_IMAGES: set[str] = {"deepseek-v4.1-flash"}
 # 账单样本再拆。其余 trae 模型仍走倍率公式（其校准为 2026-09-05，若有偏差可用
 # 同法复测）。
 MEASURED_CREDIT_RATES: dict[str, tuple[float, float, float]] = {
-    "glm-5.3-flashx": (7.98e-5, 2.81e-4, 0.31),
+    # 2026-10-12 二次对账（Claude Code 长会话流量，官方账单 02:57-02:58 的
+    # 16 条 vs 本侧 metrics 同窗口逐条比价）：官方单条 2.04~2.33，对 prompt
+    # 87k→95k / comp 38→1663 均不敏感；旧单价（7.98e-5/2.81e-4，2026-09-30
+    # 校准）在该形态下估算 ~7.3/条，高出官方 3.4 倍。二元最小二乘重解：
+    # in=2.351e-5（0.30x）、out=7.242e-5（0.26x）——两价同比缩 ~0.28，
+    # 方向与「旧校准样本无缓存流量、本次全是大缓存会话」一致（cache 折扣
+    # 之前就注明「待有缓存账单样本再拆」，这就是那份样本；Trae 的 chat 流
+    # 不回缓存 token 数，代理侧仍拆不出 in/out 各自的缓存价，取混合单价）。
+    # 注意：本次样本全是缓存命中的稳态请求，会话首请求（无缓存）按本表会
+    # 低估（旧表反而准）——两形态没有单价能同时对准，取常见形态（长会话
+    # 稳态）优先。官方账单条数比本侧请求少 ~20%（小额请求疑似合并出账），
+    # 对账时以金额总量为准、勿逐条硬配。
+    "glm-5.3-flashx": (2.351e-5, 7.242e-5, 0.31),
     "deepseek-v4.1-flash": (3.41e-5, 1.39e-4, 0.08),
 }
 
@@ -350,6 +375,9 @@ _WORK_FUNCTION_OVERRIDE: dict[str, str] = {
     "glm-5.1": "chat_v3",
     "Doubao-Seed-Code": "chat_v3",
     "glm-5.3-flash": "chat_v3",
+    # 2026-10-12 probe：solo_work_lite 4001、chat_v3 出流
+    "kimi-k2.8-preview": "chat_v3",
+    "qwen3.8-flash": "chat_v3",
 }
 
 # 海外（global）的同款表。实测（2026-10-06）：GPT-5.6 系 / GLM / Kimi-K2.x /
@@ -375,6 +403,9 @@ _WORK_FUNCTION_OVERRIDE_INTL: dict[str, str] = {
     "gpt-5.6-luna": "chat_v3",
     "glm-5.2": "chat_v3",
     "minimax-m3": "chat_v3",
+    # 2026-10-12 实测：solo_work_lite 4001、chat_v3 出流
+    "gpt-5.5": "chat_v3",
+    "gpt-6-astra": "chat_v3",
 }
 
 
@@ -412,8 +443,8 @@ def work_function_override(region_key: str) -> dict[str, str]:
 #    GPT-6 系（sol/luna）/ GPT-5.x / kimi-k3 则 solo_work_lite 直接可用。
 #
 # 反例记录（同日实测，三种 function 全 4001，**别再盲试**）：
-#   `gpt-6-astra`（IDE 下拉里有，但 agent 通道三种 function 全拒——疑似对
-#   work/agent 通道不开放或 config_name 带未知的版本尾巴）；
+#   （已推翻）`gpt-6-astra` 2026-10-06 曾记「三种 function 全拒」，实为
+#   当日只试了 solo_work_lite 变体；2026-10-12 复测 chat_v3 出流，已收录。
 #   `glm-5.3` / `glm-5.3-flash`（海外只有 GLM-5.2）；`deepseek-v4.1-flash` /
 #   `DeepSeek-V4-Flash`；`gemini-3.1-pro-preview` / `gemini-3-flash-preview`；
 #   `Seed-2.1-Turbo` / `Doubao-Seed-2.1-Turbo`。
@@ -424,9 +455,9 @@ def work_function_override(region_key: str) -> dict[str, str]:
 # 用户点名移除：GPT-6/5.6 系在场没啥用）。别当漏收补回来。
 MODEL_MAP_INTL: dict[str, str] = {}
 MODEL_IDS_INTL: list[str] = [
-    "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra",
-    "gpt-5.6-luna", "kimi-k3", "gpt-5.4", "glm-5.2",
-    "minimax-m3",
+    "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra",
+    "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+    "gpt-5.5", "gpt-5.4", "kimi-k3", "glm-5.2", "minimax-m3",
 ]
 # 海外是**次数制**（Premium 快速请求 N 次/月 + Basic 美元额度），没有 CN 的
 # 积分倍率概念——留空，额度展示走 _quota_items 的海外分支（见 provider.py）。

@@ -61,8 +61,11 @@ def test_work_catalog_ids_are_lowercase_and_map_upstream_names():
     assert map_model_for("cn", "deepseek-v4-pro") == "DeepSeek-V4-Pro"
     # step-5-preview 上游只认全小写（2026-10-07 实测），原样透传不进映射表
     assert map_model_for("cn", "step-5-preview") == "step-5-preview"
+    # qwen-3.7-plus 2026-10-12 实测收录（上游只认带连字符名）；无连字符的
+    # qwen3.7-plus / qwen-3.8-max 仍是被拒变体
     assert not {"glm-5.2", "kimi-k2.7-code", "deepseek-v4-flash",
-                "glm-5", "glm-5-turbo", "qwen-3.7-plus", "qwen-3.8-max"} & ids
+                "glm-5", "glm-5-turbo", "qwen3.7-plus", "qwen-3.8-max"} & ids
+    assert "qwen-3.7-plus" in ids
 
 
 def test_v41_flash_precedes_legacy_v4_pro():
