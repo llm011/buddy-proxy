@@ -548,7 +548,13 @@ class TraeProvider(BaseProvider):
         """查额度（``/ug/usage``），多账号并发。多账号时各账号条目带
         ``Trae #N · `` 前缀供前端分组；个别账号失败插 ``query_failed``
         说明条（benefits 层认这个标记走短缓存）。"""
-        accounts = self._work_accounts()
+        # 遍历**本区全量**账号（与签到同口径），不剔除冷却中的：冷却挡的是
+        # 模型转发（quota/限流退避），与额度查询的 billing 面无关。走
+        # available_accounts 会把在冷却的账号整条从额度面板藏掉——2026-10-11
+        # 用户实报：3 个 cn 号、2 个挂 quota 冷却，面板只剩 1 张卡。#130 修
+        # 签到时漏了这条路径（当时注释「额度/转发路径不动」，转发该不动、
+        # 额度不该）。display_index 的编号对全量位次天然一致，不引入错位。
+        accounts = self._checkin_accounts()
         if not accounts:
             # 单账号 legacy 兜底（迁移前 / PAT）：保持原行为
             try:

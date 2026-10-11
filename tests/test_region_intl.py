@@ -384,7 +384,12 @@ def test_display_index_survives_delete_holes():
 
 
 def test_quota_labels_align_with_snapshot_when_account_cooling(monkeypatch):
-    """冷却账号被跳过时，额度块仍对上**自己**（改造前的老坑）。"""
+    """额度枚举不再剔冷却账号（2026-10-11 修），但编号仍与快照逐一对上。
+
+    旧行为（#130 时代）是「冷却号被额度枚举跳过」，断言的是跳过后不错位；
+    全量枚举后防错位防线不变——display_index 用全量位次，冷却号也有自己
+    的 #N 且指向**自己**，✕ / ▲▼ 不会指到别人（删错凭据的老坑）。
+    """
     _seed_quota_stubs(monkeypatch)
     a1 = save_account_cred(_trae_cred("cn1"))
     save_account_cred(_trae_cred("cn2"))
@@ -396,8 +401,9 @@ def test_quota_labels_align_with_snapshot_when_account_cooling(monkeypatch):
     assert labels, "多账号应带 Trae #N 前缀"
     matched = [uid for lab in labels for uid, i in snap.items()
                if i == int(lab.split("#")[1])]
-    assert sorted(matched) == ["cn2", "cn3"], \
-        f"额度块必须对上本轮真查的账号（冷却的 cn1 不该被指到）：{matched}"
+    # 冷却中的 cn1 现在也出现在额度里（#1 仍是它自己，不错位）
+    assert sorted(matched) == ["cn1", "cn2", "cn3"], \
+        f"额度块必须对上自己的编号（冷却中也不许错位/消失）：{matched}"
 
 
 def test_quota_labels_align_with_snapshot_across_regions(monkeypatch):
