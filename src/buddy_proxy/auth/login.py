@@ -101,6 +101,9 @@ def _login_codebuddy(open_browser: bool = True, region: str | None = None,
                      **_kwargs) -> int:
     """CodeBuddy 浏览器 OAuth 登录（region=cn/global，默认 cn）。
 
+    区域经 ``_pick_region`` 决定（``--region`` 显式 > 交互 prompt > cn），
+    与 trae/qoder 一致——交互终端不给 ``--region`` 会问一句，别静默按 cn
+    走：想登海外版的用户拿到一套 CN uid 后很难察觉（两区账号连错域必 401）。
     海外版（www.codebuddy.ai）与 CN 协议同构，只是换 host + 独立 session
     文件：不能写进 CN 的历史 session 路径（~/.codebuddy-session.json），否则
     首次触达的 legacy 迁移会把海外账号并进 CN 区。
@@ -110,7 +113,7 @@ def _login_codebuddy(open_browser: bool = True, region: str | None = None,
     from buddy_proxy.codebuddy_provider.client import CodeBuddyClient, CodeBuddyError
     from buddy_proxy.codebuddy_provider.credentials import endpoint as cb_endpoint
 
-    region = region or "cn"
+    region = _pick_region("CodeBuddy", region, default_key="cn")
     endpoint = cb_endpoint(region)
     if region == "global":
         session_file = Path(os.getenv("CODEBUDDY_INTL_SESSION", "")
