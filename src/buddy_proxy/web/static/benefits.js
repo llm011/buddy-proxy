@@ -319,17 +319,24 @@ function renderBenefitsNav() {
   if (!labels.length) { nav.innerHTML = ''; _navDisconnect(); return; }
   nav.innerHTML = labels.map(([label, pid], i) =>
     `<a data-i="${i}"><span class="sn-dot" style="background:${pcolor(pid)}"></span>${esc(label)}</a>`).join('');
-  // 点击不用 hash 跳转（会改地址栏且默认硬跳）：scrollIntoView 平滑滚
+  // 点击不用 hash 跳转（会改地址栏且默认硬跳）：scrollIntoView 平滑滚。
+  // 滚动动画期间（~800ms）把高亮锁到目标卡——中途经过的卡片会轮流进
+  // IntersectionObserver 的视口，不锁的话高亮会从上到下逐个闪过去。
   nav.querySelectorAll('a').forEach(a => {
     a.addEventListener('click', e => {
       e.preventDefault();
-      cards[+a.dataset.i].scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const card = cards[+a.dataset.i];
+      nav.querySelectorAll('a').forEach(x =>
+        x.classList.toggle('active', x === a));
+      _navLockUntil = Date.now() + 800;
+      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
     });
   });
   // 滚动高亮：每张卡进入/离开视口时回调，取「离视口顶最近且已进入」的那张
   const active = new Map();  // card -> isIntersecting
   const io = new IntersectionObserver(items => {
     items.forEach(it => active.set(it.target, it.isIntersecting));
+    if (Date.now() < _navLockUntil) return;  // 点击后的平滑滚动中：高亮已锁
     let best = null, bestTop = Infinity;
     active.forEach((on, card) => {
       if (!on) return;
@@ -344,6 +351,8 @@ function renderBenefitsNav() {
   _navDisconnect();
   renderBenefitsNav._io = io;
 }
+
+let _navLockUntil = 0;
 
 function _navDisconnect() {
   renderBenefitsNav._io && renderBenefitsNav._io.disconnect();
