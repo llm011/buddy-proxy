@@ -273,11 +273,13 @@ def _login_trae(open_browser: bool = True, region: str | None = None, **_kwargs)
     print(f"浏览器将打开 {reg.auth_host} 授权页；完成登录后会自动回跳本机落盘凭证。")
     if open_browser:
         # webbrowser 失败时静默返回 False（SSH/无 GUI 会话等，见 core.browser）
-        # ——必须把链接打出来，否则授权 URL 凭空消失，只能干等 15 分钟超时
         if not open_external_url(url):
-            print(f"[!] 无法自动打开浏览器，请手动在浏览器打开：\n  {url}")
+            print("[!] 无法自动打开浏览器，请手动在浏览器打开：")
     else:
-        print(f"请手动在浏览器打开：\n  {url}")
+        print("请手动在浏览器打开：")
+    # 对齐 gemini/kimi 等流程：URL 始终回显——SSH 下兜底 open 可能把浏览器
+    # 开在远端屏幕上，本地什么都看不到，链接必须能从终端拿到
+    print(f"  {url}")
     print("\n[*] 等待登录完成（最长 15 分钟，Ctrl+C 取消）...")
 
     deadline = time.time() + STATE_TTL

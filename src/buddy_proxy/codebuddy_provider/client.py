@@ -265,9 +265,9 @@ class CodeBuddyClient:
             print("[Auth] 凭证失效，需重新登录（未自动打开浏览器；"
                   "运行 `buddy login` 或使用 --login 获取登录链接）")
         if open_browser:
-            # announce=True 时授权链接已在上面打印；这里只兜底「打不开」的情况
+            # 失败提示自包含：announce=False 的调用方没打印过链接，不能引用「上面」
             if not open_external_url(auth_url):
-                print("[Auth] 无法自动打开浏览器，请手动访问上面的链接")
+                print(f"[Auth] 无法自动打开浏览器，请手动访问：\n{auth_url}")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             time.sleep(1)
