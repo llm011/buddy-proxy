@@ -193,17 +193,20 @@
   h2 { font-size: 14.5px; margin: 26px 0 10px; color: var(--text); }
   h2 .sub { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  /* 额度页侧边导航：fixed 在视口左侧（贴 wrap 内容区左缘减去自身宽度+间距），
-     不随页面滚动。仅在宽屏显示——窄屏时 wrap 顶满可视宽、导航必然压在内容上。
-     高亮态由 JS 侧 IntersectionObserver 驱动（renderBenefitsNav）。 */
-  .sidenav { display: none; }
-  @media (min-width: 1280px) {
+  /* 额度页侧边导航：fixed 在视口左侧（贴 wrap 内容区左缘），不随页面滚动。
+     高亮态由 JS 侧 IntersectionObserver 驱动（renderBenefitsNav）。
+     宽度必须钉死 + 条目省略号（.sn-label）：条目名来自通道 name，长的能到
+     330px+（"Antigravity (Gemini/Claude/GPT free tier)"），nowrap 又不限宽时
+     导航右缘会怼进内容区 200px+，直接叠在打卡日历上（2026-10-11 用户实报）。
+     几何：wrap 左缘 = (100vw-1180)/2；断点 1480px 下最紧情形（left 被 clamp
+     到 8px）导航右缘 140px 仍在 wrap 左缘 150px 外。再窄的窗口侧边没有
+     132px+间距的余量，整块 display:none——宁可不放，不放会压内容。 */
+  .sidenav { display: none; width: 132px; }
+  @media (min-width: 1480px) {
     .sidenav { display: flex; flex-direction: column; gap: 1px;
-               position: fixed; left: max(12px, calc((100vw - 1180px) / 2 - 104px));
+               position: fixed; left: max(8px, calc((100vw - 1180px) / 2 - 148px));
                top: 50%; transform: translateY(-50%);
                z-index: 20; max-height: 80vh; overflow: auto; overscroll-behavior: contain; }
-    /* wrap 内容区左缘 = (100vw - 1180)/2；导航宽约 88px + 16px 间距，宽屏下
-       这个余量放得下。窄屏整块 display:none（见上），不会压在内容上。 */
   }
   .sidenav a { display: flex; align-items: center; gap: 7px; padding: 4px 10px;
                font-size: 12px; color: var(--muted); border-radius: 7px;
@@ -212,6 +215,8 @@
   .sidenav a.active { color: var(--accent); border-left-color: var(--accent);
                       background: rgba(79,140,255,.08); }
   .sidenav a .sn-dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+  .sidenav a .sn-label { flex: 1; min-width: 0; overflow: hidden;
+                         text-overflow: ellipsis; }
   /* 打卡页两栏高度差很大（日历矮、额度列表长）：默认 stretch 会把日历那张卡
      拉到与右栏等高，底部留出一大块空白。top 让各卡按自身内容高 */
   .grid2.top { align-items: start; }
