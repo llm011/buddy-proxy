@@ -9,8 +9,8 @@
 #   ./proxy.sh logs                              # 跟踪日志
 #   ./proxy.sh ui                                # 确保在跑并打开管理页 http://127.0.0.1:8787/ui
 #   ./proxy.sh login    [provider] [--no-browser] [--region cn|global] # 登录上游账号（默认 codebuddy；
-#                                                # provider: codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity）
-#                                                # --region 仅 trae/qoder 生效（两区账号不通用；交互终端不给会问一句）
+#                                                # provider: codebuddy(=workbuddy, =codebuddyintl 海外)/trae(=traeintl 海外)/zcode/glm/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity）
+#                                                # --region 仅 trae/qoder/codebuddy 生效（两区账号不通用；交互终端不给会问一句）
 #                                                # 登录成功后若网关在运行，需 restart 生效
 #
 # 支持环境变量（start 命令生效）：
@@ -260,13 +260,15 @@ cmd_ui() {
 cmd_login() {
     local provider="codebuddy"
     local extra=()
+    # provider 白名单 = python 侧入口全集（auth/login.py 的 PROVIDER_ALIASES
+    # + KNOWN_PROVIDERS）：python 认的名字这里都得放行，否则用户敲别名直接被
+    # shell 拦下（codebuddyintl 实测漏过）。两边加名字要一起改，
+    # tests/test_login_cli.py 的白名单同步测试会盯住。
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|gemini|gemini-cli|antigravity|kimi)
+            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi)
+                # 别名（workbuddy/cb/quoder 系、intl 系）原样透传，python 侧归一
                 provider="$1" ;;
-            workbuddy)
-                # workbuddy 是 codebuddy 的别名（登录模块内同样会归一）
-                provider="codebuddy" ;;
             --no-browser)
                 extra+=("$1") ;;
             # trae/qoder 选区（cn/global）：两种写法都透传给 python 侧
@@ -285,7 +287,7 @@ cmd_login() {
     if [[ "$provider" == "codebuddy" ]]; then
         log "开始 codebuddy 登录（workbuddy 同义）..."
     else
-        log "开始 $provider 登录..."
+        log "开始 $provider 登录...（别名由登录模块归一）"
     fi
     # 登录成功与否由 python 侧返回码决定；失败时这里原样透传非零退出码
     PYTHONPATH="$SCRIPT_DIR/src" $PYTHON_BIN -m buddy_proxy.auth.login "$provider" \
