@@ -157,15 +157,18 @@ def _override(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_override_loads_from_packaged_models_json():
-    """随包 models.json 必须能加载出真实限制（生产 UUID 白名单）。"""
-    assert qoder_catalog.MODEL_OVERRIDE, "覆盖表为空——models.json 丢了？"
-    # glm-5.3 只允许全量账号
-    norm = qoder_catalog._normalize("glm-5.3")
-    raw, ids = qoder_catalog.MODEL_OVERRIDE[norm]
-    assert raw == "glm-5.3"
-    assert ids == {"01a0decc-9d15-7750-a4d5-7f5a7ae40263"}
-    # 未登记的模型不在表里
-    assert qoder_catalog._normalize("qwen3.8-flash") not in qoder_catalog.MODEL_OVERRIDE
+    """随包 models.json 必须能加载出合法覆盖表。
+
+    2026-10-12 起 models.json 的 models 数组为空：受限号的权益分桶已恢复
+    全量（目录 14 条 + GLM/Kimi/MiniMax 实调真实计费），旧白名单整体过时。
+    空表语义 = 所有账号支持所有模型（_load_model_override 的空表约定）。
+    这里只钉「文件存在且能被解析成空表」，防止文件再次携带限制时静默失效。
+    """
+    assert isinstance(qoder_catalog.MODEL_OVERRIDE, dict)
+    assert qoder_catalog.MODEL_OVERRIDE == {}, (
+        "models.json 又带上了账号限制？若某号再被风控收窄，按 2026-10-06 的"
+        "形态回填条目，并同步更新本断言"
+    )
 
 
 def test_override_missing_or_corrupt_file(tmp_path, monkeypatch, caplog):
