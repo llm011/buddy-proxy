@@ -35,8 +35,9 @@ from __future__ import annotations
 import json
 import os
 import time
-import webbrowser
 from dataclasses import dataclass
+
+from buddy_proxy.core.browser import open_external_url
 from pathlib import Path
 from typing import Any, Callable
 
@@ -294,11 +295,11 @@ def login_interactive(
     print(f"    {session.login_url}")
     print()
     if open_browser:
-        try:
-            webbrowser.open(session.login_url)
+        # webbrowser 静默失败（返回 False）由 open_external_url 兜底
+        if open_external_url(session.login_url):
             print("[Mimo] 已尝试自动打开浏览器…")
-        except Exception as exc:  # noqa: BLE001 - 打不开不算失败
-            print(f"[Mimo] 自动打开浏览器失败（{exc}），请手动复制上面的链接。")
+        else:
+            print("[Mimo] 自动打开浏览器失败，请手动复制上面的链接。")
     print(f"[Mimo] 等待登录中（链接 {session.expires_in} 秒内有效，Ctrl-C 可取消）…")
 
     ticks = {"n": 0}

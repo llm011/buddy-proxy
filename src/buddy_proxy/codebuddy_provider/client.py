@@ -17,8 +17,9 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import webbrowser
 from typing import Any, Iterator
+
+from buddy_proxy.core.browser import open_external_url
 
 
 class CodeBuddyError(RuntimeError):
@@ -264,7 +265,9 @@ class CodeBuddyClient:
             print("[Auth] 凭证失效，需重新登录（未自动打开浏览器；"
                   "运行 `buddy login` 或使用 --login 获取登录链接）")
         if open_browser:
-            webbrowser.open(auth_url)
+            # 失败提示自包含：announce=False 的调用方没打印过链接，不能引用「上面」
+            if not open_external_url(auth_url):
+                print(f"[Auth] 无法自动打开浏览器，请手动访问：\n{auth_url}")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             time.sleep(1)
