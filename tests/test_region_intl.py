@@ -577,17 +577,19 @@ def test_pick_region_noninteractive_uses_default(monkeypatch):
 
 
 def test_intl_model_catalog():
-    """probe 实测收录 9 模型；用户点名不要的老模型 / 实测 4001 的反例别补回来。"""
+    """probe 实测收录 12 模型；用户点名不要的老模型 / 实测 4001 的反例别补回来。"""
     _, ids, credits, images = model_tables("global")
-    assert set(ids) == {"gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol",
-                        "gpt-5.6-terra", "gpt-5.6-luna", "kimi-k3",
-                        "gpt-5.4", "glm-5.2", "minimax-m3"}
+    assert set(ids) == {"gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-6-astra",
+                        "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+                        "gpt-5.5", "gpt-5.4", "kimi-k3", "glm-5.2", "minimax-m3"}
     # 实测通但用户决定不收录（kimi-k2.7-code 等 2026-10-06：太老；
     # gpt-5.2 2026-10-07）——别当漏收补回来
     for gone in ("kimi-k2.7-code", "kimi-k2.5", "minimax-m2.7", "gpt-5.2"):
         assert gone not in ids
-    # 实测三种 function 全 4001 的反例——报进目录只会让客户端撞墙
-    for dead in ("gpt-6-astra", "glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash"):
+    # 实测 4001 的反例——报进目录只会让客户端撞墙
+    # （gpt-6-astra 曾在此列：2026-10-06 记「三种 function 全拒」实为当日只试
+    #  了 solo_work_lite 变体，2026-10-12 复测 chat_v3 出流，移入目录）
+    for dead in ("glm-5.3", "glm-5.3-flash", "deepseek-v4.1-flash"):
         assert dead not in ids
     assert credits == {}, "海外次数制，无 CN 的积分倍率"
     assert images == set(), "图片能力未实测（probe 只发过纯文本），不声明读图"

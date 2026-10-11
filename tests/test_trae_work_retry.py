@@ -82,14 +82,29 @@ def test_non_http_error_is_retried():
 
 
 def test_http_error_4xx_not_retried():
-    """上游 401（HTTPError，非瞬态）→ 不重试，直接 HTTPException(502)，只调用 1 次。"""
+    """上游 401（HTTPError，非瞬态）→ 不重试，只调用 1 次。
+
+    2026-10-12 起凭据级错误透传真实状态码（401/403），不再包 502：failover
+    的账号级闸门按形态码判「换号可能好转」，包成 502 会绕过冷却换号（实测
+    账号 token 被服务端吊销后所有请求都先撞它一次）。其余 4xx 仍 502。"""
     with mock.patch("urllib.request.urlopen") as up, mock.patch(
         "buddy_proxy.trae.transport.time.sleep"  # 拆分后 _send_trae_work_chat 在 transport 模块
     ) as sleep:
         up.side_effect = _http_error(401, b'{"code": 401}')
         with pytest.raises(HTTPException) as ei:
             _run()
-    assert ei.value.status_code == 502
+    assert ei.value.status_code == 401
     assert "401" in ei.value.detail
+    assert up.call_count == 1
+    assert sleep.call_count == 0
+
+    # 非凭据级 4xx（如 422 参数错）维持 502 包壳：换号无意义，形态码保 502
+    with mock.patch("urllib.request.urlopen") as up, mock.patch(
+        "buddy_proxy.trae.transport.time.sleep"
+    ) as sleep:
+        up.side_effect = _http_error(422, b'{"code": 4001}')
+        with pytest.raises(HTTPException) as ei:
+            _run()
+    assert ei.value.status_code == 502
     assert up.call_count == 1
     assert sleep.call_count == 0

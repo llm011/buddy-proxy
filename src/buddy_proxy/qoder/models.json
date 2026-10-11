@@ -3,20 +3,10 @@
     "qoder per-account 模型支持覆盖表（白名单语义）：只列「有账号限制」的模型；",
     "未列出的模型 = 所有账号都支持，accounts 缺省或 \"all\" 同义。",
     "accounts 填账号 id (UUID)（管理页账号卡可查）；id 接受对外 id / display_name / 上游 key。",
-    "2026-10-06 实测：01a107eb（0103 新号）被风控只剩 Qwen3.8 两档；",
-    "01a0decc（0731 老号）14 条全量。改完需重启生效。"
+    "2026-10-06 实测：某 0103 注册的新号被风控只剩 Qwen3.8 两档，当时把 11 个",
+    "三方模型全钉在另一全量老号名下；2026-10-12 复测受限号目录已恢复 14 条全量、",
+    "GLM/Kimi/MiniMax 实调真实计费——权益分桶是账号级且会漂移，旧限制过时清空。",
+    "目录 enable 字段是唯一判据；号再被限就照 2026-10-06 的形态回填。改完需重启生效。"
   ],
-  "models": [
-    {"id": "qwen3.7-max", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "qwen3.7-plus", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "qwen3.7-flash", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "deepseek-v4-pro", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "deepseek-v4.1-flash", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "glm-5.3", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "glm-5.3-flash", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "glm-5.2", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "kimi-k3", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "kimi-k2.8-preview", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]},
-    {"id": "minimax-m2.7", "accounts": ["01a0decc-9d15-7750-a4d5-7f5a7ae40263"]}
-  ]
+  "models": []
 }

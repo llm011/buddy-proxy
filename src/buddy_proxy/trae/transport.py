@@ -155,7 +155,12 @@ def _send_trae_work_chat(
                 return raw
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")[:500]
-            raise HTTPException(status_code=502, detail=f"trae work chat failed: {e.code} {detail}")
+            # 401/403 透传真实状态码，理由同 native_tools._send_native_chat：
+            # 包成 502 会绕过 failover 的账号级闸门（形态码丢了），坏账号
+            # 永远不被冷却跳过。
+            raise HTTPException(
+                status_code=e.code if e.code in (401, 403) else 502,
+                detail=f"trae work chat failed: {e.code} {detail}")
         except Exception as e:
             # HTTPError 之外一律视为瞬态网络错误（IncompleteRead / 连接重置 / 超时等），
             # 保留原始异常重试；非瞬态错误重试 3 次也会快速失败，代价可接受。

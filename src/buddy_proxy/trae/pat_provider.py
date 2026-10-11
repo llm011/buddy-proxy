@@ -55,6 +55,13 @@ class TraePatProvider(TraeProvider):
             })
         return out
 
+    # 显式置 None：模型页的「重新拉取」按钮按 callable 判定（models_api.refresh），
+    # 继承的 TraeProvider.refresh_models 对 PAT 是错的——它按 self._region（cn）
+    # 取 work 模型表、拿 work 凭证逐模型发真实请求，再用探测结果过滤 PAT 的
+    # 静态列表（models_config），模型对不上还白付积分。PAT 目录是静态配置，
+    # 没有「可拉取」语义。
+    refresh_models = None  # type: ignore[assignment]
+
     def ensure_auth(self) -> None:
         # 启动/健康检查只做本地严格配置校验；token 交换延迟到真实请求，避免阻塞。
         ensure_pat_config()

@@ -30,7 +30,7 @@ from buddy_proxy.qoder.provider import QoderProvider
 # 当天有一条 CLAIM_BENEFIT/CLAIMABLE（-556，100 credits），
 # 另一条是 VIEW_DETAILS/CLAIMED（-922，无 benefit）。顶层 claimable=true。
 LIVE_LISTING = {
-    "uid": "01a0decc-9d15-7750-a4d5-7f5a7ae40263",
+    "uid": "00000000-0000-0000-0000-000000000001",
     "showCampaign": True,
     "claimable": True,
     "campaignUrl": "https://openapi.qoder.com.cn/growth-page/activity-iframe",

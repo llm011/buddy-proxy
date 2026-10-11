@@ -1584,15 +1584,18 @@ def test_trae_models_carry_credits():
     """Trae 模型应带积分倍率（知识库《模型及成本整理》2026-09-05 版）。"""
     from buddy_proxy.trae_provider import TraeProvider
     models = {m["id"]: m for m in TraeProvider().models()}
-    assert models["glm-5.3"]["credits"] == "x0.40"
+    assert models["glm-5.3"]["credits"] == "x0.39"  # 2026-10-12 面板跟价（会员5折徽章）
     assert models["glm-5.3-flash"]["credits"] == "x0.06"
     assert models["deepseek-v4-pro"]["credits"] == "x0.72"
     assert models["doubao-seed-evolving"]["credits"] == "x0.08"
     assert models["kimi-k3"]["credits"] == "x1.83"
     # 用户可见模型 ID 统一小写，旧模型不再出现在目录里。
     assert all(model_id == model_id.lower() for model_id in models)
+    # qwen-3.7-plus（带连字符）2026-10-12 实测收录；qwen3.7-plus（无连字符）
+    # 才是被上游拒的变体名
     assert not {"deepseek-v4-flash", "glm-5", "glm-5-turbo", "glm-5.2",
-                "kimi-k2.7-code", "qwen-3.7-plus"} & models.keys()
+                "kimi-k2.7-code", "qwen3.7-plus"} & models.keys()
+    assert "qwen-3.7-plus" in models
 
 
 def test_metrics_daily_series_zero_filled(tmp_path):

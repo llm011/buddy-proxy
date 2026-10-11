@@ -95,13 +95,13 @@ class TestRedactUrl:
     def test_masks_user_info_pii(self):
         """userInfo 是 URL-encoded JSON，含手机号/邮箱/昵称/UserID，不能进日志。"""
         info = urllib.parse.quote(json.dumps({
-            "ScreenName": "ethan",
-            "UserID": "3059256392432068",
-            "NonPlainTextMobile": "185******31",
+            "ScreenName": "tester",
+            "UserID": "1234567890123456789",
+            "NonPlainTextMobile": "138******00",
         }))
         out = _redact_url(f"/authorize?userInfo={info}&scope=solo")
-        assert "ethan" not in out
-        assert "3059256392432068" not in out
+        assert "tester" not in out
+        assert "1234567890123456789" not in out
         assert "scope=solo" in out, "非敏感参数要保留"
 
     def test_masks_data_blob(self):

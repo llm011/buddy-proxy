@@ -40,7 +40,7 @@ CHAT_SCENES = ("chat", "developer", "assistant", "app")
 #:
 #: 2026-10-03 曾实测三方模型整批被收回（目录 ``enable=false``，调用返回
 #: code 112 的 403）；2026-10-05 复测权益已恢复——那是**账号级**分桶而非
-#: 全局门：全量账号（01a0decc）目录回到 14 条。本表按该全量目录重建
+#: 全局门：全量账号目录回到 14 条。本表按该全量目录重建
 #: （``cmodel``/``smodel`` 目录里彻底消失，不收）；price_factor 全部按实测
 #: 修正（qmodel_latest 0.1→0.5、q37fmodel 0.02→0.1）。个别账号仍受限的
 #: 情况走 :data:`MODEL_OVERRIDE`（per-account 白名单）处理，兜底表不管。

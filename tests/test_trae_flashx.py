@@ -83,13 +83,14 @@ def test_flashx_credit_multiplier():
     x0.31 来自 2026-09-30 WorkBuddy 客户端倍率面板截图（口径已经过 4 个旧
     模型交叉验证）。但**积分估算不能用它线性折算**：官方真实计费对输入/输出
     分开计价（out≈4×in），「100×倍率/1M 总 tokens」会差约 9 倍——估算走
-    ``MEASURED_CREDIT_RATES`` 实测单价（官方账单对账解出，9 条记录回代 8 中）。
-    (30000,100) 实测口径：30000×7.98e-5 + 100×2.81e-4 ≈ 2.42。
+    ``MEASURED_CREDIT_RATES`` 实测单价（官方账单对账解出，9 条记录回代 8 中；
+    2026-10-12 长会话缓存流量二次对账后单价整体下修 ~0.28x，见该表注释）。
+    (30000,100) 实测口径：30000×2.351e-5 + 100×7.242e-5 ≈ 0.71。
     """
     assert MODEL_CREDITS["glm-5.3-flashx"] == "x0.31"
     entry = next(m for m in TraeProvider().models() if m["id"] == "glm-5.3-flashx")
     assert entry["credits"] == "x0.31"
-    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 2.42
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 0.71
 
 
 def test_flashx_auto_matches_trae_channel():

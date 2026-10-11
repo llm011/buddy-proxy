@@ -838,7 +838,7 @@ function orderPageSync(key) {
   const el = document.querySelector(`.order-rows[data-key="${CSS.escape(key)}"]`);
   if (!el) return;
   ORDER_DRAFT[key] = Array.from(el.querySelectorAll('.order-row')).map(r => ({
-    provider: r.querySelector('.order-provider').value,
+    provider: orderProviderOf(r),
     model: (r.querySelector('.order-model').value || '').trim(),
   }));
 }
@@ -876,16 +876,6 @@ function bindOrderRowEvents(el) {
   el.addEventListener('drop',      ev => ev.preventDefault());
   el.addEventListener('dragleave', ev => {
     if (!el.contains(ev.relatedTarget)) orderPageDrag(ev, 'end');
-  });
-  // provider 下拉：同步草稿就够了，重绘交给 orderSetProvider 的行内处理器统一做
-  // （两处都重绘会连着绘两次，输入框闪一下，还会把刚送回去的光标又丢掉）。
-  // change 冒泡到容器时，触发行可能已被那次重绘换掉（closest 返回 null）——
-  // 事件是异步派发的，DOM 归属得现查，不能假定还在。
-  el.addEventListener('change', ev => {
-    const row = ev.target.closest && ev.target.closest('.order-row');
-    const box = row && row.closest('.order-rows');
-    if (box && row.querySelector('.order-provider') === ev.target)
-      orderPageSync(box.dataset.key);
   });
 }
 
@@ -938,7 +928,7 @@ function orderPageDrag(ev, phase) {
   if (ORDER_DRAG_FROM !== null) {
     const key = box.dataset.key;
     ORDER_DRAFT[key] = Array.from(box.querySelectorAll('.order-row')).map(r => ({
-      provider: r.querySelector('.order-provider').value,
+      provider: orderProviderOf(r),
       model: (r.querySelector('.order-model').value || '').trim(),
     }));
   }
@@ -981,7 +971,7 @@ function orderPageIntendedItems(key) {
   }
   const rows = Array.from(el.querySelectorAll('.order-row'));
   const items = rows.map(r => ({
-    provider: r.querySelector('.order-provider').value,
+    provider: orderProviderOf(r),
     model: (r.querySelector('.order-model').value || '').trim(),
   })).filter(it => it.model);
   // 输入框里已经填了名的行数，和草稿里的行数对不上 → 渲染竞态，不可信
@@ -1148,10 +1138,8 @@ function orderRow(item, idx, marks, scope) {
   return `<div class="order-row" draggable="true" data-idx="${idx}" data-scope="${esc(scope)}"${provOff ? ' style="opacity:.45"' : ''}>
     <span class="order-grip" title="拖拽调整顺序">⠿</span>
     <span class="order-no muted mono">${idx + 1}</span>
-    <select class="order-provider" title="候选通道" onchange="orderSetProvider(this)">
-      ${ORDER_PROVIDER_LIST.map(p =>
-        `<option value="${esc(p)}"${p === item.provider ? ' selected' : ''}>${esc(p)}</option>`).join('')}
-    </select>
+    <button type="button" class="order-provider" title="候选通道（点击选择）"
+      onclick="orderProviderMenu(this)">${esc(item.provider || '选择通道…')}</button>
     <input class="order-model" type="text" list="${id}"
       placeholder="模型名（可下拉选择或手输，如 glm-5.3）"
       value="${esc(item.model || '')}"
@@ -1170,6 +1158,14 @@ function orderRow(item, idx, marks, scope) {
       <button class="ghost danger" title="删除此目标" onclick="orderRemove(this)">✕</button>
     </span>
   </div>`;
+}
+
+// 行的当前 provider：自定义下拉后触发器是按钮，值在 textContent 里；
+// 未选时的占位文案不是合法通道名，归一成空串
+function orderProviderOf(rowEl) {
+  const t = (rowEl.querySelector('.order-provider') || {}).textContent || '';
+  const v = t.trim();
+  return ORDER_PROVIDER_LIST.includes(v) ? v : '';
 }
 
 // 从事件元素定位它所属的行：作用域 + 下标 + 对应的可变数组
@@ -1201,10 +1197,80 @@ function orderRefocus(scope, idx, field, pos) {
   try { el.setSelectionRange(pos, pos); } catch (e) {}
 }
 
-function orderSetProvider(el) {
-  const c = orderRowCtx(el);
+let _opickEl = null;
+
+function orderProviderMenuClose() {
+  if (_opickEl) { _opickEl.remove(); _opickEl = null; }
+  document.removeEventListener('mousedown', orderProviderMenuOutside, true);
+  document.removeEventListener('keydown', orderProviderMenuEsc, true);
+}
+
+function orderProviderMenuOutside(ev) {
+  if (_opickEl && !_opickEl.contains(ev.target)) orderProviderMenuClose();
+}
+
+function orderProviderMenuEsc(ev) {
+  if (ev.key === 'Escape') orderProviderMenuClose();
+}
+
+function orderProviderMenu(btn) {
+  const c = orderRowCtx(btn);
+  if (!c) return;
+  const cur = c.items[c.idx].provider || '';
+  orderProviderMenuClose();
+  const el = document.createElement('div');
+  el.className = 'opick';
+  el.id = 'opick-root';
+  const draw = (showAll) => {
+    const model = c.items[c.idx].model || '';
+    const nk = orderKey('', model).replace(/^\//, '');
+    const matches = (pid) => ((ORDER_OPTIONS && ORDER_OPTIONS[pid]) || [])
+      .some(m => orderKey('', m.id).replace(/^\//, '') === nk);
+    const primary = [], rest = [];
+    ORDER_PROVIDER_LIST.forEach(p => {
+      // 当前已选通道永远进主列表：不然切到别处后想切回来，得先开「更多选项」
+      (p === cur || (!nk || matches(p)) ? primary : rest).push(p);
+    });
+    const item = (p) => `<div class="opick-item${p === cur ? ' on' : ''}" data-p="${esc(p)}">${esc(p)}${p === cur ? ' <span class="opick-cur">当前</span>' : ''}</div>`;
+    const more = rest.length
+      ? (showAll ? rest.map(item).join('')
+        : `<div class="opick-more" onclick="orderProviderMenuMore()">更多选项（${rest.length} 个不带「${esc(model || '该模型')}」的通道）</div>`)
+      : '';
+    el.innerHTML = primary.map(item).join('') + more;
+  };
+  el.addEventListener('click', ev => {
+    const it = ev.target.closest('.opick-item');
+    if (it) orderProviderPick(it.dataset.p, btn);
+  });
+  el._draw = draw;
+  draw(false);
+  document.body.appendChild(el);
+  // 定位：按钮正下方，右缘对齐按钮（行右端空间小）；超视口再翻转到上方
+  const b = btn.getBoundingClientRect();
+  el.style.visibility = 'hidden'; el.style.display = 'block';
+  const ew = el.offsetWidth, eh = el.offsetHeight;
+  let x = Math.min(b.right - ew, window.innerWidth - ew - 8);
+  let y = b.bottom + 4;
+  if (y + eh > window.innerHeight - 8) y = b.top - eh - 4;
+  el.style.left = `${Math.max(8, x)}px`; el.style.top = `${Math.max(8, y)}px`;
+  el.style.visibility = '';
+  _opickEl = el;
+  setTimeout(() => {   // 跳过打开这次 mousedown，否则立刻被 outside 关掉
+    document.addEventListener('mousedown', orderProviderMenuOutside, true);
+    document.addEventListener('keydown', orderProviderMenuEsc, true);
+  }, 0);
+}
+
+function orderProviderMenuMore() {
+  if (_opickEl && _opickEl._draw) _opickEl._draw(true);
+}
+
+function orderProviderPick(pid, btn) {
+  orderProviderMenuClose();
+  const c = orderRowCtx(btn);
   if (!c || !c.items[c.idx]) return;
-  c.items[c.idx].provider = el.value;
+  if (c.items[c.idx].provider === pid) return;   // 原样点击只收浮层
+  c.items[c.idx].provider = pid;
   orderRepaint(c.scope);
 }
 

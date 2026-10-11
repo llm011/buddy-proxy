@@ -178,24 +178,23 @@ function renderBenefits() {
       (lines.length ? lines.join('') : '<div class="t-p muted">当天未打卡</div>');
   });
 
+  // 只列「支持签到且当前有活动」的通道，两类整行隐藏：
+  // - traeintl：上游无每日签到端点（supports_checkin=False），列出来只会
+  //   永远挂着一行「无签到」，奇怪（2026-10-12 用户反馈）；
+  // - codebuddyintl：渠道存在但海外站当前没开签到活动（inactive，上游
+  //   status 报 active:false、claim 直接拒「签到活动未开启或已过期」，2026-10-12
+  //   实测），挂着一行「暂无签到活动」+ 名义上的「每日 +300」纯属误导。
+  // 按状态而非通道 id 判：哪天海外开了活动 inactive 翻 false，行自动回来，
+  // 不用改代码。它们的额度仍由下方通用渠道卡正常展示。
   const rows = (BENEFITS.providers || []).filter(p =>
-    p.checkin.supported || (!p.disabled && p.id === 'traeintl'));
+    p.checkin.supported && !p.checkin.inactive);
   document.getElementById('checkin-rows').innerHTML = rows.length ? rows.map(p => {
     const c = p.checkin;
-    // Trae 海外版上游没有每日签到端点：展示原因但不伪装成支持，更不能渲染
-    // 「立即打卡」按钮。额度仍由下方通用渠道卡正常展示与刷新。
-    if (p.id === 'traeintl' && !c.supported) {
-      return `<div class="pat-pkg ck-pkg"><div class="benefit-row">` +
-        `<div class="br-id"><i class="br-dot" style="background:${pcolor(p.id)}"></i>` +
-        `<span class="br-name">${esc(p.id)}</span></div>` +
-        `<div class="br-meta"><span class="br-state">海外版无每日签到</span></div>` +
-        `<div class="br-act"></div></div></div>`;
-    }
     // 签到态做成带状态点的徽标；「连续 N 天 / 每日 +X」降级成旁边的小 chip，
     // 别和状态挤在同一个 tag 里（那行本来就长，挤一起更难扫）
     const st = c.error ? `<span class="br-state bad" title="${esc(c.error)}">状态未知</span>`
       : c.unavailable ? `<span class="br-state" title="${esc(c.message || '')}">有活动，暂无可领签到奖励</span>`
-      : c.inactive ? '<span class="br-state">今日无签到活动</span>'
+      : c.inactive ? `<span class="br-state"${c.message && c.message !== 'OK' ? ` title="${esc(c.message)}"` : ''}>${c.activity_name ? '活动未开始' : '暂无签到活动'}</span>`
       : c.done_today ? '<span class="br-state ok">已签到</span>'
       : '<span class="br-state pending">未签到</span>';
     // 有逐账号明细行时第一行不再放状态徽标：第二行一号一个状态，顶上再放
@@ -205,7 +204,10 @@ function renderBenefits() {
     const chips = [];
     // daily_credit 是多账号总和（后端聚合），带（N账号）说明口径，免得和
     // 单账号通道并排时看着数字莫名翻倍
-    if (c.daily_credit > 0) {
+    // inactive 时 daily_credit 是上游照报的名义奖励额（活动没开也带 100/账号），
+    // 显示「每日 +N」会让人以为能领——虽然 inactive 行已被上面过滤，这里
+    // 再拦一道（行过滤逻辑将来改动时这层兜底别跟着丢）
+    if (c.daily_credit > 0 && !c.inactive) {
       const n = (c.accounts || []).length;
       chips.push(`每日 +${fmtCredit(c.daily_credit)}${n > 1 ? `（${n}账号）` : ''}`);
     }

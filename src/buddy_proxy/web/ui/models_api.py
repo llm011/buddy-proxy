@@ -115,6 +115,24 @@ def _model_groups(state: Any, *, include_hidden: bool = False) -> list[dict[str,
             groups.remove(zcs)
             groups.insert(zc_idx + 1, zcs)
 
+    # 同族通道相邻（用户 2026-10-12）：codebuddy → codebuddyintl、trae →
+    # traeintl → traepat、qoder → qoderintl，其余组相对顺序保持不变。
+    # 用稳定排序把同族挪到族首之后，等价于「整块平移」：各族内部的既有
+    # 次序不动，不在族内的组互不搅动。
+    FAMILY_HEADS = ["codebuddy", "trae", "qoder"]
+    FAMILIES = {h: [h, f"{h}intl"] + (["traepat"] if h == "trae" else [])
+                for h in FAMILY_HEADS}
+    present = {g["id"] for g in groups}
+    original_order = [g["id"] for g in groups]
+
+    def _rank(gid: str) -> int:
+        for r, fam in enumerate(FAMILIES.values()):
+            ids = [x for x in fam if x in present]
+            if gid in ids:
+                return r * 1000 + ids.index(gid)
+        return 500_000 + original_order.index(gid)  # 族外保持原序
+    groups.sort(key=lambda g: _rank(g["id"]))
+
     if not include_hidden:
         hidden = getattr(state, "hidden_models", set()) or set()
         for group in groups:

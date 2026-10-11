@@ -33,6 +33,7 @@ from .config import (
 from . import failover
 from .credentials import (
     _auth,
+    _load_work_cred,
     ensure_account_token,
     list_accounts,
     load_account_cred,
@@ -48,6 +49,7 @@ from .native_tools import (
 from .sse import (_parse_sse, _trae_error_text, _wrap_anthropic_stream,
                   _sse_error_status)
 from .text_protocol import _extract_prompt, _looks_like_agent_request
+from .transport import _send_trae_work_chat
 from .text_toolcall import _StreamToolCallSplitter, _parse_tool_calls, _tool_names
 from .transport import send_trae_chat
 
@@ -144,7 +146,7 @@ _AMOUNT_KEYS_DOLLAR = ("dollar_amount", "usage_amount", "credits_amount", "amoun
 
 # ---- 签到节流 / 限流退避 ----
 # 上游签到接口有短窗口频控：多账号背靠背连打时，第二个起的请求命中
-# 「当前参与用户太多，请稍后再试」（2026-10-06 ethan/ethan0 实测复现）。
+# 「当前参与用户太多，请稍后再试」（2026-10-06 多账号实测复现）。
 # 对策两段：账号间强制间隔，让每个 claim 看起来都是独立用户行为；
 # 仍命中限流时退避重试（间隔递增），活动高峰期第一发也可能被挤掉。
 _CHECKIN_THROTTLE_S = 4.0
@@ -168,6 +170,11 @@ def _first_num(obj: dict[str, Any], keys: Sequence[str]) -> float | None:
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             return float(v)
     return None
+
+
+# 目录探测结果缓存：region -> {model: 可用}。进程内记忆，避免每次点
+# 「重新拉取」全表重打上游；重启即清（探测语义是「现在的可用性」）。
+_PROBE_CACHE: dict[str, dict[str, bool]] = {}
 
 
 class TraeProvider(BaseProvider):
@@ -231,6 +238,62 @@ class TraeProvider(BaseProvider):
 
     def ensure_auth(self) -> None:
         _auth()
+
+    async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
+        """目录「重新拉取」：trae 没有可拉的官方目录端点（CN/海外目录都靠
+        截图 + probe 实测维护，见 config 模块头），这里做的是**可用性探测**——
+        逐模型发一条最小真实请求，上游 4001 的标记为失效并从 models() 里
+        剔除（本进程内），其余原样保留。返回探测后的目录。
+
+        与 kimi/qoder 的「从上游目录拉取」语义不同：这里不能发现新模型
+        （新模型要照 repo 铁律真发请求收录），只能发现「目录里已死」的。
+        探测失败的模型**不写盘**——可能是瞬态网络问题，重启进程即恢复全表；
+        稳定失效会在下次探测里再现。单模型探测失败（网络抖动）按可用保留，
+        只有拿到上游明确的 4001 拒绝才剔除。"""
+        model_map, model_ids, _, _ = model_tables(self._region.key)
+        # 探测只覆盖内部名（别名跟着内部名走），跳过探测中已确认可用的
+        # ——同一模型的探测结果进程内缓存，避免每次点按钮全表重打
+        cache = _PROBE_CACHE.setdefault(self._region.key, {})
+        dead: set[str] = set()
+        probed_any = False
+        for m in model_ids:
+            if not force and m in cache:
+                continue
+            probed_any = True
+            try:
+                ok = await asyncio.to_thread(self._probe_model, m)
+            except Exception:  # noqa: BLE001 - 网络/凭据瞬态：按可用保留
+                cache[m] = True
+                continue
+            cache[m] = ok
+            if not ok:
+                dead.add(m)
+        if probed_any and dead:
+            log.info("trae(%s) 目录探测剔除 %d 个失效模型: %s",
+                     self._region.key, len(dead), ", ".join(sorted(dead)))
+        return [m for m in self.models() if m["id"] not in dead]
+
+    def _probe_model(self, model: str) -> bool:
+        """单模型最小真实请求。返回 True=可用；False=上游明确拒绝（4001）。
+        其它异常向上抛（调用方按瞬态处理，不剔除）。"""
+        work = _load_work_cred()
+        try:
+            if work and work.get("access_token"):
+                raw = _send_trae_work_chat(
+                    [{"role": "user", "content": [{"type": "text", "text": "ping"}]}],
+                    model, False, work)
+            else:
+                raw = _send_native_chat(
+                    _native_messages([{"role": "user", "content": "ping"}]),
+                    model, False, None)
+        except HTTPException as e:
+            # 4001 只在 200+SSE error / 400 壳里出现；401/403/502 是凭据或
+            # 网关问题，与模型无关——按可用保留（不剔除）
+            if e.status_code == 400:
+                return False
+            raise
+        # 200 + SSE：看首个事件是不是 error:4001（solo_work_lite 下被拒的形态）
+        return not _native_rejected(raw)
 
     def _send_native_request(
         self,
@@ -884,10 +947,13 @@ class TraeProvider(BaseProvider):
     def _is_account_error(e: HTTPException) -> bool:
         """该 HTTPException 是否「换下一个账号可能好转」。
 
-        401 = 凭据失效（换号有意义）；429 = 额度/限流（换号有意义）。502/504 是
-        通道级（换号无意义，所有账号同网关）。其余业务 4xx 换号也无意义。
+        401 = 凭据失效（换号有意义）；403/429 = 额度/权益/限流（换号有意义
+        ——transport/native_tools 透传上游 403 后这里必须接住，否则它穿透
+        failover 直接冒给客户端且坏账号永不被冷却；与 failover.py 模块注释
+        的「401 与 403/429」口径一致）。502/504 是通道级（换号无意义，所有
+        账号同网关）。其余业务 4xx 换号也无意义。
         """
-        return e.status_code in (401, 429)
+        return e.status_code in (401, 403, 429)
 
     async def _forward_once(
         self, body: dict[str, Any], protocol: str, original: dict[str, Any] | None,
@@ -1498,7 +1564,7 @@ def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":
 
 #: 错误 chunk 里判定「换下一个账号可能好转」的 HTTP 状态码（与
 #: ``TraeProvider._is_account_error`` 一致）。
-_ACCOUNT_ERROR_CODES = (401, 429)
+_ACCOUNT_ERROR_CODES = (401, 403, 429)
 
 
 def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":

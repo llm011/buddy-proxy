@@ -130,6 +130,12 @@ class TraeIntlProvider(TraeProvider):
         base_ids = {str(m.get("id") or "") for m in base}
         for name, entry in sorted(self._discovered.items()):
             if name in base_ids:
+                # 已在静态底表（如 gpt-6.1-sol）：底表没有 context_window，
+                # 目录发现的值合并进去——丢了这个字段，模型页上下文列就空了
+                # （test_discovered_entry_shape 钉的正是这个形状）
+                m = next(x for x in base if str(x.get("id") or "") == name)
+                if m.get("context_window") is None and entry.get("context_window") is not None:
+                    m["context_window"] = entry["context_window"]
                 continue
             base.append({
                 "id": name,

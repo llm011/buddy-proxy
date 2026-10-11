@@ -58,11 +58,11 @@ def test_session_first_request_known_deviation():
 
 
 def test_multiplier_scales_across_models():
-    """倍率换算：glm-5.3（x0.40）估算 ≈ 同 token 下 flash（x0.06）的 40/6 倍。"""
+    """倍率换算：glm-5.3（x0.39）估算 ≈ 同 token 下 flash（x0.06）的 39/6 倍。"""
     flash = estimate_credit("trae", "glm-5.3-flash", 30000, 100)
     big = estimate_credit("trae", "glm-5.3", 30000, 100)
     assert flash is not None and big is not None
-    assert abs(big / flash - 0.40 / 0.06) < 0.01
+    assert abs(big / flash - 0.39 / 0.06) < 0.01
 
 
 def test_alias_model_resolves_multiplier():
@@ -87,15 +87,15 @@ def test_measured_rates_scale_with_current_multiplier(monkeypatch):
     翻倍——不需要动 MEASURED_CREDIT_RATES。
     """
     base = estimate_credit("trae", "glm-5.3-flashx", 30000, 100)
-    assert base == 2.42  # 30000×7.98e-5 + 100×2.81e-4，校准倍率 x0.31 即现状
+    assert base == 0.71  # 30000×2.351e-5 + 100×7.242e-5，校准倍率 x0.31 即现状
     monkeypatch.setitem(trae_config.MODEL_CREDITS, "glm-5.3-flashx", "x0.62")
-    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 4.84
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 1.43
 
 
 def test_measured_rates_fall_back_when_multiplier_missing(monkeypatch):
     """拿不到当前倍率时不缩放（用校准绝对值），而不是报错或归零。"""
     monkeypatch.delitem(trae_config.MODEL_CREDITS, "glm-5.3-flashx", raising=False)
-    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 2.42
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 0.71
 
 
 def test_measured_rates_zero_multiplier_means_free(monkeypatch):
@@ -111,8 +111,8 @@ def test_measured_rates_tolerate_legacy_two_tuple(monkeypatch):
     变成客户端 500——配置形状问题绝不能炸请求路径。
     """
     monkeypatch.setitem(trae_config.MEASURED_CREDIT_RATES, "glm-5.3-flashx",
-                        (7.98e-5, 2.81e-4))
-    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 2.42
+                        (2.351e-5, 7.242e-5))
+    assert estimate_credit("trae", "glm-5.3-flashx", 30000, 100) == 0.71
 
 
 # ---- zcode：GLM Coding Plan 官方抵扣公式 ----

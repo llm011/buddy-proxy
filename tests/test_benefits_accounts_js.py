@@ -481,24 +481,24 @@ globalThis.__DM_RESPONSE = {ready: true, installed: true, running: true,
                             inapp_key_hint: 'abcd…(len64)',
                             base_url: 'http://127.0.0.1:52414',
                             bceconsole_authenticated: true,
-                            display_name: 'jsongo', checkin_total_points: 1000,
+                            display_name: 'dumateuser', checkin_total_points: 1000,
                             checkin_total_times: 2};
 await loadDumateStatus();                   // 应主动 render 一次
 const readyHtml = PANEL.innerHTML;
 // 账号快照到手（含今日消耗）：首份快照整卡重渲 → 卡片标题=display_name
 globalThis.__DM_ACCTS = {enabled: true, accounts: [
-  {index: 1, id: 'u1', display_name: 'jsongo',
+  {index: 1, id: 'u1', display_name: 'dumateuser',
    today_consumed: 123.45, today_calls: 42,
    checkin_total_points: 1000, checkin_total_times: 2}]};
 await loadDumateAccounts();
 await new Promise(r => setTimeout(r, 5));   // 等重渲尾部的嵌套 load 落定
 const acctHtml = PANEL.innerHTML;
 // 第二拍：消耗数变了 → 就地回填副标题（QS 桩元素观察 insertAdjacentHTML）
-const nameEl = el('jsongo');
+const nameEl = el('dumateuser');
 nameEl.nextElementSibling = null;
 QS['#dumate-panel .pat-pkg-name'] = nameEl;
 globalThis.__DM_ACCTS = {enabled: true, accounts: [
-  {index: 1, id: 'u1', display_name: 'jsongo',
+  {index: 1, id: 'u1', display_name: 'dumateuser',
    today_consumed: 130.05, today_calls: 43,
    checkin_total_points: 1000, checkin_total_times: 2}]};
 await loadDumateAccounts();
@@ -511,7 +511,7 @@ console.log(JSON.stringify({
   stillDetecting: readyHtml.includes('检测中'),
   showsLogin: readyHtml.includes('已登录'),
   version: readyHtml.includes('v1.0.0'),
-  cardName: acctHtml.includes('jsongo'),
+  cardName: acctHtml.includes('dumateuser'),
   insertedSub,
 }));
 })().catch(e => { console.error(e); process.exit(1); });
