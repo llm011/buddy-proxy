@@ -28,6 +28,8 @@ import os
 import sys
 from pathlib import Path
 
+from buddy_proxy.core.browser import open_external_url
+
 # 别名归一：workbuddy 是 codebuddy 的旧称/别称（腾讯 WorkBuddy 同一产品线），
 # 用户两种名字都可能敲，这里统一映射。
 PROVIDER_ALIASES: dict[str, str] = {
@@ -194,7 +196,6 @@ def _login_trae(open_browser: bool = True, region: str | None = None, **_kwargs)
     import subprocess
     import sys
     import time
-    import webbrowser
 
     from buddy_proxy.auth.trae_work_login import (
         OUT_PATH,
@@ -271,7 +272,10 @@ def _login_trae(open_browser: bool = True, region: str | None = None, **_kwargs)
     print("=" * 60)
     print(f"浏览器将打开 {reg.auth_host} 授权页；完成登录后会自动回跳本机落盘凭证。")
     if open_browser:
-        webbrowser.open(url)
+        # webbrowser 失败时静默返回 False（SSH/无 GUI 会话等，见 core.browser）
+        # ——必须把链接打出来，否则授权 URL 凭空消失，只能干等 15 分钟超时
+        if not open_external_url(url):
+            print(f"[!] 无法自动打开浏览器，请手动在浏览器打开：\n  {url}")
     else:
         print(f"请手动在浏览器打开：\n  {url}")
     print("\n[*] 等待登录完成（最长 15 分钟，Ctrl+C 取消）...")
@@ -518,13 +522,11 @@ def _login_qoder(open_browser: bool = True, region: str | None = None, **_kwargs
     print(f"    {flow.auth_url}")
     print()
     if open_browser:
-        try:
-            import webbrowser
-
-            webbrowser.open(flow.auth_url)
+        # 静默失败统一交给 open_external_url 兜底（失败退 open 命令再回显链接）
+        if open_external_url(flow.auth_url):
             print("[Qoder] 已尝试自动打开浏览器…")
-        except Exception as exc:  # noqa: BLE001 - 打不开浏览器不算失败
-            print(f"[Qoder] 自动打开浏览器失败（{exc}），请手动复制上面的链接。")
+        else:
+            print("[Qoder] 自动打开浏览器失败，请手动复制上面的链接。")
     print("[Qoder] 等待授权中（最多 10 分钟，Ctrl-C 可取消）…")
 
     ticks = {"n": 0}

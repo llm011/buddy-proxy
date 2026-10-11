@@ -22,8 +22,9 @@ import secrets
 import threading
 import time
 import urllib.parse
-import webbrowser
 from dataclasses import dataclass
+
+from buddy_proxy.core.browser import open_external_url
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from .credentials import (
@@ -127,11 +128,11 @@ def login_interactive(open_browser: bool = True) -> dict:
         print(f"    {auth_url}")
         print()
         if open_browser:
-            try:
-                webbrowser.open(auth_url)
+            # webbrowser 静默失败（返回 False）由 open_external_url 兜底
+            if open_external_url(auth_url):
                 print("[Gemini] 已尝试自动打开浏览器…")
-            except Exception as exc:  # noqa: BLE001
-                print(f"[Gemini] 自动打开浏览器失败（{exc}），请手动复制上面的链接。")
+            else:
+                print("[Gemini] 自动打开浏览器失败，请手动复制上面的链接。")
         if not open_browser:
             print(f"[Gemini] 等待授权回调（127.0.0.1:{port}）…")
             print(

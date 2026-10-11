@@ -18,8 +18,9 @@ from __future__ import annotations
 import json
 import logging
 import time
-import webbrowser
 from typing import Any
+
+from buddy_proxy.core.browser import open_external_url
 
 from . import oauth
 from .credentials import (
@@ -187,11 +188,11 @@ def login_interactive(open_browser: bool = True) -> dict[str, Any]:
         print(f"    （打不开就访问 {flow.verification_uri} 并输入授权码: {flow.user_code}）")
     print()
     if open_browser:
-        try:
-            webbrowser.open(flow.verification_uri_complete or flow.verification_uri)
+        # webbrowser 静默失败（返回 False）由 open_external_url 兜底
+        if open_external_url(flow.verification_uri_complete or flow.verification_uri):
             print("[Kimi] 已尝试自动打开浏览器…")
-        except Exception as exc:  # noqa: BLE001 - 打不开浏览器不算失败
-            print(f"[Kimi] 自动打开浏览器失败（{exc}），请手动复制上面的链接。")
+        else:
+            print("[Kimi] 自动打开浏览器失败，请手动复制上面的链接。")
     print(f"[Kimi] 等待授权中（最多 {int(min(flow.expires_in, LOGIN_TIMEOUT_S))} 秒，Ctrl-C 可取消）…")
 
     ticks = {"n": 0}
