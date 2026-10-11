@@ -442,43 +442,6 @@ class BenefitsManager:
             *(self._provider_entry(pid, p, disabled, done, today)
               for pid, p in self._providers().items())
         ))
-        return await self._snapshot_tail(checkin_cfg, provider_entries)
-
-    async def _provider_entry(self, pid: str, p: Any, disabled: set[str],
-                              done: dict[str, set[str]], today: str) -> dict[str, Any]:
-        """单通道的快照条目（snapshot 的并发单元）。"""
-        supports_checkin = bool(getattr(p, "supports_checkin", False))
-        entry: dict[str, Any] = {
-            "id": pid,
-            "name": getattr(p, "name", pid),
-            # 整通道停用标记（模型页 provider 开关）：前端额度卡/专属面板
-            # 据此隐藏；数据照查照带，开关一开就能原样回来
-            "disabled": pid in disabled,
-            "checkin": {"supported": supports_checkin},
-            "quota": {"supported": False},
-        }
-        if supports_checkin:
-            status = await self._cached(f"checkin:{pid}", p.checkin_status)
-            done_today = not claimable_now(status) and (
-                today in done.get(pid, set())
-                or bool(status and status.get("checked_in"))
-            )
-            entry["checkin"].update({
-                "done_today": done_today,
-                **(status or {}),
-            })
-        # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
-        # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
-        epoch_fn = getattr(p, "quota_epoch", None)
-        qkey = f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
-        quota = await self._cached(qkey, p.quota)
-        if quota is not None:
-            entry["quota"] = {"supported": True, **quota}
-        return entry
-
-    async def _snapshot_tail(self, checkin_cfg: dict[str, Any],
-                             provider_entries: list[dict[str, Any]]) -> dict[str, Any]:
-        """日历合并 + 顶层字段组装（snapshot 的收尾段，供单测直接调）。"""
         # 上游直接给出的签到历史（如 CodeBuddy checkin_dates）合并进日历，
         # 这样代理没记录过的历史打卡天也能展示（无本地领取积分记录）
         day_map: dict[str, dict[str, Any]] = {}
@@ -522,6 +485,38 @@ class BenefitsManager:
             # 后端、pytest 直接覆盖，前端只渲染不判规则。
             "low_quota": _quota_low([e for e in provider_entries if not e["disabled"]]),
         }
+
+    async def _provider_entry(self, pid: str, p: Any, disabled: set[str],
+                              done: dict[str, set[str]], today: str) -> dict[str, Any]:
+        """单通道的快照条目（snapshot 的并发单元）。"""
+        supports_checkin = bool(getattr(p, "supports_checkin", False))
+        entry: dict[str, Any] = {
+            "id": pid,
+            "name": getattr(p, "name", pid),
+            # 整通道停用标记（模型页 provider 开关）：前端额度卡/专属面板
+            # 据此隐藏；数据照查照带，开关一开就能原样回来
+            "disabled": pid in disabled,
+            "checkin": {"supported": supports_checkin},
+            "quota": {"supported": False},
+        }
+        if supports_checkin:
+            status = await self._cached(f"checkin:{pid}", p.checkin_status)
+            done_today = not claimable_now(status) and (
+                today in done.get(pid, set())
+                or bool(status and status.get("checked_in"))
+            )
+            entry["checkin"].update({
+                "done_today": done_today,
+                **(status or {}),
+            })
+        # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
+        # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
+        epoch_fn = getattr(p, "quota_epoch", None)
+        qkey = f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
+        quota = await self._cached(qkey, p.quota)
+        if quota is not None:
+            entry["quota"] = {"supported": True, **quota}
+        return entry
 
     async def _cached(self, key: str, fn: Callable, *args):
         """TTL 缓存的 to_thread 调用；上游抛错时返回错误结构而不是 500。
