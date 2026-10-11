@@ -1787,6 +1787,7 @@ def test_failure_result_uses_short_ttl(monkeypatch):
     mgr._last_attempt = {}
     mgr._startup_seen = set()
     mgr._cache = {}
+    mgr._refreshing = {}
 
     calls: list[int] = []
 
