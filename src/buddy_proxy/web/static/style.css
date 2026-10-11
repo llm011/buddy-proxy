@@ -210,7 +210,8 @@
   }
   .sidenav a { display: flex; align-items: center; gap: 7px; padding: 4px 10px;
                font-size: 12px; color: var(--muted); border-radius: 7px;
-               white-space: nowrap; border-left: 2px solid transparent; }
+               white-space: nowrap; border-left: 2px solid transparent;
+               cursor: pointer; }  /* 无 href 的 <a> 默认不给 pointer */
   .sidenav a:hover { color: var(--text); background: var(--card); }
   .sidenav a.active { color: var(--accent); border-left-color: var(--accent);
                       background: rgba(79,140,255,.08); }
