@@ -243,3 +243,26 @@ def test_discovered_entry_shape(fake_fetch, monkeypatch):
     assert entry["owned_by"] == "traeintl"
     assert entry["context_window"] == 272000
     assert entry["images"] is False  # 未实测不声明读图
+
+
+def test_partial_success_keeps_failed_accounts_entries(fake_fetch, monkeypatch):
+    """部分成功只增不删：单号失败时它独有的上一版条目不下架（review 意见）。"""
+    from buddy_proxy.trae.intl_provider import TraeIntlProvider
+
+    _save_globals(monkeypatch, [_global_cred("u1", "U1"), _global_cred("u2", "U2")])
+    fake_fetch({"u1": [_catalog("glm-5.3")],
+                "u2": [_catalog("doubao-for-auto")]})
+    p = TraeIntlProvider()
+    ids = {m["id"] for m in asyncio.run(p.refresh_models())}
+    assert {"glm-5.3", "doubao-for-auto"} <= ids
+
+    # 第二轮 u2 失败：u1 成功。doubao-for-auto（u2 独有）必须仍在
+    fake_fetch({"u1": [_catalog("glm-5.3")]})
+    ids = {m["id"] for m in asyncio.run(p.refresh_models())}
+    assert "doubao-for-auto" in ids, "单号失败不能把它独有的模型悄悄下架"
+
+    # 第三轮两号都成功且目录里 doubao-for-auto 已被上游撤下：全成功才确认下架
+    fake_fetch({"u1": [_catalog("glm-5.3")],
+                "u2": [_catalog("gpt-6.1-sol")]})
+    ids = {m["id"] for m in asyncio.run(p.refresh_models())}
+    assert "doubao-for-auto" not in ids, "全号成功后原子替换，确认上游下架"

@@ -156,8 +156,10 @@ class TraeIntlProvider(TraeProvider):
         - 逐账号 ``ensure_account_token`` + ``fetch_intl_catalog``（阻塞 IO
           放 ``asyncio.to_thread``，照 qoder.refresh_models）；单账号失败
           只 log 跳过，不拖垮整体。
-        - 并集结果**原子替换** ``_discovered``；全账号失败抛 RuntimeError
-          ——models_api 转 502、旧快照保留（models() 仍能出静态底表）。
+        - 并集结果写回 ``_discovered``：全号成功原子替换（确认上游下架）；
+          部分成功只增不删（antigravity 同款，防单号抖动把独有模型悄悄
+          下架）；全号失败抛 RuntimeError——models_api 转 502、旧快照保留
+          （models() 仍能出静态底表）。
         ``force`` 形参保留兼容通用刷新接口（本实现无 TTL 缓存，恒强拉）。
         """
         del force
@@ -187,9 +189,14 @@ class TraeIntlProvider(TraeProvider):
                 })
         if succeeded == 0:
             raise RuntimeError("traeintl 模型目录刷新失败：全部账号均未成功")
+        # 部分成功只增不删（antigravity 同款）：某号这轮拉取失败时，它独有
+        # 的上一版条目留在快照里，不因单号抖动悄悄下架；全号成功才允许
+        # 原子替换确认下架——代际收敛仍在展示层做（见 models() docstring）。
+        if succeeded < len(accounts) and self._discovered:
+            merged = dict(self._discovered)
+            merged.update(union)
+            union = merged
         if union:
-            # 只增不删的例外（见 models() docstring）：代际收敛在展示层做，
-            # _discovered 本身保留上游全量，上游把旧代撤下后快照里自然消失。
             self._discovered = union
         return self.models()
 
