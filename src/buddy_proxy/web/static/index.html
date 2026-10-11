@@ -105,6 +105,12 @@
          默认隐藏（.show 打开），内容由 renderExpiryBanner() 按 /ui/api/benefits
          的 expiring 字段填。默认收起明细，点 <summary> 展开。 -->
     <details class="expirybar" id="expirybar"></details>
+    <!-- 侧边导航：额度页很长（十来张通道卡），这个锚点导航贴在视口左侧
+         固定不随滚动，点按平滑滚到对应通道卡、滚动时自动高亮当前所在
+         通道。窄屏（<1280px，wrap 已顶满可视宽）不显示，避免遮挡内容。
+         条目由 renderBenefitsNav() 在每次额度数据渲染后重建（通道开关/
+         登录状态变了导航也要跟着变）。 -->
+    <nav class="sidenav" id="benefits-sidenav" aria-label="额度页通道导航"></nav>
     <h2>打卡 &amp; 额度 <span class="sub">自动打卡 · 最近 35 天 · 按通道额度</span></h2>
     <div class="grid2 top">
       <!-- 左栏只有日历一张卡。各通道签到原本也挤在这半栏里（宽度只剩一半），

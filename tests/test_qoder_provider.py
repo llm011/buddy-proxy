@@ -963,8 +963,11 @@ def test_quota_wait_does_not_block_event_loop(monkeypatch, account_count):
     import buddy_proxy.qoder.provider as qoder_provider
 
     provider = _provider()
-    accounts = [SimpleNamespace(id=f"acct-{i}", priority=i) for i in range(account_count)]
-    monkeypatch.setattr(qoder_provider.failover, "available_accounts", lambda *_: accounts)
+    accounts = [SimpleNamespace(id=f"acct-{i}", priority=i, region="cn")
+                for i in range(account_count)]
+    # 额度枚举已改走区内全量 list_accounts（不剔冷却，2026-10-11 修）：
+    # mock 点从 available_accounts 迁到 list_accounts
+    monkeypatch.setattr(qoder_provider, "list_accounts", lambda: accounts)
     monkeypatch.setattr(qoder_provider, "ensure_account_token", lambda _id: ("token", {}))
     monkeypatch.setattr(qoder_provider, "cred_to_credential",
                         lambda _cred: SimpleNamespace(plan="test"))
@@ -988,26 +991,28 @@ def test_quota_wait_does_not_block_event_loop(monkeypatch, account_count):
 
 def test_qoderintl_quota_and_checkin_never_fall_back_to_cn_accounts(monkeypatch):
     import asyncio
-    from types import SimpleNamespace
 
+    import buddy_proxy.qoder.provider as qoder_provider
     from buddy_proxy.qoder import failover
     from buddy_proxy.qoder.credentials import AuthError
     from buddy_proxy.qoder.intl_provider import QoderIntlProvider
 
     calls = []
-    cn_accounts = [SimpleNamespace(id="cn-account", priority=0)]
 
-    def available(region=None):
-        calls.append(region)
-        return [] if region == "global" else cn_accounts
+    def list_all():
+        calls.append("list")
+        return []
 
-    monkeypatch.setattr(failover, "available_accounts", available)
+    # 额度枚举走区内全量 list_accounts（2026-10-11）：global 区无账号 → quota
+    # 返回 None，绝不回落到 CN 账号。_campaigns 仍走 available_accounts。
+    monkeypatch.setattr(failover, "available_accounts", lambda region=None: [])
+    monkeypatch.setattr(qoder_provider, "list_accounts", list_all)
     provider = QoderIntlProvider()
 
     assert asyncio.run(provider.quota()) is None
     with pytest.raises(AuthError, match="没有可用账号"):
         asyncio.run(provider._campaigns())
-    assert calls == ["global", "global"]
+    assert calls == ["list"]
 
 
 def test_quota_prefers_addon_when_user_quota_empty():

@@ -569,7 +569,13 @@ class QoderProvider(BaseProvider):
         各账号条目带 ``Qoder #N · `` 前缀供前端分组；个别账号失败插
         ``query_failed`` 说明条（benefits 层认这个标记走短缓存）。
         """
-        accounts = failover.available_accounts(self._region.key)
+        # 遍历**区内全量**账号（与 checkin_status 同口径），不剔除冷却中的：
+        # 冷却挡的是模型转发，与额度查询的 billing 面无关——available_accounts
+        # 会把冷却账号整条从额度面板藏掉（2026-10-11 trae 同病实报：3 号只显
+        # 1 个）。enumerate 位次对全量列表天然与账号快照一致，不引入错位。
+        region = self._region.key
+        accounts = [a for a in list_accounts()
+                    if getattr(a, "region", None) == region]
         if not accounts:
             return None
         multi = len(accounts) > 1
