@@ -77,6 +77,34 @@ def test_401_fails_over_to_next_account():
     assert failover.cooldown_left(accounts[1].id)[0] == 0  # 成功的账号不冷却
 
 
+def test_403_fails_over_to_next_account():
+    """透传的上游 403（权益/风控）必须被闸门接住换号，不能穿透 failover。
+
+    transport/native_tools 把 403 透传成真实状态码后，_is_account_error 只认
+    (401, 429) 的话它既不换号也不冷却、直接冒给客户端（review 2026-10-12）。"""
+    accounts = _seed_accounts("u1", "u2")
+    p = TraeProvider()
+    calls: list[str] = []
+
+    async def fake_forward_once(body, protocol, original, requested_model,
+                                prompt, messages, tools, native, stream, agent_mode):
+        acct = _CURRENT_WORK_ACCOUNT.get()
+        calls.append(acct)
+        if acct == accounts[0].id:
+            raise HTTPException(status_code=403, detail="forbidden")
+        return _ok_response()
+
+    async def run():
+        with mock.patch.object(TraeProvider, "_forward_once", side_effect=fake_forward_once):
+            return await _forward(p)
+    resp = asyncio.run(run())
+
+    assert resp.status_code == 200
+    assert calls == [accounts[0].id, accounts[1].id]
+    assert failover.cooldown_left(accounts[0].id)[0] > 0   # 403 → 冷却
+    assert failover.cooldown_left(accounts[1].id)[0] == 0
+
+
 def test_429_marks_quota_cooldown():
     accounts = _seed_accounts("u1", "u2")
     p = TraeProvider()

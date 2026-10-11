@@ -947,10 +947,13 @@ class TraeProvider(BaseProvider):
     def _is_account_error(e: HTTPException) -> bool:
         """该 HTTPException 是否「换下一个账号可能好转」。
 
-        401 = 凭据失效（换号有意义）；429 = 额度/限流（换号有意义）。502/504 是
-        通道级（换号无意义，所有账号同网关）。其余业务 4xx 换号也无意义。
+        401 = 凭据失效（换号有意义）；403/429 = 额度/权益/限流（换号有意义
+        ——transport/native_tools 透传上游 403 后这里必须接住，否则它穿透
+        failover 直接冒给客户端且坏账号永不被冷却；与 failover.py 模块注释
+        的「401 与 403/429」口径一致）。502/504 是通道级（换号无意义，所有
+        账号同网关）。其余业务 4xx 换号也无意义。
         """
-        return e.status_code in (401, 429)
+        return e.status_code in (401, 403, 429)
 
     async def _forward_once(
         self, body: dict[str, Any], protocol: str, original: dict[str, Any] | None,
@@ -1561,7 +1564,7 @@ def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":
 
 #: 错误 chunk 里判定「换下一个账号可能好转」的 HTTP 状态码（与
 #: ``TraeProvider._is_account_error`` 一致）。
-_ACCOUNT_ERROR_CODES = (401, 429)
+_ACCOUNT_ERROR_CODES = (401, 403, 429)
 
 
 def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":

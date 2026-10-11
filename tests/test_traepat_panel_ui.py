@@ -38,3 +38,15 @@ def test_model_load_is_after_quota_and_uses_two_column_grid():
     assert 'class="pat-load-grid"' in checkin
     assert ".pat-load-grid" in css
     assert "repeat(2, minmax(0, 1fr))" in css
+
+
+def test_pat_provider_has_no_probe_refresh():
+    """traepat 不得继承 work 通道的探测式 refresh_models。
+
+    继承版按 self._region（cn）取 work 模型表、拿 work 凭证逐模型发真实请求，
+    再用探测结果过滤 PAT 的 models_config 静态列表——模型对不上还白付积分；
+    模型页按钮按 callable 判定，置 None 即不出现「重新拉取」（review 2026-10-12）。
+    """
+    from buddy_proxy.trae.pat_provider import TraePatProvider
+
+    assert TraePatProvider.refresh_models is None
