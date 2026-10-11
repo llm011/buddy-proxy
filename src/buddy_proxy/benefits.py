@@ -537,10 +537,12 @@ class BenefitsManager:
         只有真·冷缓存（键不存在）才同步等——所以首开仍受最慢通道约束
         （通道间已并发，见 snapshot）。
 
-        **已翻转**（``_state_flipped``，next_ts 已过）是唯一不走 SWR 的过期：
-        界面倒计时正数到这个瞬间，用户等的就是状态翻新的这一拍——同步重查、
-        拿新值再回（等这一趟上游是值得的）。先回旧值会让「即将刷新」的承诺
-        落空：明明数到零了，按钮却还是灰的，要再等一轮轮询才自愈。
+        **已翻转**（``_state_flipped``，next_ts 已过）与**失败结果过期**是两个
+        不走 SWR 的例外：前者是界面倒计时正数到这个瞬间，用户等的就是状态
+        翻新的这一拍——同步重查拿新值再回（先回旧值会让「即将刷新」的承诺
+        落空：明明数到零了，按钮却还是灰的）；后者的旧值只是一条错误消息，
+        「先回旧值」毫无价值，同步重查才兑现「短 TTL、30s 后自愈」的语义
+        （``test_failure_result_uses_short_ttl`` 钉着这条）。
         """
         now = time.time()
         cached = self._cache.get(key)
@@ -549,9 +551,9 @@ class BenefitsManager:
             flipped = _state_flipped(cached[1], now)
             if not flipped and now - cached[0] < ttl:
                 return cached[1]
-            if flipped:
+            if flipped or _is_failure(cached[1]):
                 return await self._query(key, fn, *args)
-            # 普通 TTL 过期：旧值先顶着，后台刷新（同键去重）
+            # 普通 TTL 过期（成功旧值）：先回旧值，后台刷新（同键去重）
             self._kick_refresh(key, fn, *args)
             return cached[1]
         return await self._query(key, fn, *args)

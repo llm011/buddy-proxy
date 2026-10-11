@@ -147,3 +147,30 @@ def test_kick_refresh_dedupes_inflight_tasks():
         assert mgr._refreshing == {}, "完成后应从在飞表摘除"
 
     asyncio.run(run())
+
+
+def test_stale_while_revalidate_skips_failure_results(monkeypatch):
+    """失败结果过期不走 SWR：同步重查（「30s 后自愈」语义，与
+    test_trae_pat_failover 的 short_ttl 测试同一条钉子；先回旧错误再后台刷
+    的话，short-TTL 自愈承诺就落空了——CI 在 3.10 上抓到过这个 race）。"""
+
+    async def run():
+        calls: list[int] = []
+
+        def boom():
+            calls.append(1)
+            raise RuntimeError("offline")
+
+        mgr = _manager({})
+        first = await mgr._cached("k", boom)
+        assert first["error"] == "offline"
+        assert len(calls) == 1
+        # 把失败缓存推过 FAILURE_TTL_S → 必须同步重查（而不是回旧错误+后台）
+        ts, data = mgr._cache["k"]
+        mgr._cache["k"] = (ts - bm.FAILURE_TTL_S - 1, data)
+        second = await mgr._cached("k", boom)
+        assert second["error"] == "offline"
+        assert len(calls) == 2, "失败过期要同步重查，短 TTL 才能兑现自愈"
+        assert not mgr._refreshing, "失败路径不该留后台任务"
+
+    asyncio.run(run())
