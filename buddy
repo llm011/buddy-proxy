@@ -9,8 +9,8 @@
 #   buddy logs               跟踪日志
 #   buddy cleanup            删除 15 天前的历史日志（保留窗口可用 BUDDY_LOG_KEEP_DAYS 覆盖）；
 #                            超过 10MB 的 service.log / proxy.sh.log 顺带 copytruncate 轮转
-#   buddy login [provider]   登录上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi；
-#                            trae/qoder 可加 --region cn|global，海外账号登录后 traeintl/qoderintl 通道自动注册）
+#   buddy login [provider]   登录上游账号（codebuddy(=workbuddy, =codebuddyintl 海外)/trae(=traeintl 海外)/zcode/glm/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi；
+#                            trae/qoder/codebuddy 可加 --region cn|global，海外账号登录后 traeintl/qoderintl/codebuddyintl 通道自动注册）
 #   buddy ui                 仅打开管理页（必要时先启动）
 #   buddy update             更新到最新代码（git pull -> uv sync -> 重启）
 #                            工作树有未提交改动会中止，不会覆盖你的改动

@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import pathlib
+import re
 
 import pytest
 
@@ -191,3 +192,34 @@ def test_every_alias_target_is_dispatchable():
     for alias, target in auth_login.PROVIDER_ALIASES.items():
         assert target in auth_login._DISPATCH, f"别名 {alias} 指向了不存在的 {target}"
         assert target in auth_login.KNOWN_PROVIDERS
+
+
+# ---------------------------------------------------------------------------
+# proxy.sh 登录白名单与 python 别名表同步
+# ---------------------------------------------------------------------------
+
+#: 仓库根（tests/ 的上一级）的 proxy.sh——shell 层白名单在这里维护。
+PROXY_SH = pathlib.Path(__file__).resolve().parents[1] / "proxy.sh"
+
+
+def test_proxy_sh_login_whitelist_covers_python_side():
+    """proxy.sh cmd_login 的 provider 白名单必须收下 python 侧全部入口名。
+
+    ``buddy login`` 的链路是 buddy → proxy.sh login → python -m
+    buddy_proxy.auth.login，shell 层有一个自己的 case 白名单：python 侧
+    加了别名而 shell 层没同步的话，用户敲下去直接「未知参数」被拦（实测
+    codebuddyintl 漏过、traeintl/qoderintl 当年也漏过同一处）。两层各自
+    维护没有测试钉住就会再漏，这里用 python 侧的别名表 + 入口表做全集
+    校验——以后加别名/加 provider，白名单没跟上 CI 就红。
+    """
+    text = PROXY_SH.read_text(encoding="utf-8")
+    m = re.search(r"^\s*([a-z0-9|-]+)\)\s*\n\s*(?:#[^\n]*\n\s*)*provider=\"\$1\"", text, re.M)
+    assert m, "找不到 proxy.sh cmd_login 的 provider case 白名单（结构改了？）"
+    shell_names = set(m.group(1).split("|"))
+
+    expected = set(auth_login.PROVIDER_ALIASES) | set(auth_login.KNOWN_PROVIDERS)
+    missing = expected - shell_names
+    assert not missing, (
+        f"proxy.sh login 白名单缺少: {sorted(missing)}——"
+        f"python 侧认的名字 shell 层不认，`buddy login` 会直接报未知参数"
+    )

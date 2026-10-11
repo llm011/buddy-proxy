@@ -1,8 +1,9 @@
-"""登录入口的 traeintl/qoderintl 别名：隐含 region=global、区域冲突报错。
+"""登录入口的 traeintl/qoderintl/codebuddyintl 别名：隐含 region=global、区域冲突报错。
 
 海外版没有独立账号体系（共用 work 账号池按 region 落盘），「buddy login
 traeintl」是最直觉的敲法——别名落到 trae 并隐含 global，重启后 traeintl
-通道自动注册（intl_enabled()）。
+通道自动注册（intl_enabled()）。codebuddyintl 同理（海外 session 落独立
+文件 ~/.codebuddy-session-global.json）。
 """
 from __future__ import annotations
 
@@ -17,6 +18,10 @@ def test_traeintl_alias_implies_global():
 
 def test_qoderintl_alias_implies_global():
     assert _resolve_provider_region("qoderintl", None) == ("qoder", "global")
+
+
+def test_codebuddyintl_alias_implies_global():
+    assert _resolve_provider_region("codebuddyintl", None) == ("codebuddy", "global")
 
 
 def test_intl_alias_with_explicit_global_ok():
