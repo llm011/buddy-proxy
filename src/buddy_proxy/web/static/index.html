@@ -107,7 +107,8 @@
     <details class="expirybar" id="expirybar"></details>
     <!-- 侧边导航：额度页很长（十来张通道卡），这个锚点导航贴在视口左侧
          固定不随滚动，点按平滑滚到对应通道卡、滚动时自动高亮当前所在
-         通道。窄屏（<1280px，wrap 已顶满可视宽）不显示，避免遮挡内容。
+         通道。窄屏（<1480px，内容区左缘放不下 132px 导航+间距）不显示——
+         宁可不放，不放会压在日历/卡片上。
          条目由 renderBenefitsNav() 在每次额度数据渲染后重建（通道开关/
          登录状态变了导航也要跟着变）。 -->
     <nav class="sidenav" id="benefits-sidenav" aria-label="额度页通道导航"></nav>
