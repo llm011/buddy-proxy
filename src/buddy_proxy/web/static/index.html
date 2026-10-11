@@ -113,9 +113,18 @@
          登录状态变了导航也要跟着变）。 -->
     <nav class="sidenav" id="benefits-sidenav" aria-label="额度页通道导航"></nav>
     <h2>打卡 &amp; 额度 <span class="sub">自动打卡 · 最近 35 天 · 按通道额度</span></h2>
+    <!-- 各通道签到：全宽卡（横跨两栏）。里面的行左右两列平摊，卡不够宽时
+         自动退回单列——都用容器查询按卡片实际宽度判断，见 style.css -->
+    <div class="chart-card rows-card" style="margin-bottom:12px">
+      <div class="benefit-head">
+        <span class="bh-title">各通道签到</span>
+        <span class="muted" style="font-size:12px">每天自动领取，也可手动打</span>
+      </div>
+      <div id="checkin-rows"></div>
+    </div>
     <div class="grid2 top">
-      <!-- 左栏只有日历一张卡。各通道签到原本也挤在这半栏里（宽度只剩一半），
-           已挪到 grid2 下方做全宽卡、行左右两列平摊 -->
+      <!-- 左栏只有日历一张卡。各通道签到原本挤在这半栏里（宽度只剩一半），
+           后挪出做全宽卡置顶（标题下），grid2 里只剩日历 + 额度列表 -->
       <div class="chart-card">
         <div class="benefit-head">
           <span class="bh-title">打卡日历</span>
@@ -130,15 +139,6 @@
         <div class="cal" id="cal"><div class="empty" style="grid-column:1/-1">加载中…</div></div>
       </div>
       <div id="quota-list"><div class="chart-card"><div class="empty">加载中…</div></div></div>
-    </div>
-    <!-- 各通道签到：全宽卡（横跨两栏）。里面的行左右两列平摊，卡不够宽时
-         自动退回单列——都用容器查询按卡片实际宽度判断，见 style.css -->
-    <div class="chart-card rows-card" style="margin-top:12px">
-      <div class="benefit-head">
-        <span class="bh-title">各通道签到</span>
-        <span class="muted" style="font-size:12px">每天自动领取，也可手动打</span>
-      </div>
-      <div id="checkin-rows"></div>
     </div>
     <div id="codebuddy-panel"></div>
     <div id="codebuddyintl-panel"></div>

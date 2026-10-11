@@ -7,9 +7,15 @@ function renderTraepatPanel() {
   const pat = (BENEFITS.providers || []).find(p => p.id === 'traepat' && !p.disabled && p.quota && p.quota.supported);
   if (!pat) { panel.innerHTML = ''; return; }
 
-  // 日包/周包按「PAT #N」分组（label 形如「PAT #1 · 周包（通用额度）」）
+  // 日包/周包按「PAT #N」分组（label 形如「PAT #1 · 周包（通用额度）」）。
+  // 查询失败说明条（unreachable/query_failed 标记、label「PAT 额度网关不可达」
+  // 等）不进卡片：它没有「 · 」后缀会被拆成独立一组，网关一抖就整页冒出
+  // 「Trae PAT (服务账号直连) / 账号状态加载中… / 剩 10/10 个账号本轮未取到新
+  // 数据…」的奇怪首卡（用户 2026-10-12）。失败状态由账号行的 token/冷却小字
+  // 与 keeper 行传达；后端条目保留（benefits.py 的短缓存判定要用）。
   const groups = new Map();
   for (const it of pat.quota.items || []) {
+    if (it.unreachable === true || it.query_failed === true) continue;
     const idx = it.label.indexOf(' · ');
     const grp = idx >= 0 ? it.label.slice(0, idx) : (pat.name || 'PAT');
     const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
@@ -23,7 +29,10 @@ function renderTraepatPanel() {
     return `<div class="pat-pkg"${attrs}>
       <div class="pat-pkg-head">
         <div class="pat-pkg-name">${esc(grp)}</div>
-        <div class="pat-pkg-status muted">账号状态加载中…</div>
+        <!-- 副标题先留空位：账号数据回填前的「账号状态加载中…」会被误读成
+             出错（用户 2026-10-12），改静默占位，loadTraepatAccounts 回填或
+             出错时才显示文字 -->
+        <div class="pat-pkg-status muted"></div>
       </div>
       ${quotaItemsHtml(its, 'pat:' + grp)}
     </div>`;

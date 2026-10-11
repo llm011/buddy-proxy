@@ -56,8 +56,17 @@ def test_traeintl_has_dedicated_quota_panel_and_explains_no_checkin():
     assert "providerRefreshButton('traeintl')" in panel
     assert "海外版无每日签到" in panel
 
-    assert "p.id === 'traeintl' && !c.supported" in CORE
-    assert "海外版无每日签到" in CORE
-    no_checkin = CORE[CORE.index("if (p.id === 'traeintl' && !c.supported)"):]
-    no_checkin = no_checkin[:no_checkin.index("const st =")]
-    assert "claimNow" not in no_checkin, "不支持签到时不能伪造领取按钮"
+
+def test_checkin_rows_skip_unsupported_providers():
+    """签到区只列 supported 的通道：traeintl（上游无签到端点）整行不出现，
+    挂着一行「无签到」只会让人奇怪（2026-10-12 用户反馈）。它不渲染任何
+    形态——包括说明行——保证想找它信息的人去额度卡看面板内的说明。"""
+    core = CORE
+    # 过滤器不再为 traeintl 开后门：一律按 supported 判
+    assert "p.id === 'traeintl'" not in core[core.index("const rows = (BENEFITS.providers"):core.index("document.getElementById('checkin-rows')")]
+    # 旧的 traeintl 特殊说明行已删
+    assert "海外版无每日签到" not in core
+    # 专属额度面板里的说明仍在（展示职责移到那里）
+    panel = PANELS[PANELS.index("function renderTraeIntlPanel"):]
+    panel = panel[:panel.index("// ---- CODEBUDDY 面板")]
+    assert "海外版无每日签到" in panel
