@@ -181,7 +181,11 @@ async def _attach_account_names(rows: list[dict[str, Any]]) -> None:
 
 @app.get("/ui/api/benefits")
 async def ui_benefits(request: Request):
-    """打卡状态 + 打卡日历 + 各通道额度（带 5 分钟缓存，避免频打上游）。"""
+    """打卡状态 + 打卡日历 + 各通道额度（带 5 分钟缓存，避免频打上游）。
+
+    通道间并发查询；缓存过期时先回旧值、后台刷新（stale-while-revalidate），
+    管理页打开即渲染，不再等整串上游（首开冷缓存除外）。
+    """
     _ensure_local(request)
     state = get_state()
     manager = getattr(state, "benefits", None)

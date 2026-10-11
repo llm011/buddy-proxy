@@ -27,6 +27,10 @@ RETRY_THROTTLE_S = 1800
 SNAPSHOT_TTL_S = 300
 # 失败结果缓存 TTL：短得多，让网络抖动几秒恢复后下一轮就能自愈
 FAILURE_TTL_S = 30
+# 单次上游查询的硬超时：provider 实现各有各的 HTTP 超时，但「实现漏配/卡在
+# 网络风暴」的病态挂起不该把整个管理页拖住（实测 mimo 单键挂过 930s）。
+# 超时按失败处理走 FAILURE_TTL_S 短缓存，30s 后下一轮自然重试。
+QUERY_TIMEOUT_S = 35.0
 DEFAULT_CHECKIN_TIME = "09:30"
 # 「翻转点已过 → 提前作废快照」只在这个宽限窗口内生效。正常轮换最多让缓存
 # 早退这么多；超出说明上游给的 next_ts 已经不可信，退回按 TTL 过期。
@@ -392,6 +396,8 @@ class BenefitsManager:
         self._last_attempt: dict[str, float] = {}
         self._startup_seen: set[str] = set()
         self._cache: dict[str, tuple[float, Any]] = {}
+        # 后台刷新在飞任务（stale-while-revalidate 用）：同键去重
+        self._refreshing: dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------
     # provider 能力
@@ -428,37 +434,14 @@ class BenefitsManager:
         today = _today()
         disabled = disabled_providers or set()
 
-        provider_entries = []
-        for pid, p in self._providers().items():
-            supports_checkin = bool(getattr(p, "supports_checkin", False))
-            entry: dict[str, Any] = {
-                "id": pid,
-                "name": getattr(p, "name", pid),
-                # 整通道停用标记（模型页 provider 开关）：前端额度卡/专属面板
-                # 据此隐藏；数据照查照带，开关一开就能原样回来
-                "disabled": pid in disabled,
-                "checkin": {"supported": supports_checkin},
-                "quota": {"supported": False},
-            }
-            if supports_checkin:
-                status = await self._cached(f"checkin:{pid}", p.checkin_status)
-                done_today = not claimable_now(status) and (
-                    today in done.get(pid, set())
-                    or bool(status and status.get("checked_in"))
-                )
-                entry["checkin"].update({
-                    "done_today": done_today,
-                    **(status or {}),
-                })
-            # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
-            # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
-            epoch_fn = getattr(p, "quota_epoch", None)
-            qkey = f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
-            quota = await self._cached(qkey, p.quota)
-            if quota is not None:
-                entry["quota"] = {"supported": True, **quota}
-            provider_entries.append(entry)
-
+        # 通道间并发查：串行时整页耗时 = 各通道之和（实测 15-27s，qoder 一家
+        # 的 8s deadline 就占去小半），而各通道互相独立、缓存键也各自独立，
+        # gather 并发后整页 = 最慢一家（gather 保序，UI 顺序不变）。同通道的
+        # checkin/quota 仍串行——同一家上游，别并发打。
+        provider_entries = list(await asyncio.gather(
+            *(self._provider_entry(pid, p, disabled, done, today)
+              for pid, p in self._providers().items())
+        ))
         # 上游直接给出的签到历史（如 CodeBuddy checkin_dates）合并进日历，
         # 这样代理没记录过的历史打卡天也能展示（无本地领取积分记录）
         day_map: dict[str, dict[str, Any]] = {}
@@ -503,6 +486,38 @@ class BenefitsManager:
             "low_quota": _quota_low([e for e in provider_entries if not e["disabled"]]),
         }
 
+    async def _provider_entry(self, pid: str, p: Any, disabled: set[str],
+                              done: dict[str, set[str]], today: str) -> dict[str, Any]:
+        """单通道的快照条目（snapshot 的并发单元）。"""
+        supports_checkin = bool(getattr(p, "supports_checkin", False))
+        entry: dict[str, Any] = {
+            "id": pid,
+            "name": getattr(p, "name", pid),
+            # 整通道停用标记（模型页 provider 开关）：前端额度卡/专属面板
+            # 据此隐藏；数据照查照带，开关一开就能原样回来
+            "disabled": pid in disabled,
+            "checkin": {"supported": supports_checkin},
+            "quota": {"supported": False},
+        }
+        if supports_checkin:
+            status = await self._cached(f"checkin:{pid}", p.checkin_status)
+            done_today = not claimable_now(status) and (
+                today in done.get(pid, set())
+                or bool(status and status.get("checked_in"))
+            )
+            entry["checkin"].update({
+                "done_today": done_today,
+                **(status or {}),
+            })
+        # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
+        # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
+        epoch_fn = getattr(p, "quota_epoch", None)
+        qkey = f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
+        quota = await self._cached(qkey, p.quota)
+        if quota is not None:
+            entry["quota"] = {"supported": True, **quota}
+        return entry
+
     async def _cached(self, key: str, fn: Callable, *args):
         """TTL 缓存的 to_thread 调用；上游抛错时返回错误结构而不是 500。
 
@@ -514,18 +529,62 @@ class BenefitsManager:
         还有一条比 TTL 更早的失效条件：快照自己说的「翻转时刻」已过
         （见 :func:`_state_flipped`），此时状态必然已经变了，再拿它渲染就是
         在说谎。
+
+        TTL 过期时走 stale-while-revalidate：**先回旧值**、后台再查。管理页
+        不是常开的——每次隔几分钟再打开都正好赶上 TTL 失效，过去要等整串
+        上游查完才见页面（串行时代实测 15-27s）；改后打开即得旧值，数据至多
+        落后一轮刷新，卡片上的「↻/强刷」仍走 invalidate_* 删键直查，语义不变。
+        只有真·冷缓存（键不存在）才同步等——所以首开仍受最慢通道约束
+        （通道间已并发，见 snapshot）。
+
+        **已翻转**（``_state_flipped``，next_ts 已过）与**失败结果过期**是两个
+        不走 SWR 的例外：前者是界面倒计时正数到这个瞬间，用户等的就是状态
+        翻新的这一拍——同步重查拿新值再回（先回旧值会让「即将刷新」的承诺
+        落空：明明数到零了，按钮却还是灰的）；后者的旧值只是一条错误消息，
+        「先回旧值」毫无价值，同步重查才兑现「短 TTL、30s 后自愈」的语义
+        （``test_failure_result_uses_short_ttl`` 钉着这条）。
         """
         now = time.time()
         cached = self._cache.get(key)
         if cached:
             ttl = FAILURE_TTL_S if _is_failure(cached[1]) else SNAPSHOT_TTL_S
-            if now - cached[0] < ttl and not _state_flipped(cached[1], now):
+            flipped = _state_flipped(cached[1], now)
+            if not flipped and now - cached[0] < ttl:
                 return cached[1]
+            if flipped or _is_failure(cached[1]):
+                return await self._query(key, fn, *args)
+            # 普通 TTL 过期（成功旧值）：先回旧值，后台刷新（同键去重）
+            self._kick_refresh(key, fn, *args)
+            return cached[1]
+        return await self._query(key, fn, *args)
+
+    def _kick_refresh(self, key: str, fn: Callable, *args) -> None:
+        """过期键的后台刷新：同一时刻同键最多一个在飞，重复触发直接复用。"""
+        if key in self._refreshing:
+            return
         try:
-            data = await _call(fn, *args)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # 理论上到不了（_cached 只在协程里被调）
+            return
+        task = loop.create_task(self._query(key, fn, *args))
+        self._refreshing[key] = task
+        task.add_done_callback(lambda _t, k=key: self._refreshing.pop(k, None))
+
+    async def _query(self, key: str, fn: Callable, *args):
+        """真查一次并写缓存；超时/异常都兜成错误结构（短缓存），绝不抛。
+
+        ``wait_for`` 是给「provider 自己的超时失灵」兜底的：实测出现过单键
+        挂 930s（网络风暴窗口期），没有外层硬限时的话整个管理页都会被它拖住。
+        超时后底层线程可能还在跑（to_thread 取消不了线程），结果丢弃即可；
+        失败按 ``FAILURE_TTL_S`` 短缓存，30s 后下一轮自然重试。
+        """
+        try:
+            data = await asyncio.wait_for(_call(fn, *args), timeout=QUERY_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            data = {"error": f"查询超时（>{QUERY_TIMEOUT_S:.0f}s）"}
         except Exception as exc:
             data = {"error": str(exc)[:300]}
-        self._cache[key] = (now, data)
+        self._cache[key] = (time.time(), data)
         return data
 
     def invalidate_quota(self, provider_id: str) -> int:
@@ -602,6 +661,10 @@ class BenefitsManager:
         except asyncio.CancelledError:
             pass
         self._task = None
+        # 后台刷新任务一并收掉，不留悬挂引用
+        for t in self._refreshing.values():
+            t.cancel()
+        self._refreshing.clear()
 
     async def _run(self) -> None:
         while True:
