@@ -161,6 +161,8 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
             family = ""
             if entitlement_id.endswith("_gpt_56_sol"):
                 family = "GPT-5.6 Sol"
+            elif entitlement_id.endswith("_gpt_6_1"):
+                family = "GPT-6.1"
             elif entitlement_id.endswith("_gpt_6"):
                 family = "GPT-6"
             label = f"PAT 日包（{family or '高级模型'}）"
