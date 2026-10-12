@@ -201,13 +201,49 @@ try { COLLAPSED = new Set(JSON.parse(localStorage.getItem('bp-collapsed') || '[]
 function persistCollapsed() {
   try { localStorage.setItem('bp-collapsed', JSON.stringify([...COLLAPSED])); } catch (e) {}
 }
+// 搜索只改变视图，不改 COLLAPSED（含 localStorage 中的偏好）。
+let MODEL_QUERY = '';
+function filteredModelGroups(groups, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return groups;
+  const matches = value => String(value || '').toLowerCase().includes(q);
+  return groups.flatMap(g => {
+    if (matches(g.id) || matches(g.name)) return [g];
+    const models = g.models.filter(m => matches(m.id) || matches(m.name));
+    return models.length ? [{...g, models}] : [];
+  });
+}
+function clearModelSearch() {
+  const input = document.getElementById('model-search');
+  input.value = '';
+  MODEL_QUERY = '';
+  const clearBtn = document.getElementById('model-search-clear');
+  if (clearBtn) clearBtn.hidden = true;
+  renderGroups();
+  input.focus();
+}
+document.getElementById('model-search').addEventListener('input', e => {
+  MODEL_QUERY = e.target.value.trim();
+  const clearBtn = document.getElementById('model-search-clear');
+  if (clearBtn) clearBtn.hidden = !e.target.value;
+  renderGroups();
+});
+document.getElementById('model-search').addEventListener('keydown', e => {
+  if (e.key === 'Escape') { e.preventDefault(); clearModelSearch(); }
+});
+document.getElementById('model-search-clear').addEventListener('click', clearModelSearch);
+document.getElementById('groups').addEventListener('click', e => {
+  if (e.target.closest('[data-clear-model-search]')) clearModelSearch();
+});
 function toggleGroup(gid) {
+  if (MODEL_QUERY) return;
   if (COLLAPSED.has(gid)) COLLAPSED.delete(gid); else COLLAPSED.add(gid);
   persistCollapsed();
   const g = document.querySelector(`.group[data-gid="${CSS.escape(gid)}"]`);
   if (g) g.classList.toggle('collapsed', COLLAPSED.has(gid));
 }
 function setAllGroups(collapse) {
+  if (MODEL_QUERY) return;
   COLLAPSED = collapse ? new Set((MODELS.groups || []).map(g => g.id)) : new Set();
   persistCollapsed();
   document.querySelectorAll('#groups .group').forEach(g =>
@@ -307,15 +343,30 @@ document.getElementById('chart-latency').addEventListener('mouseleave', hideChar
 
 function renderGroups() {
   const el = document.getElementById('groups');
-  const groups = (MODELS.groups || []);
-  const totalModels = groups.reduce((n, g) => n + g.models.length, 0);
+  // 搜索时基于原始 MODELS.groups 生成过滤视图（浅拷贝组、过滤模型行），
+  // 不改数据源；COLLAPSED 完全不参与搜索态的折叠判断。
+  const searching = MODEL_QUERY.trim() !== '';
+  const all = MODELS.groups || [];
+  const groups = searching ? filteredModelGroups(all, MODEL_QUERY) : all;
+  const shownModels = groups.reduce((n, g) => n + g.models.length, 0);
   const dm = MODELS.default_model || '';
-  document.getElementById('model-summary').textContent =
-    `${groups.length} 个通道 · ${totalModels} 个模型` + (dm ? ` · 默认 ${dm}` : '');
+  document.getElementById('model-summary').textContent = searching
+    ? `命中 ${groups.length} 个通道 · ${shownModels} 个模型 · 搜索「${MODEL_QUERY.trim()}」`
+    : `${all.length} 个通道 · ${shownModels} 个模型` + (dm ? ` · 默认 ${dm}` : '');
   const hidden = (MODELS.hidden_models || []).length;
   const hiddenBtn = document.getElementById('hidden-models-btn');
   if (hiddenBtn) hiddenBtn.textContent = `已隐藏${hidden ? ' ' + hidden : ''}`;
-  if (!groups.length) { el.innerHTML = '<div class="empty">没有可用通道</div>'; return; }
+  // 搜索态下视图强制全展开、且不允许写折叠偏好，全部展开/折叠按钮禁用
+  ['models-expand', 'models-collapse'].forEach(id => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = searching;
+  });
+  if (!groups.length) {
+    el.innerHTML = searching
+      ? `<div class="empty">没有匹配「${esc(MODEL_QUERY.trim())}」的通道或模型 <button class="ghost" data-clear-model-search>清空搜索</button></div>`
+      : '<div class="empty">没有可用通道</div>';
+    return;
+  }
   el.innerHTML = groups.map(g => {
     const h = g.health || {};
     const okFlag = (g.id === 'codebuddy') ? (h.authenticated && h.token_valid !== false)
@@ -367,7 +418,7 @@ function renderGroups() {
     const isDefaultProv = g.id === 'codebuddy';
     const swTitle = isDefaultProv ? '默认兜底通道，不能停用'
       : (gdis ? '重新启用该通道' : '停用该通道：调用直接失败，额度页不再展示，顺序页模型置灰');
-    return `<div class="group${COLLAPSED.has(g.id) ? ' collapsed' : ''}" data-gid="${esc(g.id)}"${gdis ? ' style="opacity:.55"' : ''}>
+    return `<div class="group${!searching && COLLAPSED.has(g.id) ? ' collapsed' : ''}" data-gid="${esc(g.id)}"${gdis ? ' style="opacity:.55"' : ''}>
       <div class="group-head" title="点击折叠/展开">
         <span class="dot" style="background:${gdis ? 'var(--muted)' : (okFlag ? 'var(--ok)' : 'var(--err)')}"></span>
         <span class="name">${esc(g.name)}</span>

@@ -71,8 +71,15 @@
       <span class="spacer"></span>
       <span class="muted" style="font-size:12px" id="model-summary"></span>
       <button class="ghost" id="hidden-models-btn" onclick="openHiddenModelsModal()">已隐藏</button>
-      <button class="ghost" onclick="setAllGroups(false)">全部展开</button>
-      <button class="ghost" onclick="setAllGroups(true)">全部折叠</button>
+      <button class="ghost" id="models-expand" onclick="setAllGroups(false)">全部展开</button>
+      <button class="ghost" id="models-collapse" onclick="setAllGroups(true)">全部折叠</button>
+    </div>
+    <div class="model-search-bar">
+      <div class="model-search-field">
+        <input id="model-search" type="search" placeholder="搜索通道或模型名称 / ID…" aria-label="搜索通道或模型" aria-describedby="model-search-hint" autocomplete="off" spellcheck="false">
+        <button class="ghost" id="model-search-clear" aria-label="清空搜索" hidden>✕</button>
+      </div>
+      <span class="muted" id="model-search-hint">实时筛选 · 搜索时自动展开，清空恢复原状态</span>
     </div>
     <div id="groups"><div class="empty">加载中…</div></div>
   </section>
