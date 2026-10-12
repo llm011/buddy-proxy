@@ -530,29 +530,45 @@ def test_burst_is_per_model(fake_clock):
 
 
 def test_quota_429_failures_do_not_trigger_burst(fake_clock):
-    """429 不进突发窗口：双通道同时限流是上游/账号自己的状态，照常 5 分钟。
-
-    隧道层故障只会回 5xx/传输层错误，不会是 429；把限流缩成 30 秒还清升级
-    计数，等于帮限流中的上游解除武装、之后每 30 秒被骚扰一次。
-    """
+    """429 不进突发窗口：双通道同时限流走固定的限频短冷却，而不是突发 30 秒档。"""
     c = cooldown_mod
     c.mark_failed("pa", "m1", status=429)
     c.mark_failed("pb", "m1", status=429)
-    assert c.remaining("pa", "m1") > 240
-    assert c.remaining("pb", "m1") > 240
+    assert 30 < c.remaining("pa", "m1") <= c._RATE_LIMIT_COOLDOWN_S
+    assert 30 < c.remaining("pb", "m1") <= c._RATE_LIMIT_COOLDOWN_S
+
+
+def test_429_short_cooldown_never_escalates(fake_clock):
+    """限频是分钟级滑动窗口：反复 429 也只冷却 _RATE_LIMIT_COOLDOWN_S，不升 1 小时。"""
+    c = cooldown_mod
+    for _ in range(6):
+        c.mark_failed("pa", "m1", status=429)
+        assert c.remaining("pa", "m1") <= c._RATE_LIMIT_COOLDOWN_S
+        fake_clock.t += c._RATE_LIMIT_COOLDOWN_S + 1
+        assert not c.is_marked("pa", "m1")
+
+
+def test_429_does_not_shorten_existing_long_cooldown(fake_clock):
+    """已有的长冷却（如 502 升级档）不会被随后的 429 短档缩短。"""
+    c = cooldown_mod
+    for _ in range(3):
+        c.mark_failed("pa", "m1", status=502)
+    assert c.remaining("pa", "m1") > 3000
+    c.mark_failed("pa", "m1", status=429)
+    assert c.remaining("pa", "m1") > 3000
 
 
 def test_429_does_not_pollute_burst_window(fake_clock):
     """夹在 5xx 之间的 429 不参与突发计数：突发只看网络类失败。"""
     c = cooldown_mod
     c.mark_failed("pa", "m1", status=502)      # 网络类，进窗口（此时独自一人）
-    c.mark_failed("pb", "m1", status=429)      # 限流，不进窗口 → 普通 5 分钟
-    assert c.remaining("pb", "m1") > 240
+    c.mark_failed("pb", "m1", status=429)      # 限流，不进窗口 → 限频短冷却
+    assert 30 < c.remaining("pb", "m1") <= c._RATE_LIMIT_COOLDOWN_S
     fake_clock.t += 20
     c.mark_failed("pc", "m1", status=502)      # 与 pa 同窗 → 突发成立
     assert 0 < c.remaining("pc", "m1") <= 30
     assert 0 < c.remaining("pa", "m1") <= 30   # pa 被回头缩短
-    assert c.remaining("pb", "m1") > 240       # 429 的 pb 不受影响
+    assert c.remaining("pb", "m1") > 30        # 429 的 pb 不受突发缩档影响
 
 
 def test_clear_wipes_burst_evidence(fake_clock):

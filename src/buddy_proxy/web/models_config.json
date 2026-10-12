@@ -497,7 +497,8 @@
       "function": "solo_agent",
       "max_input": 1000000,
       "reasoning": true,
-      "tool_call": true
+      "tool_call": true,
+      "rate_limit": {"requests": 6, "window_s": 75}
     },
     {
       "id": "gemini-3.1-pro",

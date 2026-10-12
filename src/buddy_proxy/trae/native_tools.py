@@ -97,6 +97,10 @@ def _native_tools_payload(tools: list[dict[str, Any]] | None) -> list[dict[str, 
     return out
 
 
+_TOOL_IMAGE_PLACEHOLDER = "[image attached in the following user message]"
+_TOOL_IMAGE_CAPTION = "[images returned by the tool calls above]"
+
+
 def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """OpenAI messages -> 原生通道 messages（结构化历史，不做文本协议改写）。
 
@@ -105,8 +109,18 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     tool 角色 + tool_call_id，不转 user + [tool_result] 前缀。
     """
     out: list[dict[str, Any]] = []
+    pending_images: list[dict[str, Any]] = []
+
+    def flush_images() -> None:
+        if pending_images:
+            out.append({"role": "user", "content": [
+                {"type": "text", "text": _TOOL_IMAGE_CAPTION}, *pending_images]})
+            pending_images.clear()
+
     for m in messages:
         role = m.get("role", "user")
+        if role not in ("tool", "function"):
+            flush_images()
         content = _content_blocks(m.get("content"))
         tool_calls = m.get("tool_calls") if isinstance(m, dict) else None
         if role == "assistant" and tool_calls:
@@ -125,6 +139,15 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # content 为空也要带空 text block（上游 schema 要求；实测空串即可）
             out.append({"role": "assistant", "content": content, "tool_calls": tcs})
         elif role in ("tool", "function"):
+            images = [b for b in content if b.get("type") == "image_url"]
+            if images:
+                # 部分上游模型（实测 openrouter 系）拒收 tool 角色里的图片
+                # （4001 param invalid），user 角色里的同一张图却正常识别。
+                # 图片挪到这一串 tool 结果之后的 user 消息里，tool 内留文字
+                # 占位——不能插在 tool 消息之间，否则并行工具调用的配对被打断。
+                content = [b for b in content if b.get("type") != "image_url"]
+                content.append({"type": "text", "text": _TOOL_IMAGE_PLACEHOLDER})
+                pending_images.extend(images)
             out.append({
                 "role": "tool",
                 "tool_call_id": m.get("tool_call_id") or "",
@@ -133,6 +156,7 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             })
         else:
             out.append({"role": role, "content": content})
+    flush_images()
     return out
 
 

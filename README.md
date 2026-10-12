@@ -700,6 +700,8 @@ Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUD
 
 Trae stream tuning: `WB_TRAE_HEARTBEAT_INTERVAL` (heartbeat while waiting for the buffered upstream response, seconds, default 45, `0` disables — keeps clients with per-chunk timeouts like Ethan's 120s from aborting long generations), `WB_TRAE_NATIVE_TOOLS` (native channel for all Trae requests — native function calling for tool requests, preset-free chat for plain ones; default `1`; `0` falls back to the legacy prompt-taught text protocol with leak guards), `WB_TRAE_IDE_VERSION_CODE` (Trae client version header, default `20260906` — the upstream gates per-model capabilities by this header; raise it when a model suddenly 4001s), `WB_TRAE_NONSTREAM_MAX_S` (non-streaming aggregation cap), `WB_TRAE_SEMANTIC_TIMEOUT`, `WB_TRAE_TOKEN_KEEPALIVE_S` (background token refresh interval).
 
+Trae PAT rate limits: some extended models are rate-limited per account and per model upstream (queue-full / too-many-requests codes). Before any content is sent, the PAT channel switches to another account; when every account is limited it returns 429 so `model_order` fails over to the next target (429 targets cool down for only 60s and never escalate). A model can declare `"rate_limit": {"requests": N, "window_s": W}` in `models_config.json` to be paced proactively; when every account's window is full the request waits up to `TRAE_PAT_PACE_MAX_WAIT_S` seconds (default 30, heartbeats keep flowing) before giving up with 429.
+
 ## API endpoints
 
 | Method | Path | Purpose |

@@ -47,6 +47,10 @@ _BURST_WINDOW_S = 60
 _BURST_PROVIDERS = 2
 #: 机器级故障的短冷却（秒）。
 _BURST_COOLDOWN_S = 30
+#: 429（限频/账号额度）的冷却（秒），不累计升级。上游频控多为分钟级滑动窗口，
+#: 5 分钟起步、3 次升 1 小时会让多会话并发场景下目标几乎一直不可用；额度真
+#: 耗尽时，每分钟一次快速 429 再换档的代价也很小。
+_RATE_LIMIT_COOLDOWN_S = 60
 
 #: ``(provider_id, model_id)`` → 解禁时刻（epoch 秒）。
 _marks: dict[tuple[str, str], float] = {}
@@ -124,6 +128,8 @@ def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -
       各通道的隧道层失败与上游自身 502 无法逐条区分（响应体都是从隧道里回来的），
       所以用「多通道同时失败」这个统计特征判定，接受少量误判（两个上游真同时坏，
       也只是冷却转 30 秒轮换，换档仍正常工作）。
+    - **限频 429**：固定 ``_RATE_LIMIT_COOLDOWN_S``，不进突发窗口、不计升级——
+      频控是分钟级滑动窗口，长冷却只会让并发场景下目标长期不可用。
     - **普通失败**：短窗口内累计达到 ``_ESCALATE_HITS`` 次升级为
       ``_ESCALATE_COOLDOWN_S``，否则 ``_TARGET_COOLDOWN_S``。始终取 ``max``，
       短冷却不得缩短已有的长冷却（机器级路径例外——见上，突发缩档是**有意**回写）。
@@ -143,7 +149,11 @@ def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -
         else:
             window_providers = set()
             machine = False
-        if machine:
+        if status == 429:
+            span = _RATE_LIMIT_COOLDOWN_S
+            escalated = False
+            _marks[key] = max(_marks.get(key, 0.0), now + span)
+        elif machine:
             span = _BURST_COOLDOWN_S
             escalated = False
             # 本次走机器级短档，不累计升级计数；窗口内其它通道回头一起缩（见上）。
@@ -167,6 +177,9 @@ def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -
             provider_id, model_id, _BURST_WINDOW_S, len(window_providers),
             span, status if status is not None else "unknown",
         )
+    elif status == 429:
+        log.warning("目标 %s/%s 换档失败（限频/额度 429），冷却 %d 秒（不升级）",
+                    provider_id, model_id, span)
     else:
         log.warning(
             "目标 %s/%s 换档失败，冷却 %d 分钟%s（触发状态=%s，窗口内第%d次）",

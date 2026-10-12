@@ -38,6 +38,10 @@ _CONNECT_RETRY_ERRNOS = frozenset({errno.ECONNREFUSED, errno.ENETUNREACH, errno.
 # 账号级认证/限流的短冷却；429 可由 Retry-After 覆盖。
 _ACCOUNT_COOLDOWN_S = 60
 _FAILOVER_SSE_CODES = frozenset({4008, 4009, 4031, 4220, 4221, 4222, 4223, 4224, 4227})
+# 上游频控码（请求队列满 / 访问量过大）：按账号×模型计数、几十秒自愈，不是
+# 额度耗尽。首个语义事件前撞到即换号（见 pacing），全部账号都限频时报 429
+# 让 model_order 换备选通道，而不是当 502 透传成带内错误。
+_RATE_LIMIT_SSE_CODES = frozenset({3004, 4050, 4051})
 
 
 @dataclass(frozen=True, slots=True)

@@ -679,6 +679,8 @@ providers:
 
 Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期间的心跳秒数，默认 45，`0` 关闭——避免像 Ethan 那种 120s 分块超时的客户端中断长生成）、`WB_TRAE_NATIVE_TOOLS`（全部 Trae 请求是否走原生通道，默认 `1`，`0` 回落到旧的提示词教文本协议）、`WB_TRAE_IDE_VERSION_CODE`（Trae 客户端版本头，默认 `20260906`——上游按此头放开各模型能力，某模型突然 4001 时调高它）、`WB_TRAE_NONSTREAM_MAX_S`（非流式聚合上限）、`WB_TRAE_SEMANTIC_TIMEOUT`、`WB_TRAE_TOKEN_KEEPALIVE_S`（后台 Token 刷新间隔）。
 
+Trae PAT 频控：部分扩展模型上游按「账号 × 模型」限频（队列已满 / 访问量过大类错误码）。在向客户端吐出任何内容之前，PAT 通道会先换账号；所有账号都限频时返回 429，交给 `model_order` 切到下一个顺序目标（429 目标只冷却 60 秒且不升级）。模型可在 `models_config.json` 声明 `"rate_limit": {"requests": N, "window_s": W}` 做主动节流；所有账号窗口都满时最多等待 `TRAE_PAT_PACE_MAX_WAIT_S` 秒（默认 30，期间照常发心跳），仍无名额则 429。
+
 ## API 端点
 
 | 方法 | 路径 | 用途 |
