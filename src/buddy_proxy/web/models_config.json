@@ -487,6 +487,19 @@
       "tool_call": true
     },
     {
+      "id": "gpt-6.1-sol",
+      "name": "GPT-6.1-Sol",
+      "vendor": "openai",
+      "provider": "traepat",
+      "gateway": "plus",
+      "upstream_model": "gpt-6.1-sol",
+      "config_name": "gpt-6.1-sol",
+      "function": "solo_agent",
+      "max_input": 1000000,
+      "reasoning": true,
+      "tool_call": true
+    },
+    {
       "id": "gemini-3.1-pro",
       "name": "Gemini-3.1-Pro",
       "vendor": "trae",
@@ -507,6 +520,18 @@
       "upstream_model": "gemini-3-flash",
       "config_name": "gemini-3-flash",
       "max_input": 200000,
+      "reasoning": true,
+      "tool_call": true
+    },
+    {
+      "id": "openrouter-4o-max",
+      "name": "OpenRouter-4o Max",
+      "vendor": "trae",
+      "provider": "traepat",
+      "gateway": "plus",
+      "upstream_model": "openrouter-4o__max",
+      "config_name": "openrouter-4o",
+      "max_input": 1000000,
       "reasoning": true,
       "tool_call": true
     },
