@@ -299,13 +299,17 @@
                       margin: -4px 0 12px; }
   .model-search-field { position: relative; display: flex; align-items: center;
                         flex: 1 1 300px; max-width: 440px; }
-  .model-search-field input { width: 100%; padding: 6px 32px 6px 10px; }
+  /* padding 特异性要压过全局 input:not([type=checkbox]):not([type=radio])（(0,2,1)），
+     右侧留白给叠放的 ✕，文字不顶到按钮底下 */
+  .model-search-field input[type="search"] { width: 100%; padding: 6px 30px 6px 10px; }
   /* 关掉 webkit 原生清除按钮，只留我们自己的 ✕（右侧叠放），避免出现两个 */
   .model-search-field input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; }
-  .model-search-clear { position: absolute; right: 4px; padding: 2px 8px; border: none;
+  /* 注意按钮挂的是 id（class 只有 ghost），选择器写 # 才生效——首版写成 .model-search-clear
+     没匹配上，按钮掉回流内紧贴输入框右缘 */
+  #model-search-clear { position: absolute; right: 6px; padding: 2px 8px; border: none;
                         background: transparent; color: var(--muted); font-size: 12px;
                         line-height: 1; }
-  .model-search-clear:hover { color: var(--text); }
+  #model-search-clear:hover { color: var(--text); }
   .tag { font-size: 11px; padding: 1px 8px; border-radius: 6px; background: var(--bg);
          color: var(--muted); border: 1px solid var(--line); }
   .tag.ok { color: var(--ok); border-color: rgba(62,207,142,.35); }
