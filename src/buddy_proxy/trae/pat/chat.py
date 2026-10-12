@@ -41,6 +41,7 @@ from .config import (
     _CONNECT_RETRY_ERRNOS,
     _FAILOVER_SSE_CODES,
     _PLUS_GATEWAY,
+    _RATE_LIMIT_SSE_CODES,
 )
 from .cooldown import (
     _mark_account_cooldown,
@@ -54,6 +55,7 @@ from .cooldown import (
 from .credentials import _pat_headers
 from .keeper import start_token_keeper
 from .models import pat_gateway_is_plus
+from .pacing import mark_rate_limited, try_reserve, wait_for_slot
 
 log = logging.getLogger(__name__)
 
@@ -71,12 +73,16 @@ def _json_error_code(text: str) -> int | None:
         return None
 
 
+# 首个语义事件前撞到即换号的业务码：额度码 + 频控码。
+_SWITCH_SSE_CODES = _FAILOVER_SSE_CODES | _RATE_LIMIT_SSE_CODES
+
+
 def _sse_failover_code(raw: str) -> int | None:
-    """识别额度耗尽业务码；返回 None 表示不切换。"""
+    """识别额度耗尽/频控业务码；返回 None 表示不切换。"""
     stripped = raw.lstrip()
     if stripped.startswith("{"):
         code = _json_error_code(stripped)
-        return code if code is not None and code in _FAILOVER_SSE_CODES else None
+        return code if code is not None and code in _SWITCH_SSE_CODES else None
     try:
         for event, data in _parse_sse(raw):
             if event != "error" or not isinstance(data, dict):
@@ -86,7 +92,7 @@ def _sse_failover_code(raw: str) -> int | None:
                 numeric = int(code)
             except (TypeError, ValueError):
                 continue
-            if numeric in _FAILOVER_SSE_CODES:
+            if numeric in _SWITCH_SSE_CODES:
                 return numeric
     except Exception:
         pass
@@ -286,6 +292,38 @@ def _semantic_event(event: str, data: dict[str, Any]) -> bool:
 _EMPTY_SUCCESS_RETRIES = 2
 
 
+class _PacedProfiles:
+    """按频控节流的账号迭代：每个账号至多产出一次，产出前已预留窗口名额。
+
+    当前无账号有名额时有界等待（见 pacing.wait_for_slot）；等不到则停止
+    迭代并置 ``starved``，由调用方报 429 交给 model_order 换备选通道。
+    """
+
+    def __init__(self, profiles, model: str, stop: threading.Event | None = None) -> None:
+        self._pending = list(profiles)
+        self._model = model
+        self._stop = stop
+        self.starved = False
+
+    def __iter__(self) -> Iterator[Any]:
+        while self._pending:
+            for profile in self._pending:
+                if try_reserve(profile, self._model):
+                    self._pending.remove(profile)
+                    break
+            else:
+                if not wait_for_slot(self._pending, self._model, self._stop):
+                    self.starved = True
+                    return
+                continue
+            yield profile
+
+
+def _rate_limited_detail(model: str) -> str:
+    return (f"trae PAT 模型 {model} 所有账号均触发上游频率限制（请求队列已满），"
+            "请稍后重试或改用其它通道")
+
+
 def stream_pat_native(
     native_msgs: list[dict[str, Any]],
     model: str,
@@ -324,8 +362,11 @@ def stream_pat_native(
     attempted_accounts = 0
     accounts_4031 = 0
 
+    rate_limited = False
+    paced = _PacedProfiles(profiles, model, stop)
+
     have_credentials = False
-    for profile in profiles:
+    for profile in paced:
         try:
             credentials = _ns._get_profile_credentials(profile)
         except HTTPException:
@@ -346,6 +387,11 @@ def stream_pat_native(
                         return
                     code = _event_error_code(event, data)
                     if code is not None:
+                        if not committed and code in _RATE_LIMIT_SSE_CODES:
+                            mark_rate_limited(profile, model, code)
+                            rate_limited = True
+                            last_status = code
+                            break
                         if not committed and code in _FAILOVER_SSE_CODES:
                             if code == 4031:
                                 # 4031 = 该账号该池日额度耗尽。每账号日包独立，先给
@@ -430,7 +476,10 @@ def stream_pat_native(
                 log.warning("PAT stream 传输失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
                 raise HTTPException(status_code=502, detail="trae PAT chat transport failed") from None
 
-    if not have_credentials:
+    if paced.starved:
+        # 等不到频控名额：与撞限频码同口径报 429（不是凭据问题）
+        rate_limited = True
+    if not have_credentials and not rate_limited:
         raise HTTPException(status_code=502, detail="trae PAT credential unavailable")
     if empty_retries > 0:
         # 所有账号均返回空响应假成功：不是额度故障，报 502 而非 401，
@@ -443,6 +492,8 @@ def stream_pat_native(
         # 本轮被尝试的账号全部撞 4031：标记通道级短 TTL 并快速失败，见 send_pat_native。
         _mark_channel_exhausted(quota_class)
         _raise_channel_exhausted(quota_class)
+    if rate_limited:
+        raise HTTPException(status_code=429, detail=_rate_limited_detail(model))
     status = 429 if last_status in (403, 429) or last_status in _FAILOVER_SSE_CODES else 401
     raise HTTPException(status_code=status, detail="trae PAT 所有账号均不可用")
 
@@ -479,8 +530,11 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
     attempted_accounts = 0
     accounts_4031 = 0
 
+    rate_limited = False
+    paced = _PacedProfiles(profiles, model)
+
     have_credentials = False
-    for profile in profiles:
+    for profile in paced:
         try:
             credentials = _ns._get_profile_credentials(profile)
         except HTTPException:
@@ -543,6 +597,11 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                 log.warning("PAT chat 传输失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
                 raise HTTPException(status_code=502, detail="trae PAT chat transport failed") from None
             failover_code = _sse_failover_code(raw)
+            if failover_code in _RATE_LIMIT_SSE_CODES:
+                mark_rate_limited(profile, model, failover_code)
+                rate_limited = True
+                last_status = failover_code
+                break
             if failover_code is not None:
                 if failover_code == 4031:
                     # 4031 = 该账号该池日额度耗尽。每个账号的日包相互独立，故先给
@@ -582,7 +641,10 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                            f"{empty_retries} account(s))")
             return raw
 
-    if not have_credentials:
+    if paced.starved:
+        # 等不到频控名额：与撞限频码同口径报 429（不是凭据问题）
+        rate_limited = True
+    if not have_credentials and not rate_limited:
         raise HTTPException(status_code=502, detail="trae PAT credential unavailable")
     if empty_retries > 0:
         # 所有账号均返回空响应假成功：不是额度故障，报 502 而非 401，
@@ -597,6 +659,8 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
         # 后自动恢复。任一账号是别的失败原因（401/传输错误）时不视为通道级耗尽。
         _mark_channel_exhausted(quota_class)
         _raise_channel_exhausted(quota_class)
+    if rate_limited:
+        raise HTTPException(status_code=429, detail=_rate_limited_detail(model))
     status = 429 if last_status in (403, 429) or last_status in _FAILOVER_SSE_CODES else 401
     raise HTTPException(status_code=status, detail="trae PAT 所有账号均不可用")
 
