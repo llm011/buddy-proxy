@@ -8,6 +8,7 @@
   发送前按窗口预留名额，满了就换账号，所有账号都满时**有界等待**（流式
   路径等待期间读线程外层照常发心跳）；
 - 撞限频码时给该（账号, 模型）打短冷却并换号，不影响该账号的其它模型；
+  所有账号都处于限频冷却时不等待，直接 429 交给 model_order 换档；
 - 等待超过 ``TRAE_PAT_PACE_MAX_WAIT_S`` 仍无名额 → 由调用方抛 429，让
   model_order 换到备选通道。
 
@@ -49,19 +50,9 @@ def _max_wait_s() -> float:
 
 
 def _model_limit(model: str) -> tuple[int, float] | None:
-    """模型声明的窗口限额 (requests, window_s)；未声明/非法返回 None（不节流）。"""
-    info = _ns.pat_model_meta().get(model) or {}
-    spec = info.get("rate_limit")
-    if not isinstance(spec, dict):
-        return None
-    try:
-        requests = int(spec.get("requests"))
-        window = float(spec.get("window_s"))
-    except (TypeError, ValueError):
-        return None
-    if requests <= 0 or window <= 0:
-        return None
-    return requests, window
+    """模型声明的窗口限额 (requests, window_s)；未声明返回 None（不节流）。"""
+    _ns._reload_pat_models()  # mtime 未变时为空操作
+    return _ns.PAT_MODEL_RATE_LIMITS.get(model)
 
 
 def _wait_for(key: tuple[str, str], limit: tuple[int, float] | None, now: float) -> float:
@@ -101,9 +92,15 @@ def wait_for_slot(profiles: Sequence[PatProfile], model: str,
         now = time.monotonic()
         with _lock:
             waits = [_wait_for((p.cache_key, model), limit, now) for p in profiles]
+            # 上游已明确限频（全部账号在限频冷却中）：不原地干等，立刻让调用方
+            # 报 429 换下一个顺序目标。只有主动节流的窗口空档才值得等。
+            all_rejected = bool(profiles) and all(
+                _rate_cooldowns.get((p.cache_key, model), 0.0) > now for p in profiles)
         wait = min(waits) if waits else 0.0
         if wait <= 0:
             return True
+        if all_rejected:
+            return False
         if now + wait > deadline:
             return False
         if not logged:

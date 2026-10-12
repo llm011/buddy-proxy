@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from typing import Any
 
 import pytest
@@ -35,7 +36,7 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(pat, "_refresh_locks", {})
     monkeypatch.setattr(pat, "_quota_code_hits", {})
     monkeypatch.setattr(pat, "_channel_exhausted", {})
-    monkeypatch.setattr(pat, "pat_model_meta", lambda: {})
+    monkeypatch.setattr(pat, "PAT_MODEL_RATE_LIMITS", {})
     monkeypatch.setattr(
         pat, "_get_profile_credentials",
         lambda profile, **_: pat.PatCredentials(
@@ -47,8 +48,7 @@ def _isolated(monkeypatch, tmp_path):
 
 
 def _limit(monkeypatch, requests: int, window_s: float) -> None:
-    monkeypatch.setattr(pat, "pat_model_meta",
-                        lambda: {"m": {"rate_limit": {"requests": requests, "window_s": window_s}}})
+    monkeypatch.setattr(pat, "PAT_MODEL_RATE_LIMITS", {"m": (requests, window_s)})
 
 
 # ── 限频码：换号，全部撞上报 429（不是 502 带内错误） ──
@@ -166,11 +166,37 @@ def test_wait_for_slot_honours_stop():
     assert pacing.wait_for_slot(_profiles, "m", stop) is False
 
 
-def test_invalid_rate_limit_config_disables_pacing(monkeypatch):
-    monkeypatch.setattr(pat, "pat_model_meta",
-                        lambda: {"m": {"rate_limit": {"requests": "x", "window_s": 0}}})
-    profile = pat.ensure_pat_config()[0]
-    assert all(pacing.try_reserve(profile, "m") for _ in range(20))
+def test_invalid_rate_limit_config_disables_pacing():
+    from buddy_proxy.trae.pat.models import _parse_rate_limit
+    assert _parse_rate_limit({"requests": "x", "window_s": 0}) is None
+    assert _parse_rate_limit({"requests": 0, "window_s": 10}) is None
+    assert _parse_rate_limit(None) is None
+    assert _parse_rate_limit({"requests": 6, "window_s": 75}) == (6, 75.0)
+
+
+def test_all_accounts_upstream_rate_limited_does_not_wait(monkeypatch):
+    """上游已明确限频时不干等（避免拖慢 model_order 换档），立即 429。"""
+    monkeypatch.setenv("TRAE_PAT_PACE_MAX_WAIT_S", "30")
+    for p in pat.ensure_pat_config():
+        pacing.mark_rate_limited(p, "m", 4050)
+    monkeypatch.setattr(pat, "_post_chat", lambda *_a: _OK)
+    started = time.monotonic()
+    with pytest.raises(HTTPException) as caught:
+        pat.send_pat_native([], "m", False)
+    assert caught.value.status_code == 429
+    assert time.monotonic() - started < 1
+
+
+def test_shipped_catalog_rate_limit_parsed():
+    """仓库自带目录里声明的 rate_limit 能被真实加载（防字段名拼错静默失效）。"""
+    from buddy_proxy.trae.pat import models
+    data = json.loads(models._MODEL_CONFIG_FILE.read_text("utf-8"))
+    declared = {m["id"] for m in data["models"]
+                if m.get("provider") == "traepat" and m.get("rate_limit")}
+    assert declared
+    for model_id in declared:
+        spec = next(m for m in data["models"] if m["id"] == model_id)["rate_limit"]
+        assert models._parse_rate_limit(spec) is not None
 
 
 # ── tool 结果里的图片挪到随后的 user 消息 ──

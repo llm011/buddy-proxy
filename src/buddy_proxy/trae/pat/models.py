@@ -43,7 +43,23 @@ PAT_PUBLIC_MODELS: dict[str, tuple[str, str]] = {}
 # 模型 -> function 覆盖（个别模型只在特定 function 下开放，如 gpt-6-astra 仅
 # solo_agent；缺省走 WB_TRAE_NATIVE_FUNCTION / chat_v3）
 PAT_MODEL_FUNCTIONS: dict[str, str] = {}
+# 模型 -> 上游频控窗口 (requests, window_s)，见 pacing；未声明的模型不节流
+PAT_MODEL_RATE_LIMITS: dict[str, tuple[int, float]] = {}
 _config_mtime: float | None = None
+
+
+def _parse_rate_limit(spec: Any) -> tuple[int, float] | None:
+    """``{"requests": N, "window_s": W}`` → (N, W)；缺失/非法返回 None（不节流）。"""
+    if not isinstance(spec, dict):
+        return None
+    try:
+        requests = int(spec.get("requests"))
+        window = float(spec.get("window_s"))
+    except (TypeError, ValueError):
+        return None
+    if requests <= 0 or window <= 0:
+        return None
+    return requests, window
 
 
 def _reload_pat_models() -> None:
@@ -57,6 +73,7 @@ def _reload_pat_models() -> None:
     plus: dict[str, tuple[str, str]] = {}
     public: dict[str, tuple[str, str]] = {}
     functions: dict[str, str] = {}
+    rate_limits: dict[str, tuple[int, float]] = {}
     try:
         data = json.loads(_MODEL_CONFIG_FILE.read_text("utf-8"))
         for model in data.get("models", []):
@@ -70,6 +87,9 @@ def _reload_pat_models() -> None:
             override = str(model.get("function") or "").strip()
             if model_id and override:
                 functions[model_id] = override
+            limit = _parse_rate_limit(model.get("rate_limit"))
+            if model_id and limit:
+                rate_limits[model_id] = limit
     except Exception as exc:
         log.warning("PAT 模型配置解析失败（沿用上次内容）: %s", type(exc).__name__)
         return
@@ -79,6 +99,8 @@ def _reload_pat_models() -> None:
     PAT_PUBLIC_MODELS.update(public)
     PAT_MODEL_FUNCTIONS.clear()
     PAT_MODEL_FUNCTIONS.update(functions)
+    PAT_MODEL_RATE_LIMITS.clear()
+    PAT_MODEL_RATE_LIMITS.update(rate_limits)
     PAT_MODELS.clear()
     PAT_MODELS.update({**plus, **public})
     _config_mtime = mtime
