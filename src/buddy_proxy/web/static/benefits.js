@@ -192,7 +192,11 @@ function renderBenefits() {
     const c = p.checkin;
     // 签到态做成带状态点的徽标；「连续 N 天 / 每日 +X」降级成旁边的小 chip，
     // 别和状态挤在同一个 tag 里（那行本来就长，挤一起更难扫）
-    const st = c.error ? `<span class="br-state bad" title="${esc(c.error)}">状态未知</span>`
+    // 查询失败（error / query_failed）→「状态未知」，绝不画成「未签到」：
+    // 声明支持打卡却拿不到状态时，显示可点的「立即打卡」会让用户以为今天还没打
+    // （dumate 在无本机登录态时就是这条路径——别处已打过卡，本机显示未打卡）。
+    const unknown = c.error || c.query_failed;
+    const st = unknown ? `<span class="br-state bad" title="${esc(c.error || c.message || '')}">状态未知</span>`
       : c.unavailable ? `<span class="br-state" title="${esc(c.message || '')}">有活动，暂无可领签到奖励</span>`
       : c.inactive ? `<span class="br-state"${c.message && c.message !== 'OK' ? ` title="${esc(c.message)}"` : ''}>${c.activity_name ? '活动未开始' : '暂无签到活动'}</span>`
       : c.done_today ? '<span class="br-state ok">已签到</span>'
@@ -239,7 +243,7 @@ function renderBenefits() {
         <div class="br-meta">${badge}${meta}${nextTimeHtml(c)}</div>
         <div class="br-act">
           <button onclick="refreshCheckin('${esc(p.id)}', this)" title="绕过缓存，真打上游重查该通道签到状态">强刷</button>
-          <button class="primary" ${(c.done_today || c.inactive || c.unavailable) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)">立即打卡</button>
+          <button class="primary" ${(unknown || c.done_today || c.inactive || c.unavailable) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)" ${unknown ? 'title="状态未知，先点「强刷」重查"' : ''}>立即打卡</button>
         </div>
       </div>
       ${acctsHtml ? `<div class="ck-accts">${acctsHtml}</div>` : ''}

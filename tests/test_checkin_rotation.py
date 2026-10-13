@@ -210,6 +210,45 @@ def test_snapshot_done_today_survives_status_query_failure(tmp_path, monkeypatch
     assert "error" in ck
 
 
+def test_snapshot_marks_query_failed_when_status_is_none(tmp_path, monkeypatch):
+    """声明支持打卡却返回裸 ``None`` → 标 ``query_failed``，别退化成「未签到」。
+
+    这是 dumate 报障的通用防线：拿不到状态（未登录/网络失败）时，前端只在
+    ``error``/``query_failed`` 下才显示「状态未知」，否则会画成「未签到」+ 可点的
+    「立即打卡」——用户看到的就是「今天还没打卡」，而实况是「查不到」。
+    """
+    class _NoneStatus(_RotatingCheckin):
+        def checkin_status(self):
+            self.status_calls += 1
+            return None
+
+    p = _NoneStatus(claimable=False)
+    state, mgr = _manager(tmp_path, monkeypatch, {"rotating": p})
+
+    snap = asyncio.run(mgr.snapshot())
+    ck = next(x["checkin"] for x in snap["providers"] if x["id"] == "rotating")
+    assert ck["query_failed"] is True
+    assert ck.get("message")
+    assert ck["done_today"] is False
+    # 失败结构按「查询失败」短 TTL 缓存（网络恢复/登录态出现后尽快自愈）
+    from buddy_proxy.benefits import _is_failure
+    assert _is_failure(ck) is True
+
+
+def test_tick_does_not_claim_when_status_is_none(tmp_path, monkeypatch):
+    """裸 ``None`` 时不该去 claim（拿不到状态就对上游打 claim 会刷失败记录）。"""
+    class _NoneStatus(_RotatingCheckin):
+        def checkin_status(self):
+            self.status_calls += 1
+            return None
+
+    p = _NoneStatus(claimable=True)
+    state, mgr = _manager(tmp_path, monkeypatch, {"rotating": p})
+
+    asyncio.run(mgr._tick())
+    assert p.claim_calls == 0
+
+
 def test_tick_does_not_claim_when_upstream_contradicts_itself(tmp_path, monkeypatch):
     """``checked_in`` 与 ``claimable`` 同时为真 → 按「已打」处理，不重复领。
 

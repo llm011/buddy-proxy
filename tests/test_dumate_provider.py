@@ -462,6 +462,60 @@ def test_checkin_status_none_when_not_logged_in():
         assert dumate_checkin.fetch_checkin_status() is None
 
 
+# --- 签到：provider 层把「查不到」标成 query_failed（不返回裸 None）----------
+#
+# 报障（2026-10-07）：dumate 已在另一台机器自动签到，但本机 8787 面板显示
+# 「未打卡」。根因是本机无 DuMate 登录态（qianfan-desktop-app 目录不存在）→
+# fetch_checkin_status() 返回 None → snapshot 里 done_today=False、无 error，
+# 前端据此渲染成「未签到」+ 可点的「立即打卡」——把「拿不到状态」谎报成
+# 「今天还没打」。修法：provider 返回带 query_failed 的失败结构。
+
+
+def test_checkin_status_returns_query_failed_when_not_logged_in():
+    """本机无登录态：不返回裸 None，返回 query_failed 的失败结构。
+
+    裸 None 在 snapshot 里会退化成「未签到」可点状态（本次报障成因）。
+    """
+    from buddy_proxy.dumate import checkin as dumate_checkin
+    from buddy_proxy.dumate.provider import DumateProvider
+
+    p = DumateProvider()
+    with mock.patch.object(dumate_checkin, "fetch_checkin_status", return_value=None), \
+         mock.patch.object(dumate_checkin, "resolve_bceconsole_auth", return_value=None):
+        st = p.checkin_status()
+
+    assert st is not None, "不能返回裸 None——那会让前端显示「未签到」"
+    assert st["query_failed"] is True
+    assert st["checked_in"] is False and st["claimable"] is False
+    assert "本机" in st["message"] and "别的机器" in st["message"]
+
+
+def test_checkin_status_returns_query_failed_on_upstream_error():
+    """有登录态但查询失败（网络/上游异常）：同样标 query_failed，文案区分。"""
+    from buddy_proxy.dumate import checkin as dumate_checkin
+    from buddy_proxy.dumate.provider import DumateProvider
+
+    p = DumateProvider()
+    auth = SimpleNamespace(headers=lambda: {"Cookie": "x"})
+    with mock.patch.object(dumate_checkin, "fetch_checkin_status", return_value=None), \
+         mock.patch.object(dumate_checkin, "resolve_bceconsole_auth", return_value=auth):
+        st = p.checkin_status()
+
+    assert st["query_failed"] is True
+    assert "查询失败" in st["message"]
+
+
+def test_checkin_status_passes_through_real_status():
+    """拿得到状态时原样透传（不带 query_failed），行为不变。"""
+    from buddy_proxy.dumate import checkin as dumate_checkin
+    from buddy_proxy.dumate.provider import DumateProvider
+
+    real = {"checked_in": True, "claimable": False, "message": "ok"}
+    p = DumateProvider()
+    with mock.patch.object(dumate_checkin, "fetch_checkin_status", return_value=real):
+        assert p.checkin_status() == real
+
+
 # --- 端点发现：pgrep 竞态（自身先出现）------------------------------------
 
 
