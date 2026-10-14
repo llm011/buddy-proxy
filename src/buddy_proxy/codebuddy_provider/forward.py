@@ -226,6 +226,13 @@ async def _dispatch_once(
     ``body`` / ``model`` 必须是**已剥前缀**的：前缀剥离、trae/traepat 交叉校验、
     ``_resolved_model_id`` 都属于**解析**，留在 ``forward_chat`` 里。
     """
+    # 不变量：派发到的是**已解析**的 (provider_id, model)，上游认的是这个 model，
+    # 不是外层请求里的别名。model_order 换档时 body["model"] 仍是原始别名
+    # （如 openrouter-4o-max），provider.forward 会把它当上游模型名发出去 →
+    # 上游不认 → 挂起/超时（前缀路径在 forward_chat 里已 body={**body,"model":real_model}，
+    # 唯独 model_order 路径漏了）。这里统一兜住：body["model"] 一律对齐到已解析的 model。
+    if body.get("model") != model:
+        body = {**body, "model": model}
     providers = getattr(state, "providers", {}) or {}
     if provider_id == "codebuddy" or provider_id not in providers:
         # 默认 CodeBuddy 通道（不在 providers 里），对称封装，与其它 provider 一致

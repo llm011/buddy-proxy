@@ -793,6 +793,27 @@ def test_order_does_not_apply_to_other_models(tmp_path, monkeypatch):
     assert len(b.calls) == 1
 
 
+def test_order_target_rewrites_body_model(tmp_path, monkeypatch):
+    """换档到 ``provider/other-model`` 时，上游收到的必须是**目标模型名**，不是请求别名。
+
+    真机事故（2026-10-14）：请求 ``openrouter-4o-max`` 经 model_order 映射到
+    ``traepat/gpt-5.6-sol``，诊断日志打的是解析后的目标名，但 ``body["model"]`` 从未被
+    改写——provider.forward 把原始别名当上游模型名发出去，上游不认 → 挂起/超时 40~90s；
+    而直连 ``gpt-5.6-sol`` 2s 返回。前缀路径在 forward_chat 里会 body={**body,"model":real}，
+    唯独 model_order 路径漏了。钉住：裸名别名 → 目标模型，body["model"] 必须对齐目标。
+    """
+    a = _Provider("pa", ["gpt-5.6-sol"], "ok")
+    state = _make_state({"pa": a}, tmp_path,
+                        model_order={"openrouter-4o-max": ["pa/gpt-5.6-sol"]})
+    monkeypatch.setattr(st, "proxy_state", state)
+    client = TestClient(m.app)
+    r = _post(client, model="openrouter-4o-max")
+    assert r.status_code == 200, r.text
+    assert len(a.calls) == 1
+    assert a.calls[0]["model"] == "gpt-5.6-sol", (
+        "上游必须收到解析后的目标模型名，而不是请求里的别名 openrouter-4o-max")
+
+
 # --- 5. normalize_order 纯单元 -------------------------------------------------
 
 
