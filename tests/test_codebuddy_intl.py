@@ -12,6 +12,10 @@ from fastapi import HTTPException
 from buddy_proxy.codebuddy_provider import credentials as creds
 from buddy_proxy.codebuddy_provider import failover
 from buddy_proxy.codebuddy_provider.forward import _resolve_auto
+from buddy_proxy.codebuddy_provider.provider import (
+    CodeBuddyProvider,
+    _ensure_leading_system,
+)
 from buddy_proxy.codebuddy_provider.intl_provider import (
     CodeBuddyIntlProvider,
     intl_enabled,
@@ -207,8 +211,58 @@ def test_intl_enabled_and_provider_region():
 
 
 # ---------------------------------------------------------------------------
-# 刷新 / api_post_as 打海外端点
+# 海外版风控：messages 首条必须是 system（11128）
 # ---------------------------------------------------------------------------
+
+def test_ensure_leading_system_injects_when_missing():
+    msgs = [{"role": "user", "content": "hi"}]
+    out = _ensure_leading_system(msgs)
+    assert out[0] == {"role": "system", "content": ""}
+    assert out[1:] == msgs  # 原消息原样尾随
+
+
+def test_ensure_leading_system_noop_when_present():
+    msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "hi"}]
+    assert _ensure_leading_system(msgs) is msgs  # 已有 system：原样返回不复制
+
+
+def test_ensure_leading_system_edge_cases():
+    assert _ensure_leading_system([]) == [{"role": "system", "content": ""}]
+    assert _ensure_leading_system(None) is None  # 非 list 不碰
+
+
+def test_intl_forward_injects_system(monkeypatch):
+    """海外版 forward 必须在转发前给缺 system 的 body 补首块；CN 不动。"""
+    import asyncio
+    from types import SimpleNamespace
+    import buddy_proxy.codebuddy_provider.provider as prov
+    from buddy_proxy.core import state as st
+
+    monkeypatch.setattr(st, "proxy_state", SimpleNamespace(
+        enable_desensitize=False, logger=None, write_log=lambda *a, **k: None))
+    creds.save_account_cred(_intl_cred("uid-u200"))
+    seen = {}
+
+    async def fake_once(self, upstream_body, protocol, original, account_id, stream):
+        from fastapi.responses import JSONResponse
+        seen["messages"] = upstream_body["messages"]
+        return JSONResponse(content={"ok": True})
+
+    monkeypatch.setattr(prov.CodeBuddyProvider, "_forward_once", fake_once)
+
+    p = CodeBuddyIntlProvider()
+    asyncio.run(p.forward(
+        {"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]}, "openai"))
+    assert seen["messages"][0] == {"role": "system", "content": ""}
+
+    # CN 通道：缺 system 也不注入
+    creds.save_account_cred(_cred("u100"))
+    seen.clear()
+    cn = CodeBuddyProvider()
+    asyncio.run(cn.forward(
+        {"model": "auto", "messages": [{"role": "user", "content": "hi"}]}, "openai"))
+    assert seen["messages"][0]["role"] == "user"
+
 
 def test_refresh_hits_intl_endpoint(monkeypatch):
     ref = creds.save_account_cred(_intl_cred("uid-u200", expires_at_ms=1))  # 已过期 → 强制刷新
