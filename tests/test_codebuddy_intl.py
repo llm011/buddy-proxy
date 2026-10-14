@@ -231,9 +231,9 @@ def test_ensure_leading_system_edge_cases():
     assert _ensure_leading_system(None) is None  # 非 list 不碰
 
 
-@pytest.mark.asyncio
-async def test_intl_forward_injects_system(monkeypatch):
+def test_intl_forward_injects_system(monkeypatch):
     """海外版 forward 必须在转发前给缺 system 的 body 补首块；CN 不动。"""
+    import asyncio
     from types import SimpleNamespace
     import buddy_proxy.codebuddy_provider.provider as prov
     from buddy_proxy.core import state as st
@@ -251,16 +251,16 @@ async def test_intl_forward_injects_system(monkeypatch):
     monkeypatch.setattr(prov.CodeBuddyProvider, "_forward_once", fake_once)
 
     p = CodeBuddyIntlProvider()
-    await p.forward({"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]},
-                    "openai")
+    asyncio.run(p.forward(
+        {"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]}, "openai"))
     assert seen["messages"][0] == {"role": "system", "content": ""}
 
     # CN 通道：缺 system 也不注入
     creds.save_account_cred(_cred("u100"))
     seen.clear()
     cn = CodeBuddyProvider()
-    await cn.forward({"model": "auto", "messages": [{"role": "user", "content": "hi"}]},
-                     "openai")
+    asyncio.run(cn.forward(
+        {"model": "auto", "messages": [{"role": "user", "content": "hi"}]}, "openai"))
     assert seen["messages"][0]["role"] == "user"
 
 
