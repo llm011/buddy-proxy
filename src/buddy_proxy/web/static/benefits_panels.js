@@ -7,7 +7,7 @@ function renderTraepatPanel() {
   const pat = (BENEFITS.providers || []).find(p => p.id === 'traepat' && !p.disabled && p.quota && p.quota.supported);
   if (!pat) { panel.innerHTML = ''; return; }
 
-  // 日包/周包按「PAT #N」分组（label 形如「PAT #1 · 周包（通用额度）」）。
+  // 日包/周包按「PAT #N」分组（label 形如「PAT #1 · Orange 包」）。
   // 查询失败说明条（unreachable/query_failed 标记、label「PAT 额度网关不可达」
   // 等）不进卡片：它没有「 · 」后缀会被拆成独立一组，网关一抖就整页冒出
   // 「Trae PAT (服务账号直连) / 账号状态加载中… / 剩 10/10 个账号本轮未取到新

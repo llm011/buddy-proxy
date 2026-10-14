@@ -781,7 +781,7 @@ def test_quota_items_distinguish_daily_model_families(monkeypatch):
     ]}
     labels = [item["label"] for item in pat._quota_items(data, profile, True)]
     assert labels == [
-        "PAT #1 · 周包（通用额度）",
+        "PAT #1 · Orange 包",
         "PAT #1 · 日包（GPT-5.6 Sol）",
         "PAT #1 · 日包（GPT-6）",
     ]
@@ -1657,7 +1657,7 @@ def test_quota_uses_per_account_cache_when_gateway_unreachable(monkeypatch):
     for i, profile in enumerate(profiles):
         def store(state, _i=i):
             state.setdefault("quota", {})["advanced"] = {
-                "items": [{"label": f"PAT #{_i + 1} · 周包（通用额度）", "used": 1.0,
+                "items": [{"label": f"PAT #{_i + 1} · Orange 包", "used": 1.0,
                            "total": 100.0, "remaining": 99.0, "percent": 1,
                            "reset_ts": None}],
                 "fetched_at": time.time(),
@@ -1667,8 +1667,8 @@ def test_quota_uses_per_account_cache_when_gateway_unreachable(monkeypatch):
     items = pat.fetch_pat_ent_usage()
     labels = [it["label"] for it in items]
     assert labels[0].startswith("PAT 额度网关不可达")
-    assert "PAT #1 · 周包（通用额度）·缓存" in labels
-    assert "PAT #2 · 周包（通用额度）·缓存" in labels
+    assert "PAT #1 · Orange 包·缓存" in labels
+    assert "PAT #2 · Orange 包·缓存" in labels
 
 
 def test_quota_probe_result_is_cached_between_calls(monkeypatch):
@@ -1728,7 +1728,7 @@ def test_quota_accounts_queried_concurrently(monkeypatch):
     assert len(items) == 6
     assert elapsed < 1.6, f"疑似串行执行：{elapsed:.2f}s"
     # 顺序稳定：结果按 profiles 顺序拼接
-    assert [it["label"] for it in items] == [f"PAT #{i + 1} · 周包（通用额度）" for i in range(6)]
+    assert [it["label"] for it in items] == [f"PAT #{i + 1} · Orange 包" for i in range(6)]
 
 
 def test_quota_single_request_timeout_is_short(monkeypatch):
@@ -1829,9 +1829,9 @@ def test_partial_quota_failure_marks_as_failure():
     from buddy_proxy.benefits import _is_failure
 
     real = {"items": [{"query_failed": True, "unreachable": True, "label": "PAT 额度网关不可达"},
-                      {"label": "PAT #1 · 周包（通用额度）·缓存", "used": 1, "total": 300}]}
+                      {"label": "PAT #1 · Orange 包·缓存", "used": 1, "total": 300}]}
     assert _is_failure(real) is True
-    healthy = {"items": [{"label": "PAT #1 · 周包（通用额度）", "used": 1, "total": 300}]}
+    healthy = {"items": [{"label": "PAT #1 · Orange 包", "used": 1, "total": 300}]}
     assert _is_failure(healthy) is False
 
 

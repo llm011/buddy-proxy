@@ -153,7 +153,10 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
             continue
         entitlement_id = str(base.get("entitlement_id") or "pack")
         if "weekly" in entitlement_id:
-            label = "PAT 周包（通用额度）"
+            # 上游 entitlement_id 是 free_weekly_*（周期重置的通用池），但这池实际
+            # 对应 openrouter/es1_orange_* 那条上游线，用户侧按「Orange 包」认知，
+            # 故 UI 直呼其名而非笼统的「周包/通用额度」。
+            label = "PAT Orange 包"
         elif "daily" in entitlement_id:
             # 同一账号会同时返回多个日包（例如 GPT-5.6 与 GPT-6），不能都叫
             # “高级模型共享”，否则 UI 看起来像重复额度。只从 entitlement_id 的
