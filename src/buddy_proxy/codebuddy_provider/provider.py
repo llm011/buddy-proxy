@@ -110,6 +110,24 @@ def _normalize_tool_choice(tool_choice: Any) -> Any:
     return "auto"
 
 
+def _ensure_leading_system(messages: Any) -> Any:
+    """海外版风控要求 ``messages`` 第一条必须是 system role，否则整单被
+    ``11128 first message is not system prompt`` 拦截（2026-10-15 实测，
+    CN 版 copilot.tencent.com 不校验，仅 www.codebuddy.ai 新加）。
+
+    首条已是 system 时原样返回；否则在最前插一个空 system 块——实测
+    ``content:""`` 即可过闸，不给模型注入任何 persona，行为最贴近「用户没发
+    system」。只在 :meth:`CodeBuddyIntlProvider`（region=global）的转发链上调用，
+    CN 请求不碰（别给没发 system 的 CN 请求凭空加块）。
+    """
+    if not isinstance(messages, list):
+        return messages
+    first = messages[0] if messages else None
+    if isinstance(first, dict) and first.get("role") == "system":
+        return messages
+    return [{"role": "system", "content": ""}, *messages]
+
+
 def _is_account_error(e: HTTPException) -> bool:
     """该 HTTPException 是否「换下一个账号可能好转」。
 
@@ -611,6 +629,11 @@ class CodeBuddyProvider(BaseProvider):
         # 归一化 tool_choice：object 形式 → 函数名字符串（上游只接受 string）
         if "tool_choice" in upstream_body:
             upstream_body["tool_choice"] = _normalize_tool_choice(upstream_body["tool_choice"])
+
+        # 海外版风控：messages 第一条必须是 system，否则 11128 整单被拦
+        # （2026-10-15 实测，仅 www.codebuddy.ai）。CN 不碰。
+        if self._region == "global" and "messages" in upstream_body:
+            upstream_body["messages"] = _ensure_leading_system(upstream_body["messages"])
 
         # 应用脱敏处理（脱敏开关是全局 state 的，与账号无关，循环外做一次）
         state = get_state()
