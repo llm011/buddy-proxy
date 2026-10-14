@@ -296,13 +296,19 @@ cmd_status() {
 }
 
 wait_healthy() {
-    for _ in $(seq 1 20); do
+    # 时长必须按真实秒数算，不能按迭代数：端口还没人听时 curl 瞬间失败，一轮
+    # 实际只花 ~0.55s，20 轮只有 ~11s——而全量 provider 冷启动到监听实测 ~12s，
+    # 警告每次都压线误报（2026-10-14 连续 restart 三次全中，用户以为启动失败、
+    # 再 restart 反把刚要就绪的进程杀掉重来）。用 SECONDS 死线给足 30s；真起
+    # 不来也会在死线处退出（单轮 curl -m 5 兜底，最多再超 5s），不会无限等。
+    local deadline=$((SECONDS + 30))
+    while (( SECONDS < deadline )); do
         if curl -sf -m 5 -o /dev/null "http://127.0.0.1:${PROXY_PORT}/health"; then
             return 0
         fi
         sleep 0.5
     done
-    log "警告: /health 20s 内未就绪（查看日志: buddy logs）"
+    log "警告: /health 30s 内未就绪（查看日志: buddy logs）"
     return 1
 }
 
