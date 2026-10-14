@@ -771,6 +771,76 @@ def test_accounts_status_reports_token_cooldown_and_keeper(monkeypatch):
     assert status["enabled"] is True
 
 
+def _setup_status_catalog(monkeypatch):
+    """注入一张含「仅 solo_agent 开放」模型的 plus 目录，供负载查询测试用。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    monkeypatch.setattr(pat, "_model_status_cache", {"fetched_at": 0.0, "data": None})
+    monkeypatch.setattr(pat, "_reload_pat_models", lambda: None)
+    monkeypatch.setattr(pat, "PAT_PLUS_MODELS", {
+        "chatty": ("up-chatty", "chatty-cfg"),       # 默认 function
+        "solo-only": ("up-solo", "solo-cfg"),        # 仅 solo_agent 开放
+    })
+    monkeypatch.setattr(pat, "PAT_MODEL_FUNCTIONS", {"solo-only": "solo_agent"})
+    monkeypatch.setattr(pat, "pat_model_names",
+                        lambda: ["chatty", "solo-only"])
+    monkeypatch.setattr(pat, "pat_gateway_is_plus", lambda m: m in {"chatty", "solo-only"})
+    monkeypatch.setattr(pat, "pat_model_meta", lambda: {
+        "chatty": {"name": "Chatty", "max_input": 100},
+        "solo-only": {"name": "Solo Only", "max_input": 200},
+    })
+
+
+def test_model_status_fetches_per_function_tables(monkeypatch):
+    """仅在 solo_agent 下开放的模型，负载要从它自己的 function 表取，不是默认表。"""
+    _setup_status_catalog(monkeypatch)
+    calls: list[str] = []
+
+    def fake_fetch(plus, creds, function):
+        calls.append(function)
+        if function == "chat_v3":
+            return {"chatty-cfg": 42.0}          # 默认表没有 solo-cfg
+        if function == "solo_agent":
+            return {"solo-cfg": 88.0}            # 只有 solo 表有
+        return {}
+
+    monkeypatch.setattr(pat, "_fetch_hot_by_config", fake_fetch)
+    out = pat.fetch_pat_model_status(force=True)
+    by_id = {m["id"]: m for m in out["models"]}
+    assert by_id["chatty"]["workload"] == 42.0
+    assert by_id["solo-only"]["workload"] == 88.0   # 修复前这里会是 None
+    assert set(calls) == {"chat_v3", "solo_agent"}  # 两张表都查了，各一次
+
+
+def test_model_status_non_default_function_failure_degrades(monkeypatch):
+    """非默认 function 查询失败只降级为该模型 workload=None，不拖垮其余模型。"""
+    _setup_status_catalog(monkeypatch)
+
+    def fake_fetch(plus, creds, function):
+        if function == "chat_v3":
+            return {"chatty-cfg": 42.0}
+        raise urllib.error.URLError("solo table down")
+
+    monkeypatch.setattr(pat, "_fetch_hot_by_config", fake_fetch)
+    out = pat.fetch_pat_model_status(force=True)
+    by_id = {m["id"]: m for m in out["models"]}
+    assert by_id["chatty"]["workload"] == 42.0      # 默认表照常
+    assert by_id["solo-only"]["workload"] is None   # solo 表挂了，降级 None
+
+
+def test_model_status_default_function_failure_raises(monkeypatch):
+    """默认 function 查询失败视为整体不可用，向上报 502（沿用旧语义）。"""
+    _setup_status_catalog(monkeypatch)
+
+    def fake_fetch(plus, creds, function):
+        raise urllib.error.URLError("gateway down")
+
+    monkeypatch.setattr(pat, "_fetch_hot_by_config", fake_fetch)
+    with pytest.raises(HTTPException) as exc:
+        pat.fetch_pat_model_status(force=True)
+    assert exc.value.status_code == 502
+
+
 def test_quota_items_distinguish_daily_model_families(monkeypatch):
     _configure_two(monkeypatch)
     profile = pat.ensure_pat_config()[0]
