@@ -10,7 +10,17 @@ async function loadTraepatStatus(btn, force, silent) {
     const r = force
       ? await api('/ui/api/traepat/model-status', {method: 'POST'})
       : await api('/ui/api/traepat/model-status');
-    const rows = (r.models || []).map(m => {
+    // 排序：有负载的在前（按负载降序，越繁忙越靠上），查不到负载（workload==null）
+    // 的沉底。原序（config 顺序）用作同档内的稳定次序（Array.prototype.sort 在
+    // 现代引擎稳定）。只排展示，不改后端数据。
+    const sorted = (r.models || []).slice().sort((a, b) => {
+      const wa = a.workload, wb = b.workload;
+      if (wa == null && wb == null) return 0;
+      if (wa == null) return 1;
+      if (wb == null) return -1;
+      return Number(wb) - Number(wa);
+    });
+    const rows = sorted.map(m => {
       const w = m.workload;
       const hasW = w != null;
       const pct = hasW ? Math.max(0, Math.min(100, Number(w))) : 0;
