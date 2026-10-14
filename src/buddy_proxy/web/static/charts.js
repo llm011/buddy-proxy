@@ -393,7 +393,7 @@ function renderGroups() {
         ? `<span class="tag ${ordMarks.length ? 'bad' : 'ok'}" title="${esc(ordTitle)}">⇄ ${ord.targets.length}${ordMarks.length ? ` <span style="cursor:pointer" title="冷却中，点击清除" onclick='clearOrderMarks(${jsq(g.id)},${jsq(m.id)})'>⏸${ordMarks.length}</span>` : ''}</span>`
         : '';
       return `<tr>
-        <td${dim}><span class="mono">${esc(m.id)}</span>
+        <td${dim}><span class="mono">${esc(bareModelId(m.id, g.id))}</span>
             ${m.is_default ? '<span class="badge-default">✦ 默认</span>' : ''}
             ${dis ? '<span class="tag bad">已停用</span>' : ''}
             ${schTag}
@@ -404,7 +404,7 @@ function renderGroups() {
         <td class="num mono muted"${dim}>${st.count ? fmtMs(st.avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
             ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick='setDefault(${jsq(g.id)},${jsq(m.id)})'>设为默认</button>`}
-            <button class="primary" onclick='runTest(${jsq(g.id)},${jsq(m.id)})'>测试</button>
+            <button class="primary" onclick='runTest(${jsq(g.id)},${jsq(bareModelId(m.id, g.id))})'>测试</button>
             <button class="ghost" title="设置限时可用时段：仅在窗口内可调用，窗口外直接失败（支持跨天）" onclick='openScheduleModal(${jsq(g.id)},${jsq(m.id)},${schWinsAttr})'>${sch ? '时段·' + sch.windows.length : '时段'}</button>
             <!-- 候选顺序的编辑入口只在「模型顺序」页签：这张表行多列窄，塞进去
                  既挤又难找（用户当初就是在这一列里找不到它）。行内只留一个

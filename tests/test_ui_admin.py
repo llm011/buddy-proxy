@@ -1238,6 +1238,16 @@ def test_ui_test_ok(env):
     assert env.fake.last_body["model"] == "fake-model"
 
 
+def test_ui_test_strips_doubled_channel_prefix(env):
+    """管理页回传带前缀的 model + 单独的 provider（海外通道列表就是这形状）：
+    不能拼成 fakeprov/fakeprov/fake-model 发给上游（上游见双前缀 → 11102）。"""
+    body = env.client.post("/ui/api/test",
+                           json={"provider": "fakeprov",
+                                 "model": "fakeprov/fake-model"}).json()
+    assert body["ok"] is True
+    assert env.fake.last_body["model"] == "fake-model"
+
+
 def test_ui_test_reports_provider_selected_by_model_order(env):
     env.state.model_order = {"fake-model": ["fakeprov/fake-model"]}
     body = env.client.post("/ui/api/test",

@@ -815,7 +815,7 @@ async def ui_model_order_mark_clear(request: Request):
 async def ui_test(request: Request):
     """一键测试：向指定 (provider, model) 发一条 "hi"，返回延迟与回复预览。"""
     _ensure_local(request)
-    get_state()  # 未初始化时抛 503
+    state = get_state()  # 未初始化时抛 503
     body = await request.json()
     provider = (body.get("provider") or "").strip()
     model = (body.get("model") or "").strip()
@@ -823,7 +823,12 @@ async def ui_test(request: Request):
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
     prompt = (body.get("prompt") or TEST_PROMPT).strip() or TEST_PROMPT
 
-    full_model = f"{provider}/{model}" if provider else model
+    # 管理页回传的 model 带通道前缀（codebuddyintl/gpt-5.6-luna），provider 又单独给了
+    # 通道 id。直接拼就得到 codebuddyintl/codebuddyintl/gpt-5.6-luna，转发侧剥一层后仍带
+    # 前缀发给上游 → 11102 service info not found。先归一成裸名再拼，与 default/disable
+    # /hide 诸端点同口径。
+    pid, bare = _normalize_model_ref(provider, model, state)
+    full_model = f"{pid}/{bare}" if pid else bare
     chat_body = {
         "model": full_model,
         "messages": [{"role": "user", "content": prompt}],

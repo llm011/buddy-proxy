@@ -73,6 +73,10 @@ globalThis.localStorage = {{
 }};
 globalThis.esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 globalThis.jsq = s => JSON.stringify(s);
+globalThis.bareModelId = (id, provider) => {{
+  const p = String(provider || ''), s = String(id || '');
+  return p && s.startsWith(p + '/') ? s.slice(p.length + 1) : s;
+}};
 globalThis.fmtMs = ms => ms + 'ms';
 globalThis.fmtNum = n => String(n);
 globalThis.refreshStickyVars = () => {{}};
