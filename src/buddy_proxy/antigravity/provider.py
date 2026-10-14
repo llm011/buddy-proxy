@@ -48,9 +48,11 @@ from .model_catalog import (
     _EFFORTS,
     _MODELS_JSON,
     _MODEL_BY_ID,
+    BLOCKED_PREFIXES,
     _load_models as _load_catalog_models,
     _default_effort,
     _group_for_model,
+    _is_blocked_base,
     _is_public_upstream_model,
     _split_effort_suffix,
     _strip_effort_suffix,
@@ -230,6 +232,11 @@ class AntigravityProvider(BaseProvider):
                 if not _is_public_upstream_model(name):
                     continue
                 base, effort = _split_effort_suffix(name)
+                # 旧代/内部基名（gemini-2.5/3-flash/3.1-flash/3.5 等，见 models.json
+                # 的 blocked_prefixes）：fetchAvailableModels 仍回传，不拦就会被
+                # 「重新拉取」灌回 /v1/models。curated 的 verified 模型不在前缀表里。
+                if _is_blocked_base(base):
+                    continue
                 variants = discovered.setdefault(base, [])
                 if all(existing != name for existing, _ in variants):
                     variants.append((name, effort))
@@ -239,6 +246,19 @@ class AntigravityProvider(BaseProvider):
             raise RuntimeError(f"Antigravity 模型目录刷新全部失败：{detail}")
         if not discovered:
             raise RuntimeError("Antigravity 模型目录刷新成功响应均无公开模型")
+
+        # curated 的 verified 模型永不下架：fetchAvailableModels **不会**回传
+        # gemini-3.1-pro / gemini-3.6-flash 这类 premium 条目（实测只吐旧代
+        # flash 变体），全账号成功时若按上游目录下架，就会把人工校验过的好模型
+        # 连同旧模型一起洗掉。故无论成功与否，先把 models.json 里 verified=true
+        # 的条目按其 upstream base 注入 discovered，保证它们始终留在目录里。
+        for local in MODELS:
+            if not local.get("verified"):
+                continue
+            upstream_name = str(local.get("upstream") or local.get("id") or "").strip()
+            if not upstream_name:
+                continue
+            discovered.setdefault(_strip_effort_suffix(upstream_name), [(upstream_name, None)])
 
         if succeeded < len(accounts):
             # 部分账号失败时无法证明旧 id 已从所有账号下架；本轮只允许新增/更新。
