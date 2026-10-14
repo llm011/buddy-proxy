@@ -86,6 +86,50 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
     assert "gemini-4-flash" not in _ids(prov.AntigravityProvider())
 
 
+def test_refresh_blocks_stale_families_and_pins_verified_curated(monkeypatch):
+    """上游目录吐旧代模型 + 不吐 premium curated 时：旧代被拦、curated 不丢。
+
+    复刻线上实测：fetchAvailableModels 回传 gemini-2.5/3-flash/3.1-flash/3.5 等
+    旧代变体，却**不含** gemini-3.1-pro / gemini-3.6-flash 这类人工校验过的
+    premium 条目。旧逻辑会「灌垃圾 + 丢好货」，这里断言两头都对。
+    """
+    provider = prov.AntigravityProvider()
+    monkeypatch.setattr(prov, "list_accounts", lambda: [_account("a1")])
+
+    async def fake_fetch(_account_id: str):
+        return {"models": {
+            # 旧代/内部变体：全部应被 blocked_prefixes 拦掉
+            "gemini-2.5-flash": {},
+            "gemini-2.5-pro": {},
+            "gemini-3-flash": {},
+            "gemini-3-flash-agent": {},
+            "gemini-3.1-flash-lite": {},
+            "gemini-3.1-flash-image": {},
+            "gemini-3.5-flash-lite": {},
+            "gemini-3.5-flash-low": {},
+            # 仍在供的 curated upstream（校验过，应保留）
+            "gemini-3.8-flash-tiered": {},
+            "claude-sonnet-4-6": {},
+            # 货真价实的新模型（不在前缀表里，应照常被发现）
+            "gemini-4-argon-high": {},
+        }}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", fake_fetch)
+    asyncio.run(provider.refresh_models())
+    ids = _ids(provider)
+
+    # 旧代全军覆没
+    for stale in ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash",
+                  "gemini-3-flash-agent", "gemini-3.1-flash-lite",
+                  "gemini-3.1-flash-image", "gemini-3.5-flash-lite", "gemini-3.5-flash"):
+        assert stale not in ids, stale
+    # curated premium 虽未被上游目录回传，也必须保住（verified-sticky）
+    assert {"gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.8-flash",
+            "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b"} <= ids
+    # 真·新模型照常收录
+    assert "gemini-4-argon" in ids
+
+
 def test_refresh_all_failures_or_empty_keep_previous_catalog(monkeypatch):
     provider = prov.AntigravityProvider()
     before = provider.models()
@@ -180,17 +224,17 @@ def test_refreshed_model_routes_and_drives_quota_mapping(monkeypatch):
             "gemini-4-pro-high": {
                 "quotaInfo": {"remainingFraction": 0.75}
             },
-            # 已被新运行时目录移除的静态模型不得再参与映射。
-            "claude-sonnet-4-6": {
+            # 运行时目录里根本没有的模型不得凭上游额度响应凭空参与映射。
+            "gemini-9-ghost-high": {
                 "quotaInfo": {"remainingFraction": 0.1}
             },
         }},
         "",
     )
-    assert len(quota) == 1
-    assert quota[0]["label"] == "Gemini 组"
-    assert quota[0]["models_in_group"] == ["gemini-4-pro"]
-    assert quota[0]["remaining"] == 750.0
+    gemini = next(q for q in quota if q["models_in_group"] == ["gemini-4-pro"])
+    assert gemini["label"] == "Gemini 组"
+    assert gemini["remaining"] == 750.0
+    assert all("gemini-9-ghost" not in g for q in quota for g in q["models_in_group"])
 
     captured: dict[str, str] = {}
 

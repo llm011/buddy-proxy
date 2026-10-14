@@ -252,6 +252,25 @@ required` / `Expected the 'id'`）。三族都容忍哨兵值
 `efforts`/`default_effort`），实测一发再置 `verified: true`。下线的模型挪进
 `_comment` 记一笔。
 
+### 运行期「重新拉取」为什么不是全信上游目录
+
+`refresh_models` 拿 `fetchAvailableModels` 做目录发现，但那张表**既脏又缺**，
+不能当权威（2026-10-14 实测两账号均如此）：
+
+- **脏**：仍回传已淘汰的旧代/内部变体（`gemini-2.5-*`、`gemini-3-flash(-agent)`、
+  `gemini-3.1-flash-lite/-image`、`gemini-3.5-flash-*` 等）。全收进来 `/v1/models`
+  就被灌满旧模型。→ `models.json` 的 `blocked_prefixes` 列这些**去 effort 后缀后**
+  的基名前缀，刷新时命中即丢。只拦旧代，真·新模型（如 `gemini-4-argon`，不在表里）
+  照常被发现收录。
+- **缺**：**不回传** `gemini-3.1-pro` / `gemini-3.6-flash` 这类 premium curated
+  条目（它们在 IDE 可见、也能直接路由，但目录接口不吐）。全账号成功时若按上游
+  目录下架，就把人工校验过的好模型连旧模型一起洗掉。→ 刷新时无条件把
+  `verified: true` 的条目按其 upstream base 注入发现集，保证**永不下架**。
+
+改 `blocked_prefixes` 时务必复核：任何前缀都不能命中某个 verified 条目的
+upstream base（有单测 `test_refresh_blocks_stale_families_and_pins_verified_curated`
+守着这条）。
+
 ## 封号风险与已知边界
 
 - **指纹来源是社区逆向**（不是官方客户端源码——agy 是 gRPC 黑盒），形态
