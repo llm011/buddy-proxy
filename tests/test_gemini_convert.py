@@ -270,6 +270,42 @@ def test_response_inline_image():
     ]
 
 
+def test_stream_carries_inline_image():
+    import asyncio
+
+    import httpx
+
+    from buddy_proxy.gemini.provider import _to_openai_stream
+
+    inner = {"candidates": [{
+        "content": {"parts": [
+            {"text": "here"},
+            {"inlineData": {"mimeType": "image/webp", "data": "QUJD"}},
+        ]},
+        "finishReason": "STOP",
+    }]}
+    line = "data: " + json.dumps({"response": inner}) + "\n\n"
+    resp = httpx.Response(
+        200, content=line.encode(),
+        headers={"content-type": "text/event-stream"},
+        request=httpx.Request("POST", "https://x/"),
+    )
+
+    async def _go():
+        out = []
+        async for piece in _to_openai_stream(resp, "m"):
+            out.append(piece)
+        return "".join(out)
+
+    text = asyncio.run(_go())
+    deltas = [json.loads(l[5:])["choices"][0]["delta"]
+              for l in text.splitlines()
+              if l.startswith("data:") and l != "data: [DONE]"]
+    images = [img for d in deltas for img in (d.get("images") or [])]
+    assert images == [{"type": "image_url",
+                       "image_url": {"url": "data:image/webp;base64,QUJD"}}]
+
+
 def test_response_without_image_has_no_images_key():
     payload = {"response": {"candidates": [{
         "content": {"parts": [{"text": "pong"}]},

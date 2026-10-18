@@ -399,6 +399,23 @@ def new_tool_call(fc: dict[str, Any], signature: str = "") -> dict[str, Any]:
     }
 
 
+def inline_image_part(part: dict[str, Any]) -> dict[str, Any] | None:
+    """Gemini ``inlineData`` part → OpenAI ``image_url`` block（生图模型用）。
+
+    生图模型（如 gemini-3.1-flash-image）把图片放在 ``candidates[].content.
+    parts[].inlineData``：返回 ``{"type": "image_url", "image_url": {"url":
+    "data:<mime>;base64,..."}}``，流式/非流式共用。缺数据时返回 None。
+    """
+    payload = part.get("inlineData") or part.get("inline_data") or {}
+    if not isinstance(payload, dict):
+        return None
+    data = str(payload.get("data") or "")
+    if not data:
+        return None
+    mime = str(payload.get("mimeType") or payload.get("mime_type") or "image/png")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}
+
+
 def _candidate_parts(candidate: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str, list[dict[str, str]]]:
     """candidate → (text, tool_calls, reasoning_text, images)。
 
@@ -419,12 +436,9 @@ def _candidate_parts(candidate: dict[str, Any]) -> tuple[str, list[dict[str, Any
                 signature=str(part.get("thoughtSignature") or ""),
             ))
         elif "inlineData" in part or "inline_data" in part:
-            payload = part.get("inlineData") or part.get("inline_data") or {}
-            data = str(payload.get("data") or "")
-            mime = str(payload.get("mimeType") or payload.get("mime_type") or "image/png")
-            if data:
-                images.append({"type": "image_url",
-                               "image_url": {"url": f"data:{mime};base64,{data}"}})
+            image = inline_image_part(part)
+            if image:
+                images.append(image)
         elif part.get("thought") is True and part.get("text"):
             reasoning_parts.append(str(part["text"]))
         elif "text" in part:
