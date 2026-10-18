@@ -213,6 +213,19 @@ def test_nonstream_convert_inline_images():
     ]
 
 
+def test_nonstream_image_precedes_tool_use():
+    data = {"choices": [{"message": {
+        "role": "assistant", "content": "",
+        "images": [{"type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,QUJD"}}],
+        "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": "f", "arguments": "{}"}}],
+    }}]}
+    types = [b["type"] for b in chat_completion_to_anthropic_message(data)["content"]]
+    # tool_use 之后不能再跟其它块
+    assert types == ["image", "tool_use"]
+
+
 def test_nonstream_convert_tool_calls():
     data = {
         "choices": [{"message": {

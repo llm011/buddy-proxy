@@ -733,6 +733,12 @@ def chat_completion_to_anthropic_message(
         content_blocks.append({"type": "thinking", "thinking": thinking, "signature": ""})
     if text:
         content_blocks.append({"type": "text", "text": text})
+    # 生图模型（gemini-*-image）返回的图片，走 OpenAI 扩展字段 images[]；
+    # 放在 tool_use 之前——tool_use 之后只允许 tool_result（在下一个 user turn）。
+    for image in message.get("images") or []:
+        block = _chat_image_to_anthropic(image) if isinstance(image, dict) else None
+        if block:
+            content_blocks.append(block)
     for call in message.get("tool_calls") or []:
         fn = call.get("function") or {}
         try:
@@ -745,11 +751,6 @@ def chat_completion_to_anthropic_message(
             "name": fn.get("name", ""),
             "input": arguments,
         })
-    for image in message.get("images") or []:
-        # 生图模型（gemini-*-image）返回的图片，走 OpenAI 扩展字段 images[]
-        block = _chat_image_to_anthropic(image) if isinstance(image, dict) else None
-        if block:
-            content_blocks.append(block)
     usage = data.get("usage") or {}
     details = usage.get("prompt_tokens_details") or {}
     cached = details.get("cached_tokens") or usage.get("cached_tokens") or 0

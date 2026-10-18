@@ -7,14 +7,18 @@
     "gemini-3.1-pro-high 在列表里但实测 400 INVALID_ARGUMENT，故 default_effort=low（显式指定 high 仍会尝试，便于上游放开后直接可用）。",
     "group 对应 /usage 的两组独立限额（组内共享 weekly + 5h 双池）。",
     "上游还有但未暴露：gemini-2.5-pro/-flash(-lite)、gemini-3.5-flash(-lite/-low/-extra-low)、gemini-3.1-flash(-lite)、gemini-3-flash(-agent)、gemini-pro-agent、gemini-3.x-flash-tiered 变体；chat_*/tab_* 是内部条目不暴露。",
-    "blocked_prefixes：fetchAvailableModels 仍会回传这些**旧代/内部**基名（去 effort 后缀后比对），运行期刷新目录时按前缀命中即丢弃，否则「重新拉取」会把 gemini-2.5/3-flash/3.1-flash/3.5 等旧模型灌回 /v1/models。只拦旧代，不拦真·新模型（如 gemini-4-*）——它们不在前缀表里会照常被发现收录。chat_/tab_ 内部前缀已由 _is_public_upstream_model 单独过滤，不重复列。"
+    "blocked_prefixes：fetchAvailableModels 仍会回传这些**旧代/内部**基名（去 effort 后缀后比对），运行期刷新目录时按前缀命中即丢弃，否则「重新拉取」会把 gemini-2.5/3-flash/3.1-flash/3.5 等旧模型灌回 /v1/models。只拦旧代，不拦真·新模型（如 gemini-4-*）——它们不在前缀表里会照常被发现收录。chat_/tab_ 内部前缀已由 _is_public_upstream_model 单独过滤，不重复列。",
+    "blocked_prefix_exceptions：命中前缀但仍在用的模型（精确基名、大小写不敏感）豁免，目前只有生图模型 gemini-3.1-flash-image——旧代前缀保持粗粒度，不必为放行一个模型把整族放进来。"
   ],
   "blocked_prefixes": [
     "gemini-2.5-",
     "gemini-3-flash",
-    "gemini-3.1-flash-lite",
+    "gemini-3.1-flash",
     "gemini-3.5-",
     "gemini-pro-agent"
+  ],
+  "blocked_prefix_exceptions": [
+    "gemini-3.1-flash-image"
   ],
   "models": [
     {

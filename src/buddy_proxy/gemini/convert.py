@@ -50,6 +50,7 @@ def new_session_id() -> str:
 
 
 _SANITIZER = re.compile(r"[^a-zA-Z0-9_.:-]")
+_BASE64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
 
 
 def sanitize_function_name(name: str) -> str:
@@ -404,13 +405,17 @@ def inline_image_part(part: dict[str, Any]) -> dict[str, Any] | None:
 
     生图模型（如 gemini-3.1-flash-image）把图片放在 ``candidates[].content.
     parts[].inlineData``：返回 ``{"type": "image_url", "image_url": {"url":
-    "data:<mime>;base64,..."}}``，流式/非流式共用。缺数据时返回 None。
+    "data:<mime>;base64,..."}}``，流式/非流式共用。
+
+    缺数据或不是完整 base64（长度非 4 的倍数 / 含非法字符）时返回 None：
+    上游实测单事件即给完整图片，但若哪天拆成多个分片，宁可丢掉这个半截
+    data URL，也不要让客户端解出一张坏图。
     """
     payload = part.get("inlineData") or part.get("inline_data") or {}
     if not isinstance(payload, dict):
         return None
     data = str(payload.get("data") or "")
-    if not data:
+    if not data or len(data) % 4 or not _BASE64_RE.fullmatch(data):
         return None
     mime = str(payload.get("mimeType") or payload.get("mime_type") or "image/png")
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{data}"}}

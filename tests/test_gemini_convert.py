@@ -306,6 +306,18 @@ def test_stream_carries_inline_image():
                        "image_url": {"url": "data:image/webp;base64,QUJD"}}]
 
 
+def test_inline_image_rejects_malformed_base64():
+    from buddy_proxy.gemini.convert import inline_image_part
+
+    ok = {"inlineData": {"mimeType": "image/png", "data": "QUJD"}}
+    assert inline_image_part(ok)
+    # 长度非 4 的倍数（分片）/ 非法字符：宁缺勿坏
+    assert inline_image_part({"inlineData": {"data": "QUJ"}}) is None
+    assert inline_image_part({"inlineData": {"data": "QU JD"}}) is None
+    assert inline_image_part({"inlineData": {"data": ""}}) is None
+    assert inline_image_part({}) is None
+
+
 def test_response_without_image_has_no_images_key():
     payload = {"response": {"candidates": [{
         "content": {"parts": [{"text": "pong"}]},
