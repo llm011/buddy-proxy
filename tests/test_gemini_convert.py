@@ -254,6 +254,78 @@ def test_response_thought_split():
     assert msg["reasoning_content"] == "thinking..."
 
 
+def test_response_inline_image():
+    # 生图模型（gemini-3.1-flash-image）返回 inlineData，需转成 message.images[]
+    payload = {"response": {"candidates": [{
+        "content": {"parts": [
+            {"text": "Here is the image."},
+            {"inlineData": {"mimeType": "image/png", "data": "QUJD"}},
+        ]},
+        "finishReason": "STOP",
+    }]}}
+    msg = gemini_response_to_chat(payload, model="m")["choices"][0]["message"]
+    assert msg["content"] == "Here is the image."
+    assert msg["images"] == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}
+    ]
+
+
+def test_stream_carries_inline_image():
+    import asyncio
+
+    import httpx
+
+    from buddy_proxy.gemini.provider import _to_openai_stream
+
+    inner = {"candidates": [{
+        "content": {"parts": [
+            {"text": "here"},
+            {"inlineData": {"mimeType": "image/webp", "data": "QUJD"}},
+        ]},
+        "finishReason": "STOP",
+    }]}
+    line = "data: " + json.dumps({"response": inner}) + "\n\n"
+    resp = httpx.Response(
+        200, content=line.encode(),
+        headers={"content-type": "text/event-stream"},
+        request=httpx.Request("POST", "https://x/"),
+    )
+
+    async def _go():
+        out = []
+        async for piece in _to_openai_stream(resp, "m"):
+            out.append(piece)
+        return "".join(out)
+
+    text = asyncio.run(_go())
+    deltas = [json.loads(l[5:])["choices"][0]["delta"]
+              for l in text.splitlines()
+              if l.startswith("data:") and l != "data: [DONE]"]
+    images = [img for d in deltas for img in (d.get("images") or [])]
+    assert images == [{"type": "image_url",
+                       "image_url": {"url": "data:image/webp;base64,QUJD"}}]
+
+
+def test_inline_image_rejects_malformed_base64():
+    from buddy_proxy.gemini.convert import inline_image_part
+
+    ok = {"inlineData": {"mimeType": "image/png", "data": "QUJD"}}
+    assert inline_image_part(ok)
+    # 长度非 4 的倍数（分片）/ 非法字符：宁缺勿坏
+    assert inline_image_part({"inlineData": {"data": "QUJ"}}) is None
+    assert inline_image_part({"inlineData": {"data": "QU JD"}}) is None
+    assert inline_image_part({"inlineData": {"data": ""}}) is None
+    assert inline_image_part({}) is None
+
+
+def test_response_without_image_has_no_images_key():
+    payload = {"response": {"candidates": [{
+        "content": {"parts": [{"text": "pong"}]},
+        "finishReason": "STOP",
+    }]}}
+    assert "images" not in gemini_response_to_chat(payload, model="m")["choices"][0]["message"]
+
+
 # ---------------------------------------------------------------------------
 # 模型表 / 凭证
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ from ..providers.base import BaseProvider
 from .convert import (
     chat_to_gemini_request,
     gemini_response_to_chat,
+    inline_image_part,
     new_tool_call,
     usage_from_metadata,
 )
@@ -430,6 +431,11 @@ async def _to_openai_stream(response: httpx.Response, model: str) -> AsyncIterat
                     )
                     for delta in buf.feed([call]):
                         yield _dump(_openai_chunk(model, delta={"tool_calls": [delta]}))
+                elif "inlineData" in part or "inline_data" in part:
+                    # 生图模型流式返回的图片（与 gemini_response_to_chat 同形）
+                    image = inline_image_part(part)
+                    if image:
+                        yield _dump(_openai_chunk(model, delta={"images": [image]}))
                 elif part.get("thought") is True and part.get("text"):
                     yield _dump(_openai_chunk(model, delta={"reasoning_content": part["text"]}))
                 elif "text" in part and part.get("text"):

@@ -190,6 +190,42 @@ def test_nonstream_convert_think_split():
     assert msg["content"][1] == {"type": "text", "text": "结论"}
 
 
+def test_nonstream_convert_inline_images():
+    # 生图模型（OpenAI 扩展字段 images[]）→ Anthropic image 块
+    data = {
+        "choices": [{"message": {
+            "role": "assistant",
+            "content": "done",
+            "images": [
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/png;base64,QUJD"}},
+                {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                {"type": "image_url", "image_url": {"url": ""}},  # 坏块丢弃
+            ],
+        }}],
+    }
+    msg = chat_completion_to_anthropic_message(data)
+    assert msg["content"] == [
+        {"type": "text", "text": "done"},
+        {"type": "image", "source": {"type": "base64",
+                                     "media_type": "image/png", "data": "QUJD"}},
+        {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+    ]
+
+
+def test_nonstream_image_precedes_tool_use():
+    data = {"choices": [{"message": {
+        "role": "assistant", "content": "",
+        "images": [{"type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,QUJD"}}],
+        "tool_calls": [{"id": "c1", "type": "function",
+                        "function": {"name": "f", "arguments": "{}"}}],
+    }}]}
+    types = [b["type"] for b in chat_completion_to_anthropic_message(data)["content"]]
+    # tool_use 之后不能再跟其它块
+    assert types == ["image", "tool_use"]
+
+
 def test_nonstream_convert_tool_calls():
     data = {
         "choices": [{"message": {

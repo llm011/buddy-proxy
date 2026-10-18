@@ -46,8 +46,25 @@ def _load_blocked_prefixes(path: Path = _MODELS_JSON) -> tuple[str, ...]:
     return tuple(str(p).lower() for p in raw if isinstance(p, str) and p)
 
 
+def _load_prefix_exceptions(path: Path = _MODELS_JSON) -> tuple[str, ...]:
+    """``blocked_prefixes`` 的显式例外基名（精确匹配，大小写不敏感）。
+
+    用于「整族都该拦、只有某个仍在用的模型要留」的情形：例如
+    ``gemini-3.1-flash`` 是旧代前缀，但 ``gemini-3.1-flash-image`` 是
+    刻意保留的生图模型。前缀保持粗粒度，例外单独列出，免得为放行一个
+    模型把整个旧代变体放进来。读取失败时返回空表（宁可照拦）。
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+    raw = data.get("blocked_prefix_exceptions") or []
+    return tuple(str(p).lower() for p in raw if isinstance(p, str) and p)
+
+
 MODELS: list[dict[str, Any]] = _load_models()
 BLOCKED_PREFIXES: tuple[str, ...] = _load_blocked_prefixes()
+PREFIX_EXCEPTIONS: tuple[str, ...] = _load_prefix_exceptions()
 DEFAULT_MODELS: dict[str, str] = {
     m["id"]: str(m.get("description") or m["id"]) for m in MODELS
 }
@@ -77,11 +94,15 @@ def _is_public_upstream_model(name: str) -> bool:
 def _is_blocked_base(base: str) -> bool:
     """运行期刷新目录时是否丢弃该（去 effort 后缀的）基名。
 
-    命中 ``BLOCKED_PREFIXES`` 即旧代/内部模型，不收录；表为空则一律放行。
+    命中 ``BLOCKED_PREFIXES`` 即旧代/内部模型，不收录；``PREFIX_EXCEPTIONS``
+    里的精确基名豁免（如 ``gemini-3.1-flash-image``）。表为空则一律放行。
     curated（verified）模型不走这里判定——它们在 refresh 时被直接 seed 进目录，
-    且前缀表经核对不与任何 verified 基名相交（见 models.json 注释）。
+    例外表与其保持一致（见 models.json 注释）。
     """
-    return bool(base) and base.lower().startswith(BLOCKED_PREFIXES)
+    name = (base or "").lower()
+    if not name or not name.startswith(BLOCKED_PREFIXES):
+        return False
+    return name not in PREFIX_EXCEPTIONS
 
 
 def _default_effort(efforts: Sequence[str]) -> str:

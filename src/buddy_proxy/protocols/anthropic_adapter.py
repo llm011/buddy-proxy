@@ -69,6 +69,25 @@ def _anthropic_image_to_chat(block: dict[str, Any]) -> dict[str, Any] | None:
     return {"type": "image_url", "image_url": {"url": url}}
 
 
+def _chat_image_to_anthropic(block: dict[str, Any]) -> dict[str, Any] | None:
+    """OpenAI ``image_url`` block → Anthropic image block（生图模型出口）。
+
+    只转换 data URL；http(s) URL 转成 Anthropic ``url`` source。字段不全
+    直接丢弃，与入站方向保持对称。
+    """
+    url = (block.get("image_url") or {}).get("url")
+    if not isinstance(url, str) or not url:
+        return None
+    if url.startswith("data:"):
+        header, _, data = url.partition(",")
+        if not data:
+            return None
+        media_type = header[5:].split(";", 1)[0] or "image/png"
+        return {"type": "image", "source": {
+            "type": "base64", "media_type": media_type, "data": data}}
+    return {"type": "image", "source": {"type": "url", "url": url}}
+
+
 def _anthropic_mixed_content(blocks: list[Any]) -> tuple[list[dict[str, Any]], bool]:
     """转换 text/image blocks，返回 (OpenAI blocks, 是否包含图片)。"""
     parts: list[dict[str, Any]] = []
@@ -714,6 +733,12 @@ def chat_completion_to_anthropic_message(
         content_blocks.append({"type": "thinking", "thinking": thinking, "signature": ""})
     if text:
         content_blocks.append({"type": "text", "text": text})
+    # 生图模型（gemini-*-image）返回的图片，走 OpenAI 扩展字段 images[]；
+    # 放在 tool_use 之前——tool_use 之后只允许 tool_result（在下一个 user turn）。
+    for image in message.get("images") or []:
+        block = _chat_image_to_anthropic(image) if isinstance(image, dict) else None
+        if block:
+            content_blocks.append(block)
     for call in message.get("tool_calls") or []:
         fn = call.get("function") or {}
         try:
