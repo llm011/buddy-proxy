@@ -399,11 +399,17 @@ def new_tool_call(fc: dict[str, Any], signature: str = "") -> dict[str, Any]:
     }
 
 
-def _candidate_text_and_calls(candidate: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]:
-    """candidate → (text, tool_calls, reasoning_text)。"""
+def _candidate_parts(candidate: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str, list[dict[str, str]]]:
+    """candidate → (text, tool_calls, reasoning_text, images)。
+
+    images 是生图模型（如 gemini-3.1-flash-image）返回的 ``inlineData`` 图片，
+    转成 OpenAI chat 的 ``{"type": "image_url", "image_url": {"url": data URL}}``，
+    聊天客户端（含 ethan 的 image-generate 技能）靠 ``message.images[]`` 取图。
+    """
     text_parts: list[str] = []
     reasoning_parts: list[str] = []
     calls: list[dict[str, Any]] = []
+    images: list[dict[str, str]] = []
     for part in candidate.get("content", {}).get("parts") or []:
         if not isinstance(part, dict):
             continue
@@ -412,11 +418,24 @@ def _candidate_text_and_calls(candidate: dict[str, Any]) -> tuple[str, list[dict
                 part["functionCall"] or {},
                 signature=str(part.get("thoughtSignature") or ""),
             ))
+        elif "inlineData" in part or "inline_data" in part:
+            payload = part.get("inlineData") or part.get("inline_data") or {}
+            data = str(payload.get("data") or "")
+            mime = str(payload.get("mimeType") or payload.get("mime_type") or "image/png")
+            if data:
+                images.append({"type": "image_url",
+                               "image_url": {"url": f"data:{mime};base64,{data}"}})
         elif part.get("thought") is True and part.get("text"):
             reasoning_parts.append(str(part["text"]))
         elif "text" in part:
             text_parts.append(str(part["text"]))
-    return "".join(text_parts), calls, "".join(reasoning_parts)
+    return "".join(text_parts), calls, "".join(reasoning_parts), images
+
+
+def _candidate_text_and_calls(candidate: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str]:
+    """candidate → (text, tool_calls, reasoning_text)。"""
+    text, calls, reasoning, _ = _candidate_parts(candidate)
+    return text, calls, reasoning
 
 
 def _finish_reason(candidate: dict[str, Any]) -> str:
@@ -457,7 +476,7 @@ def gemini_response_to_chat(
     inner = payload.get("response") if isinstance(payload.get("response"), dict) else payload
     candidates = inner.get("candidates") or []
     cand = candidates[0] if candidates else {}
-    text, calls, reasoning = _candidate_text_and_calls(cand)
+    text, calls, reasoning, images = _candidate_parts(cand)
     usage = inner.get("usageMetadata") or {}
     now = int(time.time())
 
@@ -468,6 +487,8 @@ def gemini_response_to_chat(
     message["content"] = text or None
     if calls:
         message["tool_calls"] = calls
+    if images:
+        message["images"] = images
     return {
         "id": f"chatcmpl-{secrets.token_hex(12)}",
         "object": "chat.completion",

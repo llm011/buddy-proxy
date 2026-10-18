@@ -104,7 +104,6 @@ def test_refresh_blocks_stale_families_and_pins_verified_curated(monkeypatch):
             "gemini-3-flash": {},
             "gemini-3-flash-agent": {},
             "gemini-3.1-flash-lite": {},
-            "gemini-3.1-flash-image": {},
             "gemini-3.5-flash-lite": {},
             "gemini-3.5-flash-low": {},
             # 混合大小写旧代名字也要拦住（blocklist 大小写不敏感）
@@ -123,12 +122,14 @@ def test_refresh_blocks_stale_families_and_pins_verified_curated(monkeypatch):
     # 旧代全军覆没（含混合大小写变体）
     for stale in ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash",
                   "gemini-3-flash-agent", "gemini-3.1-flash-lite",
-                  "gemini-3.1-flash-image", "gemini-3.5-flash-lite", "gemini-3.5-flash",
+                  "gemini-3.5-flash-lite", "gemini-3.5-flash",
                   "Gemini-2.5-Flash-Thinking"):
         assert stale not in ids, stale
     # curated premium 虽未被上游目录回传，也必须保住（verified-sticky）
     assert {"gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.8-flash",
             "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b"} <= ids
+    # 生图模型不随旧代前缀被拦（前缀收窄到 -lite），刷新后仍在
+    assert "gemini-3.1-flash-image" in ids
     # 真·新模型照常收录
     assert "gemini-4-argon" in ids
 

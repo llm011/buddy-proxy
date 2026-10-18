@@ -254,6 +254,30 @@ def test_response_thought_split():
     assert msg["reasoning_content"] == "thinking..."
 
 
+def test_response_inline_image():
+    # 生图模型（gemini-3.1-flash-image）返回 inlineData，需转成 message.images[]
+    payload = {"response": {"candidates": [{
+        "content": {"parts": [
+            {"text": "Here is the image."},
+            {"inlineData": {"mimeType": "image/png", "data": "QUJD"}},
+        ]},
+        "finishReason": "STOP",
+    }]}}
+    msg = gemini_response_to_chat(payload, model="m")["choices"][0]["message"]
+    assert msg["content"] == "Here is the image."
+    assert msg["images"] == [
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,QUJD"}}
+    ]
+
+
+def test_response_without_image_has_no_images_key():
+    payload = {"response": {"candidates": [{
+        "content": {"parts": [{"text": "pong"}]},
+        "finishReason": "STOP",
+    }]}}
+    assert "images" not in gemini_response_to_chat(payload, model="m")["choices"][0]["message"]
+
+
 # ---------------------------------------------------------------------------
 # 模型表 / 凭证
 # ---------------------------------------------------------------------------

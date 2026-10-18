@@ -190,6 +190,29 @@ def test_nonstream_convert_think_split():
     assert msg["content"][1] == {"type": "text", "text": "结论"}
 
 
+def test_nonstream_convert_inline_images():
+    # 生图模型（OpenAI 扩展字段 images[]）→ Anthropic image 块
+    data = {
+        "choices": [{"message": {
+            "role": "assistant",
+            "content": "done",
+            "images": [
+                {"type": "image_url",
+                 "image_url": {"url": "data:image/png;base64,QUJD"}},
+                {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+                {"type": "image_url", "image_url": {"url": ""}},  # 坏块丢弃
+            ],
+        }}],
+    }
+    msg = chat_completion_to_anthropic_message(data)
+    assert msg["content"] == [
+        {"type": "text", "text": "done"},
+        {"type": "image", "source": {"type": "base64",
+                                     "media_type": "image/png", "data": "QUJD"}},
+        {"type": "image", "source": {"type": "url", "url": "https://x/y.png"}},
+    ]
+
+
 def test_nonstream_convert_tool_calls():
     data = {
         "choices": [{"message": {
