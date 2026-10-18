@@ -341,6 +341,203 @@ document.getElementById('chart-latency').addEventListener('mousemove', e => {
 });
 document.getElementById('chart-latency').addEventListener('mouseleave', hideChartTip);
 
+// ---- 请求日志页头部：各模型使用占比饼图（纯 SVG 圆环）----
+//
+// 数据来自 /ui/api/model-mix（MetricsCollector 的内存计数表，按天聚合，不扫
+// 磁盘），所以它随日期范围联动，且与 /ui/api/stats 同价——30s 轮询不会额外读文件。
+// 交互：扇区/图例行双向 hover 高亮，点击图例行 = 只看该模型（再点一次或点「全部」
+// 回到全量），点击扇区则跳到对应模型。
+let MIX = null;        // 最近一次 /ui/api/model-mix 响应
+let MIX_QS = null;     // 该响应对应的查询串（相同则跳过，不重复请求）
+let MIX_SEQ = 0;       // 并发防抖：只有最后发起的请求结果生效
+let MIX_FOCUS = null;  // 当前聚焦的模型键 `provider/model`（null = 全部）
+
+// 饼图配色：catmull 风格的柔和色板，与图表卡片的深色底相容。
+// 通道色（pcolor）只用于请求趋势图——那里同一通道必须同色，而这里每个模型
+// 各占一块，按模型取色才有区分度。
+const MIX_COLORS = ['#5b8def', '#e5a54b', '#4fc48f', '#e06c9f', '#9a7be0',
+                    '#4fb8d8', '#c9d05a', '#e07b5b', '#7b8ff0', '#d98bc4',
+                    '#61c9a8', '#b0a06a'];
+const MIX_OTHER_COLOR = '#4a5464';
+
+function modelMixKey(m) { return m.model; }
+
+// 扇区块列表：前 N 个模型各一块，剩下合并成「其他」一块（tooltip 里列明细）。
+// 后端已按**模型名**跨通道合并，所以一块 = 一个模型（providers 里看各通道次数）。
+function mixSlices() {
+  if (!MIX) return [];
+  const out = (MIX.models || []).map((m, i) => ({
+    key: modelMixKey(m), label: m.model, provider: m.provider || '',
+    count: m.count, errors: m.errors || 0, providers: m.providers || [],
+    color: MIX_COLORS[i % MIX_COLORS.length],
+  }));
+  if (MIX.other && MIX.other.count) {
+    out.push({ key: '__other__', label: '其他', provider: '',
+               count: MIX.other.count, errors: MIX.other.errors || 0,
+               color: MIX_OTHER_COLOR, members: MIX.other.models || [] });
+  }
+  return out;
+}
+
+// 悬浮框内容：模型 + 次数/占比 + 错误 + 各通道明细
+function mixTipHtml(s) {
+  const total = mixSlices().reduce((n, x) => n + x.count, 0) || 1;
+  let html = `<div class="t-date">${esc(s.label)}</div>`
+           + `<div class="t-p"><i style="background:${s.color}"></i>请求 <b style="margin-left:auto;padding-left:12px">${s.count.toLocaleString()} 次</b></div>`
+           + `<div class="t-p">占比 <b style="margin-left:auto;padding-left:12px">${(s.count / total * 100).toFixed(1)}%</b></div>`;
+  if (s.errors) html += `<div class="t-p">错误 <b style="margin-left:auto;padding-left:12px;color:var(--err)">${s.errors}</b></div>`;
+  // 各通道明细：同模型跨通道时才知道流量走的是哪个上游
+  if (s.providers && s.providers.length > 1) {
+    html += '<div class="t-sep"></div>' + s.providers.map(p =>
+      `<div class="t-p muted" style="font-size:11.5px">${esc(p.provider)}<b style="margin-left:auto;padding-left:12px">${p.count.toLocaleString()}</b></div>`).join('');
+  }
+  if (s.members && s.members.length) {
+    html += s.members.slice(0, 8).map(m =>
+      `<div class="t-p muted" style="font-size:11.5px">${esc(m.model)}<b style="margin-left:auto;padding-left:12px">${m.count.toLocaleString()}</b></div>`).join('');
+    if (s.members.length > 8)
+      html += `<div class="t-p muted" style="font-size:11.5px">… 另 ${s.members.length - 8} 个</div>`;
+  }
+  return html;
+}
+
+// 极坐标 → 笛卡尔坐标（12 点方向起画，顺时针；与图例行顺序一致，读起来更顺）
+function polarXY(cx, cy, r, angle) {
+  return [cx + r * Math.sin(angle), cy - r * Math.cos(angle)];
+}
+
+function donutArcPath(cx, cy, rOuter, rInner, from, to) {
+  const [x0, y0] = polarXY(cx, cy, rOuter, from);
+  const [x1, y1] = polarXY(cx, cy, rOuter, to);
+  const [x2, y2] = polarXY(cx, cy, rInner, to);
+  const [x3, y3] = polarXY(cx, cy, rInner, from);
+  const large = (to - from) > Math.PI ? 1 : 0;
+  return `M${x0} ${y0}A${rOuter} ${rOuter} 0 ${large} 1 ${x1} ${y1}`
+       + `L${x2} ${y2}A${rInner} ${rInner} 0 ${large} 0 ${x3} ${y3}Z`;
+}
+
+function renderModelMix() {
+  if (currentTab() !== 'log') return;   // 其它页签不可见，别空转
+  const donutEl = document.getElementById('mix-donut');
+  const legendEl = document.getElementById('mix-legend');
+  const subEl = document.getElementById('mix-sub');
+  if (!donutEl || !legendEl) return;
+  const slices = mixSlices();
+  const total = slices.reduce((n, s) => n + s.count, 0);
+
+  if (!total) {
+    donutEl.innerHTML = '<div class="empty" style="padding:0">所选范围内暂无请求</div>';
+    legendEl.innerHTML = '';
+    if (subEl) subEl.textContent = rangeLabel();
+    return;
+  }
+  const focus = slices.some(s => s.key === MIX_FOCUS) ? MIX_FOCUS : null;
+  MIX_FOCUS = focus;
+
+  // 几何：viewBox 固定 220x220，卡片按实际宽度缩放（等比）
+  const S = 220, cx = S / 2, cy = S / 2, rOuter = 96, rInner = 62;
+  const active = focus ? slices.filter(s => s.key === focus) : slices;
+  const activeTotal = active.reduce((n, s) => n + s.count, 0) || 1;
+  let angle = 0;
+  let svg = `<svg viewBox="0 0 ${S} ${S}" width="100%" height="100%" role="img"
+      aria-label="各模型使用占比">`;
+  for (const s of slices) {
+    const sweep = (s.count / total) * Math.PI * 2;
+    const from = angle, to = angle + sweep;
+    angle = to;
+    const dim = focus && s.key !== focus;
+    // 只剩一块时画整环（画圆弧到 2π 两端点重合，A 指令退化画不出来）
+    const d = sweep >= Math.PI * 2 - 1e-6
+      ? donutArcPath(cx, cy, rOuter, rInner, 0, Math.PI * 2 - 1e-4) + '' 
+      : donutArcPath(cx, cy, rOuter, rInner, from, to);
+    const grow = focus === s.key ? 3 : 0;   // 聚焦扇区往外顶一点
+    svg += `<path class="mix-slice${dim ? ' dim' : ''}" data-key="${esc(s.key)}"
+      d="${d}" fill="${s.color}"
+      ${grow ? `transform="translate(${(grow * Math.sin((from + to) / 2)).toFixed(2)} ${(-grow * Math.cos((from + to) / 2)).toFixed(2)})"` : ''}
+    />`;
+  }
+  // 圆心：全部时显示合计，聚焦时显示该模型占比
+  const focused = focus ? slices.find(s => s.key === focus) : null;
+  const big = focused ? (focused.count / total * 100) : total;
+  const small = focused ? `${focused.count} 次` : '次请求';
+  svg += `<text class="mix-center-v" x="${cx}" y="${cy - 1}" text-anchor="middle">`
+       + `${focused ? big.toFixed(1) + '%' : big.toLocaleString()}</text>`
+       + `<text class="mix-center-k" x="${cx}" y="${cy + 16}" text-anchor="middle">${small}</text>`;
+  // 扇区热区：直用 path 的 hit 区域（圆环本身），hover 高亮
+  svg += '</svg>';
+  donutEl.innerHTML = svg;
+
+  // 图例 = 明细表：色块 / 模型名 / 占比 / 次数 / 迷你占比条
+  const maxShare = Math.max(...slices.map(s => s.count), 1);
+  legendEl.innerHTML = slices.map(s => {
+    const share = s.count / total * 100;
+    const isFocus = focus === s.key;
+    return `<button type="button" class="mix-row${isFocus ? ' on' : ''}${focus && !isFocus ? ' dim' : ''}"
+        data-key="${esc(s.key)}" title="${esc(s.providers && s.providers.length > 1
+          ? s.providers.map(p => p.provider + ' ' + p.count + ' 次').join(' · ')
+          : (s.provider || '其余模型'))}">
+      <i class="mix-dot" style="background:${s.color}"></i>
+      <span class="mix-name">${esc(s.label)}</span>
+      <span class="mix-prov muted">${esc(s.provider || '')}${(s.providers && s.providers.length > 1) ? ' +' + (s.providers.length - 1) : ''}</span>
+      <span class="mix-bar"><i style="width:${Math.max(2, s.count / maxShare * 100)}%;background:${s.color}"></i></span>
+      <span class="mix-pct mono">${share.toFixed(share >= 9.95 ? 0 : 1)}%</span>
+      <span class="mix-count mono muted">${s.count.toLocaleString()}</span>
+    </button>`;
+  }).join('');
+
+  // 副标题：范围 + 覆盖度（内存计数表只能覆盖启动回读的部分历史）
+  const bits = [rangeLabel(), `共 ${total.toLocaleString()} 次 · ${(MIX && MIX.models_total) || slices.length} 个模型`];
+  if (MIX && MIX.partial) bits.push('≈ 更早的归档未计入');
+  if (subEl) subEl.textContent = bits.join(' · ') + ' · 点图例行可只看该模型';
+}
+
+// 拉取 + 渲染（只在日志页可见时发请求）
+async function loadModelMix(force) {
+  if (currentTab() !== 'log') return;
+  const qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}`;
+  if (!force && qs === MIX_QS) return;   // 同范围已渲染：不重复请求
+  const seq = ++MIX_SEQ;
+  try {
+    const resp = await api('/ui/api/model-mix?' + qs);
+    if (seq !== MIX_SEQ) return;         // 已被更晚的请求取代
+    MIX = resp; MIX_QS = qs;
+    renderModelMix();
+  } catch (e) {
+    if (seq !== MIX_SEQ) return;
+    const el = document.getElementById('mix-donut');
+    if (el) el.innerHTML = `<div class="empty" style="padding:0">加载失败：${esc(e.message)}</div>`;
+    MIX_QS = null;                       // 失败不记：下次轮询应重试
+  }
+}
+
+// 扇区 hover：显示该模型明细（不改变筛选，只做浮框 + 扇区提亮）
+document.getElementById('mix-donut').addEventListener('mousemove', e => {
+  const path = e.target.closest('.mix-slice');
+  if (!path) { hideChartTip(); return; }
+  const s = mixSlices().find(x => x.key === path.dataset.key);
+  if (!s) { hideChartTip(); return; }
+  showChartTip(mixTipHtml(s), path.getBoundingClientRect());
+});
+document.getElementById('mix-donut').addEventListener('mouseleave', hideChartTip);
+
+// 点图例行：聚焦/取消聚焦（纯前端筛选，不重新拉数据）
+document.getElementById('mix-legend').addEventListener('click', e => {
+  const row = e.target.closest('.mix-row');
+  if (!row) return;
+  const key = row.dataset.key;
+  MIX_FOCUS = (MIX_FOCUS === key) ? null : key;
+  renderModelMix();
+});
+document.getElementById('mix-legend').addEventListener('mousemove', e => {
+  const row = e.target.closest('.mix-row');
+  if (!row) { hideChartTip(); return; }
+  const s = mixSlices().find(x => x.key === row.dataset.key);
+  if (!s) { hideChartTip(); return; }
+  showChartTip(mixTipHtml(s)
+    + `<div class="t-p muted" style="font-size:11.5px">点击只看它，再点一次恢复</div>`,
+    row.getBoundingClientRect());
+});
+document.getElementById('mix-legend').addEventListener('mouseleave', hideChartTip);
+
 function renderGroups() {
   const el = document.getElementById('groups');
   // 搜索时基于原始 MODELS.groups 生成过滤视图（浅拷贝组、过滤模型行），
@@ -470,6 +667,8 @@ function recentPages(cur, total) {
 async function renderRecent() {
   // 日志页不可见时直接跳过：翻页/筛选/范围变化都可能调到这里，别在其它页签白跑。
   if (currentTab() !== 'log') return;
+  // 头部饼图与本表同源同范围，一起刷新（它读内存计数表，不扫磁盘，开销可忽略）
+  loadModelMix();
   const el = document.getElementById('recent');
   const pager = document.getElementById('recent-pager');
   document.getElementById('recent-sub').textContent =
