@@ -371,3 +371,213 @@ async function loadKimiAccounts() {
 
 
 
+// ---- CODEX 面板（kimi 同款布局：每账号一块，标题=账号名、副标题=状态，
+//      ▲▼ 顺位 / ✎ 改名 / ✕ 删除 / 导入账号；组件复用 kimi 的）----
+// 与 kimi 的唯一差别在「导入」提示：Codex 凭据可来自 `buddy login codex` 的
+// 本机授权、粘贴 ~/.codex/auth.json，或别的机器上导出的同构 JSON——**都不需要
+// 本机装 Codex CLI**。
+let CODEX_ACCTS = null;
+let CODEX_MOVING = false;
+
+function _codex_acct_for(idx) {
+  if (!CODEX_ACCTS) return null;
+  if (idx == null) return CODEX_ACCTS.length === 1 ? CODEX_ACCTS[0] : null;
+  return CODEX_ACCTS.find(a => a.index === idx) || null;
+}
+
+function _codex_sub_html(a) {
+  // 副标题：冷却（quota/account 两档）+ ChatGPT 套餐档位
+  if (!a) return '';
+  const bits = [];
+  for (const c of a.cooling || []) {
+    const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
+    bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
+  }
+  if (a.plan_type) bits.push(`套餐 ${a.plan_type}`);
+  return bits.length
+    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-codex-sub>${esc(bits.join(' · '))}</div>`
+    : '';
+}
+
+function codexConfirmDelete(id) {
+  const a = (CODEX_ACCTS || []).find(x => x.id === id);
+  const name = (a && (a.name || a.id)) || id;
+  return confirmAccountDelete({
+    title: '删除 Codex 账号',
+    name,
+    extra: '该账号的凭据文件一并移除，转发不再使用它。refresh_token 已被 OpenAI 轮换作废' +
+      '（副标题持续显示账号冷却且转发失败）的账号删掉后即不再白耗一轮 failover。',
+  });
+}
+
+async function codexMoveAccount(idx, delta, id) {
+  if (CODEX_MOVING) return;
+  CODEX_MOVING = true;
+  try {
+    if (!CODEX_ACCTS) {
+      const r0 = await api('/ui/api/codex/accounts');
+      CODEX_ACCTS = r0.accounts || [];
+    }
+    const accts = CODEX_ACCTS;
+    if (id) {  // 按 id 校正到快照里的真实位次（面板重绘滞后时 idx 会过期）
+      const at = accts.findIndex(a => a.id === id);
+      if (at < 0) return;
+      idx = at + 1;
+    }
+    const to = idx + delta;
+    if (to < 1 || to > accts.length) return;
+    const ids = accts.map(a => a.id);
+    const [moved] = ids.splice(idx - 1, 1);
+    ids.splice(to - 1, 0, moved);
+    const r = await api('/ui/api/codex/accounts/order', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids})});
+    CODEX_ACCTS = r.accounts || [];
+    const movedName = (accts.find(a => a.id === moved) || {}).name || moved;
+    toast(`${movedName} 已移到顺位 #${to}`);
+    refreshAll();
+  } catch (e) { toast('调整失败: ' + e.message, true); }
+  finally { CODEX_MOVING = false; }
+}
+
+async function codexDeleteAccount(id) {
+  if (CODEX_MOVING) return;
+  if (!(await codexConfirmDelete(id))) return;
+  const a = (CODEX_ACCTS || []).find(x => x.id === id);
+  const name = (a && (a.name || a.id)) || id;
+  CODEX_MOVING = true;
+  try {
+    const r = await api('/ui/api/codex/accounts/delete', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({id})});
+    CODEX_ACCTS = r.accounts || [];
+    toast(`${name} 已删除`);
+    refreshAll();
+  } catch (e) { toast('删除失败: ' + e.message, true); }
+  finally {
+    CODEX_MOVING = false;
+    ACCT_CONFIRM_OPEN = false;  // 确认时从 confirmAccountDelete 接手的锁，到这里才放
+  }
+}
+
+// 导入账号：粘贴凭据 JSON。认 ~/.codex/auth.json（{"tokens": {...}}）与扁平形态；
+// 没有 Codex CLI 也行——`buddy login codex` 走的是同一套 OpenAI OAuth。
+function openCodexImport() {
+  document.getElementById('modal-title').textContent = '导入 Codex 账号';
+  document.getElementById('modal-body').innerHTML =
+    `<p style="margin:0 0 8px">粘贴 <span class="mono">~/.codex/auth.json</span> 的内容，或任何含 ` +
+    `<span class="mono">access_token</span> / <span class="mono">refresh_token</span> 的 JSON。</p>` +
+    `<p class="muted" style="margin:0 0 8px;font-size:12px">不需要安装 Codex CLI：终端跑 ` +
+    `<span class="mono">buddy login codex</span> 直接走 OpenAI 授权页登录，成功后自动落到这里。</p>` +
+    `<textarea id="codex-import-text" class="mono" style="width:100%;height:180px;resize:vertical" ` +
+    `placeholder='{"tokens": {"access_token": "...", "refresh_token": "...", "id_token": "..."}}'></textarea>`;
+  setModalFoot('<button onclick="closeModal()">取消</button>' +
+    '<button onclick="codexImportSubmit()">导入</button>');
+  document.getElementById('overlay').classList.add('show');
+  const ta = document.getElementById('codex-import-text');
+  if (ta) ta.focus();
+}
+
+async function codexImportSubmit() {
+  const ta = document.getElementById('codex-import-text');
+  const text = ((ta && ta.value) || '').trim();
+  if (!text) { toast('先粘贴 JSON 再导入', true); return; }
+  const btns = document.querySelectorAll('#modal-foot button');
+  btns.forEach(b => { b.disabled = true; });
+  try {
+    const r = await api('/ui/api/codex/accounts/import', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({payload: text})});
+    CODEX_ACCTS = r.accounts || [];
+    closeModal();
+    toast('Codex 账号已导入');
+    refreshAll();
+  } catch (e) { toast('导入失败: ' + e.message, true); }
+  finally { btns.forEach(b => { b.disabled = false; }); }
+}
+
+function renderCodexPanel() {
+  const panel = document.getElementById('codex-panel');
+  if (!panel) return;
+  const codex = (BENEFITS.providers || []).find(p => p.id === 'codex' && !p.disabled);
+  if (!codex) { panel.innerHTML = ''; return; }  // 通道未注册（没加 --codex）：整块不渲染
+
+  const groups = new Map();
+  const notices = [];
+  for (const it of (codex.quota && codex.quota.supported ? codex.quota.items : []) || []) {
+    if (it.query_failed || (it.percent == null && it.used == null)) { notices.push(it); continue; }
+    const idx = it.label.indexOf(' · ');
+    const grp = idx >= 0 ? it.label.slice(0, idx) : 'Codex';
+    const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
+  const n = Math.max(...[...groups.keys()]
+    .map(g => g.match(/^Codex #(\d+)$/)).filter(Boolean).map(mm => Number(mm[1])), 1);
+  const quotaHtml = [...groups.entries()].map(([grp, its]) => {
+    const m = grp.match(/^Codex #(\d+)$/);
+    const idx = m ? Number(m[1]) : null;
+    const acct = _codex_acct_for(idx);
+    const moveBtns = (m && n > 1) ? acctMoveButtons('codex', idx, n, acct && acct.id) : '';
+    const delBtn = acctDeleteButton('codex', acct, 'refresh_token 作废/不再使用时');
+    const renameBtn = acctRenameButton('codex', acct);
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    return `
+    <div class="pat-pkg">
+      <span class="pat-pkg-name"${m ? ` data-codex-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.id) : grp)}</span>
+      ${_codex_sub_html(acct)}
+      ${quotaItemsHtml(its, 'codex:' + grp)}
+      ${rowBtns}
+    </div>`;
+  }).join('');
+  const noticeHtml = notices.map(quotaItemHtml).join('');
+  const multi = n > 1;
+
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head">
+        <span class="name">Codex</span>
+        <span class="tag">${multi ? '多账号 · 自动切换' : 'ChatGPT 订阅 · 自动切换'}</span>
+        <span class="grow"></span>
+        <span class="muted" style="font-size:11px">${multi ? '429/403 自动冷却换号（按账号顺位）' : '额度耗尽自动切换下一个账号'}</span>
+        ${providerRefreshButton('codex')}
+        <button class="ghost" title="粘贴 ~/.codex/auth.json 或同构 JSON（无需安装 Codex CLI）" onclick="openCodexImport()">导入账号</button>
+      </div>
+      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
+      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}
+    </div>`;
+  loadCodexAccounts();
+}
+
+async function loadCodexAccounts() {
+  try {
+    const r = await api('/ui/api/codex/accounts');
+    if (!r.enabled) { CODEX_ACCTS = []; return; }
+    const accts = r.accounts || [];
+    if (JSON.stringify(accts) === JSON.stringify(CODEX_ACCTS)) return;
+    const snapshotMissing = !CODEX_ACCTS || !CODEX_ACCTS.length;
+    CODEX_ACCTS = accts;
+    if (!accts.length) return;
+    if (snapshotMissing) {
+      renderCodexPanel();
+      syncQuotaFold();
+      return;
+    }
+    for (const a of accts) {
+      const el = (accts.length === 1)
+        ? document.querySelector('#codex-panel .pat-pkg-name')
+        : document.querySelector(`#codex-panel [data-codex-idx="${a.index}"]`);
+      if (!el) continue;
+      el.textContent = a.alias || a.name || a.id;
+      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-codex-sub')) {
+        el.nextElementSibling.remove();
+      }
+      const sub = _codex_sub_html(a);
+      if (sub) el.insertAdjacentHTML('afterend', sub);
+    }
+    syncQuotaFold();
+  } catch (e) {
+    // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
+  }
+}

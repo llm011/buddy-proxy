@@ -98,6 +98,7 @@ function acctRenamePrompt(pid, id, current) {
       (typeof AG_ACCTS !== 'undefined' ? AG_ACCTS : []) || [],
       (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : []) || [],
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : []) || [],
+      (typeof CODEX_ACCTS !== 'undefined' ? CODEX_ACCTS : []) || [],
       (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : []) || [],
       (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : []) || [],
       (typeof CODEBUDDY_INTL_ACCTS !== 'undefined' ? CODEBUDDY_INTL_ACCTS : []) || [],
@@ -142,6 +143,7 @@ async function acctRenameSubmit(pid, id) {
       (typeof QODER_ACCTS !== 'undefined' ? QODER_ACCTS : null),
       (typeof INTL_ACCTS !== 'undefined' ? INTL_ACCTS : null),
       (typeof KIMI_ACCTS !== 'undefined' ? KIMI_ACCTS : null),
+      (typeof CODEX_ACCTS !== 'undefined' ? CODEX_ACCTS : null),
       (typeof TRAE_ACCTS !== 'undefined' ? TRAE_ACCTS : null),
       (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : null),
       (typeof CODEBUDDY_INTL_ACCTS !== 'undefined' ? CODEBUDDY_INTL_ACCTS : null),
@@ -166,6 +168,7 @@ async function acctRenameSubmit(pid, id) {
     }
     if (typeof renderAntigravityPanel === 'function') renderAntigravityPanel();
     if (typeof renderKimiPanel === 'function') renderKimiPanel();
+    if (typeof renderCodexPanel === 'function') renderCodexPanel();
     if (typeof renderQoderPanel === 'function') renderQoderPanel();
     if (typeof renderQoderIntlPanel === 'function') renderQoderIntlPanel();
     if (typeof renderTraePanel === 'function') renderTraePanel();
@@ -285,12 +288,12 @@ function acctFor(state, idx) {
 // 新增多账号通道时在这里登记即可。
 function acctMove(pid, idx, delta, id) {
   if (pid === 'dumate') return dumateMove(idx, delta, id);
-  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy'})[pid] + 'MoveAccount'];
+  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', codex: 'codex', qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy'})[pid] + 'MoveAccount'];
   if (fn) fn(idx, delta, id);
 }
 function acctDelete(pid, id) {
   if (pid === 'dumate') return dumateDelete(id);
-  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy'})[pid] + 'DeleteAccount'];
+  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', codex: 'codex', qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy'})[pid] + 'DeleteAccount'];
   if (fn) fn(id);
 }
 

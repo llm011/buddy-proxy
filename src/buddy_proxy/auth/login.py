@@ -12,6 +12,7 @@
     python -m buddy_proxy.auth.login gemini              # Google OAuth（Gemini 免费通道，与 ~/.gemini 登录态互通）
     python -m buddy_proxy.auth.login antigravity         # Google OAuth（Antigravity 免费通道，Gemini/Claude/GPT 多模型；检测到本机 agy 登录态可直接导入）
     python -m buddy_proxy.auth.login kimi                # Kimi Code device flow（浏览器授权；kimi cli 导出的 token JSON 可在管理面板导入）
+    python -m buddy_proxy.auth.login codex               # ChatGPT / Codex 订阅 OAuth（浏览器回环 1455 收回调；回调失败可粘贴，无需安装 Codex CLI）
 
 可选参数：
     --no-browser    codebuddy 登录不自动打开浏览器，只打印授权链接
@@ -52,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -782,6 +783,27 @@ def _login_kimi(open_browser: bool = True, **_kwargs) -> int:
     return 0
 
 
+def _login_codex(open_browser: bool = True, **_kwargs) -> int:
+    """Codex（ChatGPT 订阅）登录：OAuth 回环 + PKCE。
+
+    流程：本地起 1455 回调服务（起不来就退化为手动粘贴）→ 打印授权 URL →
+    自动开浏览器（打不开就手动复制）→ 收到 code 换 token → 多账号落盘
+    ``~/.buddy-proxy/codex/``。本机 Codex CLI 的 ``~/.codex/auth.json`` 也
+    可以在管理面板直接导入，不必重走授权。
+    """
+    from buddy_proxy.codex.login import LoginError, login_interactive
+
+    try:
+        login_interactive(open_browser=open_browser)
+    except LoginError as exc:
+        print(f"\n[X] Codex 登录失败: {exc}")
+        return 1
+    except KeyboardInterrupt:
+        print("\n[Codex] 已取消。")
+        return 1
+    return 0
+
+
 _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
@@ -794,6 +816,7 @@ _DISPATCH = {
     "gemini": _login_gemini,
     "antigravity": _login_antigravity,
     "kimi": _login_kimi,
+    "codex": _login_codex,
 }
 
 
@@ -823,9 +846,9 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy, =codebuddyintl 海外) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi，默认 codebuddy")
+                        help="codebuddy(=workbuddy, =codebuddyintl 海外) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi / codex，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
-                        help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi 登录不自动打开浏览器，只打印链接")
+                        help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi/codex 登录不自动打开浏览器，只打印链接")
     parser.add_argument("--region", default=None,
                         help="trae/qoder/codebuddy 登录区域：cn（国内版）/ global（海外版）。"
                              "不给且是交互终端时会问一句；两区账号不通用。"

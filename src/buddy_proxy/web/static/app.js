@@ -1,4 +1,4 @@
-const PCOLORS = { codebuddy: '#4f8cff', trae: '#a78bfa', zcode: '#3ecf8e', doubao: '#f0b429', kimi: '#4dd0e7' };
+const PCOLORS = { codebuddy: '#4f8cff', trae: '#a78bfa', zcode: '#3ecf8e', doubao: '#f0b429', kimi: '#4dd0e7', codex: '#10a37f' };
 function pcolor(p) {
   if (PCOLORS[p]) return PCOLORS[p];
   let h = 0; for (const c of p) h = (h * 31 + c.charCodeAt(0)) % 360;

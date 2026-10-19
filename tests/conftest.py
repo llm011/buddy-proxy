@@ -17,6 +17,9 @@
 - codebuddy 多账号状态（`CODEBUDDY_STATE_DIR`，index.json + 每账号 cred 文件）
   与历史单账号迁移源（`CODEBUDDY_LEGACY_SESSION`，即旧 ~/.codebuddy-session.json）
   同理：登录/quota/签到/迁移测试都会落盘或读盘，必须隔离防串真实账号。
+- codex 多账号状态（`CODEX_STATE_DIR`，index.json + 每账号 cred 文件）同理：
+  登录/导入/刷新/quota/转发测试都会落盘。注意它**不**读本机 ~/.codex/auth.json
+  （那份只在显式导入时读），所以这里只需要隔离我们自己的目录。
 
 个别测试想自定路径时在测试体内再 setenv 覆盖即可（autouse fixture 先跑，
 测试体里的 monkeypatch.setenv 后生效）。
@@ -45,3 +48,5 @@ def _isolate_gemini_state_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEBUDDY_STATE_DIR", str(tmp_path / "codebuddy"))
     monkeypatch.setenv("CODEBUDDY_LEGACY_SESSION",
                        str(tmp_path / "codebuddy_legacy_session.json"))
+    # codex 多账号状态（见模块 docstring）
+    monkeypatch.setenv("CODEX_STATE_DIR", str(tmp_path / "codex"))

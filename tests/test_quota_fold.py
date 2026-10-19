@@ -447,7 +447,7 @@ def test_all_three_panels_use_the_fold_helper():
     # codebuddy 面板同期随多账号改造加入。
     panels = "".join(p.read_text(encoding="utf-8") for p in PANELS_JS)
     calls = re.findall(r"quotaItemsHtml\(its, '(\w+):' \+ grp\)", panels)
-    assert sorted(calls) == ["ag", "codebuddy", "codebuddyintl", "kimi", "pat", "qoder", "qoderintl", "trae", "traeintl"], f"各面板没接上折叠: {calls}"
+    assert sorted(calls) == ["ag", "codebuddy", "codebuddyintl", "codex", "kimi", "pat", "qoder", "qoderintl", "trae", "traeintl"], f"各面板没接上折叠: {calls}"
 
 
 def test_render_benefits_syncs_after_rebuild():

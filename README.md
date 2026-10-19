@@ -9,7 +9,7 @@
 ## Features
 
 - **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **GLM official** (BigModel Coding Plan key — same upstream as ZCode, independent credentials), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state); all listed by `/v1/models` and routed by model name
-- **Multi-account failover** — most subscription channels (codebuddy / trae / qoder / kimi / antigravity…) support multiple accounts: rotated in login order as primary/backup; account-level errors (401 expired credentials / 429 quota exhausted) cool the current account down and switch to the next automatically. Per-account quota, check-in, rename / reorder / delete are all managed in the admin UI
+- **Multi-account failover** — most subscription channels (codebuddy / trae / qoder / kimi / codex / antigravity…) support multiple accounts: rotated in login order as primary/backup; account-level errors (401 expired credentials / 429 quota exhausted) cool the current account down and switch to the next automatically. Per-account quota, check-in, rename / reorder / delete are all managed in the admin UI
 - **Protocol conversion** — `/v1/chat/completions` (OpenAI), `/v1/responses` (Codex CLI), `/v1/messages` (Anthropic / Claude Code)
 - **Admin UI** — built-in web console at `/ui`: browse models grouped by provider, one-click "set as default model", one-click test per model (sends a "hi"), and per-model request stats with charts. Providers backed by a reliable upstream catalog (Qoder / QoderIntl / Kimi / Antigravity) can refresh their model list in place. Any model can be hidden from catalogs and selectors without disabling direct requests, then restored from the “Hidden” manager; disabling remains the separate hard-rejection control. Loads lazily per tab, so the first paint never waits on the slowest endpoint (the request log)
 - **Model list** — `/v1/models` returns an OpenAI-compatible model list plus rich per-model metadata (context window, credits, input modalities / image support); locally hidden models are omitted consistently from this endpoint, the admin catalog, and model-order candidates
@@ -54,7 +54,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 # After installation, use buddy from any directory.
 buddy start                # start (if not running) and open http://127.0.0.1:8787/ui
 buddy stop / restart / status / logs
-buddy login [provider]     # upstream login (codebuddy(=workbuddy, =codebuddyintl global)/trae(=traeintl global)/zcode/glm/doubao/mimo/qoder(=qoderintl global)/gemini/antigravity/kimi)
+buddy login [provider]     # upstream login (codebuddy(=workbuddy, =codebuddyintl global)/trae(=traeintl global)/zcode/glm/doubao/mimo/qoder(=qoderintl global)/gemini/antigravity/kimi/codex)
                            # trae/qoder/codebuddy accept --region cn|global (accounts differ per region); other providers ignore it
                            # traeintl/qoderintl/codebuddyintl are login aliases meaning --region global; logging in a global account also enables the
                            # traeintl/qoderintl/codebuddyintl channels — separate quota cards in the UI
@@ -556,6 +556,20 @@ Quota shows up in the admin panel when `fetchAvailableModels` is reachable: one 
 Credentials live under `~/.buddy-proxy/antigravity/` (`index.json` + one 0600 JSON per account, cap 8). The legacy single-account `~/.buddy-proxy/antigravity_oauth.json` is migrated automatically as account #1 on first access (old file kept as backup). Remove an account via the ✕ button on its card (`POST /ui/api/antigravity/accounts/delete`, confirmed through the in-app modal, not the browser's `confirm()`): index entry, cred file and cooldown marks go together — cleaner than hand-deleting the JSON (which the index self-heal also tolerates). The admin UI shows a dedicated Antigravity panel (Trae-PAT style): one block per account — titled with the account name — the ✎ alias when set, the email otherwise — subtitled with its status (cooldown / likely-blacklisted / missing-project) — followed by that account's own quota bars. Quota snapshots invalidate immediately when the account list changes (cache key carries an account fingerprint), so a freshly added account never shows stale single-account data.
 
 > `--antigravity` is only needed when you want this channel; without it the provider is not registered and `antigravity/...` model names fall through to the fallback provider.
+
+### Codex provider (optional)
+
+Turns a **ChatGPT subscription** (Plus / Pro / Team / Free) into an upstream channel, addressed as `codex/<id>`:
+
+```bash
+buddy login codex    # browser OAuth (loopback callback on 1455); paste the callback URL if no browser
+```
+
+- **No Codex CLI required.** Login uses OpenAI's public OAuth client (PKCE S256) — the same authorization Codex CLI uses — so it works on a machine that never installed Codex. Conversely, an existing `~/.codex/auth.json` can be pasted into the admin panel's "导入账号" dialog (or imported from another machine).
+- **Protocol.** The upstream speaks the **Responses** API (`https://chatgpt.com/backend-api/codex/responses`, SSE), unlike every other channel's Chat Completions. The channel ships a bidirectional projection: requests are converted chat → Responses (system → `instructions`, tools flattened, assistant-history reasoning is *not* replayed since Responses reasoning items need an upstream signature); responses are dispatched per entry point — `openai` converts Responses SSE to chat deltas, `responses` passes the upstream stream through untouched, `anthropic` converts further into Anthropic events.
+- **Multi-account failover.** Logging in again with another ChatGPT account appends a backup. 401 forces one token refresh and then switches; 429/403 cool the account down (`Retry-After` honored) and switch; 5xx passes through without switching. OpenAI **rotates `refresh_token`** — the new RT is persisted immediately. The admin panel offers ▲▼ reorder, ✎ rename, ✕ delete and import.
+- **Quota.** The ChatGPT backend exposes no public quota endpoint, so the card only shows each account's plan tier and login state instead of inventing a `used_percent` (the `rate_limits` parser hook lives in `codex/upstream.py::parse_rate_limits`).
+- Catalog: `gpt-5.5` (default), `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.3-codex-spark`, `gpt-oss-120b-medium` (taken from Codex 0.142's `models_cache.json`).
 
 ## Connect clients
 

@@ -139,7 +139,8 @@ async def ui_logs(request: Request, start: str = "", end: str = "",
 
 #: 有多账号且往日志 account 字段写 id 的通道（各自的 ``failover.accounts_status``
 #: 是纯本地读取，不触网）。Trae PAT 单独从 ``trae.pat.accounts_status`` 取 profile id。
-_ACCOUNT_NAME_SOURCES = ("codebuddy_provider", "trae", "antigravity", "qoder", "kimi")
+_ACCOUNT_NAME_SOURCES = (
+    "codebuddy_provider", "trae", "antigravity", "qoder", "kimi", "codex")
 
 _ACCT_NAME_TTL_S = 60.0
 _acct_name_cache: tuple[float, dict[str, str]] = (0.0, {})

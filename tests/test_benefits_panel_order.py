@@ -23,6 +23,7 @@ EXPECTED_ORDER = [
     "trae-panel",
     "traeintl-panel",
     "kimi-panel",
+    "codex-panel",
     "qoder-panel",
     "qoderintl-panel",
     "antigravity-panel",
