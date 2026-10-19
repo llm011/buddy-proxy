@@ -150,9 +150,16 @@ def test_forward_anthropic_stream_emits_events():
         async def _fake_post(url, json=None, headers=None):
             return _FakeResp()
 
+        async def _fake_send(request, stream=False):
+            assert stream is True, "流式必须 send(stream=True)，用 post() 会把首字节推迟到生成结束"
+            return _FakeResp()
+
         with mock.patch.object(discovery, "discover", return_value=ep), \
              mock.patch.object(p, "_get_client") as gc:
             gc.return_value.post = _fake_post
+            gc.return_value.send = _fake_send
+            gc.return_value.build_request = mock.Mock(
+                side_effect=lambda method, url, **kw: mock.Mock(method=method, url=url, **kw))
             resp = await p.forward(
                 {"model": "kimi-k3", "messages": [], "stream": True},
                 "anthropic",
@@ -208,6 +215,51 @@ def test_forward_openai_nonstream_pass_through():
     assert sent["url"] == _endpoint().chat_url()
     assert sent["headers"]["X-Dumate-Inapp-Key"] == _endpoint().inapp_key
     assert resp.status_code == 200
+
+
+def test_forward_stream_uses_send_not_post():
+    """流式必须走 ``send(stream=True)``。
+
+    ``await client.post()`` 是 read 模式——httpx 会把整个响应体读完才返回，
+    首字节被推迟到上游生成结束。实测 kimi-k3 首 token 从 3s 拖成 11s、整条流
+    只剩 1 个 chunk（客户端体验到「憋很久再一次性倒出」）。这条测试锁住回归。
+    """
+    import asyncio
+
+    async def _run():
+        p = DumateProvider()
+        ep = _endpoint()
+
+        class _FakeResp:
+            status_code = 200
+            async def aiter_bytes(self):
+                yield b"data: {}\n\n"
+            async def aclose(self): pass
+
+        calls: list[str] = []
+
+        async def _fake_post(*a, **kw):
+            calls.append("post")
+            return _FakeResp()
+
+        async def _fake_send(request, stream=False):
+            calls.append(f"send(stream={stream})")
+            return _FakeResp()
+
+        client = mock.Mock()
+        client.post = _fake_post
+        client.send = _fake_send
+        client.build_request = mock.Mock(side_effect=lambda method, url, **kw: mock.Mock(
+            method=method, url=url, **kw))
+
+        with mock.patch.object(discovery, "discover", return_value=ep), \
+             mock.patch.object(p, "_get_client", new=mock.AsyncMock(return_value=client)):
+            resp = await p.forward(
+                {"model": "kimi-k3", "messages": [], "stream": True}, "openai")
+            [c async for c in resp.body_iterator]
+        return calls
+
+    assert asyncio.run(_run()) == ["send(stream=True)"]
 
 
 # --- 额度：quota_overview 数字余额 → 积分条目 + 本地布尔兜底 -----------------

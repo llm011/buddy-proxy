@@ -175,7 +175,17 @@ class DumateProvider(BaseProvider):
 
         client = await self._get_client()
         try:
-            resp = await client.post(ep.chat_url(), json=upstream_body, headers=headers)
+            # 流式必须 send(stream=True) 而不是 post()：``await client.post`` 会
+            # 把整个响应体读完才返回（httpx 默认 read 模式），导致首字节被推迟到
+            # 上游生成结束——实测 kimi-k3 首 token 从 3s 拖成 11s、整条流只有 1 个
+            # chunk（客户端看到「憋很久再一次性倒出」）。非流式仍走 read 模式，
+            # 后面直接 resp.json() 不受影响。
+            if stream:
+                request = client.build_request(
+                    "POST", ep.chat_url(), json=upstream_body, headers=headers)
+                resp = await client.send(request, stream=True)
+            else:
+                resp = await client.post(ep.chat_url(), json=upstream_body, headers=headers)
         except httpx.TimeoutException as exc:
             log.warning("dumate upstream timeout: %s", describe_exception(exc))
             raise HTTPException(status_code=504, detail={
