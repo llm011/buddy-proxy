@@ -1,4 +1,4 @@
-"""饼图接口不可用时的错误态（用户 2026-10-19 反馈「加载失败：Not Found」）。
+"""饼图的错误态与「没有对比时隐藏整卡」（用户 2026-10-19 / 10-20 反馈）。
 
 真实事故：proxy 进程是在合并前启动的，路由表里没有 `/ui/api/model-mix`；
 但 `page.py:_read_static` 是**每次请求现读磁盘**，于是浏览器拿到的新 `charts.js`
@@ -11,6 +11,9 @@
    重启 proxy 进程」，而不是把后端原话直接铺给用户。
 2. **失败后不要每轮白打**：404 类错误标 `MIX_BROKEN` 后，非强制刷新不再发请求；
    「重试」按钮（force）必须能绕过它。
+
+另外钉住「没有对比时隐藏整卡」（用户 2026-10-20 反馈）：只有一种模型、或者没数据，
+整张 `.mix-card` 连同标题一起收起，切回多模型/报错时能重新露出来。
 
 这里用 node 起一个极简 DOM 桩来跑真实的 charts.js 切片，不依赖浏览器。
 
@@ -36,26 +39,52 @@ pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"
 )
 
-# 从 MIX_BROKEN 声明到 loadModelMix 结束：错误态与重试节流都在这一片里
+# 从 MIX 状态声明到 loadModelMix 结束：错误态、重试节流，以及卡片显隐要用的
+# MIX_FOCUS / mixHasNothingToCompare / setMixVisible / renderModelMix 都在这一片里。
 MIX_RE = re.compile(
-    r"let MIX_BROKEN = false;.*?\nasync function loadModelMix\([\s\S]*?\n\}\n", re.S
+    r"let MIX = null;.*?\nasync function loadModelMix\([\s\S]*?\n\}\n", re.S
 )
 
 # fetch 桩统一是「无参函数，返回 Promise」——写成函数体而不是裸 Promise，
 # 否则 Promise.reject 会在模块加载时就求值成未处理拒绝。
+MULTI = {"total": 2, "errors": 0,
+         "models": [{"model": "glm-5.3-flash", "count": 62, "errors": 0, "provider": "trae",
+                     "providers": [{"provider": "trae", "count": 62, "errors": 0}]},
+                    {"model": "deepseek-v4.1-flash", "count": 38, "errors": 0,
+                     "provider": "codebuddy",
+                     "providers": [{"provider": "codebuddy", "count": 38, "errors": 0}]}],
+         "other": None, "models_total": 2, "partial": False}
+ONE = {"total": 40, "errors": 0,
+       "models": [{"model": "glm-5.3-flash", "count": 40, "errors": 0, "provider": "trae",
+                   "providers": [{"provider": "trae", "count": 40, "errors": 0}]}],
+       "other": None, "models_total": 1, "partial": False}
+EMPTY = {"total": 0, "errors": 0, "models": [], "other": None,
+         "models_total": 0, "partial": False}
+
 NOT_FOUND = "() => Promise.reject(new Error('Not Found'))"
 NETWORK = "() => Promise.reject(new Error('Failed to fetch'))"
+
+
+def _ok(payload: dict) -> str:
+    return "() => Promise.resolve(%s)" % json.dumps(payload, ensure_ascii=False)
 
 
 def _run(body: str, fetch_impl: str) -> dict:
     text = CHARTS_JS.read_text(encoding="utf-8")
     m = MIX_RE.search(text)
-    assert m, "charts.js 里找不到饼图错误态切片"
+    assert m, "charts.js 里找不到饼图渲染/错误态切片"
     script = f"""
 const els = {{
   'mix-donut': {{ innerHTML: '' }},
   'mix-sub': {{ textContent: '' }},
   'mix-legend': {{ innerHTML: '' }},
+  // 整张卡：只关心 hidden 属性有没有被正确设置/清掉
+  'log-mix': {{
+    _hidden: false,
+    setAttribute(n) {{ if (n === 'hidden') this._hidden = true; }},
+    removeAttribute(n) {{ if (n === 'hidden') this._hidden = false; }},
+    get hidden() {{ return this._hidden; }},
+  }},
 }};
 const document = {{ getElementById: id => els[id] || null }};
 const RANGE = {{ start: '2026-10-01', end: '2026-10-20' }};
@@ -64,8 +93,11 @@ let requests = 0;
 function currentTab() {{ return 'log'; }}
 function rangeLabel() {{ return '14 天'; }}
 function esc(s) {{ return String(s ?? ''); }}
-function renderModelMix() {{ els['mix-sub'].textContent = rangeLabel() + ' · 共 ' + (MIX.total||0) + ' 次'; }}
-let MIX = null, MIX_QS = null, MIX_SEQ = 0;
+function modelMixKey(m) {{ return m.model; }}
+function polarXY(cx, cy, r, a) {{ return [cx + r * Math.sin(a), cy - r * Math.cos(a)]; }}
+function donutArcPath() {{ return 'M0 0'; }}
+function hideChartTip() {{}}
+function showChartTip() {{}}
 const api = (path) => {{ requests++; return ({fetch_impl})(); }};
 
 {m.group(0)}
@@ -75,6 +107,8 @@ const api = (path) => {{ requests++; return ({fetch_impl})(); }};
   console.log(JSON.stringify({{
     donut: els['mix-donut'].innerHTML,
     sub: els['mix-sub'].textContent,
+    legend: els['mix-legend'].innerHTML,
+    cardHidden: els['log-mix'].hidden,
     requests,
   }}));
 }})().catch(e => {{ console.error(e && e.stack || e); process.exit(1); }});
@@ -176,3 +210,79 @@ def test_network_error_stays_retryable():
         NETWORK,
     )
     assert out["requests"] == 2, "网络类错误应允许每轮自动重试"
+
+
+def test_single_model_hides_whole_card():
+    """只有一种模型 → 整张卡（含标题）收起，别留一个 100% 的满圆。"""
+    out = _run("await loadModelMix();", _ok(ONE))
+    assert out["cardHidden"] is True
+    assert out["donut"] == ""
+
+
+def test_multi_model_shows_card():
+    out = _run("await loadModelMix();", _ok(MULTI))
+    assert out["cardHidden"] is False
+    assert "<svg" in out["donut"]
+    assert "glm-5.3-flash" in out["legend"]
+
+
+def test_switch_single_then_multi_reveals_card():
+    """切日期/筛选后从「一种模型」变成「多种」时，卡片必须重新露出来。"""
+    fetch = "() => Promise.resolve(requests === 1 ? %s : %s)" % (
+        json.dumps(ONE, ensure_ascii=False), json.dumps(MULTI, ensure_ascii=False))
+    out = _run("""
+      await loadModelMix();
+      RANGE.start = '2026-09-01';   // 换范围 -> qs 变
+      await loadModelMix();
+    """, fetch)
+    assert out["requests"] == 2
+    assert out["cardHidden"] is False, "模型变多后必须重新显示"
+    assert "<svg" in out["donut"]
+
+
+def test_switch_multi_then_single_hides_card():
+    """反向：从多种切到单一，卡片要收起。"""
+    fetch = "() => Promise.resolve(requests === 1 ? %s : %s)" % (
+        json.dumps(MULTI, ensure_ascii=False), json.dumps(ONE, ensure_ascii=False))
+    out = _run("""
+      await loadModelMix();
+      RANGE.start = '2026-09-01';
+      await loadModelMix();
+    """, fetch)
+    assert out["requests"] == 2
+    assert out["cardHidden"] is True
+
+
+def test_empty_range_hides_card():
+    """没有请求时也没有占比可看：同样整卡隐藏，不留空盒子（用户 2026-10-20 追加要求）。"""
+    out = _run("await loadModelMix();", _ok(EMPTY))
+    assert out["cardHidden"] is True
+    assert out["donut"] == "", "隐藏时不留残留内容"
+    assert out["sub"] == "", "藏起来的副标题也别留「0 次」"
+
+
+def test_switch_multi_then_empty_hides_card():
+    """多个模型 → 筛成空：要从显示切回隐藏。"""
+    fetch = "() => Promise.resolve(requests === 1 ? %s : %s)" % (
+        json.dumps(MULTI, ensure_ascii=False), json.dumps(EMPTY, ensure_ascii=False))
+    out = _run("""
+      await loadModelMix();
+      RANGE.start = '2026-09-01';
+      await loadModelMix();
+    """, fetch)
+    assert out["requests"] == 2
+    assert out["cardHidden"] is True
+
+
+def test_single_model_then_error_shows_error_not_blank():
+    """上次因单一模型隐藏了，这次接口挂了 —— 必须露出错误提示，而不是继续空白。"""
+    fetch = """() => requests === 1
+      ? Promise.resolve(%s)
+      : Promise.reject(new Error('Not Found'))""" % json.dumps(ONE, ensure_ascii=False)
+    out = _run("""
+      await loadModelMix();
+      RANGE.start = '2026-09-01';
+      await loadModelMix();
+    """, fetch)
+    assert out["cardHidden"] is False, "报错时卡片必须露出来"
+    assert "重启" in out["donut"]
