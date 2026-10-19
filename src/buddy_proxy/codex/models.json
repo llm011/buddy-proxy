@@ -1,0 +1,29 @@
+{
+  "models": [
+    {
+      "id": "gpt-5.5",
+      "description": "GPT-5.5 — 复杂编码 / 研究 / 真实任务的前沿模型（默认）",
+      "reasoning": true
+    },
+    {
+      "id": "gpt-5.4",
+      "description": "GPT-5.4 — 日常编码主力",
+      "reasoning": true
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "description": "GPT-5.4-Mini — 小而快、更省，适合简单任务",
+      "reasoning": true
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "description": "GPT-5.3 Codex Spark — 超快编码模型",
+      "reasoning": true
+    },
+    {
+      "id": "gpt-oss-120b-medium",
+      "description": "GPT-OSS 120B（Medium）",
+      "reasoning": true
+    }
+  ]
+}

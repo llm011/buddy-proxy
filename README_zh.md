@@ -9,7 +9,7 @@
 ## 特性
 
 - **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
-- **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
+- **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / codex / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
 - **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
 - **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）；本地隐藏项会同时从该端点、管理页目录和模型顺序候选中移除
@@ -60,7 +60,7 @@ buddy login codebuddy
 
 buddy start                # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 buddy stop / restart / status / logs
-buddy login [provider]     # 登录/自检上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/dumate/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi）
+buddy login [provider]     # 登录/自检上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/dumate/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/codex）
                            # trae/qoder 可加 --region cn|global（两区账号不通用），其它 provider 忽略该参数；
                            # traeintl/qoderintl 是登录别名，等价 --region global；登录过海外账号会自动启用独立通道，
                            # 管理页里海外额度单独一张卡
@@ -308,6 +308,31 @@ Anthropic 原生端点，所以要把响应**反向转换**成 Anthropic 事件�
 > 排障提示：`30012` 是「**未开通会员**」而不是 token 失效——遇到它本 provider 不会去重换票。
 > 管理页额度面板的 `percent` 已由上游的「剩余」换算成「已用」，且管理页显示的
 > 「已用 N%」用的是 `100 - 剩余`。
+
+### 9. Codex Provider（`codex/` 子包，可选）
+
+把 **ChatGPT 订阅**（Plus / Pro / Team / Free）的 Codex 额度变成一条上游通道，以
+`codex/<id>` 寻址：
+
+```bash
+buddy login codex    # 浏览器授权（回环 1455 收回调）；打不开浏览器时粘贴回调链接
+```
+
+- **不需要安装 Codex CLI**：登录走 OpenAI 公开的 OAuth 客户端（PKCE S256），与 Codex CLI
+  同一套授权，本机没有 `~/.codex/auth.json` 也能登。反过来，已有的 `~/.codex/auth.json`
+  可以在管理页面板「导入账号」里直接粘贴，或从别的机器导出后导入。
+- **协议**：上游是 **Responses** 协议（`https://chatgpt.com/backend-api/codex/responses`，
+  SSE），与其它通道的 Chat Completions 不同。本通道内置双向投影：请求方向把 chat body
+  转成 Responses（system → `instructions`、工具平铺、assistant 历史里的推理不回放，
+  因为 Responses 的 reasoning item 需要上游签名）；响应方向按入口分派——`openai` 把
+  Responses SSE 转 chat delta，`responses` 原样透传，`anthropic` 再转 Anthropic 事件流。
+- **多账号 failover**：重复 `buddy login codex` 换账号登录即追加备用号；401 先强刷一次
+  再换号，429/403 冷却换号（`Retry-After` 优先），5xx 透传不换号。OpenAI 会**轮换
+  refresh_token**，刷新得到的 RT 立即落盘。管理页支持 ▲▼ 顺位、✎ 改名、✕ 删除与导入。
+- **额度**：ChatGPT 后端没有公开的额度查询端点，面板只展示各账号套餐档位与登录状态，
+  不编造 `used_percent`（`rate_limits` 的解析接入点预留为
+  `codex/upstream.py::parse_rate_limits`）。
+- 模型目录：`gpt-5.5`（默认）、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex-spark`、`gpt-oss-120b-medium`（取自 Codex 0.142 的 `models_cache.json`）。
 
 ## 模型列表
 

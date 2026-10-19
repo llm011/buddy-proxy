@@ -34,7 +34,7 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # + 豆包（CDP 直连）+ MiMo（小米桌面登录态）+ Qoder（千问/GLM/Kimi 等）+
 # Antigravity（Google 免费额度，Gemini 3.x / Claude / GPT-OSS）；
 # 可用 PROXY_EXTRA_ARGS 覆盖，或命令行追加参数（如 --default-provider codebuddy）
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --zcode-start --mimo --qoder --antigravity --kimi --default-provider trae}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --zcode-start --mimo --qoder --antigravity --kimi --codex --default-provider trae}"
 
 # 优先使用项目自带 .venv（uv 已装好依赖），否则退回系统 python
 if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
@@ -266,7 +266,7 @@ cmd_login() {
     # tests/test_login_cli.py 的白名单同步测试会盯住。
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi)
+            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi|codex)
                 # 别名（workbuddy/cb/quoder 系、intl 系）原样透传，python 侧归一
                 provider="$1" ;;
             --no-browser)

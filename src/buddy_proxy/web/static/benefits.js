@@ -253,10 +253,10 @@ function renderBenefits() {
   syncNextTimeAuto();
 
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
-  // traepat/antigravity/kimi/qoder/qoderintl/trae/traeintl/codebuddy/dumate 的额度
+  // traepat/antigravity/kimi/codex/qoder/qoderintl/trae/traeintl/codebuddy/dumate 的额度
   // 挪到底部专属面板内展示，这里排除，避免重复且缩短页面。
   // 停用的通道整卡不展示（模型页 provider 开关，用户 2026-10-06 需求）
-  const qps = (BENEFITS.providers || []).filter(p => !p.disabled && p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'qoder' && p.id !== 'qoderintl' && p.id !== 'trae' && p.id !== 'traeintl' && p.id !== 'codebuddy' && p.id !== 'codebuddyintl' && p.id !== 'dumate');
+  const qps = (BENEFITS.providers || []).filter(p => !p.disabled && p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'codex' && p.id !== 'qoder' && p.id !== 'qoderintl' && p.id !== 'trae' && p.id !== 'traeintl' && p.id !== 'codebuddy' && p.id !== 'codebuddyintl' && p.id !== 'dumate');
   // zcode / zcode-start 是同一家产品的两档套餐，卡片排一起好对照——providers
   // 默认按通道注册顺序排，zcode-start 落在队尾、和 zcode 中间隔着 glm/mimo 的卡
   const zcIdx = qps.findIndex(p => p.id === 'zcode');
@@ -282,6 +282,7 @@ function renderBenefits() {
   renderTraeIntlPanel();
   renderTraepatPanel();
   renderKimiPanel();
+  renderCodexPanel();
   renderQoderPanel();
   renderQoderIntlPanel();
   renderAntigravityPanel();

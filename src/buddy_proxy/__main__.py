@@ -238,6 +238,9 @@ def main():
     parser.add_argument("--kimi", action="store_true", default=os.getenv("KIMI_ENABLED", "") == "1",
                         help="启用 Kimi provider（Kimi Code 订阅通道，kimi cli 同款 OAuth；"
                              "凭据跑 `buddy login kimi` 或在管理面板导入 token JSON）")
+    parser.add_argument("--codex", action="store_true", default=os.getenv("CODEX_ENABLED", "") == "1",
+                        help="启用 Codex provider（ChatGPT 订阅通道，OpenAI OAuth 登录，上游 Responses 协议；"
+                             "凭据跑 `buddy login codex` 或在管理面板导入 ~/.codex/auth.json）")
     parser.add_argument("--dumate", action="store_true", default=os.getenv("DUMATE_ENABLED", "") == "1",
                         help="启用 DuMate provider（百度搭子/千帆桌面端本地代理；需本机已安装并登录 DuMate.app 且在运行）")
     parser.add_argument("--zcode-start", action="store_true", default=os.getenv("ZCODE_START_ENABLED", "") == "1",
@@ -397,6 +400,23 @@ def main():
         print(f"[Kimi] Enabled ({_kh.get('nickname') or '未登录'} / {len(_kh.get('accounts') or [])} 个账号)")
     else:
         print("[Kimi] Disabled (pass --kimi or KIMI_ENABLED=1 to enable)")
+
+    if args.codex:
+        from buddy_proxy.codex.provider import CodexProvider
+
+        codex = CodexProvider()
+        try:
+            codex.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("codex provider 认证未就绪: %s", exc.detail)
+        providers[codex.id] = codex
+        _ch = codex.health()
+        logger.info("Codex provider enabled (%s / %s / %s)",
+                    _ch.get("email"), _ch.get("plan_type"), _ch.get("accounts"))
+        print(f"[Codex] Enabled ({_ch.get('email') or '未登录'} / "
+              f"{_ch.get('plan_type') or '?'} / {_ch.get('accounts') or 0} 个账号)")
+    else:
+        print("[Codex] Disabled (pass --codex or CODEX_ENABLED=1 to enable)")
 
     if args.doubao:
         doubao = DoubaoProvider()

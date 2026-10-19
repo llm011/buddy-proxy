@@ -518,6 +518,121 @@ async def ui_kimi_accounts_import(request: Request):
     return await asyncio.to_thread(failover.accounts_status)
 
 
+@app.get("/ui/api/codex/accounts")
+async def ui_codex_accounts(request: Request):
+    """codex 各账号本地凭证/冷却状态（纯本地，不触网，不含秘密）。"""
+    _ensure_local(request)
+    try:
+        from ...codex import failover
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codex 通道不可用"}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/codex/accounts/order")
+async def ui_codex_accounts_order(request: Request):
+    """调整 codex 账号的 failover 顺位（管理页上移/下移按钮）。
+
+    与其它通道同款：提交完整账号 id 顺序列表，重写 index.json 的 priority；
+    返回重排后的账号状态（与 GET 同构）。quota 缓存键带 priority
+    （``quota_epoch``），重排后旧额度快照自动失效。
+    """
+    _ensure_local(request)
+    try:
+        from ...codex import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codex 通道不可用"}})
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 ids（账号 id 的完整顺序列表）"}})
+    try:
+        await asyncio.to_thread(creds.reorder_accounts, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    from ...codex import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/codex/accounts/delete")
+async def ui_codex_accounts_delete(request: Request):
+    """删除一个 codex 账号（索引条目 + cred 文件 + 冷却标记）。"""
+    _ensure_local(request)
+    try:
+        from ...codex import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codex 通道不可用"}})
+    body = await request.json()
+    aid = body.get("id")
+    if not isinstance(aid, str) or not aid.strip():
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（要删除的账号 id）"}})
+    aid = aid.strip()
+    removed = await asyncio.to_thread(creds.delete_account, aid)
+    if not removed:
+        raise HTTPException(status_code=404,
+                            detail={"error": {"message": f"账号不存在: {aid}"}})
+    from ...codex import failover
+    await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/codex/accounts/rename")
+async def ui_codex_accounts_rename(request: Request):
+    """改一个 codex 账号的本地别名（管理页 ✎）。
+
+    只改 index.json 的 ``alias`` 字段（显示名），原始凭据与顺位不动；
+    空串 = 清除别名、回退默认显示名。
+    """
+    _ensure_local(request)
+    try:
+        from ...codex import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codex 通道不可用"}})
+    body = await request.json()
+    aid, alias = body.get("id"), body.get("alias")
+    if not isinstance(aid, str) or not aid.strip() or not isinstance(alias, str):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id 或 alias（要改的账号 id 与新别名）"}})
+    if len(alias.strip()) > 64:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "别名过长（≤64 字符）"}})
+    try:
+        await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
+    from ...codex import failover
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/codex/accounts/import")
+async def ui_codex_accounts_import(request: Request):
+    """导入凭据 JSON（面板「导入账号」入口，CLI 共用）。
+
+    body ``{"payload": <str|dict>}``。认两种形态：Codex CLI 原生的
+    ``{"tokens": {...}}``，以及扁平 ``{"access_token": ..., "refresh_token": ...}``。
+    同 refresh_token / 同 chatgpt_account_id 更新原账号（顺位不变），新的追加
+    为备用号。**不需要本机安装 Codex CLI**——没有 auth.json 时用
+    ``buddy login codex`` 直接授权即可。
+    """
+    _ensure_local(request)
+    try:
+        from ...codex import failover, login
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codex 通道不可用"}})
+    body = await request.json()
+    payload = body.get("payload", body.get("content"))
+    if payload is None:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 payload（~/.codex/auth.json 或同构 JSON）"}})
+    try:
+        await asyncio.to_thread(login.import_cred_payload, payload)
+    except login.LoginError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
 @app.post("/ui/api/traepat/refresh-tokens")
 async def ui_traepat_refresh_tokens(request: Request):
     """立即补签 traepat 缺失/临期 Token；健康账号不强刷。"""
