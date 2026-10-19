@@ -496,8 +496,32 @@ function renderModelMix() {
 }
 
 // 拉取 + 渲染（只在日志页可见时发请求）
+// 接口挂了（典型：进程还没重启，路由表里没有 /ui/api/model-mix）时画一个有指引的
+// 错误态，而不是把后端原话「Not Found」直接益给用户——那句话既不说哪里坏了，
+// 也不说该怎么办。用户 2026-10-19 报的就是这个。
+// 400/404 这类「路由都不存在」的失败重试也没用（每次轮询都会再打一遍、再登一次），
+// 所以标上 MIX_BROKEN 后本轮不再重试，只留一个「重试」按钮；5xx/网络错误则允许
+// 下轮轮询自动重试。
+let MIX_BROKEN = false;
+
+function mixErrorHtml(msg, status) {
+  // 没拿到状态码时（fetch 本身失败）归为网络类，允许自动重试
+  const gone = status === 401 || status === 403 || status === 404 || status === 405;
+  const hint = gone
+    ? '后端没有这个接口——改完代码后<b>需要重启 proxy 进程</b>才会加载新路由（静态 JS/CSS 每次现读，所以前端已经是新的、后端还是旧的）。'
+    : '下一轮自动刷新会重试；也可点「重试」立即重试。';
+  return `<div class="mix-error">
+      <div class="me-title">占比图暂时不可用</div>
+      <div class="me-msg">${esc(msg)}${status ? `（HTTP ${status}）` : ''}</div>
+      <div class="me-hint">${hint}</div>
+      <button class="ghost me-retry" onclick="loadModelMix(true)">重试</button>
+    </div>`;
+}
+
 async function loadModelMix(force) {
   if (currentTab() !== 'log') return;
+  // 已确认是「接口不存在」：别每轮白打一次（force = 用户点「重试」，要放行）
+  if (MIX_BROKEN && !force) return;
   // 与日志表同一套查询串：日期范围 + 通道/模型筛选（客户端维度计数表里没有）。
   // 只传日期的话，勾了「只看某通道」下面表格缩了、饼图却还是全量。
   let qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}`;
@@ -511,13 +535,27 @@ async function loadModelMix(force) {
     const resp = await api('/ui/api/model-mix?' + qs);
     if (seq !== MIX_SEQ) return;         // 已被更晚的请求取代
     MIX = resp; MIX_QS = qs;
+    MIX_BROKEN = false;
     renderModelMix();
   } catch (e) {
     if (seq !== MIX_SEQ) return;
     const el = document.getElementById('mix-donut');
-    if (el) el.innerHTML = `<div class="empty" style="padding:0">加载失败：${esc(e.message)}</div>`;
-    MIX_QS = qs;   // 记下失败时的查询：别在同一次渲染里被反复重试
-                   // （下一轮轮询会先清 MIX_QS，见 loadAll，所以不会一直停在错误态）
+    // api() 抛的 Error 只带 message，丢了状态码；这里从 message 里识别常见的
+    // 「404 Not Found」形态即可（errMessage 对 FastAPI 的 {"detail":"Not Found"}
+    // 就是原样透传这句）。识别不到就按可重试处理。
+    const gone = /not found|404/i.test(e.message || '');
+    MIX_BROKEN = gone;
+    if (el) el.innerHTML = mixErrorHtml(e.message || '请求失败', gone ? 404 : null);
+    // 副标题也要收尾：否则会一直挂着「加载中…」，看着像还在跑
+    const subEl = document.getElementById('mix-sub');
+    if (subEl) subEl.textContent = `${rangeLabel()} · 占比图不可用`;
+    const lg = document.getElementById('mix-legend');
+    if (lg) lg.innerHTML = '';
+    // 关键：**成功才记 MIX_QS**。失败也记的话，下一轮轮询会在
+    // `qs === MIX_QS` 处直接 return，网络抖一下就永久停在错误态
+    // （用户只能手动点「重试」）——这正是本函数要避免的。
+    // 404 那种「接口根本不存在」已经由 MIX_BROKEN 拦住了，不会因此每轮白打。
+    MIX_QS = null;
   }
 }
 
@@ -704,7 +742,12 @@ async function renderRecent() {
     resp = await api('/ui/api/logs?' + qs);
   } catch (e) {
     if (seq !== RECENT_SEQ) return;  // 已被更晚的请求取代
-    el.innerHTML = `<tr><td colspan="9" class="empty">加载失败：${esc(e.message)}</td></tr>`;
+    // 与饼图同款：404/Not Found 基本就是「进程没重启，路由还不存在」，
+    // 把这句话说出来，比把后端原话直接铺在表里有用得多。
+    const gone = /not found|404/i.test(e.message || '');
+    el.innerHTML = `<tr><td colspan="9" class="empty">加载失败：${esc(e.message)}` +
+      (gone ? '<br><span class="muted" style="font-size:12px">后端没有这个接口——改完代码后需<b>重启 proxy 进程</b>才会加载新路由。</span>' : '') +
+      '</td></tr>';
     pager.innerHTML = '';
     return;
     // 失败路径不记 RECENT_QS：下次渲染（轮询/切回页签）应当重试，而不是拿着旧视图空转
