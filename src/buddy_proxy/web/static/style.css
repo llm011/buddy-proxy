@@ -564,6 +564,10 @@
      同一套颜色，hover 互相对应（扇区变亮并发光，其余扇区降不透明度）。 */
   .mix-card { background: var(--card); border: 1px solid var(--line);
               border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; }
+  /* 只有一个模型时整张卡收起（JS 设 hidden）。显式写规则而不是只靠 UA 默认：
+     .mix-body 等后代都有 display，一旦以后谁给 .mix-card 加了 display 值，
+     UA 的 [hidden]{display:none} 会被覆盖、卡片又冒出来。 */
+  .mix-card[hidden] { display: none; }
   .mix-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
               margin-bottom: 10px; }
   .mix-title { font-weight: 600; font-size: 13px; }

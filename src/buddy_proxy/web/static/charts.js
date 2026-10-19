@@ -364,6 +364,31 @@ function modelMixKey(m) { return m.model; }
 
 // 扇区块列表：前 N 个模型各一块，剩下合并成「其他」一块（tooltip 里列明细）。
 // 后端已按**模型名**跨通道合并，所以一块 = 一个模型（providers 里看各通道次数）。
+// 没有对比时饼图没意义：一个满圆 + 一行 100%，或者一片空的「暂无请求」，
+// 都纯占地方。用户在 2026-10-20 反馈里明确要求这两种情形直接隐藏整张卡片。
+//
+// 判定看**扇区数**而不是 MIX.models_total：
+//   - models_total 是聚合前的模型数；top-N + 「其他」折叠后可能只剩两块，
+//     但两块之间有对比，仍然值得看。
+//   - 无数据（total=0）也隐藏：日志页紧接着就是「最近请求」，空态不会让人
+//     以为功能坏了；此时副标题避开显示，免得留下一条孤零零的「0 次」。
+// 所以：有数据、且真正只有一个扇区 → 隐藏；没有数据 → 隐藏。
+function mixHasNothingToCompare() {
+  const slices = mixSlices();
+  const total = slices.reduce((n, s) => n + s.count, 0);
+  return total === 0 || slices.length === 1;
+}
+
+// 卡片显隐：隐藏时整张 .mix-card 连同标题一起收起（不是只清空内容，
+// 否则会在日志页顶部留一个空盒子）。用 hidden 属性而非 display:none，
+// 便于测试与 a11y 工具识别。
+function setMixVisible(visible) {
+  const card = document.getElementById('log-mix');
+  if (!card) return;
+  if (visible) card.removeAttribute('hidden');
+  else card.setAttribute('hidden', '');
+}
+
 function mixSlices() {
   if (!MIX) return [];
   const out = (MIX.models || []).map((m, i) => ({
@@ -424,14 +449,16 @@ function renderModelMix() {
   const slices = mixSlices();
   const total = slices.reduce((n, s) => n + s.count, 0);
 
-  if (!total) {
-    donutEl.innerHTML = '<div class="empty" style="padding:0">所选范围内暂无请求</div>';
+  // 只有一种模型 / 没有数据 → 整张卡隐藏（含标题），别留满圆或空盒子。
+  if (mixHasNothingToCompare()) {
+    MIX_FOCUS = null;
+    donutEl.innerHTML = '';
     legendEl.innerHTML = '';
-    const flt0 = [...LOG_FILTERS.provider].concat([...LOG_FILTERS.model]);
-    if (subEl) subEl.textContent = flt0.length
-      ? `${rangeLabel()} · 已按 ${flt0.join(' / ')} 筛选` : rangeLabel();
+    if (subEl) subEl.textContent = '';
+    setMixVisible(false);
     return;
   }
+  setMixVisible(true);   // 切范围/筛选后模型变多了，要能重新露出来
   const focus = slices.some(s => s.key === MIX_FOCUS) ? MIX_FOCUS : null;
   MIX_FOCUS = focus;
 
@@ -545,6 +572,9 @@ async function loadModelMix(force) {
     // 就是原样透传这句）。识别不到就按可重试处理。
     const gone = /not found|404/i.test(e.message || '');
     MIX_BROKEN = gone;
+    // 出错时要**强制重新露出卡片**：如果上一次是「只有一种模型」而隐藏了，
+    // 现在接口挂了却把错误提示也一并隐藏，用户只会看到空白，比报错还困惑。
+    setMixVisible(true);
     if (el) el.innerHTML = mixErrorHtml(e.message || '请求失败', gone ? 404 : null);
     // 副标题也要收尾：否则会一直挂着「加载中…」，看着像还在跑
     const subEl = document.getElementById('mix-sub');
