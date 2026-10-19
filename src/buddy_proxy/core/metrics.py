@@ -415,60 +415,44 @@ class MetricsCollector:
                         self._bucket(_date_str(rec["ts"]), rec.get("provider", ""), rec.get("model", "")),
                         normalized,
                     )
-                    self._count_add({
-                        "ts": rec["ts"],
-                        "provider": rec.get("provider", ""),
-                        "model": rec.get("model", ""),
-                        **normalized,
-                    })
-        self._backfill_mix_archives(cutoff)
+        self._backfill_mix_archives()
 
-    def _backfill_mix_archives(self, cutoff: float) -> None:
-        """启动时把**更早的归档**也计入饼图计数表（只建 ``_model_counts``）。
+    def _rebuild_mix_counts(self) -> None:
+        """整读所有在期文件，重建饼图计数表（调用方须持有 self._lock）。
+
+        ``_load_tail`` 的 ``_recent`` / ``_daily`` 只能读尾部（2MB 截断，且每次
+        请求都会 append，没法续读），所以计数表不跟着尾部走，而是启动时从文件
+        整读一遍：当前文件 + KEEP_DAYS 内的每个归档，各读一次。
+
+        用「整文件」而非「尾部」是为了和下面日志表的「共 N 条」同口径——归档
+        超过 2MB 时尾部只会少算前半段，且没有任何标记能提示；重复读同一份文件
+        则会翻倍，所以这里一律先清空再重建。
+        """
+        self._model_counts.clear()
+        if self.log_path is None:
+            return
+        cutoff = time.time() - KEEP_DAYS * 86400
+        for path in (self.log_path, *sorted(self.log_path.parent.glob(self.log_path.name + ".*"))):
+            for rec in self._read_all(path):
+                if rec.get("ts", 0) < cutoff:
+                    continue
+                self._count_add(rec)
+        self._mix_floor = min((k[0] for k in self._model_counts), default=None)
+
+    def _backfill_mix_archives(self) -> None:
+        """启动时从文件重建饼图计数表（只建 ``_model_counts``，见 :meth:`_rebuild_mix_counts`）。
 
         ``_load_tail`` 只回读昨日归档 + 当前文件尾部（供内存最近的表格/聚合），
         但请求日志页的日期范围可以拉到 30 天——只靠那份回读的话，切到「30 天」
-        饼图就只剩今天，跟下面的日志表（服务端会扫全部归档）对不上。
+        饼图就只剩今天，跟下面的日志表（服务端会扫全部归档）对不上；而且尾部
+        截断在归档超过 2MB 时会静默少算前半段。
 
-        这里只做**计次**，不复原 token/耗时聚合（那些仍只跟尾部走），所以代价
-        仅是一次流式逐行 json 解析：归档是几十万行级，启动多花百毫秒量级，
-        换每次查询零成本——**运行时（30s 轮询）仍不碰磁盘**，这才是用户担心的
-        那部分。该文件能滚成 30 天归档后自然被 KEEP_DAYS 清掉。
-
-        顺带记下计数表的日期下沿 ``_mix_floor``（= 已计入的最早日期），
-        供 :meth:`model_distribution` 判断「这个窗口的历史确实没扫到」。
+        只做**计次**，不复原 token/耗时聚合（那些仍只跟尾部走），所以代价仅是
+        一次逐行 json 解析：几十万行级，启动多花百毫秒量级，换每次查询零成本——
+        **运行时（30s 轮询）仍不碰磁盘**，这才是用户担心的那部分。
         """
-        if self.log_path is None:
-            return
-        loaded_dates = {k[0] for k in self._model_counts}
-        for path in sorted(self.log_path.parent.glob(self.log_path.name + ".*")):
-            suffix = path.name[len(self.log_path.name) + 1:]
-            try:
-                ts = time.mktime(time.strptime(suffix, "%Y-%m-%d"))
-            except ValueError:
-                continue  # 非日期后缀（.pid / .bak 等）不是归档
-            if ts < cutoff:
-                continue  # 超期归档下次写入时会被清理，不浪费启动时间
-            # 这条归档已被计过（昨日归档由 _load_tail 计、或重复调用本方法）
-            if suffix in loaded_dates:
-                continue
-            try:
-                with self._lock:
-                    for rec in self._read_all(path):
-                        # 不按单条 ts 过滤：全归档都是当日零点前后的真实历史，
-                        # 超期归档已由上面的 ts < cutoff 整体跳过
-                        self._count_add({
-                            "ts": rec["ts"],
-                            "provider": rec.get("provider", ""),
-                            "model": rec.get("model", ""),
-                            "status": rec.get("status", 200),
-                            "error": rec.get("error", ""),
-                        })
-                        loaded_dates.add(_date_str(rec["ts"]))
-            except OSError:
-                continue
-        if self._model_counts:
-            self._mix_floor = min(k[0] for k in self._model_counts)
+        with self._lock:
+            self._rebuild_mix_counts()
 
     # ------------------------------------------------------------------
     # 查询（/ui/api/logs）：按日期范围分页读日志文件（含 30 天归档）
@@ -593,11 +577,14 @@ class MetricsCollector:
         start: Optional[str] = None,
         end: Optional[str] = None,
         limit: int = 12,
+        providers: Optional[list[str]] = None,
+        models: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """按日期范围（YYYY-MM-DD，含端点）汇总**各模型**的请求次数。
 
         口径：扇区按模型名（同模型名跳通道合并），每行附 ``providers`` 供悬浮框
-        展开各通道明细。
+        展开各通道明细。providers/models 与 :meth:`query_logs` 同语义（非空时
+        按白名单过滤、组内 OR），前端用它让饼图跟着日志表的筛选一起收缩。
 
         只读内存里的 ``_model_counts``（构造时已从 30 天内的归档 + 当前文件
         重建）：**不扫磁盘**，所以 30 秒轮询时开销与 /ui/api/stats 同量级。
@@ -616,6 +603,10 @@ class MetricsCollector:
             per: dict[str, dict[str, Any]] = {}
             for (date, provider, model), (count, errors) in self._model_counts.items():
                 if (start and date < start) or (end and date > end):
+                    continue
+                if providers and provider not in providers:
+                    continue
+                if models and model not in models:
                     continue
                 row = per.get(model)
                 if row is None:

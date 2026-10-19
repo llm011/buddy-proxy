@@ -427,7 +427,9 @@ function renderModelMix() {
   if (!total) {
     donutEl.innerHTML = '<div class="empty" style="padding:0">所选范围内暂无请求</div>';
     legendEl.innerHTML = '';
-    if (subEl) subEl.textContent = rangeLabel();
+    const flt0 = [...LOG_FILTERS.provider].concat([...LOG_FILTERS.model]);
+    if (subEl) subEl.textContent = flt0.length
+      ? `${rangeLabel()} · 已按 ${flt0.join(' / ')} 筛选` : rangeLabel();
     return;
   }
   const focus = slices.some(s => s.key === MIX_FOCUS) ? MIX_FOCUS : null;
@@ -485,7 +487,10 @@ function renderModelMix() {
   }).join('');
 
   // 副标题：范围 + 覆盖度（内存计数表只能覆盖启动回读的部分历史）
+  // 筛选生效时明确写出来：否则和下面筛选前的「共 N 条」对不上会被当成 bug
+  const flt = [...LOG_FILTERS.provider].concat([...LOG_FILTERS.model]);
   const bits = [rangeLabel(), `共 ${total.toLocaleString()} 次 · ${(MIX && MIX.models_total) || slices.length} 个模型`];
+  if (flt.length) bits.push(`已按 ${flt.join(' / ')} 筛选`);
   if (MIX && MIX.partial) bits.push('≈ 更早的归档未计入');
   if (subEl) subEl.textContent = bits.join(' · ') + ' · 点图例行可只看该模型';
 }
@@ -493,8 +498,14 @@ function renderModelMix() {
 // 拉取 + 渲染（只在日志页可见时发请求）
 async function loadModelMix(force) {
   if (currentTab() !== 'log') return;
-  const qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}`;
-  if (!force && qs === MIX_QS) return;   // 同范围已渲染：不重复请求
+  // 与日志表同一套查询串：日期范围 + 通道/模型筛选（客户端维度计数表里没有）。
+  // 只传日期的话，勾了「只看某通道」下面表格缩了、饼图却还是全量。
+  let qs = `start=${encodeURIComponent(RANGE.start)}&end=${encodeURIComponent(RANGE.end)}`;
+  if (LOG_FILTERS.provider.size)
+    qs += `&providers=${encodeURIComponent([...LOG_FILTERS.provider].join(','))}`;
+  if (LOG_FILTERS.model.size)
+    qs += `&models=${encodeURIComponent([...LOG_FILTERS.model].join(','))}`;
+  if (!force && qs === MIX_QS) return;   // 同查询已渲染：不重复请求
   const seq = ++MIX_SEQ;
   try {
     const resp = await api('/ui/api/model-mix?' + qs);
@@ -505,7 +516,8 @@ async function loadModelMix(force) {
     if (seq !== MIX_SEQ) return;
     const el = document.getElementById('mix-donut');
     if (el) el.innerHTML = `<div class="empty" style="padding:0">加载失败：${esc(e.message)}</div>`;
-    MIX_QS = null;                       // 失败不记：下次轮询应重试
+    MIX_QS = qs;   // 记下失败时的查询：别在同一次渲染里被反复重试
+                   // （下一轮轮询会先清 MIX_QS，见 loadAll，所以不会一直停在错误态）
   }
 }
 

@@ -7,8 +7,8 @@
 不碰磁盘。这些测试钉住三件事：
 
 1. 计数正确（含错误数），且不依赖落盘（log_path=None 也能用）；
-2. 重启后从昨日归档 + 当前文件重建，与 /ui/api/stats 的口径一致；
-3. top-N + 「其他」合并、日期范围过滤、覆盖度标记（partial）语义。
+2. 重启后整读当前文件 + 30 天归档重建（不跟 2MB 尾部走），与日志表口径一致；
+3. top-N + 「其他」合并、日期/通道/模型过滤、覆盖度标记（partial）语义。
 
 运行：
     .venv/bin/python -m pytest tests/test_model_mix.py -v
@@ -119,6 +119,26 @@ def test_partial_flag_when_window_precedes_loaded_history(tmp_path):
     assert c.model_distribution("2026-01-01", today)["partial"] is True
 
 
+def test_provider_model_whitelist(tmp_path):
+    """通道/模型白名单与日志表同语义（组内 OR），让饼图跟着筛选一起收缩。"""
+    c = MetricsCollector(tmp_path / "metrics.jsonl")
+    for _ in range(3):
+        c.record("codebuddy", "glm-5.3")
+    c.record("trae", "glm-5.3")
+    c.record("trae", "deepseek-v4")
+
+    only_trae = c.model_distribution(providers=["trae"])
+    assert only_trae["total"] == 2
+    assert {m["model"] for m in only_trae["models"]} == {"glm-5.3", "deepseek-v4"}
+    assert only_trae["models"][0]["providers"] == [{"provider": "trae", "count": 1, "errors": 0}]
+
+    only_model = c.model_distribution(models=["glm-5.3"])
+    assert only_model["total"] == 4
+    assert only_model["models"][0]["count"] == 4
+
+    assert c.model_distribution(providers=["zcode"])["total"] == 0
+
+
 def test_backfill_counts_older_archives(tmp_path):
     """日期范围可拉到 30 天，饼图不能只看到今天——更早的归档也要计进来。
 
@@ -147,7 +167,11 @@ def test_backfill_counts_older_archives(tmp_path):
 
 
 def test_backfill_skips_duplicate_yesterday(tmp_path):
-    """昨日归档已被 _load_tail 计过，backfill 不能再数一遍（否则翻倍）。"""
+    """昨日归档不能被数两遍（否则翻倍）。
+
+    早期实现里 ``_load_tail`` 计昨日归档 + backfill 再按日期跳过，靠日期集合
+    推断「谁已经计过」，跨零点/连续两天没写入时就对不上；现在一律整读重建。
+    """
     import time as _t
     yesterday = _t.time() - 86400
     stamp = _t.strftime("%Y-%m-%d", _t.localtime(yesterday))
@@ -157,6 +181,33 @@ def test_backfill_skips_duplicate_yesterday(tmp_path):
         encoding="utf-8")
     c = MetricsCollector(tmp_path / "metrics.jsonl")
     assert c.model_distribution()["total"] == 1
+
+
+def test_backfill_counts_whole_oversized_files(tmp_path):
+    """超过 2MB 的昨日归档 / 当日文件也要整份计数，不能只算尾部。
+
+    `_load_tail` 是尾部截断（2MB），只供内存里最近的表格/聚合；饼图的计数表
+    若跟着它走，一天里前半段的请求就静默丢失，且与日志表「共 N 条」对不上。
+    """
+    import time as _t
+    now = _t.time()
+    today = _date_str(now)
+    stamp = _t.strftime("%Y-%m-%d", _t.localtime(now - 86400))
+    row = '{{"ts": {ts}, "provider": "p", "model": "m", "status": 200, "padding": "{pad}"}}\n'
+    pad = "x" * 100
+    (tmp_path / f"metrics.jsonl.{stamp}").write_text(
+        "".join(row.format(ts=now - 86400, pad=pad) for _ in range(12000)), encoding="utf-8")
+    (tmp_path / "metrics.jsonl").write_text(
+        "".join(row.format(ts=now, pad=pad) for _ in range(15000)), encoding="utf-8")
+    assert (tmp_path / f"metrics.jsonl.{stamp}").stat().st_size > 2_000_000
+    assert (tmp_path / "metrics.jsonl").stat().st_size > 2_000_000
+
+    c = MetricsCollector(tmp_path / "metrics.jsonl")
+    dist = c.model_distribution()
+    assert dist["total"] == 27000
+    per_day = {d: sum(v[0] for k, v in c._model_counts.items() if k[0] == d)
+               for d in (stamp, today)}
+    assert per_day == {stamp: 12000, today: 15000}
 
 
 def test_rebuild_from_archive_matches_live_counts(tmp_path):
