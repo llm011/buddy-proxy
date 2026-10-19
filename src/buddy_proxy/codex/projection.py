@@ -691,13 +691,15 @@ async def aiter_sse_events(
     ``event:`` 行缺省时回退到 payload 里的 ``type`` 字段；``[DONE]`` 结束。
     无法解析的帧跳过（上游偶尔会夹心跳/注释行，不该因此中断整条流）。
     """
-    name = ""
-    data_lines: list[str] = []
+    # 状态用 dict 而不是局部变量：``_flush`` 是闭包，若在 ``yield`` 之后
+    # 重新绑定局部变量，闭包仍会持有旧对象，重置不生效（第二帧会顶着上一帧
+    # 的 event 名）。dict 原地改字节的是同一个对象。
+    state: dict[str, Any] = {"name": "", "data": []}
 
     def _flush() -> tuple[str, dict[str, Any]] | None:
-        if not data_lines:
+        if not state["data"]:
             return None
-        raw = "\n".join(data_lines)
+        raw = "\n".join(state["data"])
         if raw.strip() == "[DONE]":
             return None
         try:
@@ -706,23 +708,23 @@ async def aiter_sse_events(
             return None
         if not isinstance(payload, dict):
             return None
-        return (name or str(payload.get("type") or "")), payload
+        return (state["name"] or str(payload.get("type") or "")), payload
 
     async for line in lines:
         if line == "" or line == "\r":
             flushed = _flush()
             if flushed is not None:
                 yield flushed
-            name = ""
-            data_lines = []
+            state["name"] = ""
+            state["data"] = []
             continue
         if line.startswith(":"):
             continue
         if line.startswith("event:"):
-            name = line[len("event:"):].strip()
+            state["name"] = line[len("event:"):].strip()
             continue
         if line.startswith("data:"):
-            data_lines.append(line[len("data:"):].lstrip())
+            state["data"].append(line[len("data:"):].lstrip())
 
     flushed = _flush()
     if flushed is not None:

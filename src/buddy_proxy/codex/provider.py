@@ -35,12 +35,26 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..core.metrics import ACCOUNT_META
 from ..providers.base import BaseProvider
 from . import failover
+from .catalog import (
+    CatalogError,
+    build_model_entries,
+    fetch_catalog,
+    write_catalog,
+)
 from .credentials import (
     AuthError,
+    codex_state_dir,
     ensure_account_token,
     has_cred,
     list_accounts,
     load_account_cred,
+)
+from .images import (
+    ImageUpstreamError,
+    build_image_body,
+    collect_image,
+    extract_prompt,
+    to_chat_completion as image_to_chat_completion,
 )
 from .projection import (
     ResponsesToChatStream,
@@ -70,21 +84,42 @@ _ATTEMPT_DEADLINE_S = 600.0
 #: 闸门缓冲行上限（防异常上游无界攒内存）。
 _GATE_BUFFER_MAX_LINES = 256
 
+#: 上游心跳事件（不携带业务数据）。生图与高 reasoning 模型的首帧常是它，
+#: 不能被当成「语义已至」。
+_HEARTBEAT_EVENTS = frozenset({"keepalive", "ping", "heartbeat"})
+
+#: 出厂目录（随包分发）：首次启动与兜底用。
 _MODELS_JSON = Path(__file__).with_name("models.json")
+_IMAGES_JSON = Path(__file__).with_name("image_models.json")
 
 #: models.json 损坏时的内置兜底（保持通道可用）。
 _FALLBACK_MODELS = [{
-    "id": "gpt-5.5",
-    "description": "GPT-5.5 (fallback)",
+    "id": "gpt-6.1-sol",
+    "description": "GPT-6.1 Sol (fallback)",
 }]
 
 
+def _runtime_models_path() -> Path:
+    """运行期目录快照（「↻ 重新拉取」写这里，不污染仓库工作区）。
+
+    与凭据同目录（``CODEX_STATE_DIR``），删掉即回落到随包出的厂目录。
+    """
+    return codex_state_dir() / "models.json"
+
+
 def _load_models() -> list[dict[str, Any]]:
-    models = load_models_file(str(_MODELS_JSON))
-    if not models:
-        log.warning("codex: models.json 缺失或损坏，使用内置兜底模型表")
-        return [dict(m) for m in _FALLBACK_MODELS]
-    return models
+    for path in (_runtime_models_path(), _MODELS_JSON):
+        models = load_models_file(str(path))
+        if models:
+            return models
+    log.warning("codex: models.json 缺失或损坏，使用内置兜底模型表")
+    return [dict(m) for m in _FALLBACK_MODELS]
+
+
+def _load_images() -> list[dict[str, Any]]:
+    """图片模型目录（生图走 ``/images/generations``，不混进对话目录文件）。"""
+    models = load_models_file(str(_IMAGES_JSON))
+    return [{**m, "type": "image"} for m in models]
 
 
 class CodexProvider(BaseProvider):
@@ -95,16 +130,71 @@ class CodexProvider(BaseProvider):
 
     def __init__(self) -> None:
         self._models: list[dict[str, Any]] = _load_models()
+        self._images = _load_images()
         self._client: httpx.AsyncClient | None = None
+        self._refresh_lock = asyncio.Lock()
 
     # -- 目录 --
 
     def models(self) -> Sequence[dict[str, Any]]:
-        return [dict(m) for m in self._models]
+        return [dict(m) for m in (*self._models, *self._images)]
 
     def accepts_model(self, model: str, aliases: bool = True) -> bool:
         want = (model or "").strip().removeprefix(f"{self.id}/")
-        return any(str(m.get("id")) == want for m in self._models)
+        return any(str(m.get("id")) == want for m in (*self._models, *self._images))
+
+    def _is_image_model(self, model: str) -> bool:
+        return any(str(m.get("id")) == model for m in self._images)
+
+    async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
+        """从上游目录重新拉取对话模型，并写回 ``models.json``。
+
+        模型页「↻ 重新拉取」按钮的数据源（``GET /ui/api/models/refresh``）。
+        上游目录**按账号套餐**给，所以逐账号尝试、第一个成功即用；单账号
+        失败不冷却（目录失败不代表账号不能转发），全部失败则保留旧快照并
+        抛错，由接口层转成 502——绝不把空表写进文件。
+        """
+        del force  # 目录没有缓存期：按钮本来就是「强制重拉」
+        async with self._refresh_lock:
+            accounts = list_accounts()
+            if not accounts:
+                raise CatalogError("未登录：先跑 `buddy login codex`")
+            client = await self._get_client()
+            errors: list[str] = []
+            upstream: list[dict[str, Any]] | None = None
+            for acct in accounts:
+                try:
+                    access_token, cred = await asyncio.to_thread(
+                        ensure_account_token, acct.id)
+                except AuthError as exc:
+                    errors.append(f"{acct.id}: {exc}")
+                    continue
+                try:
+                    upstream = await fetch_catalog(
+                        client,
+                        base_url=str(cred.get("base_url") or ""),
+                        access_token=access_token,
+                        account_id=str(cred.get("chatgpt_account_id") or ""),
+                    )
+                    break
+                except CatalogError as exc:
+                    errors.append(f"{acct.id}: {exc}")
+            if upstream is None:
+                raise CatalogError("所有账号均拉取失败：" + "；".join(errors))
+
+            entries = build_model_entries(
+                upstream, image_ids=[str(m["id"]) for m in self._images])
+            chat_entries = [e for e in entries if e.get("type") != "image"]
+            path = _runtime_models_path()
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                write_catalog(path, chat_entries)
+            except OSError as exc:
+                raise CatalogError(f"写回 {path} 失败: {exc}") from exc
+            self._models = chat_entries
+            log.info("codex 模型目录已刷新（%d 个对话模型 + %d 个图片模型）",
+                     len(chat_entries), len(self._images))
+            return self.models()
 
     def resolve_model(self, model: str) -> str | None:
         want = (model or "").strip().removeprefix(f"{self.id}/")
@@ -139,9 +229,13 @@ class CodexProvider(BaseProvider):
     ) -> StreamingResponse | JSONResponse:
         self.ensure_auth()
         stream = bool(body.get("stream", False))
-        model = str(body.get("model") or self._models[0]["id"]).removeprefix(f"{self.id}/")
+        default_model = self._models[0]["id"] if self._models else _FALLBACK_MODELS[0]["id"]
+        model = str(body.get("model") or default_model).removeprefix(f"{self.id}/")
         entry = next((m for m in self._models if str(m.get("id")) == model), None)
         if entry is None:
+            if self._is_image_model(model):
+                return await self._forward_image(
+                    body, model, protocol, original, stream)
             raise HTTPException(
                 status_code=400,
                 detail={"error": {
@@ -187,7 +281,10 @@ class CodexProvider(BaseProvider):
             if meta is not None:
                 meta["account"] = acct.id
 
-            upstream_body = build_upstream_body(body, model=upstream_model, stream=stream)
+            # 上游**只**接受 SSE：非流式请求（chat / anthropic 不带 stream）也必须
+            # 以 stream=true 打过去，再把 response.completed 里的终态对象聚合成
+            # 非流式响应。带 stream=false 会被直接 400「Stream must be set to true」。
+            upstream_body = build_upstream_body(body, model=upstream_model, stream=True)
 
             resp = await self._post(
                 client, base_url, upstream_body, access_token, account_id, stream)
@@ -243,8 +340,8 @@ class CodexProvider(BaseProvider):
                 finally:
                     await resp.aclose()
 
-            # 200：过首事件闸门
-            gate = await _gate_first_event(resp, stream)
+            # 200：过首事件闸门（上游恒为 SSE；非流式客户端也要先读完流）
+            gate = await _gate_first_event(resp, True)
             if gate.account_error:
                 last_status, last_detail = gate.code, gate.message
                 failover.mark_cooldown(
@@ -282,15 +379,16 @@ class CodexProvider(BaseProvider):
                     headers=_SSE_HEADERS,
                 )
 
-            payload = gate.payload
+            # 非流式客户端：上游仍是一条 SSE（见上面注释），这里把最后一个
+            # response 对象聚合出来，再按 protocol 还原成非流式响应。
+            payload = await _collect_response(gate.resp, _replay_lines(gate))
+            await gate.resp.aclose()
             if payload is None:
-                await gate.resp.aclose()
                 raise HTTPException(
                     status_code=502,
-                    detail={"error": {"message": "codex upstream returned non-JSON",
+                    detail={"error": {"message": "codex upstream returned no response object",
                                       "type": "bad_gateway"}},
                 )
-            await gate.resp.aclose()
             if protocol == "responses":
                 # 上游 response 对象直接回给 Responses 客户端
                 return JSONResponse(content=payload)
@@ -338,6 +436,95 @@ class CodexProvider(BaseProvider):
             return f"upstream timeout: {exc}"
         except httpx.HTTPError as exc:
             return f"upstream error: {exc}"
+
+    # -- 生图 --
+
+    async def _forward_image(
+        self,
+        body: dict[str, Any],
+        model: str,
+        protocol: str,
+        original: dict[str, Any] | None,
+        stream: bool,
+    ) -> StreamingResponse | JSONResponse:
+        """``gpt-image-*``：走 ``/images/generations``，按协议包成 chat/Anthropic。
+
+        图片是一次性产物：上游 SSE 收完才有图，所以**客户端选流式也只是
+        最后一帧转发**（先发 role 帧再发整图，避免客户端以为卡死）。生成
+        失败按对话同款策略换号（401/403/429 冷却，其余透传最后一次错误）。
+        """
+        prompt = extract_prompt(body)
+        if not prompt:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {
+                    "message": "codex 生图缺少 prompt（放在 messages 的用户文本里）",
+                    "type": "invalid_request_error",
+                }},
+            )
+        accounts = failover.available_accounts()
+        if not accounts:
+            raise HTTPException(
+                status_code=429,
+                detail={"error": {
+                    "message": f"codex 所有账号均在冷却中：{failover.cooldown_report()}",
+                    "type": "rate_limit_error",
+                }},
+            )
+        image_body = build_image_body(model, prompt, **{
+            k: body.get(k) for k in ("size", "quality", "background")
+        })
+        meta = ACCOUNT_META.get()
+        client = await self._get_client()
+        last_status, last_detail = 0, ""
+        for acct in accounts:
+            try:
+                access_token, cred = await asyncio.to_thread(ensure_account_token, acct.id)
+            except AuthError as exc:
+                failover.mark_cooldown(acct.id, reason=f"凭据不可用: {exc}")
+                continue
+            if meta is not None:
+                meta["account"] = acct.id
+            try:
+                result = await collect_image(
+                    client,
+                    base_url=str(cred.get("base_url") or ""),
+                    body=image_body,
+                    access_token=access_token,
+                    account_id=str(cred.get("chatgpt_account_id") or ""),
+                )
+            except ImageUpstreamError as exc:
+                last_status, last_detail = exc.status, str(exc)
+                if exc.status in (401, 403, 429, 502):
+                    failover.mark_cooldown(
+                        acct.id, quota=exc.status == 429,
+                        reason=f"生图 HTTP {exc.status}: {exc}")
+                continue
+
+            chat = image_to_chat_completion(result, model=model, prompt=prompt)
+            if protocol == "anthropic":
+                from ..protocols.anthropic_adapter import (
+                    chat_completion_to_anthropic_message,
+                )
+
+                return JSONResponse(
+                    content=chat_completion_to_anthropic_message(chat, original))
+            if protocol == "responses":
+                return JSONResponse(content=_image_as_response(chat, model))
+            if stream:
+                return StreamingResponse(
+                    _image_chat_stream(chat), media_type="text/event-stream",
+                    headers=_SSE_HEADERS)
+            return JSONResponse(content=chat)
+
+        raise HTTPException(
+            status_code=last_status if last_status in (401, 403, 429) else 502,
+            detail={"error": {
+                "message": f"codex 生图失败（{failover.cooldown_report() or '无可用账号'}；"
+                           f"HTTP {last_status or 'n/a'}{(': ' + last_detail) if last_detail else ''}）",
+                "type": "bad_gateway",
+            }},
+        )
 
     # -- 健康 / 额度 --
 
@@ -532,10 +719,15 @@ class _Gate:
 async def _gate_first_event(resp: httpx.Response, stream: bool) -> _Gate:
     """压住第一个上游事件再决定透传还是换号。
 
-    非流式：全量解析 JSON，``error`` 节点按码分类。流式：缓冲原始 SSE 行
-    直到第一条能定性的事件——语义已至即 committed（缓冲行随透传补放，客户端
-    无损）；``error``/``response.failed`` 判账号级则换号；语义事件前断流按
-    eof 处理（换号，防「200 空流假成功」）。
+    ``stream`` 参数只表示**上游**是不是流式；Codex 后端对 ``/responses``
+    只接受 SSE，所以调用方恒传 ``True``（非流式客户端也是先收完整条流再
+    聚合）。非流式 JSON 分支保留给可能的兼容基址。
+
+    流式：缓冲原始 SSE 行直到第一条能定性的事件——语义已至即 committed
+    （缓冲行随透传补放，客户端无损）；``error``/``response.failed`` 判账号级
+    则换号；语义事件前断流按 eof 处理（换号，防「200 空流假成功」）。
+    **心跳（``keepalive``）不算语义事件**：生图/高推理模型首帧往往是心跳，
+    把它当 committed 会让换号失效。
     """
     if not stream:
         try:
@@ -573,6 +765,12 @@ async def _gate_first_event(resp: httpx.Response, stream: bool) -> _Gate:
             if not isinstance(payload, dict):
                 continue
             name = str(payload.get("type") or "")
+            if name in _HEARTBEAT_EVENTS:
+                # 心跳只证明连接活着，不证明这次请求会成功：继续等真正的
+                # 语义事件（生图首帧实测要等 16s+，全是 keepalive）。
+                # 心跳帧不必重放给下游（它不含业务数据）
+                buffered.clear()
+                continue
             code, message = is_error_event(name, payload)
             if code in (401, 403, 429):
                 return _Gate(resp=resp, account_error=True, code=code,
@@ -630,6 +828,86 @@ class _ReplayStream:
 
     async def aclose(self) -> None:
         await self._resp.aclose()
+
+
+def _image_as_response(chat: dict[str, Any], model: str) -> dict[str, Any]:
+    """生图 chat.completion → Responses 对象（``/v1/responses`` 客户端）。
+
+    图片是 assistant message 的 ``output_image`` content part；文本放
+    ``output_text``。usage 字段名用 Responses 口径。
+    """
+    message = (chat.get("choices") or [{}])[0].get("message") or {}
+    content: list[dict[str, Any]] = []
+    if message.get("content"):
+        content.append({"type": "output_text", "text": str(message["content"])})
+    for item in message.get("images") or []:
+        url = ((item or {}).get("image_url") or {}).get("url")
+        if url:
+            content.append({"type": "output_image", "image_url": url})
+    usage = chat.get("usage") or {}
+    return {
+        "id": chat.get("id") or f"resp_img_{chat.get('created')}",
+        "object": "response",
+        "created_at": chat.get("created"),
+        "status": "completed",
+        "model": model,
+        "output": [{"type": "message", "role": "assistant", "id": "msg_img",
+                    "content": content}],
+        "usage": {
+            "input_tokens": usage.get("prompt_tokens", 0),
+            "output_tokens": usage.get("completion_tokens", 0),
+            "total_tokens": usage.get("total_tokens", 0),
+        },
+    }
+
+
+async def _image_chat_stream(chat: dict[str, Any]) -> AsyncIterator[bytes]:
+    """生图 chat.completion → 两帧 chat chunk（role 帧 + 整图帧）。"""
+    from .images import sse_chunk
+
+    message = (chat.get("choices") or [{}])[0].get("message") or {}
+    base = {"id": chat.get("id"), "object": "chat.completion.chunk",
+            "created": chat.get("created"), "model": chat.get("model")}
+    yield sse_chunk({**base, "choices": [{
+        "index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]}).encode()
+    delta = {k: message[k] for k in ("content", "images") if message.get(k)}
+    yield sse_chunk({**base, "choices": [{
+        "index": 0, "delta": delta, "finish_reason": "stop"}]}).encode()
+    yield b"data: [DONE]\n\n"
+
+
+async def _replay_lines(gate: "_Gate") -> AsyncIterator[str]:
+    """闸门缓冲行 → 在途迭代器（非流式聚合时也要先补放缓冲）。"""
+    for line in gate.buffered:
+        yield line
+    if gate.lines is not None:
+        async for line in gate.lines:
+            yield line
+
+
+async def _collect_response(
+    resp: httpx.Response, lines: AsyncIterator[str] | None = None,
+) -> dict[str, Any] | None:
+    """把整条 Responses SSE 收拢成最终 response 对象（非流式客户端用）。
+
+    终态事件是 ``response.completed``（或 ``response.incomplete`` 截断）；
+    客户端只要最终结果，中间 delta 全部丢弃。``lines`` 是闸门的在途迭代器
+    （已缓冲的心跳被清过，续跑它而不是重开 ``aiter_lines``）。
+    """
+    source = lines if lines is not None else resp.aiter_lines()
+    final: dict[str, Any] | None = None
+    async for name, payload in aiter_sse_events(source):
+        kind = name or str(payload.get("type") or "")
+        if kind in ("response.completed", "response.incomplete"):
+            body = payload.get("response")
+            if isinstance(body, dict):
+                final = body
+        elif kind == "response.failed":
+            # 走到这里说明闸门已经放行了（例如非账号级错误），把错误体当结果
+            body = payload.get("response")
+            if isinstance(body, dict):
+                return body
+    return final
 
 
 async def _pass_through_lines(replay: _ReplayStream) -> AsyncIterator[bytes]:

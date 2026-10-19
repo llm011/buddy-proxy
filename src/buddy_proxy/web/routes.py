@@ -154,6 +154,14 @@ async def list_models():
                 # 一律报成纯文本，客户端据此误剥图片（见列表下方 input_modalities）
                 **({"images": bool(m["images"])} if "images" in m else {}),
                 **({"tool_call": bool(m["tool_call"])} if "tool_call" in m else {}),
+                # 目录条目自带的元数据必须透传：漏传时模型会被报成纯文本 +
+                # 无上下文窗口（codex 目录从上游带回这两项）。
+                **({"context_window": m["context_window"]}
+                   if isinstance(m.get("context_window"), int) else {}),
+                **({"images": True} if "image" in (m.get("input_modalities") or ())
+                   else {}),
+                # 生图模型（codex gpt-image-*）标记：调用方式与对话模型不同
+                **({"type": "image"} if m.get("type") == "image" else {}),
             })
 
     # 用户隐藏项只影响目录曝光，不改变 provider 路由：从两个公开数组生成前统一
