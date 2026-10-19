@@ -86,6 +86,30 @@ async def ui_stats(request: Request):
     return snap
 
 
+@app.get("/ui/api/model-mix")
+async def ui_model_mix(request: Request, start: str = "", end: str = "",
+                       providers: str = "", models: str = "", limit: int = 12):
+    """请求日志页头部的「各模型使用占比」饼图数据。
+
+    只聚合**请求次数**（不读 token/耗时），数据源是 MetricsCollector 的内存
+    计数表，不扫磁盘——见 ``MetricsCollector.model_distribution``。没落盘的
+    部署（log_path=None）也能用，因为它同样在 ``record()`` 时累加。
+
+    providers/models：逗号分隔白名单（与 /ui/api/logs 同语义，组内 OR），
+    让饼图和下面的日志表跟着同一套通道/模型筛选收缩。
+    """
+    _ensure_local(request)
+    state = get_state()
+    metrics = getattr(state, "metrics", None)
+    provs = [p for p in providers.split(",") if p] or None
+    mds = [m for m in models.split(",") if m] or None
+    if metrics is None:
+        return {"start": start, "end": end, "total": 0, "errors": 0,
+                "models": [], "other": None, "models_total": 0, "partial": False}
+    return await asyncio.to_thread(
+        metrics.model_distribution, start or None, end or None, limit, provs, mds)
+
+
 @app.get("/ui/api/logs")
 async def ui_logs(request: Request, start: str = "", end: str = "",
                   page: int = 1, page_size: int = 20,

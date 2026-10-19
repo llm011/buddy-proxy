@@ -305,10 +305,12 @@ function ensureData(key, force) {
 // 否则 renderRecent() 会因 qs 相同而跳过，导致刷新后看不到最新记录。
 function invalidateRecent() {
   RECENT_QS = null;
+  MIX_QS = null;  // 头部饼图同理：强制刷新要看到新请求带来的变化
   // 只作废日志接口自己的去重条目；整表 clear() 会把 overview/benefits/models
   // 正在飞的条目一起丢掉，之后平白多打一轮请求。
   for (const k of [...GET_INFLIGHT.keys()])
-    if (k.startsWith('/ui/api/logs')) GET_INFLIGHT.delete(k);
+    if (k.startsWith('/ui/api/logs') || k.startsWith('/ui/api/model-mix'))
+      GET_INFLIGHT.delete(k);
 }
 
 // 当前页需要哪些数据集。注意每个页签都带上 stats：
@@ -350,7 +352,7 @@ async function loadData(keys, manual, poll) {
 async function loadAll(manual, poll) {
   const cur = currentTab();
   const keys = new Set(['overview', 'benefits', ...dataForTab(cur)]);
-  if (poll) RECENT_QS = null;  // 轮询：日志查询是活数据，需重取
+  if (poll) { RECENT_QS = null; MIX_QS = null; }  // 轮询：日志查询是活数据，需重取
   await loadData([...keys], manual, poll);
 }
 

@@ -54,6 +54,19 @@
 
   <section class="page" id="page-log">
     <div class="range-slot"></div>
+    <!-- 头部概览：左侧饼图（各模型使用占比），右侧图例即明细表。
+         数据来自 /ui/api/model-mix（内存计数表，不扫磁盘）；扇区与图例行
+         双向 hover 联动，点图例行 = 只看该模型，点扇区 = 只留那一块。 -->
+    <div class="mix-card" id="log-mix">
+      <div class="mix-head">
+        <span class="mix-title">各模型使用占比</span>
+        <span class="mix-sub" id="mix-sub">加载中…</span>
+      </div>
+      <div class="mix-body">
+        <div class="mix-donut" id="mix-donut"><div class="empty">加载中…</div></div>
+        <div class="mix-legend" id="mix-legend"></div>
+      </div>
+    </div>
     <h2>最近请求 <span class="sub" id="recent-sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
     <div class="log-filters" id="log-filters"></div>
     <div class="chart-card" style="padding: 4px 8px;">
