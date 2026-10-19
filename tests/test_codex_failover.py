@@ -110,13 +110,24 @@ def _ok_stream(text: str = "pong") -> httpx.Response:
                           stream=_ChunkedBody([body]))
 
 
-def _ok_json(text: str = "pong") -> httpx.Response:
-    return httpx.Response(200, json={
-        "id": "resp_1", "object": "response", "status": "completed",
+def _final_response(text: str, *, id: str = "resp_1") -> dict:
+    return {
+        "id": id, "object": "response", "status": "completed",
         "output": [{"type": "message", "role": "assistant",
                     "content": [{"type": "output_text", "text": text}]}],
         "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
-    })
+    }
+
+
+def _ok_json(text: str = "pong") -> httpx.Response:
+    """**SSE** 终态：上游 /responses 只接受 stream=true（实测硬约束），
+    非流式请求也是先收完整条流再聚合，所以假上游要发 SSE 而不是 JSON。"""
+    body = _sse_events((
+        "response.completed",
+        {"type": "response.completed", "response": _final_response(text, id="r1")},
+    ))
+    return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                          stream=_ChunkedBody([body]))
 
 
 def _error(status: int, retry_after: str | None = None):
@@ -140,7 +151,7 @@ def two_accounts():
 
 def _body(**over) -> dict[str, Any]:
     body: dict[str, Any] = {
-        "model": "codex/gpt-5.4",
+        "model": "codex/gpt-5.6-terra",
         "messages": [{"role": "user", "content": "hi"}],
         "stream": False,
     }
@@ -177,11 +188,14 @@ def _run_stream_text(prov, body, protocol: str = "openai") -> str:
 def test_models_catalog():
     prov = CodexProvider()
     ids = [m["id"] for m in prov.models()]
-    assert ids[0] == "gpt-5.5", "目录首条 = 默认模型"
-    assert prov.accepts_model("gpt-5.5")
-    assert prov.accepts_model("codex/gpt-5.5")
+    # 目录会被「↻ 重新拉取」改写（上游按代际增删），这里只钉「首个可见
+    # 模型是默认模型」与相关别名，不把具体 slug 写死。
+    assert ids[0] in {"gpt-6.1-sol", "gpt-6-sol"}, "目录首条 = 默认模型"
+    assert prov.accepts_model(ids[0])
+    assert prov.accepts_model(f"codex/{ids[0]}")
+    assert "gpt-6.1-sol" in ids and "gpt-6-astra" in ids
     assert not prov.accepts_model("kimi-for-coding")
-    assert prov.resolve_model("codex/gpt-5.4") == "gpt-5.4"
+    assert prov.resolve_model("codex/gpt-5.6-terra") == "gpt-5.6-terra"
     assert prov.resolve_model("nope") is None
 
 
@@ -215,7 +229,7 @@ def test_upstream_request_shape(monkeypatch, two_accounts):
     assert req.headers["Originator"] == "codex-tui"
     assert "codex-tui" in req.headers["User-Agent"]
     sent = json.loads(req.content)
-    assert sent["model"] == "gpt-5.4"
+    assert sent["model"] == "gpt-5.6-terra"
     assert sent["input"][0]["role"] == "user"
     assert "instructions" in sent
 

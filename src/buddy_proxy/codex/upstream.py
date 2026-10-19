@@ -82,6 +82,10 @@ def build_upstream_body(body: dict[str, Any], *, model: str, stream: bool) -> di
     # 上游对 instructions 的存在性敏感，缺失时补空串
     upstream.setdefault("instructions", "")
     upstream["stream"] = bool(stream)
+    # ChatGPT 账号走 Codex 后端时**必须** store=false：带上（或让上游默认 true）
+    # 会直接 400「Store must be set to false」。这是实测出来的硬约束，
+    # 不是可选项——CLIProxyAPI 同样固定写入。
+    upstream["store"] = False
     return upstream
 
 

@@ -1,0 +1,10 @@
+{
+  "source": "Codex 图片目录不在 /backend-api/codex/models 里（那张表只覆盖对话模型），这五个 slug 是探 /backend-api/codex/images/generations 实测可用的；可用性仍按账号套餐走，列表给的是「已实测过」的全集",
+  "models": [
+    {"id": "gpt-image-2.5", "description": "GPT Image 2.5（生图，默认）"},
+    {"id": "gpt-image-2.5-sunburst", "description": "GPT Image 2.5 Sunburst"},
+    {"id": "gpt-image-2.5-flare", "description": "GPT Image 2.5 Flare"},
+    {"id": "gpt-image-2", "description": "GPT Image 2"},
+    {"id": "gpt-image-1.5", "description": "GPT Image 1.5"}
+  ]
+}

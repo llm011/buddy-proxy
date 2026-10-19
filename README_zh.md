@@ -332,7 +332,23 @@ buddy login codex    # 浏览器授权（回环 1455 收回调）；打不开浏
 - **额度**：ChatGPT 后端没有公开的额度查询端点，面板只展示各账号套餐档位与登录状态，
   不编造 `used_percent`（`rate_limits` 的解析接入点预留为
   `codex/upstream.py::parse_rate_limits`）。
-- 模型目录：`gpt-5.5`（默认）、`gpt-5.4`、`gpt-5.4-mini`、`gpt-5.3-codex-spark`、`gpt-oss-120b-medium`（取自 Codex 0.142 的 `models_cache.json`）。
+- **上游只收 SSE**：`/responses` 必须 `stream: true` + `store: false`（否则直接 400）。
+  因此非流式客户端（不带 `stream` 的 `/v1/chat/completions`、`/v1/messages`）也是先以
+  流式请求上游、收到 `response.completed` 后再聚合回非流式响应，行为与直连一致。
+- **模型目录 + 「↻ 重新拉取」**：对话模型来自 `GET /backend-api/codex/models?client_version=`
+  （这张表按客户端版本分代，版本号太旧就看不到新模型，因此固定用 `0.159.0` 查询），
+  只收 `visibility=list` 且 `supported_in_api!=false` 的 slug。模型页「重新拉取」会用当前账号
+  重拉并写入 `~/.buddy-proxy/codex/models.json`（运行期快照，优先于随包的
+  `codex/models.json`；不改仓库文件）。上游返回空表时保留旧快照，绝不把目录清空。
+  当前可见：`gpt-6.1-sol`（默认，500K 上下文）、`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna`、
+  `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`；`gpt-reserve` / `codex-auto-review` 是
+  内部用途（`visibility=hide`），不进列表。
+- **生图**：`gpt-image-2.5`（默认）、`gpt-image-2.5-sunburst`、`gpt-image-2.5-flare`、
+  `gpt-image-2`、`gpt-image-1.5` 走 `POST /backend-api/codex/images/generations`。用法与
+  对话模型一样，用 chat 协议把 prompt 放进 user 消息即可，图片以 data URL 返回在
+  `choices[0].message.images[]`（`/v1/messages` 出口转成 Anthropic `image` 块，
+  `/v1/responses` 出口转成 `output_image`）。上游首帧是十几秒的 `keepalive` 心跳，
+  心跳不计入「已提交」，生图失败同样按 401/403/429 换号。
 
 ## 模型列表
 

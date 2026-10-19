@@ -1,29 +1,12 @@
 {
+  "source": "出厂目录：GET https://chatgpt.com/backend-api/codex/models?client_version=0.159.0（该表按 client_version 分代，旧版本号看不见新模型），只收 visibility=list 且 supported_in_api!=false 的 slug。模型页「↻ 重新拉取」把当前账号的可见目录写进 CODEX_STATE_DIR/models.json，运行时优先读那份快照",
   "models": [
-    {
-      "id": "gpt-5.5",
-      "description": "GPT-5.5 — 复杂编码 / 研究 / 真实任务的前沿模型（默认）",
-      "reasoning": true
-    },
-    {
-      "id": "gpt-5.4",
-      "description": "GPT-5.4 — 日常编码主力",
-      "reasoning": true
-    },
-    {
-      "id": "gpt-5.4-mini",
-      "description": "GPT-5.4-Mini — 小而快、更省，适合简单任务",
-      "reasoning": true
-    },
-    {
-      "id": "gpt-5.3-codex-spark",
-      "description": "GPT-5.3 Codex Spark — 超快编码模型",
-      "reasoning": true
-    },
-    {
-      "id": "gpt-oss-120b-medium",
-      "description": "GPT-OSS 120B（Medium）",
-      "reasoning": true
-    }
+    {"id": "gpt-6.1-sol", "description": "GPT-6.1 Sol — Codex 后端当前最强档（默认）", "context_window": 500000, "input_modalities": ["text", "image"]},
+    {"id": "gpt-6-astra", "description": "GPT-6 Astra — 最难的推理/设计任务", "context_window": 272000, "input_modalities": ["text", "image"]},
+    {"id": "gpt-6-sol", "description": "GPT-6 Sol — 上一代主力档", "context_window": 272000, "input_modalities": ["text", "image"]},
+    {"id": "gpt-6-luna", "description": "GPT-6 Luna — 轻量快档", "context_window": 272000, "input_modalities": ["text", "image"]},
+    {"id": "gpt-5.6-sol", "description": "GPT-5.6 Sol — 前沿编码 / 研究模型", "context_window": 272000, "input_modalities": ["text", "image"]},
+    {"id": "gpt-5.6-terra", "description": "GPT-5.6 Terra — 均衡档", "context_window": 272000, "input_modalities": ["text", "image"]},
+    {"id": "gpt-5.6-luna", "description": "GPT-5.6 Luna — 快速档", "context_window": 272000, "input_modalities": ["text", "image"]}
   ]
 }

@@ -186,8 +186,11 @@ def model_to_codex_format(m: dict[str, Any]) -> dict[str, Any]:
         # 上下文窗口
         # context_window = 当前生效的输入上下文（输入 token 上限）
         # max_context_window = 模型支持的最大上下文（也应为输入 token 上限）
-        "context_window": m.get("max_input"),
-        "max_context_window": m.get("max_input"),
+        # 目录条目自带生效窗口（如 codex 逐模型从上游带回）时优先用它：
+        # max_input 是 codex 访问约定里的大窗口上限，不等于模型实际窗口。
+        "context_window": m.get("context_window") or m.get("max_input"),
+        "max_context_window": (m.get("context_window")
+                               or m.get("max_input")),
         "auto_compact_token_limit": None,
         "effective_context_window_percent": 95,
 

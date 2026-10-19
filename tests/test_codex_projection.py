@@ -387,3 +387,18 @@ def test_iter_sse_events_skips_comments_and_bad_frames():
     ]
     events = list(projection.iter_sse_events(iter(lines)))
     assert events == [("response.output_text.delta", {"delta": "ok"})]
+
+
+# ---------------------------------------------------------------------------
+# 上游 body 收口（build_upstream_body）
+# ---------------------------------------------------------------------------
+
+def test_upstream_body_forces_store_false():
+    """ChatGPT 账号走 Codex 后端时必须 store=false，否则直接 400。"""
+    from buddy_proxy.codex import upstream as codex_upstream
+
+    out = codex_upstream.build_upstream_body(
+        _chat(store=True), model="gpt-6-sol", stream=True)
+    assert out["store"] is False
+    assert codex_upstream.build_upstream_body(
+        _chat(), model="gpt-6-sol", stream=False)["store"] is False
