@@ -15,7 +15,7 @@
 这里用 node 起一个极简 DOM 桩来跑真实的 charts.js 切片，不依赖浏览器。
 
 运行：
-    .venv/bin/python -m pytest tests/test_model_mix_error_ui.py -v
+    .venv/bin/python -m pytest tests/test_model_mix_ui.py -v
 """
 from __future__ import annotations
 
