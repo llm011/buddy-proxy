@@ -292,8 +292,20 @@ def test_image_prompt_from_multimodal_and_direct_field(monkeypatch, two_accounts
     }]), "openai"))
     assert json.loads(upstream.requests[0].content)["prompt"] == "画个苹果"
 
-    asyncio.run(prov.forward(_image_body(prompt="直接给 prompt"), "openai"))
+    # 顶层 prompt 只在「不含对话消息」时才算数（/v1/images 形态）
+    asyncio.run(prov.forward(
+        {"model": "codex/gpt-image-2.5", "prompt": "直接给 prompt"}, "openai"))
     assert json.loads(upstream.requests[-1].content)["prompt"] == "直接给 prompt"
+
+
+def test_image_top_level_prompt_does_not_mask_messages(monkeypatch, two_accounts):
+    """chat 体里顺手带的 ``prompt`` 字段不能盖掉用户真正说的话。"""
+    prov, upstream = two_accounts
+    _patch_token(monkeypatch)
+    upstream.routes["tok-acct-a"] = _image_ok()
+    asyncio.run(prov.forward(
+        _image_body(prompt="别的工具塞进来的字段"), "openai"))
+    assert json.loads(upstream.requests[0].content)["prompt"] == "一只雪地里的红狐，水彩"
 
 
 def test_image_requires_prompt(monkeypatch, two_accounts):
@@ -526,6 +538,53 @@ def test_nonstream_break_before_semantic_event_fails_over(monkeypatch, two_accou
         return json.loads(resp.body)
 
     assert asyncio.run(_go())["choices"][0]["message"]["content"] == "from-b"
+    assert upstream.calls == ["tok-acct-a", "tok-acct-b"]
+
+
+def test_heartbeat_only_stream_times_out_and_fails_over(monkeypatch, two_accounts):
+    """上游只发心跳、迟迟没有语义事件：按空流处理并换号，而不是挂到读超时。
+
+    闸门把心跳看作「连接活着但请求还没定性」，所以不会提交；这里用一个
+    把单调时钟推进到阈值之后的假时钟验证它确实会收手。
+    """
+    prov, upstream = two_accounts
+    _patch_token(monkeypatch)
+    import buddy_proxy.codex.provider as codex_provider
+
+    class _Clock:
+        now = 0.0
+
+        def monotonic(self) -> float:
+            self.now += 1.0
+            return self.now
+
+    clock = _Clock()
+    monkeypatch.setattr(codex_provider.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(codex_provider, "_GATE_HEARTBEAT_ONLY_S", 5.0)
+    upstream.routes["tok-acct-a"] = lambda req: httpx.Response(
+        200, headers={"content-type": "text/event-stream"},
+        stream=_ChunkedBody([
+            _sse_events(("keepalive", {"type": "keepalive"})),
+            _sse_events(("keepalive", {"type": "keepalive"})),
+            _sse_events(("keepalive", {"type": "keepalive"})),
+            _sse_events(("keepalive", {"type": "keepalive"})),
+            _sse_events(("keepalive", {"type": "keepalive"})),
+            _sse_events(("keepalive", {"type": "keepalive"})),
+            _sse_events(("keepalive", {"type": "keepalive"})),
+            _sse_events(("keepalive", {"type": "keepalive"})),
+        ]))
+    upstream.routes["tok-acct-b"] = lambda req: httpx.Response(
+        200, headers={"content-type": "text/event-stream"},
+        stream=_ChunkedBody([_sse_events((
+            "response.completed",
+            {"type": "response.completed", "response": _final_response("from-b")},
+        ))]))
+
+    resp = asyncio.run(prov.forward(
+        {"model": "codex/gpt-5.6-terra",
+         "messages": [{"role": "user", "content": "hi"}], "stream": False},
+        "openai"))
+    assert json.loads(resp.body)["choices"][0]["message"]["content"] == "from-b"
     assert upstream.calls == ["tok-acct-a", "tok-acct-b"]
 
 

@@ -57,15 +57,19 @@ def build_image_body(model: str, prompt: str, **extra: Any) -> dict[str, Any]:
     return body
 
 
+#: 顶层 ``prompt`` 只在**不含 messages**（即 /v1/images 那种一次性素材请求）
+#: 时才认；chat 体里 ``prompt`` 往往是 SDK 顺手透传的额外字段，拿它当提示词
+#: 会盖掉用户真正说的那句话。
 def extract_prompt(body: dict[str, Any]) -> str:
     """从 chat / responses 请求体里抽出要画的 prompt。
 
-    - 老式 ``prompt`` 字段优先（直接透传 OpenAI images 语义）
+    - 不含对话消息时认顶层 ``prompt`` 字段（OpenAI images 语义）
     - 否则取最后一条 user 消息的文本（多模态 content 只拼 text 部分）
     """
-    direct = body.get("prompt")
-    if isinstance(direct, str) and direct.strip():
-        return direct.strip()
+    if not body.get("messages") and not body.get("input"):
+        direct = body.get("prompt")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
     messages = body.get("messages")
     if isinstance(messages, list):
         for msg in reversed(messages):

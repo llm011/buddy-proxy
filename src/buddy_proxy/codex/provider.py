@@ -77,13 +77,20 @@ log = logging.getLogger(__name__)
 #: 流式超时：Responses 上游首 token 可能需要较长推理时间（尤其高 reasoning
 #: effort），read 放到 300s。
 _TIMEOUT_STREAM = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=15.0)
-#: 非流式客户端：上游仍是一次完整读取（聚合），read 放到 600s。
+#: 非流式客户端只作为测试/兼容构造客户端的默认值；上游发送端恒用
+#: ``_TIMEOUT_STREAM``（首帧/帧间隔），整条流的总时长见 ``_AGGREGATE_DEADLINE_S``。
 _TIMEOUT_NONSTREAM = httpx.Timeout(connect=20.0, read=600.0, write=60.0, pool=15.0)
 _TIMEOUT = _TIMEOUT_NONSTREAM
+#: 非流式聚合的**总**时长上限（从首帧到终态事件），与单次 read 超时分开。
+_AGGREGATE_DEADLINE_S = 600.0
 #: failover 循环的尝试期总预算（只挡「还没开始试」的尝试）。
 _ATTEMPT_DEADLINE_S = 600.0
 #: 闸门缓冲行上限（防异常上游无界攒内存）。
 _GATE_BUFFER_MAX_LINES = 256
+#: 闸门只会收到心跳、等不到语义事件的容忍时长。生图/高推理首帧实测 16s+
+#: 全是 keepalive，而对话首个语义事件一般几秒内就到；超过这个时长按空流
+#: 处理（换号），避免整条请求挂到读超时。
+_GATE_HEARTBEAT_ONLY_S = 90.0
 
 #: 上游心跳事件（不携带业务数据）。生图与高 reasoning 模型的首帧常是它，
 #: 不能被当成「语义已至」。
@@ -388,7 +395,18 @@ class CodexProvider(BaseProvider):
             # （语义已经开始流了，换号也不该重放），转成 502/504 给客户端，
             # 但连接必须无论如何回收——否则池里留半开连接越积越多。
             try:
-                payload = await _collect_response(gate.resp, _replay_lines(gate))
+                # 单次 read 只管「多久没有下一帧」；这里再加一个总预算，
+                # 免得上游一直慢速吐帧把请求拖到小时级
+                payload = await asyncio.wait_for(
+                    _collect_response(gate.resp, _replay_lines(gate)),
+                    timeout=_AGGREGATE_DEADLINE_S,
+                )
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=504,
+                    detail={"error": {"message": "codex 非流式聚合超过总时长上限",
+                                      "type": "timeout"}},
+                )
             except httpx.TimeoutException:
                 raise HTTPException(
                     status_code=504,
@@ -453,15 +471,18 @@ class CodexProvider(BaseProvider):
         try:
             req = client.build_request(
                 "POST", f"{base_url}/responses", json=body, headers=headers,
-                timeout=_TIMEOUT)
+                # 首帧预算单独卡（空闲 90s 内没有下一帧就断），总时长走总超时：
+                # 非流式聚合可能持续几分钟，单次 read 超时不该同时兼任两者。
+                timeout=_TIMEOUT_STREAM)
             # 上游恒为 SSE，所以发送端一律用流式打开：``stream=False`` 会让
             # httpx 在 ``send()`` 里预先 ``aread()``，响应体被一次性读光
             # （``is_stream_consumed`` 直接为真），后面的闸门/聚合都读不到东西。
-            return await client.send(req, stream=True)
+            resp = await client.send(req, stream=True)
         except httpx.TimeoutException as exc:
             return f"upstream timeout: {exc}"
         except httpx.HTTPError as exc:
             return f"upstream error: {exc}"
+        return resp
 
     # -- 生图 --
 
@@ -783,6 +804,7 @@ async def _gate_first_event(resp: httpx.Response, stream: bool) -> _Gate:
 
     buffered: list[str] = []
     event_name = ""  # 当前帧的 event 名（data 行前可能先到）
+    waiting_since = time.monotonic()  # 只有心跳在跑的话，从这里开始计时
     # 不经 ``resp.aiter_lines()``：它的底层会把断流/超时吞成「正常结束」
     # （见 ``codex/sse.py``），这里要区分「首事件前网络故障」和「上游空响应」
     line_iter: AsyncIterator[str] = iter_sse_lines(resp)
@@ -817,7 +839,14 @@ async def _gate_first_event(resp: httpx.Response, stream: bool) -> _Gate:
             if name in _HEARTBEAT_EVENTS:
                 # 心跳只证明连接活着，不证明这次请求会成功：继续等真正的
                 # 语义事件（生图首帧实测要等 16s+，全是 keepalive）。
-                # 心跳帧不必重放给下游（它不含业务数据）
+                # 清的是**闸门缓冲**（不把它当已提交的证据），帧本身照常随
+                # 缓冲一起重放给下游——下游转换器会忽略它，但语义上没被吞。
+                if time.monotonic() - waiting_since > _GATE_HEARTBEAT_ONLY_S:
+                    # 只收到心跳、迟迟等不到语义事件：按空流处理（换号），
+                    # 别让整条请求挂在读超时上直到 504/502
+                    log.info("codex: 上游仅发心跳超过 %.0fs，判定空流",
+                             _GATE_HEARTBEAT_ONLY_S)
+                    return _Gate(resp=resp, eof=True, lines=line_iter)
                 buffered.clear()
                 continue
             code, message = is_error_event(name, payload)
