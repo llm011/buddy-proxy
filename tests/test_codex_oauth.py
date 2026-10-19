@@ -53,6 +53,21 @@ def test_build_authorize_url_has_all_params():
     assert q["codex_cli_simplified_flow"] == ["true"]
 
 
+def test_build_authorize_url_prompt_not_duplicated():
+    """``prompt`` 只能出现一次（重复参数服务端取哪个不确定）。"""
+    pkce = oauth.PKCECodes(verifier="v" * 43, challenge="c" * 43)
+    q = urllib.parse.parse_qs(
+        urllib.parse.urlparse(oauth.build_authorize_url(pkce, "s")).query)
+    assert q["prompt"] == ["login"]
+
+
+def test_build_authorize_url_force_reauth_off():
+    pkce = oauth.PKCECodes(verifier="v" * 43, challenge="c" * 43)
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(
+        oauth.build_authorize_url(pkce, "s", force_reauth=False)).query)
+    assert "prompt" not in q
+
+
 @pytest.mark.parametrize("raw, want", [
     ("http://localhost:1455/auth/callback?code=abc&state=xyz", ("abc", "xyz")),
     ("code=abc&state=xyz", ("abc", "xyz")),

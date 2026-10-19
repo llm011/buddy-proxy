@@ -211,6 +211,18 @@ def test_import_missing_payload_400(client):
     assert r.status_code == 400
 
 
+def test_import_account_limit_400_not_500(client):
+    """账号数到上限：AuthError 必须转成 400（否则接口抛 500）。"""
+    from buddy_proxy.codex import credentials
+    for i in range(credentials._MAX_ACCOUNTS):
+        _seed(f"limit{i}")
+    r = client.post("/ui/api/codex/accounts/import", json={"payload": {
+        "access_token": "at", "refresh_token": "rt-overflow",
+        "chatgpt_account_id": "acc-overflow"}})
+    assert r.status_code == 400
+    assert "上限" in r.json()["detail"]["error"]["message"]
+
+
 # ---------------------------------------------------------------------------
 # 账号名解析（日志归属）
 # ---------------------------------------------------------------------------

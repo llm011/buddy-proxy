@@ -43,8 +43,9 @@ SCOPE = "openid email profile offline_access"
 #: - ``prompt=login`` 强制走登录页（否则已登录会话直接弹授权，多账号切换不了）
 #: - ``id_token_add_organizations`` 让 ID token 带上 org/account 声明
 #: - ``codex_cli_simplified_flow`` 是 Codex CLI 专用简化流程开关
+#: 授权页的额外参数（与 Codex CLI 一致）。``prompt`` 不在这里——它由
+#: :func:`build_authorize_url` 的 ``force_reauth`` 控制（重复出现会打架）。
 _EXTRA_AUTH_PARAMS = {
-    "prompt": "login",
     "id_token_add_organizations": "true",
     "codex_cli_simplified_flow": "true",
 }
@@ -91,8 +92,16 @@ def generate_state() -> str:
     return secrets.token_urlsafe(24)
 
 
-def build_authorize_url(pkce: PKCECodes, state: str) -> str:
-    """拼授权 URL（浏览器打开的就是这个）。"""
+def build_authorize_url(
+    pkce: PKCECodes, state: str, *, force_reauth: bool = True,
+) -> str:
+    """拼授权 URL（浏览器打开的就是这个）。
+
+    ``force_reauth``：追加 ``prompt=login``（与 Codex CLI 每次登录都强制重新
+    输密码一致——否则浏览器里已有会话会被静默复用，想「换个账号登」根本换不掉）。
+    **用 dict 合并而不是拼 query**：URL 里本来可能已有 ``prompt=consent``，
+    再拼一个就成了重复参数，服务端取哪个不确定。
+    """
     params = {
         "client_id": CLIENT_ID,
         "response_type": "code",
@@ -103,6 +112,8 @@ def build_authorize_url(pkce: PKCECodes, state: str) -> str:
         "code_challenge_method": "S256",
     }
     params.update(_EXTRA_AUTH_PARAMS)
+    if force_reauth:
+        params["prompt"] = "login"
     return f"{AUTH_URL}?{urllib.parse.urlencode(params)}"
 
 

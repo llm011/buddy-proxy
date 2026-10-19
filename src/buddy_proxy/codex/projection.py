@@ -251,14 +251,19 @@ def chat_to_responses_request(
         "input": items,
         "stream": bool(stream),
     }
-    # Claude Code / Codex CLI 进来时原本就带 instructions：优先用它的（更精确），
-    # 否则用从 system 消息合并出来的。
+    # Claude Code / Codex CLI 进来时原本就带 instructions：它更精确，放前面；
+    # 但 system 消息**不能丢**——例如 anthropic 入口把客户端 ``system`` 转成
+    # system message，而同一份 body 又带着别人的 instructions 时，只取
+    # instructions 会把系统提示整段吞掉。两者都在就按「instructions + 空行 +
+    # system」拼接。
     explicit = body.get("instructions")
+    parts: list[str] = []
     if isinstance(explicit, str) and explicit.strip():
-        upstream["instructions"] = explicit
-    else:
-        # Codex 后端对 instructions 字段的存在性敏感，缺失时补空串（CLIProxyAPI 同款）
-        upstream["instructions"] = instructions or ""
+        parts.append(explicit.strip())
+    if instructions and instructions.strip() and instructions.strip() != (parts[0] if parts else ""):
+        parts.append(instructions.strip())
+    # Codex 后端对 instructions 字段的存在性敏感，缺失时补空串（CLIProxyAPI 同款）
+    upstream["instructions"] = "\n\n".join(parts)
 
     tools = _convert_tools(body.get("tools"))
     if tools:

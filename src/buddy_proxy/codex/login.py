@@ -31,6 +31,7 @@ from .callback_server import (
 )
 from .credentials import (
     AccountRef,
+    AuthError,
     _expiry_iso,
     account_cred_path,
     list_accounts,
@@ -151,7 +152,11 @@ def import_cred_payload(raw: str | dict[str, Any] | bytes) -> dict[str, Any]:
     else:
         payload = raw
     cred = cred_from_payload(payload)
-    ref = save_account_cred(cred)
+    try:
+        ref = save_account_cred(cred)
+    except AuthError as exc:
+        # 账号数到上限：面板入口只认 LoginError（→400），不转就成 500
+        raise LoginError(str(exc)) from exc
     cred["account_id"] = ref.id
     return cred
 

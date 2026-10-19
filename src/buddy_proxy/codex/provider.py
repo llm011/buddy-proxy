@@ -391,7 +391,9 @@ class CodexProvider(BaseProvider):
                 "used": None, "total": None, "remaining": None,
                 "percent": 0, "unit": "percent",
                 "reset_ts": None, "expire_ts": None,
-                "note": f"{plan} 套餐 · 额度随请求实时扣减（无公开查询端点）",
+                # 别写「无公开端点」：上游 ``rate_limits`` 解析已就绪，缺的只是
+                # 稳定数据源（接入点见 comments 与 upstream.parse_rate_limits）
+                "note": f"{plan} 套餐 · 额度随请求实时扣减（上游未提供百分比，暂不展示）",
             })
         return {"items": items, "level": level}
 

@@ -47,7 +47,24 @@ def test_request_explicit_instructions_wins():
         instructions="explicit prompt",
         messages=[{"role": "system", "content": "from system"},
                   {"role": "user", "content": "hi"}]))
-    assert out["instructions"] == "explicit prompt"
+    # explicit 在前（更精确），但 system 不能被吞：anthropic 入口同时带
+    # 客户端 system message 与别人的 instructions 时，丢掉 system 等于
+    # 把系统提示整段删掉。
+    assert out["instructions"] == "explicit prompt\n\nfrom system"
+
+
+def test_request_explicit_instructions_alone_verbatim():
+    """只有 instructions、没有 system message 时原样使用（不多空行）。"""
+    out = projection.chat_to_responses_request(_chat(instructions="only prompt"))
+    assert out["instructions"] == "only prompt"
+
+
+def test_request_instructions_dedup_identical():
+    """instructions 与 system 文本完全一致时不重复拼接。"""
+    out = projection.chat_to_responses_request(_chat(
+        instructions="same",
+        messages=[{"role": "system", "content": "same"}]))
+    assert out["instructions"] == "same"
 
 
 def test_request_assistant_tool_calls_become_function_call_items():
