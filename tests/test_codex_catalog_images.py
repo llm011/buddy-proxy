@@ -96,6 +96,36 @@ def test_build_model_entries_default_first_and_keeps_context():
                            "type": "image"}
 
 
+def test_refresh_keeps_local_flags(monkeypatch, two_accounts, tmp_path):
+    """上游目录没有 reasoning 之类本地旗标：刷新不能把它们丢掉。
+
+    丢了 ``/v1/models`` 的 ``supported_reasoning_levels`` 就空了（见
+    model_list.model_to_codex_format），客户端会以为模型不支持思考。
+    """
+    prov, upstream = two_accounts
+    _patch_token(monkeypatch)
+    target = _state_models()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps({"models": [
+        {"id": "gpt-6.1-sol", "description": "本地中文说明",
+         "reasoning": True, "context_window": 500000},
+        {"id": "fresh-model", "description": "本地给新 slug 的说明"},
+        {"id": "gone-model", "reasoning": True},
+    ]}), encoding="utf-8")
+    upstream.routes["tok-acct-a"] = lambda req: httpx.Response(200, json=_CATALOG)
+
+    asyncio.run(prov.refresh_models())
+
+    written = {m["id"]: m for m in json.loads(target.read_text())["models"]}
+    assert written["gpt-6.1-sol"]["reasoning"] is True
+    assert written["gpt-6.1-sol"]["context_window"] == 500000
+    # 内置文案 > 本地旧目录的说明 > 上游 display_name
+    assert written["gpt-6.1-sol"]["description"].startswith("GPT-6.1 Sol")
+    assert written["old-model"]["description"] == "Old — old one"
+    assert "gone-model" not in written, "上游已经没有的模型不该残留"
+    assert "reasoning" not in written["old-model"], "本地没标的不能凭空加"
+
+
 def test_catalog_url_uses_client_version():
     assert catalog.catalog_url("https://chatgpt.com/backend-api/codex") == (
         "https://chatgpt.com/backend-api/codex/models?client_version=0.159.0")
@@ -329,6 +359,61 @@ def test_image_failure_cools_and_fails_over(monkeypatch, two_accounts):
     assert left > 0 and kind == "quota"
 
 
+def _image_error_sse(err: dict[str, Any]) -> bytes:
+    return _sse_events(
+        ("keepalive", {"type": "keepalive"}),
+        ("error", {"type": "error", "error": err}),
+    )
+
+
+def test_image_inband_usage_limit_cools_and_fails_over(monkeypatch, two_accounts):
+    """HTTP 200 + 带内 usage_limit：免费号最常见形态，必须冷却换号而不是 502。"""
+    prov, upstream = two_accounts
+    _patch_token(monkeypatch)
+    upstream.routes["tok-acct-a"] = lambda req: httpx.Response(
+        200, headers={"content-type": "text/event-stream"},
+        stream=_ChunkedBody([_image_error_sse({
+            "message": "Usage limit reached, resets in 3h", "type": "invalid_request_error",
+            "code": "usage_limit_reached"})]))
+    upstream.routes["tok-acct-b"] = _image_ok()
+
+    resp = asyncio.run(prov.forward(_image_body(), "openai"))
+    assert resp.status_code == 200
+    assert upstream.calls[:2] == ["tok-acct-a", "tok-acct-b"]
+    left, kind = failover.cooldown_left("acct-a")
+    assert left > 0 and kind == "quota"
+
+
+def test_image_invalid_request_is_not_failed_over(monkeypatch, two_accounts):
+    """空 prompt 这类请求错误：换号也救不了，别让下一个账号白等十几秒。"""
+    prov, upstream = two_accounts
+    _patch_token(monkeypatch)
+    upstream.routes["tok-acct-a"] = lambda req: httpx.Response(
+        200, headers={"content-type": "text/event-stream"},
+        stream=_ChunkedBody([_image_error_sse({
+            "message": "Invalid 'prompt': empty string.",
+            "type": "invalid_request_error", "param": "prompt"})]))
+
+    with pytest.raises(Exception) as exc:
+        asyncio.run(prov.forward(_image_body(), "openai"))
+    assert getattr(exc.value, "status_code", None) == 400
+    assert upstream.calls == ["tok-acct-a"], "请求错误不该换号"
+    assert failover.cooldown_left("acct-a")[0] == 0.0, "也不该冷却账号"
+
+
+def test_image_error_status_classification():
+    from buddy_proxy.codex.images import _error_status
+
+    assert _error_status({"code": "usage_limit_reached",
+                          "type": "invalid_request_error"}) == 429
+    assert _error_status({"message": "Rate limit hit"}) == 429
+    assert _error_status({"message": "Unauthorized"}) == 401
+    assert _error_status({"code": "invalid_request_error",
+                          "message": "Invalid 'prompt': empty string."}) == 400
+    assert _error_status({"message": "boom"}) == 502
+    assert _error_status({"code": 503}) == 503
+
+
 def test_image_missing_b64_raises():
     from buddy_proxy.codex.images import ImageUpstreamError, to_data_url
 
@@ -378,6 +463,70 @@ def test_nonstream_always_requests_upstream_stream(monkeypatch, two_accounts):
     sent = json.loads(upstream.requests[0].content)
     assert sent["stream"] is True
     assert sent["store"] is False
+
+
+class _MidstreamBreak(httpx.AsyncByteStream):
+    """发若干帧后断流。``semantic=True`` 时先发一个真语义事件（闸门据此提交），
+    否则只有 keepalive（闸门仍停在「未提交」）。"""
+
+    def __init__(self, *, semantic: bool = False) -> None:
+        self.semantic = semantic
+
+    async def __aiter__(self):
+        if self.semantic:
+            yield _sse_events(("response.created",
+                               {"type": "response.created", "response": {"id": "resp_1"}}))
+        yield _sse_events(("keepalive", {"type": "keepalive"}))
+        raise httpx.ReadError("connection reset")
+
+
+def test_nonstream_midstream_break_returns_502_and_closes(monkeypatch, two_accounts):
+    """语义已开始后断流：不换号，但必须回收连接并给 502（不能裸 500）。
+
+    httpx 的 ``aiter_lines()`` 会把断流吞成「正常结束」——这里同时盯住
+    「被识别成网络故障」，下一条测试盯「首事件前断流仍能换号」。
+    """
+    prov, upstream = two_accounts
+    _patch_token(monkeypatch)
+    # 先出一个语义事件让闸门提交，再断流（只有心跳的话闸门永远不提交，
+    # 断流会被当成「首事件前失败」按设计去换号）
+    upstream.routes["tok-acct-a"] = lambda req: httpx.Response(
+        200, headers={"content-type": "text/event-stream"},
+        stream=_MidstreamBreak(semantic=True))
+    # 不设 B 分支：任何重放都会在 calls 里留痕，断言能抓到
+
+    with pytest.raises(Exception) as exc:
+        asyncio.run(prov.forward(
+            {"model": "codex/gpt-5.6-terra",
+             "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            "openai"))
+    assert getattr(exc.value, "status_code", None) == 502
+    assert upstream.calls == ["tok-acct-a"], "语义已流出，不该重放到下一个账号"
+    assert failover.cooldown_left("acct-a")[0] == 0.0
+
+
+def test_nonstream_break_before_semantic_event_fails_over(monkeypatch, two_accounts):
+    """首事件前断流仍是账号级失败：换号（httpx 默认会把它吞成空流）。"""
+    prov, upstream = two_accounts
+    _patch_token(monkeypatch)
+    upstream.routes["tok-acct-a"] = lambda req: httpx.Response(
+        200, headers={"content-type": "text/event-stream"}, stream=_MidstreamBreak())
+    upstream.routes["tok-acct-b"] = lambda req: httpx.Response(
+        200, headers={"content-type": "text/event-stream"},
+        stream=_ChunkedBody([_sse_events((
+            "response.completed",
+            {"type": "response.completed", "response": _final_response("from-b")},
+        ))]))
+
+    async def _go():
+        resp = await prov.forward(
+            {"model": "codex/gpt-5.6-terra",
+             "messages": [{"role": "user", "content": "hi"}], "stream": False},
+            "openai")
+        return json.loads(resp.body)
+
+    assert asyncio.run(_go())["choices"][0]["message"]["content"] == "from-b"
+    assert upstream.calls == ["tok-acct-a", "tok-acct-b"]
 
 
 def test_aiter_sse_events_resets_name_between_frames():

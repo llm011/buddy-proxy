@@ -62,6 +62,7 @@ from .projection import (
     is_error_event,
     responses_to_chat_completion,
 )
+from .sse import iter_sse_lines
 from .upstream import (
     build_headers,
     build_upstream_body,
@@ -76,7 +77,7 @@ log = logging.getLogger(__name__)
 #: 流式超时：Responses 上游首 token 可能需要较长推理时间（尤其高 reasoning
 #: effort），read 放到 300s。
 _TIMEOUT_STREAM = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=15.0)
-#: 非流式：一次 read 拿到全部响应 = 总时长上限。
+#: 非流式客户端：上游仍是一次完整读取（聚合），read 放到 600s。
 _TIMEOUT_NONSTREAM = httpx.Timeout(connect=20.0, read=600.0, write=60.0, pool=15.0)
 _TIMEOUT = _TIMEOUT_NONSTREAM
 #: failover 循环的尝试期总预算（只挡「还没开始试」的尝试）。
@@ -182,8 +183,11 @@ class CodexProvider(BaseProvider):
             if upstream is None:
                 raise CatalogError("所有账号均拉取失败：" + "；".join(errors))
 
+            # 旧目录（随包或上次快照）只用来补本地旗标，现读而不是用内存中的
+            # self._models——那可能已经是刷新后的形态
             entries = build_model_entries(
-                upstream, image_ids=[str(m["id"]) for m in self._images])
+                upstream, image_ids=[str(m["id"]) for m in self._images],
+                local=_load_models())
             chat_entries = [e for e in entries if e.get("type") != "image"]
             path = _runtime_models_path()
             try:
@@ -287,7 +291,7 @@ class CodexProvider(BaseProvider):
             upstream_body = build_upstream_body(body, model=upstream_model, stream=True)
 
             resp = await self._post(
-                client, base_url, upstream_body, access_token, account_id, stream)
+                client, base_url, upstream_body, access_token, account_id)
             if isinstance(resp, str):  # 网络错误：已冷却
                 last_status, last_detail = 502, resp
                 failover.mark_cooldown(acct.id, reason=resp)
@@ -295,8 +299,8 @@ class CodexProvider(BaseProvider):
 
             # 401：token 被上游拒（refresh_token 被轮换/作废等）——强刷一次
             if resp.status_code == 401:
-                last_status, last_detail = 401, await _error_detail(resp, stream)
-                await _drain_and_close(resp, stream)
+                last_status, last_detail = 401, await _error_detail(resp)
+                await _drain_and_close(resp)
                 try:
                     access_token, cred = await asyncio.to_thread(
                         ensure_account_token, acct.id, force_refresh=True)
@@ -305,14 +309,14 @@ class CodexProvider(BaseProvider):
                     continue
                 account_id = str(cred.get("chatgpt_account_id") or "")
                 resp = await self._post(
-                    client, base_url, upstream_body, access_token, account_id, stream)
+                    client, base_url, upstream_body, access_token, account_id)
                 if isinstance(resp, str):
                     last_status, last_detail = 502, resp
                     failover.mark_cooldown(acct.id, reason=resp)
                     continue
                 if resp.status_code == 401:
-                    last_status, last_detail = 401, await _error_detail(resp, stream)
-                    await _drain_and_close(resp, stream)
+                    last_status, last_detail = 401, await _error_detail(resp)
+                    await _drain_and_close(resp)
                     failover.mark_cooldown(
                         acct.id,
                         reason="401 强刷后仍被拒（refresh_token 可能已失效，请重新登录）")
@@ -321,20 +325,19 @@ class CodexProvider(BaseProvider):
             # 403/429：账号级拒绝（额度/风控/订阅不含该模型）——冷却换号
             if resp.status_code in (403, 429):
                 last_status = resp.status_code
-                last_detail = await _error_detail(resp, stream)
+                last_detail = await _error_detail(resp)
                 failover.mark_cooldown(
                     acct.id,
                     retry_after=resp.headers.get("Retry-After"),
                     quota=resp.status_code == 429,
                     reason=f"HTTP {resp.status_code}{(': ' + last_detail) if last_detail else ''}",
                 )
-                await _drain_and_close(resp, stream)
+                await _drain_and_close(resp)
                 continue
 
             if resp.status_code >= 400:
                 # 其余业务 4xx（模型名不合法等）：换号没意义，原样透传
-                if stream:
-                    await resp.aread()
+                await resp.aread()
                 try:
                     return _upstream_error_response(resp)
                 finally:
@@ -347,7 +350,7 @@ class CodexProvider(BaseProvider):
                 failover.mark_cooldown(
                     acct.id, quota=gate.code == 429,
                     reason=f"带内 error {gate.code}: {gate.message}")
-                await _drain_and_close(gate.resp, stream, gate.lines)
+                await _drain_and_close(gate.resp, gate.lines)
                 continue
             if gate.eof:
                 if gate.timed_out:
@@ -355,7 +358,7 @@ class CodexProvider(BaseProvider):
                     failover.mark_cooldown(acct.id, reason="首事件前读超时")
                 else:
                     last_status, last_detail = 502, "首事件前断流（上游空响应）"
-                await _drain_and_close(gate.resp, stream, gate.lines)
+                await _drain_and_close(gate.resp, gate.lines)
                 continue
 
             if stream:
@@ -381,8 +384,25 @@ class CodexProvider(BaseProvider):
 
             # 非流式客户端：上游仍是一条 SSE（见上面注释），这里把最后一个
             # response 对象聚合出来，再按 protocol 还原成非流式响应。
-            payload = await _collect_response(gate.resp, _replay_lines(gate))
-            await gate.resp.aclose()
+            # 聚合期间上游可能在任意一帧断流/读超时：那不是「账号不可用」
+            # （语义已经开始流了，换号也不该重放），转成 502/504 给客户端，
+            # 但连接必须无论如何回收——否则池里留半开连接越积越多。
+            try:
+                payload = await _collect_response(gate.resp, _replay_lines(gate))
+            except httpx.TimeoutException:
+                raise HTTPException(
+                    status_code=504,
+                    detail={"error": {"message": "codex upstream 聚合响应超时",
+                                      "type": "timeout"}},
+                )
+            except (httpx.HTTPError, httpx.StreamError) as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail={"error": {"message": f"codex upstream 流中断: {exc}",
+                                      "type": "bad_gateway"}},
+                )
+            finally:
+                await gate.resp.aclose()
             if payload is None:
                 raise HTTPException(
                     status_code=502,
@@ -421,17 +441,23 @@ class CodexProvider(BaseProvider):
         body: dict[str, Any],
         access_token: str,
         account_id: str,
-        stream: bool,
     ) -> httpx.Response | str:
-        """发一次上游请求；网络层失败时返回错误文案字符串（调用方冷却换号）。"""
+        """发一次上游请求；网络层失败时返回错误文案字符串（调用方冷却换号）。
+
+        上游**只输出** SSE（非流式客户端也是收完整条流再聚合），所以这里
+        恒按流式请求构造与打开。
+        """
         headers = build_headers(
             access_token, account_id=account_id,
-            session_id=new_session_id(), stream=stream)
+            session_id=new_session_id(), stream=True)
         try:
             req = client.build_request(
                 "POST", f"{base_url}/responses", json=body, headers=headers,
-                timeout=_TIMEOUT_STREAM if stream else _TIMEOUT_NONSTREAM)
-            return await client.send(req, stream=stream)
+                timeout=_TIMEOUT)
+            # 上游恒为 SSE，所以发送端一律用流式打开：``stream=False`` 会让
+            # httpx 在 ``send()`` 里预先 ``aread()``，响应体被一次性读光
+            # （``is_stream_consumed`` 直接为真），后面的闸门/聚合都读不到东西。
+            return await client.send(req, stream=True)
         except httpx.TimeoutException as exc:
             return f"upstream timeout: {exc}"
         except httpx.HTTPError as exc:
@@ -495,10 +521,19 @@ class CodexProvider(BaseProvider):
                 )
             except ImageUpstreamError as exc:
                 last_status, last_detail = exc.status, str(exc)
-                if exc.status in (401, 403, 429, 502):
-                    failover.mark_cooldown(
-                        acct.id, quota=exc.status == 429,
-                        reason=f"生图 HTTP {exc.status}: {exc}")
+                # 400 是请求本身的问题（空 prompt、尺寸不支持）：换号也救不了，
+                # 直接把它当最终结果返回，别让下一个账号白跑一次（要等十几秒）
+                if exc.status == 400:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"error": {"message": str(exc),
+                                          "type": "invalid_request_error"}},
+                    )
+                failover.mark_cooldown(
+                    acct.id, quota=exc.status == 429,
+                    reason=f"生图 HTTP {exc.status}: {exc}")
+                # 其余 401/403/429/502 从哪个层出来（HTTP 状态行或带内 error）
+                # 都按对话同款冷却换号——带内的用量上限正是免费号最常见的形态
                 continue
 
             chat = image_to_chat_completion(result, model=model, prompt=prompt)
@@ -606,10 +641,13 @@ def _upstream_error_response(resp: httpx.Response) -> JSONResponse:
     return JSONResponse(content=payload, status_code=resp.status_code)
 
 
-async def _error_detail(resp: httpx.Response, stream: bool) -> str:
-    """从错误响应体抽 ``error.message``（只用于日志/客户端报错文案）。"""
+async def _error_detail(resp: httpx.Response) -> str:
+    """从错误响应体抽 ``error.message``（只用于日志/客户端报错文案）。
+
+    响应恒以流式打开（见 ``_post``），``resp.json()`` 之前必须先读完。
+    """
     try:
-        if stream:
+        if not resp.is_stream_consumed:
             await resp.aread()
         payload = resp.json()
     except Exception:  # noqa: BLE001
@@ -744,27 +782,38 @@ async def _gate_first_event(resp: httpx.Response, stream: bool) -> _Gate:
                      payload=payload if isinstance(payload, dict) else None)
 
     buffered: list[str] = []
-    lines = resp.aiter_lines()
+    event_name = ""  # 当前帧的 event 名（data 行前可能先到）
+    # 不经 ``resp.aiter_lines()``：它的底层会把断流/超时吞成「正常结束」
+    # （见 ``codex/sse.py``），这里要区分「首事件前网络故障」和「上游空响应」
+    line_iter: AsyncIterator[str] = iter_sse_lines(resp)
     try:
-        async for line in lines:
+        async for line in line_iter:
             buffered.append(line)
             if len(buffered) > _GATE_BUFFER_MAX_LINES:
-                return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
+                return _Gate(resp=resp, committed=True, buffered=buffered, lines=line_iter)
             stripped = line.strip()
+            if not stripped:
+                event_name = ""  # 帧结束：下一帧重新认 event 名
+                continue
+            if stripped.startswith("event:"):
+                event_name = stripped[6:].strip()
+                continue
             if not stripped.startswith("data:"):
                 continue
             data = stripped[5:].strip()
             if not data:
                 continue
             if data == "[DONE]":
-                return _Gate(resp=resp, eof=True, lines=lines)
+                return _Gate(resp=resp, eof=True, lines=line_iter)
             try:
                 payload = json.loads(data)
             except json.JSONDecodeError:
                 continue
             if not isinstance(payload, dict):
                 continue
-            name = str(payload.get("type") or "")
+            # 事件名优先取 ``event:`` 行——上游帧不一定把 type 写进 payload，
+            # 只看 payload 会把任意 data 当语义事件放行（闸门失效）
+            name = event_name or str(payload.get("type") or "")
             if name in _HEARTBEAT_EVENTS:
                 # 心跳只证明连接活着，不证明这次请求会成功：继续等真正的
                 # 语义事件（生图首帧实测要等 16s+，全是 keepalive）。
@@ -774,18 +823,19 @@ async def _gate_first_event(resp: httpx.Response, stream: bool) -> _Gate:
             code, message = is_error_event(name, payload)
             if code in (401, 403, 429):
                 return _Gate(resp=resp, account_error=True, code=code,
-                             message=message, lines=lines)
+                             message=message, lines=line_iter)
             if code:
                 # 其它错误（500 等）：已 committed，交给下游转换器透出
-                return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
+                return _Gate(resp=resp, committed=True, buffered=buffered, lines=line_iter)
             # 任何非错误的 Responses 事件都算语义已至：
             # response.created 一到就可以安全透传（此时不再可能换号）
-            return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
+            return _Gate(resp=resp, committed=True, buffered=buffered, lines=line_iter)
     except httpx.TimeoutException:
-        return _Gate(resp=resp, eof=True, timed_out=True, lines=lines)
-    except httpx.HTTPError:
-        return _Gate(resp=resp, eof=True, lines=lines)
-    return _Gate(resp=resp, eof=True, lines=lines)
+        return _Gate(resp=resp, eof=True, timed_out=True, lines=line_iter)
+    except (httpx.HTTPError, RuntimeError):
+        # RuntimeError：无 request 的响应对象做状态校验时抛的
+        return _Gate(resp=resp, eof=True, lines=line_iter)
+    return _Gate(resp=resp, eof=True, lines=line_iter)
 
 
 def _code_from(err: dict[str, Any]) -> int:
@@ -823,7 +873,7 @@ class _ReplayStream:
             async for line in self._lines:
                 yield line
         else:  # pragma: no cover - 闸门流式路径必然带 lines
-            async for line in self._resp.aiter_lines():
+            async for line in iter_sse_lines(self._resp):
                 yield line
 
     async def aclose(self) -> None:
@@ -894,7 +944,7 @@ async def _collect_response(
     客户端只要最终结果，中间 delta 全部丢弃。``lines`` 是闸门的在途迭代器
     （已缓冲的心跳被清过，续跑它而不是重开 ``aiter_lines``）。
     """
-    source = lines if lines is not None else resp.aiter_lines()
+    source = lines if lines is not None else iter_sse_lines(resp)
     final: dict[str, Any] | None = None
     async for name, payload in aiter_sse_events(source):
         kind = name or str(payload.get("type") or "")
@@ -919,19 +969,21 @@ async def _pass_through_lines(replay: _ReplayStream) -> AsyncIterator[bytes]:
         await replay.aclose()
 
 
-async def _drain_and_close(resp: httpx.Response, stream: bool,
+async def _drain_and_close(resp: httpx.Response,
                            lines: AsyncIterator[str] | None = None) -> None:
-    """读完丢弃响应体并关闭（换号前必须回收连接）。"""
+    """读完丢弃响应体并关闭（换号前必须回收连接）。
+
+    响应恒以流式打开（见 ``_post``），必须显式读完才能复用连接。
+    """
     try:
-        if stream:
-            try:
-                if lines is not None:
-                    async for _ in lines:
-                        pass
-                elif not resp.is_stream_consumed:
-                    await resp.aread()
-            except (httpx.HTTPError, httpx.StreamError):
-                pass
+        try:
+            if lines is not None:
+                async for _ in lines:
+                    pass
+            elif not resp.is_stream_consumed:
+                await resp.aread()
+        except (httpx.HTTPError, httpx.StreamError):
+            pass
     finally:
         await resp.aclose()
 

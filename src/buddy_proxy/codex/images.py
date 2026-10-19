@@ -25,6 +25,7 @@ from typing import Any
 import httpx
 
 from .projection import aiter_sse_events
+from .sse import iter_sse_lines
 from .upstream import build_headers, normalize_base_url, new_session_id
 
 #: 图片默认模型（请求里的 model 若只是 ``image`` 之类占位时用）。
@@ -124,7 +125,7 @@ async def collect_image(
                 raw = (await resp.aread())[:400]
                 raise ImageUpstreamError(resp.status_code,
                                          raw.decode("utf-8", "replace"))
-            async for name, event in aiter_sse_events(resp.aiter_lines()):
+            async for name, event in aiter_sse_events(iter_sse_lines(resp)):
                 kind = name or str(event.get("type") or "")
                 if kind == "image_generation.completed":
                     payload = event
@@ -151,17 +152,36 @@ class ImageUpstreamError(RuntimeError):
         self.status = status
 
 
+#: 上游带内 error 里表示「这个账号的额度/用量用完了」的文案特征。实测空 prompt
+#: 是 ``invalid_request_error``（与账号无关），用量上限则以 ``usage_limit_reached``
+#: 一类码或 ``rate limit`` 文案出现——这类才是换号能救的。
+_ACCOUNT_LIMIT_WORDS = (
+    "usage_limit", "rate_limit", "rate limit", "quota", "too many requests",
+    "insufficient", "credits", "limit reached", "resets_in",
+)
+
+
 def _error_status(err: dict[str, Any]) -> int:
+    """带内 error → 供 failover 决策的 HTTP 状态码。
+
+    顺序很重要：先认文案（用量/额度 → 429）再认 ``code``，因为上游把
+    ``usage_limit_reached`` 塞在 ``error.code`` 而 ``error.type`` 仍是
+    ``invalid_request_error``——只看 type 会把账号额度误判成请求错误，
+    永远不换号。
+    """
     raw = err.get("code") or err.get("status")
     if isinstance(raw, int) and 400 <= raw <= 599:
         return raw
-    text = str(raw or err.get("message") or "").lower()
-    if any(k in text for k in ("rate_limit", "quota", "usage_limit")):
+    text = " ".join(str(err.get(k) or "") for k in ("code", "type", "message")).lower()
+    if any(k in text for k in _ACCOUNT_LIMIT_WORDS):
         return 429
-    if "unauthorized" in text or "auth" in text:
+    if "unauthorized" in text or "authentication" in text:
         return 401
     if "forbidden" in text or "permission" in text:
         return 403
+    # 参数/请求错误（空 prompt、不支持的尺寸等）：请求本身有问题，换号也没用
+    if "invalid" in text or "unsupported" in text:
+        return 400
     return 502
 
 

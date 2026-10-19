@@ -85,16 +85,32 @@ def parse_catalog(payload: Any) -> list[dict[str, Any]]:
     return out
 
 
+#: 上游目录里没有、只存在于本地 ``models.json`` 的能力旗标。刷新时按 slug
+#: 从旧目录抄回来——否则一次刷新就把 ``reasoning`` 之类丢掉，``/v1/models``
+#: 的 ``supported_reasoning_levels`` 随之变空。
+_LOCAL_FLAGS = ("reasoning", "tool_call", "interleaved_thinking")
+
+
 def build_model_entries(
     upstream: list[dict[str, Any]],
     *,
     image_ids: list[str] | None = None,
+    local: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """上游条目 → ``models.json`` 的 ``models`` 数组（默认模型排第一）。"""
+    """上游条目 → ``models.json`` 的 ``models`` 数组（默认模型排第一）。
+
+    ``local`` 是刷新前的本地目录：只用来补上游不提供的本地标注
+    （:data:`_LOCAL_FLAGS`，以及本地有、上游没给描述时的中文说明）。
+    """
+    previous = {
+        str(m.get("id")): m for m in (local or [])
+        if isinstance(m, dict) and m.get("id") and m.get("type") != "image"
+    }
     entries: list[dict[str, Any]] = []
     for item in upstream:
         slug = str(item.get("slug") or "").strip()
-        note = _LOCAL_NOTES.get(slug)
+        old = previous.get(slug) or {}
+        note = _LOCAL_NOTES.get(slug) or _text_like(old.get("description"))
         if not note:
             display = str(item.get("display_name") or slug).strip()
             desc = str(item.get("description") or "").strip()
@@ -103,8 +119,15 @@ def build_model_entries(
         ctx = item.get("context_window")
         if isinstance(ctx, int) and ctx > 0:
             entry["context_window"] = ctx
+        elif isinstance(old.get("context_window"), int):
+            entry["context_window"] = old["context_window"]
         if item.get("input_modalities"):
             entry["input_modalities"] = list(item["input_modalities"])
+        elif old.get("input_modalities"):
+            entry["input_modalities"] = list(old["input_modalities"])
+        for key in _LOCAL_FLAGS:
+            if key in old:
+                entry[key] = old[key]
         entries.append(entry)
 
     # 默认模型置顶（它代表 `body` 不带 model 时的落点，见 provider.forward）
@@ -114,6 +137,11 @@ def build_model_entries(
     for mid in image_ids or []:
         entries.append(_image_entry(mid))
     return entries
+
+
+def _text_like(value: Any) -> str:
+    """本地 description 若是字符串则原样用（上游描述可能只是英文展示名）。"""
+    return value.strip() if isinstance(value, str) else ""
 
 
 _IMAGE_NOTES = {
