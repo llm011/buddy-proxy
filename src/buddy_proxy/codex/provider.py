@@ -613,6 +613,9 @@ class CodexProvider(BaseProvider):
         - 单账号查询失败（网络 / 401 / 非 JSON）：该账号一条说明条，不影响
           其它账号。说明条不携带 ``percent``，面板会按 notice 横贯渲染——
           这正是想要的效果，别拿 0% 冒充「用完了」。
+        - 上游 ``rate_limit_reset_credits`` 出一行「重置券」（``unit:
+          reset_credit``）。它是**独立标记行**不是额度：不带 percent/remaining，
+          只借 ``who`` 指明归属账号，面板按账号卡片渲染，不进合计/告警。
         """
         accounts = list_accounts()
         if not accounts:
@@ -646,7 +649,14 @@ class CodexProvider(BaseProvider):
                 plan = str(parsed["level"])
                 if level is None or i == 1:
                     level = plan
-            windows = parsed.get("items") or []
+            parsed_items = list(parsed.get("items") or [])
+            # 重置券是张数说明，不是额度水位：单独的标记行 + who（账号标题），
+            # 前端据此放进该账号卡片，不走下面的窗口标签拼接。
+            resets = [w for w in parsed_items if w.get("unit") == "reset_credit"]
+            windows = [w for w in parsed_items if w.get("unit") != "reset_credit"]
+            # 券行先落盘：没有窗口的账号（例如额度已耗尽）也要能看到自己的券。
+            for reset in resets:
+                items.append({**dict(reset), "who": title})
             if not windows:
                 items.append({
                     **notice_item(title, f"{plan} 套餐 · 上游未返回可用额度窗口"),

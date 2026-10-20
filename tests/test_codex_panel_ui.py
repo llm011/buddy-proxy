@@ -360,3 +360,125 @@ console.log(JSON.stringify({calls: CALLS, alias: CODEX_ACCTS[0].alias, renders: 
                               "body": {"id": "u1", "alias": "新名"}}]
     assert data["alias"] == "新名"
     assert data["renders"] >= 1
+
+
+def _reset_item(who, available, applicable=None):
+    """重置券条目：真实形态——独立标记行，无 percent/used，只靠 who 归属。"""
+    counts = {"available": available}
+    if applicable is not None:
+        counts["applicable"] = applicable
+    return {"label": "重置券", "unit": "reset_credit", "reset_credit": True,
+            "reset_credits": counts, "used": None, "total": None,
+            "remaining": None, "percent": None, "who": who}
+
+
+_ACCTS_TWO = """[{id: 'u1', name: 'a@x.y', alias: '主力号', index: 1, plan_type: 'plus', cooling: []},
+  {id: 'u2', name: 'b@x.y', index: 2, plan_type: 'pro', cooling: []}]"""
+
+
+def test_codex_reset_credits_rendered_inside_each_account_card():
+    """券行落在各自账号卡片内：有 applicable 才显示「当前可用」，不进横贯 notice 区。"""
+    items = [
+        _item(1, "a@x.y", "plus 套餐"),
+        _item(2, "b@x.y", "pro 套餐"),
+        _reset_item("Codex #1 · a@x.y", 3, 0),
+        _reset_item("Codex #2 · b@x.y", 1),
+    ]
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [%s]};
+CODEX_ACCTS = %s;
+globalThis.api = async () => ({enabled: true, accounts: CODEX_ACCTS});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+renderCodexPanel();
+const html = PANEL.innerHTML;
+const cards = html.split('pat-pkg-name').slice(1);
+const seg = (n) => {
+  const part = cards[n];
+  const end = part.indexOf('</div>', part.indexOf('<span class="ag-move"'));
+  return part.slice(0, end > 0 ? end : part.length);
+};
+console.log(JSON.stringify({
+  card1: seg(0), card2: seg(1), html,
+  lines: html.split('data-reset-credit').length - 1,
+}));
+""" % (json.dumps(_provider(items)), _ACCTS_TWO))
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["lines"] == 2, "两个账号各一条券行（不合并、不重复）"
+    assert "重置券 3 张 · 当前可用 0 张" in data["card1"]
+    assert "重置券 1 张" in data["card2"]
+    assert "当前可用" not in data["card2"], "没有 applicable 时不拼「当前可用」"
+    # 不在横贯 notice 区：券行只出现在 pat-pkg 卡片里
+    head, _, cards_html = data["html"].partition('pat-quota-grid')
+    assert "重置券" not in head, "券行不能被当成 notice 横贯全宽"
+
+
+def test_codex_reset_credits_only_account_still_renders_card():
+    """只有券没有窗口（额度耗尽/上游没给窗口）的账号也要出带账号名的卡。"""
+    items = [_item(1, "a@x.y", "plus 套餐"), _reset_item("Codex #2 · b@x.y", 2, 1)]
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [%s]};
+CODEX_ACCTS = %s;
+globalThis.api = async () => ({enabled: true, accounts: CODEX_ACCTS});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+renderCodexPanel();
+const html = PANEL.innerHTML;
+console.log(JSON.stringify({
+  grid: html.includes('pat-quota-grid'),
+  card2: html.includes('data-codex-idx="2"'),
+  line: html.includes('重置券 2 张 · 当前可用 1 张'),
+  del2: html.includes("acctDelete('codex','u2')"),
+  empty: html.includes('暂无账号额度数据'),
+}));
+""" % (json.dumps(_provider(items)), _ACCTS_TWO))
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["grid"] and data["card2"], "只有券的账号仍出自己的卡片"
+    assert data["line"] and data["del2"]
+    assert not data["empty"]
+
+
+@pytest.mark.parametrize("bad", [None, "3", 1.5, -1, True])
+def test_codex_reset_credits_invalid_available_not_rendered(bad):
+    """available 非法/缺失 → 整行不渲染（不编数字），也不退化成空 notice。"""
+    item = _reset_item("Codex #1 · a@x.y", 3, 0)
+    if bad is None:
+        item["reset_credits"] = {}
+    else:
+        item["reset_credits"] = {"available": bad, "applicable": 0}
+    items = [_item(1, "a@x.y", "plus 套餐"), item]
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [%s]};
+CODEX_ACCTS = %s;
+globalThis.api = async () => ({enabled: true, accounts: CODEX_ACCTS});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+renderCodexPanel();
+const html = PANEL.innerHTML;
+const grid = html.includes('pat-quota-grid');
+const outside = html.split('pat-quota-grid')[0];
+console.log(JSON.stringify({line: html.includes('重置券'),
+                            notice: outside.includes('class="qitem"')}));
+""" % (json.dumps(_provider(items)), _ACCTS_TWO))
+    data = json.loads(out.strip().splitlines()[-1])
+    assert not data["line"]
+    assert not data["notice"], "非法券行不能落到横贯 notice 区"
+
+
+def test_codex_reset_credits_without_who_not_rendered():
+    """缺 who 的券行直接丢弃：错挂到别的账号比少显示一条更糟。"""
+    items = [_item(1, "a@x.y", "plus 套餐"), _reset_item("", 3, 0)]
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [%s]};
+CODEX_ACCTS = %s;
+globalThis.api = async () => ({enabled: true, accounts: CODEX_ACCTS});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+renderCodexPanel();
+const html = PANEL.innerHTML;
+console.log(JSON.stringify({line: html.includes('重置券'),
+                            cards: html.split('pat-pkg-name').length - 1}));
+""" % (json.dumps(_provider(items)), _ACCTS_TWO))
+    data = json.loads(out.strip().splitlines()[-1])
+    assert not data["line"]
+    assert data["cards"] == 1, "不能为无归属券行凭空多出一张卡"
