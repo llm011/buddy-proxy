@@ -513,7 +513,18 @@ def main():
     # 管理页设置文件里的兜底通道优先于 CLI/环境变量（UI 改动跨重启生效）
     saved_settings = settings_mod.load_settings()
     if saved_settings.get("default_provider"):
-        args.default_provider = normalize_default_model(saved_settings["default_provider"])
+        saved_default = normalize_default_model(saved_settings["default_provider"])
+        # 两处配置不一致时必须喊出来。这个覆盖是**静默**的：plist/proxy.sh 里写着
+        # ``--default-provider trae``、settings.json 里写着 codebuddy 时，实际生效的
+        # 永远是后者，而启动横幅上只看得到结果、看不出「CLI 那份被丢掉了」。
+        # 2026-10-21 排查「切不到模型」时正是被这处不一致带偏过。
+        if args.default_provider and args.default_provider != saved_default:
+            logger.warning(
+                "default-provider 不一致：CLI/环境变量为 '%s'，settings.json 为 '%s'；"
+                "按「管理页设置优先」采用后者。请把启动参数也改成 '%s'，否则两处会持续漂移。",
+                args.default_provider, saved_default, saved_default,
+            )
+        args.default_provider = saved_default
 
     # 校验兜底通道：必须是 codebuddy 或已启用的 provider id
     if args.default_provider != "codebuddy" and args.default_provider not in providers:

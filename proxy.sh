@@ -33,8 +33,13 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # 默认启用 ZCode（glm-* 编码通道，必须最先注册以免被 trae 截走）+ Trae（兜底通道）
 # + 豆包（CDP 直连）+ MiMo（小米桌面登录态）+ Qoder（千问/GLM/Kimi 等）+
 # Antigravity（Google 免费额度，Gemini 3.x / Claude / GPT-OSS）；
-# 可用 PROXY_EXTRA_ARGS 覆盖，或命令行追加参数（如 --default-provider codebuddy）
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --zcode-start --mimo --qoder --antigravity --kimi --codex --default-provider trae}"
+# 可用 PROXY_EXTRA_ARGS 覆盖，或命令行追加参数（如 --default-provider trae）。
+#
+# 兜底通道用 codebuddy：它是唯一恒在的通道（无需任何 flag 注册），不会因为
+# 某个 flag 被拿掉就失效。早先这里写的是 trae——但 settings.json 的
+# ``default_provider`` 会覆盖本参数（见 __main__.py「管理页设置优先于 CLI」），
+# 两处常年不一致却毫无提示，排查时极易被带偏。
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --zcode-start --mimo --qoder --antigravity --kimi --codex --default-provider codebuddy}"
 
 # 优先使用项目自带 .venv（uv 已装好依赖），否则退回系统 python
 if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then

@@ -46,7 +46,7 @@
         <string>--doubao</string>
         <string>--zcode</string>
         <string>--default-provider</string>
-        <string>trae</string>
+        <string>codebuddy</string>
     </array>
 
     <key>WorkingDirectory</key>
