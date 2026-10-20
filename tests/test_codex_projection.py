@@ -134,6 +134,25 @@ def test_request_max_completion_tokens_preferred():
     assert out["max_output_tokens"] == 200
 
 
+def test_request_max_output_tokens_clamped_to_upstream_minimum():
+    """上游要 ≥16；低值必须钳住而不是透传。
+
+    ``max_tokens: 1`` 是 Claude Code ``/model`` 切换时的探测请求。原样透传会被
+    上游拒成 ``integer_below_min_value``（400），表现为「切不到该模型」；而 400
+    不在 ``forward._RETRYABLE_STATUS`` 里，还会顺带中断整条 model_order 换档链。
+    """
+    out = projection.chat_to_responses_request(_chat(max_tokens=1))
+    assert out["max_output_tokens"] == projection._MIN_MAX_OUTPUT_TOKENS == 16
+
+
+def test_request_max_output_tokens_above_minimum_untouched():
+    """钳制只在下方生效，真实请求的上限不能被抬高。"""
+    out = projection.chat_to_responses_request(_chat(max_tokens=16))
+    assert out["max_output_tokens"] == 16
+    out = projection.chat_to_responses_request(_chat(max_tokens=17))
+    assert out["max_output_tokens"] == 17
+
+
 def test_request_drops_stop():
     """Responses 不支持 stop，塞进去会 400。"""
     out = projection.chat_to_responses_request(_chat(stop=["END"]))

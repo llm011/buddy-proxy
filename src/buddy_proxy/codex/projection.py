@@ -54,6 +54,10 @@ def _now_s() -> int:
 #: chat 里表示「思考中」的字段名（各家用得不一样），统一映射到 reasoning summary。
 _REASONING_MESSAGE_KEYS = ("reasoning_content", "reasoning", "thinking")
 
+#: 上游 Responses 对 ``max_output_tokens`` 的硬下界。低于它的值会被直接拒绝
+#: （``integer_below_min_value``），见 :func:`chat_to_responses_request` 里的说明。
+_MIN_MAX_OUTPUT_TOKENS = 16
+
 
 def _text_of(content: Any) -> str:
     """把 chat 的 content（str / parts 数组）压成纯文本。"""
@@ -276,10 +280,18 @@ def chat_to_responses_request(
     if reasoning:
         upstream["reasoning"] = reasoning
 
-    # chat 用 max_tokens，Responses 用 max_output_tokens
+    # chat 用 max_tokens，Responses 用 max_output_tokens。
+    # 上游对 max_output_tokens 有下界 **16**，低于它的请求会被硬拒：
+    #   {"code":"integer_below_min_value",
+    #    "message":"Invalid 'max_output_tokens': ... Expected a value >= 16"}
+    # 这个值绝不能原样透传——Claude Code 的 `/model` 切换会发 `max_tokens: 1`
+    # 的探测请求，透传后拿到 400，表现为「切不到该模型」；而 400 又不在
+    # ``forward._RETRYABLE_STATUS`` 里（确定性错误），整条 model_order 换档链
+    # 会就此中断，后面几档根本没机会试。钳到 16 只抬高探测请求的上限，
+    # 对真实请求（通常上千）无影响。
     max_tokens = body.get("max_completion_tokens") or body.get("max_tokens")
     if isinstance(max_tokens, int) and max_tokens > 0:
-        upstream["max_output_tokens"] = max_tokens
+        upstream["max_output_tokens"] = max(max_tokens, _MIN_MAX_OUTPUT_TOKENS)
 
     for key in ("temperature", "top_p", "user", "service_tier"):
         if body.get(key) is not None:
