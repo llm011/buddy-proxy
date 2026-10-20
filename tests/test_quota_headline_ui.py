@@ -303,6 +303,38 @@ def test_expiry_banner_non_credit_hides_amount():
     assert '19.5' not in out, f"非积分类不该显示余量: {out}"
 
 
+def test_quota_item_renders_percent_only_window_with_bar():
+    """Codex /wham/usage 只给已用百分比，不给 used/total 的绝对量。
+
+    这种条目仍应显示「剩 75% · 已用 25%」并画 25% 进度条；不能因 total=null
+    降级成「剩 75 · 已用未知」且整条进度条消失。
+    """
+    out = _run_fn(("quotaItemHtml",), """
+console.log(quotaItemHtml({
+  label: '5 小时窗口', used: null, total: null, remaining: 75,
+  percent: 25, reset_ts: 1792525266, unit: 'percent',
+}));
+""")
+    assert '剩 75%' in out, out
+    assert '已用 25%' in out, out
+    assert '已用未知' not in out, out
+    assert 'class="qbar"' in out, out
+    assert 'width:25%' in out, out
+
+
+def test_quota_item_percent_only_derives_remaining_when_missing():
+    """百分比窗口若没显式给 remaining，也能从已用百分比推出剩余。"""
+    out = _run_fn(("quotaItemHtml",), """
+console.log(quotaItemHtml({
+  label: '周窗口', used: null, total: null, remaining: null,
+  percent: 17, reset_ts: null, unit: 'percent',
+}));
+""")
+    assert '剩 83%' in out, out
+    assert '已用 17%' in out, out
+    assert 'class="qbar"' in out, out
+
+
 def test_quota_item_renders_expire_not_reset():
     """条目上的日期后缀要分「到期」与「重置」，不能一律说成重置。
 

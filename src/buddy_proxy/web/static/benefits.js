@@ -441,11 +441,15 @@ function quotaItemHtml(it) {
   const hasBar = pct != null;
   pct = Math.max(0, Math.min(100, Number(pct) || 0));
   const color = pct >= 85 ? 'var(--err)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)';
+  const percentOnly = it.unit === 'percent' && hasBar;
   let rem = it.remaining;
   if (rem == null && it.used != null && it.total != null) rem = it.total - it.used;
-  // 只有「分子分母都拿到」才算有数：只见 total 时（例如额度网关只回包容量、
+  // Codex /wham/usage 只给已用百分比，不给绝对 used/total；这种形状仍然有完整
+  // 水位语义。缺 remaining 时可由 100-pct 推出，不能显示「已用未知」。
+  if (rem == null && percentOnly) rem = 100 - pct;
+  // 只有「分子分母都拿到」才算有绝对量：只见 total 时（例如额度网关只回包容量、
   // 还没回用量）下面的 ``percent`` 实际是 0，报出来就是「剩 300 / 300 · 已用
-  // 0%」这种把未知当零的假象。有 rem 走正常文案，没 rem 就说「已用未知」。
+  // 0%」这种把未知当零的假象。百分比窗口是例外，它不需要绝对分母。
   const hasNums = rem != null;
   const hasVolume = hasNums && it.total != null;
   const fmtReset = it.reset_ts ? new Date(it.reset_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'}) : '';
@@ -479,9 +483,11 @@ function quotaItemHtml(it) {
   const noticeColor = it.unreachable ? 'var(--err)'
     : (it.query_failed ? 'var(--warn)' : 'var(--muted)');
   const nums = hasNums
-    ? (hasVolume
-        ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
-        : `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> · 已用未知</span>`)
+    ? (percentOnly
+        ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}%</span> · 已用 ${pct}%</span>`
+        : (hasVolume
+            ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
+            : `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> · 已用未知</span>`))
     : (pending
         ? `<span class="mono muted" title="standard 池无主动查询接口，用量仅在账号撞 4031 时被动采集；重置后成功请求不带账单事件，故用量待下次撞码确认">已于 ${fmtReset || '—'} 重置 · 用量待确认</span>`
         : (notice
@@ -494,7 +500,7 @@ function quotaItemHtml(it) {
                 : '<span class="mono"></span>')));
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
-  const bar = hasVolume && hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
+  const bar = (hasVolume || percentOnly) && hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
   // note：后端的解释性附注（如 antigravity 的「组内包含哪些模型 / 满额含义」）。
   // 以前只挂 label 的 title，但面板是窄卡、悬停提示基本看不到——用户实际反馈
   // 「额度都是 0、看不明白」就是没看到这层解释。改为正文一行小号 muted 展示：
