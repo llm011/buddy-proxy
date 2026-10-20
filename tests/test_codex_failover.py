@@ -498,23 +498,126 @@ def test_quota_not_logged_in():
     assert q["items"][0]["display"].startswith("未登录")
 
 
-def test_quota_lists_accounts(two_accounts):
+_USAGE_PAYLOAD = {
+    "plan_type": "team",
+    "rate_limit": {
+        "allowed": True, "limit_reached": False,
+        "primary_window": {"used_percent": 0, "limit_window_seconds": 18000,
+                           "reset_after_seconds": 18000, "reset_at": 1792477637},
+        "secondary_window": {"used_percent": 17, "limit_window_seconds": 604800,
+                             "reset_after_seconds": 481343, "reset_at": 1792940980},
+    },
+    "credits": {"has_credits": False, "unlimited": False, "balance": None},
+}
+
+
+def _patch_usage(monkeypatch, payload: Any = None, *, status: int = 200) -> list[httpx.Request]:
+    """打桩 httpx.get：provider.quota() 查 /wham/usage 用同步 httpx。"""
+    calls: list[httpx.Request] = []
+
+    def fake_get(url, headers=None, timeout=None, **kw):
+        req = httpx.Request("GET", url, headers=headers or {})
+        calls.append(req)
+        body = _USAGE_PAYLOAD if payload is None else payload
+        return httpx.Response(status, json=body if isinstance(body, dict) else {"x": body},
+                              request=req)
+
+    monkeypatch.setattr("buddy_proxy.codex.provider.httpx.get", fake_get)
+    return calls
+
+
+def test_quota_lists_accounts(monkeypatch, two_accounts):
     prov, _ = two_accounts
+    _patch_usage(monkeypatch)
     q = prov.quota()
     labels = [i["label"] for i in q["items"]]
-    assert len(labels) == 2
     assert any("a@x.y" in label for label in labels)
-    assert q["level"] == "plus"
+    assert any("b@x.y" in label for label in labels)
+    assert q["level"] == "team"
 
 
-def test_quota_items_enter_account_groups(two_accounts):
-    """条目必须是进度条形态（percent 有值），否则面板按 notice 横贯全宽渲染，
-    账号分组与 ▲▼/✎/✕ 按钮全消失；同时不许编总量（total/used 留 None）。"""
+def test_quota_uses_usage_endpoint(monkeypatch, two_accounts):
+    """真实百分比来自 /wham/usage（Codex CLI 同款端点），带账号 token 与
+    ChatGPT-Account-Id——两个头缺一个都可能落到别的工作区。"""
     prov, _ = two_accounts
-    for it in prov.quota()["items"]:
-        assert it["percent"] is not None, "percent 为 None 会被面板判成 notice"
-        assert it["total"] is None and it["used"] is None, "上游没有总量，不能编"
-        assert "plus" in it["note"], "套餐档位写在 note 里"
+    _patch_token(monkeypatch)
+    calls = _patch_usage(monkeypatch)
+    prov.quota()
+    assert len(calls) == 2
+    first = calls[0]
+    assert first.url.path == "/backend-api/wham/usage"
+    assert first.headers["Authorization"].startswith("Bearer tok-")
+    assert first.headers["Chatgpt-Account-Id"].startswith("acc-acct-")
+
+
+def test_quota_items_are_progress_bars(monkeypatch, two_accounts):
+    """条目必须是进度条形态：percent=**已用**百分比、remaining=剩余百分比，
+    total/used 留 None（上游只给百分比，别编总量）。"""
+    prov, _ = two_accounts
+    _patch_usage(monkeypatch)
+    pct = [it for it in prov.quota()["items"] if it.get("unit") == "percent"]
+    assert len(pct) == 4  # 2 账号 × (5h + 周)
+    weekly = [it for it in pct if "周窗口" in it["label"]]
+    assert len(weekly) == 2
+    for it in weekly:
+        assert it["percent"] == 17.0
+        assert it["remaining"] == 83.0
+        assert it["total"] is None and it["used"] is None
+        assert it["reset_ts"] == 1792940980
+        assert "team" in it["note"]
+
+
+def test_quota_window_identity_by_length(monkeypatch, two_accounts):
+    """窗口身份按长度认，不按 primary/secondary：上游挪过槽位。"""
+    prov, _ = two_accounts
+    _patch_usage(monkeypatch, {
+        "plan_type": "plus",
+        "rate_limit": {
+            "primary_window": {"used_percent": 40, "limit_window_seconds": 604800},
+            "secondary_window": {"used_percent": 5, "limit_window_seconds": 18000},
+        },
+    })
+    weekly = [it for it in prov.quota()["items"] if "周窗口" in it["label"]]
+    assert len(weekly) == 2
+    assert all(it["percent"] == 40 for it in weekly)
+
+
+def test_quota_legacy_shape(monkeypatch, two_accounts):
+    """旧形状（rate_limits.primary + window_minutes）也认——CLIProxyAPI 同源。"""
+    prov, _ = two_accounts
+    _patch_usage(monkeypatch, {
+        "plan_type": "pro",
+        "rate_limits": {"primary": {"used_percent": 12.5, "window_minutes": 300,
+                                    "reset_at": 1730000000}},
+    })
+    items = prov.quota()["items"]
+    assert len(items) == 2
+    assert all(it["percent"] == 12.5 and "5 小时" in it["label"] for it in items)
+
+
+def test_quota_failure_is_notice_and_isolated(monkeypatch, two_accounts):
+    """单账号查询失败 → 该账号一条说明条（不冒充 0%），其它账号照常。"""
+    prov, _ = two_accounts
+    _patch_token(monkeypatch)
+    calls: list[str] = []
+
+    def fake_get(url, headers=None, timeout=None, **kw):
+        account = (headers or {}).get("Chatgpt-Account-Id", "")
+        calls.append(account)
+        req = httpx.Request("GET", url, headers=headers or {})
+        if account.endswith("acct-a"):
+            return httpx.Response(401, json={"error": "nope"}, request=req)
+        return httpx.Response(200, json=_USAGE_PAYLOAD, request=req)
+
+    monkeypatch.setattr("buddy_proxy.codex.provider.httpx.get", fake_get)
+    items = prov.quota()["items"]
+    assert len(calls) == 2
+    failed = [it for it in items if it.get("unreachable")]
+    assert len(failed) == 1
+    assert "a@x.y" in failed[0]["label"]
+    assert failed[0].get("percent") is None
+    assert "HTTP 401" in failed[0]["display"]
+    assert any(it.get("percent") == 17.0 for it in items)
 
 
 def test_quota_epoch_changes_with_accounts(two_accounts):

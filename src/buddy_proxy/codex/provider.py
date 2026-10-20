@@ -70,6 +70,8 @@ from .upstream import (
     new_session_id,
     normalize_base_url,
     notice_item,
+    parse_usage,
+    usage_url,
 )
 
 log = logging.getLogger(__name__)
@@ -91,6 +93,8 @@ _GATE_BUFFER_MAX_LINES = 256
 #: 全是 keepalive，而对话首个语义事件一般几秒内就到；超过这个时长按空流
 #: 处理（换号），避免整条请求挂到读超时。
 _GATE_HEARTBEAT_ONLY_S = 90.0
+#: 额度查询（``/wham/usage``）单次超时：它是个小 JSON，不需要对话那样的长读。
+_USAGE_TIMEOUT_S = 15.0
 
 #: 上游心跳事件（不携带业务数据）。生图与高 reasoning 模型的首帧常是它，
 #: 不能被当成「语义已至」。
@@ -597,17 +601,18 @@ class CodexProvider(BaseProvider):
         }
 
     def quota(self) -> dict[str, Any] | None:
-        """套餐额度。
+        """套餐额度：逐账号 GET ``/backend-api/wham/usage``（Codex CLI 同款）。
 
-        ChatGPT 后端没有公开的「查额度」端点（Codex CLI 自己也是从响应头与
-        本地用量推的），因此这里只做**本地可确定**的部分：
+        这是 Codex 自己的用量面板数据源：账号 token 直查，返回
+        ``rate_limit.primary_window/secondary_window``（已用百分比 + 窗口长度
+        + reset_at），team 套餐同样有。解析见
+        :func:`buddy_proxy.codex.upstream.parse_usage`。
 
         - 未登录：说明条（返回 None 会让整块额度卡从面板消失）
-        - 登录了：按账号列出套餐档位与凭据到期时刻
-
-        真实 `used_percent` 需要上游 ``rate_limits`` 数据，接入点见
-        :func:`buddy_proxy.codex.upstream.parse_rate_limits`——等拿到稳定
-        数据源（响应头观测）再接，不在这里编数字。
+        - 查到了：每个窗口一行进度条（``unit: percent``，percent 为**已用**）
+        - 单账号查询失败（网络 / 401 / 非 JSON）：该账号一条说明条，不影响
+          其它账号。说明条不携带 ``percent``，面板会按 notice 横贯渲染——
+          这正是想要的效果，别拿 0% 冒充「用完了」。
         """
         accounts = list_accounts()
         if not accounts:
@@ -627,18 +632,55 @@ class CodexProvider(BaseProvider):
             # 条目必须走**进度条形态**而不是 notice 形态：管理页面板按
             # 「percent == null && used == null」把说明条判成 notice、横贯全宽，
             # 账号分组（▲▼/✎/✕ 按钮）就永远不出现（kimi 靠真实百分比天然满足）。
-            # 上游没有百分比，所以 total/used **留 None**——前端文案显示
-            # 「剩 — · 已用未知」，不画假进度条、也不编「100%」。
-            items.append({
-                "label": f"{prefix}{who}",
-                "used": None, "total": None, "remaining": None,
-                "percent": 0, "unit": "percent",
-                "reset_ts": None, "expire_ts": None,
-                # 别写「无公开端点」：上游 ``rate_limits`` 解析已就绪，缺的只是
-                # 稳定数据源（接入点见 comments 与 upstream.parse_rate_limits）
-                "note": f"{plan} 套餐 · 额度随请求实时扣减（上游未提供百分比，暂不展示）",
-            })
+            title = f"{prefix}{who}"
+            try:
+                parsed = self._fetch_usage(acct.id)
+            except Exception as exc:  # noqa: BLE001 - 单账号失败不拖垮整卡
+                items.append({
+                    **notice_item(title, f"额度查询失败：{exc}"),
+                    "note": f"{plan} 套餐",
+                    "unreachable": True,
+                })
+                continue
+            if parsed.get("level"):
+                plan = str(parsed["level"])
+                if level is None or i == 1:
+                    level = plan
+            windows = parsed.get("items") or []
+            if not windows:
+                items.append({
+                    **notice_item(title, f"{plan} 套餐 · 上游未返回可用额度窗口"),
+                    "note": f"{plan} 套餐",
+                })
+                continue
+            for w in windows:
+                item = dict(w)
+                # 进度条标签要带上是谁的账号，否则多账号时两行一模一样的
+                # 「周窗口」分不清。附加额度（余额）本来就没有百分号。
+                label = str(item.get("label") or "额度")
+                item["label"] = f"{title} · {label}" if multi or len(windows) > 1 else title
+                item.setdefault("note", f"{plan} 套餐")
+                items.append(item)
         return {"items": items, "level": level}
+
+    def _fetch_usage(self, account_id: str) -> dict[str, Any]:
+        """单账号查一次用量（同步：由 benefits 的 to_thread 调用）。"""
+        access_token, cred = ensure_account_token(account_id)
+        url = usage_url(str(cred.get("base_url") or ""))
+        headers = build_headers(
+            access_token,
+            account_id=str(cred.get("chatgpt_account_id") or ""),
+            stream=False,
+        )
+        headers["Accept"] = "application/json"
+        resp = httpx.get(url, headers=headers, timeout=_USAGE_TIMEOUT_S)
+        if resp.status_code != 200:
+            raise RuntimeError(f"HTTP {resp.status_code}")
+        try:
+            payload = resp.json()
+        except ValueError as exc:
+            raise RuntimeError("上游返回的不是 JSON") from exc
+        return parse_usage(payload)
 
     def quota_epoch(self) -> str:
         """账号集合指纹：账号变化时让额度缓存失效。"""

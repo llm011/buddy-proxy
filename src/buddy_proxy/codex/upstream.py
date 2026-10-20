@@ -235,6 +235,143 @@ def parse_rate_limits(payload: Any) -> dict[str, Any]:
     return {"items": items, "level": level}
 
 
+def usage_url(base_url: str) -> str:
+    """额度查询 URL：``<chatgpt base>/wham/usage``。
+
+    Codex CLI 自己就是拿账号 token GET ``/backend-api/wham/usage`` 展示用量
+    面板的（与 ``/backend-api/codex/usage`` 实测同源），所以不需要任何额外
+    授权，也不需要抓响应头。``base_url`` 通常是 ``.../backend-api/codex``，
+    这里把 ``/codex`` 剥掉再拼；既没 ``/backend-api`` 也不是官方基址的自
+    定义域名按 ChatGPT 同构部署处理，补上 ``/backend-api``。
+    """
+    text = (base_url or "").strip().rstrip("/")
+    codex_base = normalize_base_url(text)  # 空值 → 官方 .../backend-api/codex
+    if codex_base.endswith("/backend-api/codex"):
+        root = codex_base[: -len("/codex")]
+    elif "/backend-api" not in codex_base:
+        root = f"{codex_base}/backend-api"
+    else:
+        root = codex_base
+    return f"{root}/wham/usage"
+
+
+def _window_seconds(window: dict[str, Any]) -> float:
+    """窗口长度（秒）：上游给 ``limit_window_seconds``，旧形状给 ``window_minutes``。"""
+    seconds = _num(window.get("limit_window_seconds"))
+    if seconds is None:
+        seconds = _num(window.get("limitWindowSeconds"))
+    if seconds is None:
+        minutes = _num(window.get("window_minutes"))
+        if minutes is None:
+            minutes = _num(window.get("windowMinutes"))
+        seconds = minutes * 60.0 if minutes else None
+    return seconds or 0.0
+
+
+#: 额度查询 payload 里被当成「一个窗口」的对象名（有序：先主后次）。
+_WINDOW_KEYS = ("primary_window", "secondary_window", "primary", "secondary")
+
+
+def _quotas_from_window_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """``GET /wham/usage`` 的形状 → ``{"items", "level"}``。
+
+    payload 形如 (CodexBar / codex-rs 抓包)::
+
+        {"plan_type": "team",
+         "rate_limit": {"allowed": true, "limit_reached": false,
+                        "primary_window":  {"used_percent": 0,
+                                            "limit_window_seconds": 18000,
+                                            "reset_at": 1792477637},
+                        "secondary_window": {"used_percent": 17,
+                                            "limit_window_seconds": 604800,
+                                            "reset_at": 1792940980}},
+         "credits": {"has_credits": false, "unlimited": false, "balance": null}}
+
+    窗口身份**按长度认**（5h / 1 天 / 周），不按 primary/secondary 认——
+    上游把滚动窗口和周窗口在这两个槽之间挪过。
+    """
+    items: list[dict[str, Any]] = []
+    level = payload.get("plan_type")
+    level = level.strip() if isinstance(level, str) and level.strip() else None
+
+    limit = payload.get("rate_limit")
+    if not isinstance(limit, dict):
+        limit = payload.get("rateLimit")
+    if not isinstance(limit, dict):
+        return {"items": items, "level": level}
+
+    seen: set[str] = set()
+    for key in _WINDOW_KEYS:
+        window = limit.get(key)
+        if not isinstance(window, dict):
+            continue
+        used = _num(window.get("used_percent"))
+        if used is None:
+            used = _num(window.get("usedPercent"))
+        if used is None:
+            continue
+        seconds = _window_seconds(window)
+        minutes = round(seconds / 60.0)
+        label = window_label("", minutes)
+        if label in seen:
+            continue
+        seen.add(label)
+        percent = max(0.0, min(100.0, used))
+        item: dict[str, Any] = {
+            "label": label,
+            "percent": round(percent, 1),
+            "used": None,
+            "total": None,
+            "remaining": round(100.0 - percent, 1),
+            "unit": "percent",
+        }
+        reset_ts = _num(window.get("reset_at")) or _num(window.get("resetAt"))
+        if not reset_ts:
+            after = _num(window.get("reset_after_seconds"))
+            if after is not None and after >= 0:
+                import time as _time
+                reset_ts = _time.time() + after
+        if reset_ts:
+            item["reset_ts"] = int(reset_ts)
+        items.append(item)
+
+    credits = payload.get("credits")
+    if isinstance(credits, dict) and credits.get("has_credits"):
+        if credits.get("unlimited"):
+            items.append({
+                "label": "附加额度", "used": None, "total": None,
+                "remaining": None, "percent": None, "unit": "credit",
+                "display": "不限额",
+            })
+        else:
+            balance = _num(credits.get("balance"))
+            if balance is not None:
+                items.append({
+                    "label": "附加额度", "used": None, "total": None,
+                    "remaining": round(balance, 2),
+                    "percent": None, "unit": "credit",
+                })
+
+    return {"items": items, "level": level}
+
+
+def parse_usage(payload: Any) -> dict[str, Any]:
+    """/wham/usage 完整响应 → ``{"items", "level"}``（两种已知形状都认）。
+
+    - 新版（Codex CLI 当前形状）：``rate_limit.primary_window/secondary_window``，
+      窗口长度在 ``limit_window_seconds``——见 :func:`_quotas_from_window_payload`
+    - 旧版（CLIProxyAPI ``helps/codex_quota.go`` 同源，事件/响应头形态）：
+      ``rate_limits.primary/secondary``，长度在 ``window_minutes``——复用
+      :func:`parse_rate_limits`
+    """
+    if not isinstance(payload, dict):
+        return {"items": [], "level": None}
+    if isinstance(payload.get("rate_limit"), dict) or isinstance(
+            payload.get("rateLimit"), dict):
+        return _quotas_from_window_payload(payload)
+    return parse_rate_limits(payload)
+
+
 def notice_item(label: str, text: str) -> dict[str, Any]:
     """一条纯说明性的「额度行」（无数字，前端原样显示）。
 
