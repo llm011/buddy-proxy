@@ -145,8 +145,8 @@ def test_models_credits_and_name(client):
 
     # 同一 id 可能被多个 provider 声明（trae/traepat/zcode...），按 (id, owned_by) 取
     checks = {
-        ("glm-5.3", "zhipu"): ("x0.79 credits", "GLM-5.3"),
-        ("glm-5.3-flash", "zhipu"): ("x0.06 credits", "GLM-5.3-Flash"),
+        ("glm-5.3", "zhipu"): ("x0.69 credits", "GLM-5.3"),
+        ("glm-5.3-flash", "zhipu"): ("x0.08 credits", "GLM-5.3-Flash"),
         ("hy4-preview", "tencent"): ("x0.29 credits", "Hy4 preview"),
         ("minimax-m3", "f"): ("x0.25 credits", "MiniMax-M3"),
         ("deepseek-v4-flash", "f"): ("x0.17 credits", "Deepseek-V4-Flash"),
