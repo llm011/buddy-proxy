@@ -482,3 +482,31 @@ console.log(JSON.stringify({line: html.includes('重置券'),
     data = json.loads(out.strip().splitlines()[-1])
     assert not data["line"]
     assert data["cards"] == 1, "不能为无归属券行凭空多出一张卡"
+
+
+def test_codex_reset_credits_follow_name_when_snapshot_reordered():
+    """快照顺位变了：券按名字并进自己的卡片，不按旧 `Codex #N` 挂到别人卡上。"""
+    items = [
+        _item(1, "a@x.y", "plus 套餐"),
+        _item(2, "b@x.y", "pro 套餐"),
+        _reset_item("Codex #2 · b@x.y", 4, 1),
+    ]
+    # 快照里 b 已经被移到第一位，a 成了第二位
+    accts = """[{id: 'u1', name: 'a@x.y', index: 2, plan_type: 'plus', cooling: []},
+  {id: 'u2', name: 'b@x.y', index: 1, plan_type: 'pro', cooling: []}]"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [%s]};
+CODEX_ACCTS = %s;
+globalThis.api = async () => ({enabled: true, accounts: CODEX_ACCTS});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+renderCodexPanel();
+const html = PANEL.innerHTML;
+const cards = html.split('pat-pkg-name').slice(1);
+console.log(JSON.stringify({cards, line: html.includes('重置券 4 张 · 当前可用 1 张')}));
+""" % (json.dumps(_provider(items)), accts))
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["line"]
+    with_line = [c for c in data["cards"] if "重置券" in c]
+    assert len(with_line) == 1, "券只挂一张卡"
+    assert "data-codex-idx=\"2\"" in with_line[0], "券跟着 b@x.y（快照位次 2）走"

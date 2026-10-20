@@ -653,16 +653,19 @@ class CodexProvider(BaseProvider):
             # 重置券是张数说明，不是额度水位：单独的标记行 + who（账号标题），
             # 前端据此放进该账号卡片，不走下面的窗口标签拼接。
             resets = [w for w in parsed_items if w.get("unit") == "reset_credit"]
+            # 只有进度条行才算「窗口」：附加额度（unit credit）不是水位，
+            # 上游只给余额不给窗口时它照样要显示，不能跟着被下面那句
+            # 「未返回可用额度窗口」一起吞掉。
             windows = [w for w in parsed_items if w.get("unit") != "reset_credit"]
+            bars = [w for w in windows if w.get("unit") == "percent"]
             # 券行先落盘：没有窗口的账号（例如额度已耗尽）也要能看到自己的券。
             for reset in resets:
                 items.append({**dict(reset), "who": title})
-            if not windows:
+            if not bars:
                 items.append({
                     **notice_item(title, f"{plan} 套餐 · 上游未返回可用额度窗口"),
                     "note": f"{plan} 套餐",
                 })
-                continue
             for w in windows:
                 item = dict(w)
                 # 进度条标签要带上是谁的账号，否则多账号时两行一模一样的

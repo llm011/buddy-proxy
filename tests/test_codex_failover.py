@@ -740,3 +740,17 @@ def test_health_shape(two_accounts):
     assert h["id"] == "codex"
     assert h["accounts"] == 2
     assert h["plan_type"] == "plus"
+
+
+def test_quota_credits_survive_without_windows(monkeypatch, two_accounts):
+    """只有附加额度、没有进度条窗口：余额行不能被「未返回窗口」那句一起吞掉。"""
+    prov, _ = two_accounts
+    _patch_usage(monkeypatch, {"rate_limit": {}, "rate_limit_reset_credits":
+                               {"available_count": 1},
+                               "credits": {"has_credits": True, "unlimited": False,
+                                           "balance": 12.5}})
+    credits = [it for it in prov.quota()["items"] if it.get("unit") == "credit"]
+    assert len(credits) == 2, credits
+    assert all(it.get("remaining") == 12.5 for it in credits)
+    assert {it["label"] for it in credits} == {
+        "Codex #1 · a@x.y · 附加额度", "Codex #2 · b@x.y · 附加额度"}

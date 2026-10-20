@@ -386,15 +386,11 @@ function _codex_acct_for(idx) {
 }
 
 function _codex_acct_by_title(who) {
-  // who 形如 `Codex #N · 名字` 或单账号的裸名字；逐项比对快照里的 id/name/alias，
-  // 取最后一个（等价于「最多匹配一次」的兜底：宁可不匹配也不乱挂）。
+  // who 形如 `Codex #N · 名字` 或单账号的裸名字。这里**只按名字**认（去掉前缀
+  // 后比 id/name/alias），不按位次：位次匹配由调用方显式做，免得快照顺位变了
+  // 之后拿旧编号把券挂到别的账号上——宁可认不出单开一卡，也不乱挂。
   if (!CODEX_ACCTS || !CODEX_ACCTS.length) return null;
   const want = String(who || '').replace(/^Codex #\d+ · /, '').trim();
-  const num = (String(who || '').match(/^Codex #(\d+)/) || [])[1];
-  if (num) {
-    const byIndex = CODEX_ACCTS.find(a => a.index === Number(num));
-    if (byIndex) return byIndex;
-  }
   if (!want) return null;
   return CODEX_ACCTS.find(a => a.id === want || a.name === want || a.alias === want) || null;
 }
@@ -570,17 +566,29 @@ function renderCodexPanel() {
     }
     return who;
   };
+  // 券行顺序跟随 who 里自带的位次（多账号 `Codex #N · X`）；单账号或无位次时
+  // 用原始插入顺序，正好落在对应账号卡之后。
+  const resetOrder = who => {
+    const m = who.match(/^Codex #(\d+)/);
+    return m ? Number(m[1]) : 0;
+  };
   const resetGrp = new Map();
+  const resetSrc = new Map();
   for (const [who, it] of resetByGrp) {
     const grp = grpKey(who);
-    if (!resetGrp.has(grp)) resetGrp.set(grp, it);
+    if (!resetGrp.has(grp)) {
+      resetGrp.set(grp, it);
+      resetSrc.set(grp, resetOrder(who));
+    }
   }
   const allGrps = new Set([...groups.keys(), ...resetGrp.keys()]);
   // 只有券的账号没有「Codex #N」标题可解析，从 who 里取位次（与卡片编号一致）
-  // 才能拿到账号快照、挂上 ▲▼/✎/✕ 并按真实顺位排序。
+  // 才能拿到账号快照、挂上 ▲▼/✎/✕ 并按真实顺位排序。原分组名优先，其次券
+  // 行自带的位次。
   const idxOf = grp => {
     const m = grp.match(/^Codex #(\d+)(?: · |$)/);
-    return m ? Number(m[1]) : null;
+    if (m) return Number(m[1]);
+    return resetSrc.has(grp) ? resetSrc.get(grp) || null : null;
   };
   const ordered = [...allGrps].sort((a, b) => {
     const ia = idxOf(a), ib = idxOf(b);
@@ -593,7 +601,7 @@ function renderCodexPanel() {
     const m = idx != null;
     // 券没有窗口行可借，就用 who 在快照里按 id/名字/别名反查账号，
     // 否则「只有券」的账号拿不到 id，按钮和标题都会退化。
-    const acct = _codex_acct_for(idx) || _codex_acct_by_title(grp);
+    const acct = _codex_acct_for(idx) || _codex_acct_by_title(resetGrp.get(grp)?.who);
     const moveBtns = (m && n > 1) ? acctMoveButtons('codex', idx, n, acct && acct.id) : '';
     const delBtn = acctDeleteButton('codex', acct, 'refresh_token 作废/不再使用时');
     const renameBtn = acctRenameButton('codex', acct);
