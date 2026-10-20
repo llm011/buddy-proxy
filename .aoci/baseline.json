@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-19T18:07:13Z",
-  "updated_at": "2026-10-20T18:04:44Z",
+  "updated_at": "2026-10-20T19:02:47Z",
   "files": {
     ".gitattributes": {
       "role": "index",
@@ -46,9 +46,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "017f91745504dc2ec5622e129e0f5ee7bf82644877cbe5d52a5e532f19894fbf",
-      "size": 73278,
-      "normalized_sha256": "017f91745504dc2ec5622e129e0f5ee7bf82644877cbe5d52a5e532f19894fbf"
+      "sha256": "fc802a70a085f04c487b4d19e8feaa9d4907dc3b54093cfcf3004e598a75a7c9",
+      "size": 73631,
+      "normalized_sha256": "fc802a70a085f04c487b4d19e8feaa9d4907dc3b54093cfcf3004e598a75a7c9"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -322,9 +322,9 @@
     },
     "src/buddy_proxy/codex/provider.py": {
       "role": "index",
-      "sha256": "51aec91174b4954ab8ea33a19843e05b7a591591fb6306eb6d87dd72830fdf01",
-      "size": 47884,
-      "normalized_sha256": "51aec91174b4954ab8ea33a19843e05b7a591591fb6306eb6d87dd72830fdf01"
+      "sha256": "2f702e8dbba6dfcd05fea4cfbbb7a036e9f649eff5a461036131ab57032b6729",
+      "size": 49036,
+      "normalized_sha256": "2f702e8dbba6dfcd05fea4cfbbb7a036e9f649eff5a461036131ab57032b6729"
     },
     "src/buddy_proxy/codex/sse.py": {
       "role": "index",
@@ -334,9 +334,9 @@
     },
     "src/buddy_proxy/codex/upstream.py": {
       "role": "index",
-      "sha256": "57221f9fd91544d2ff7518829a30f14d28bd6b26a3ceb813a5c2338fadbb4df6",
-      "size": 15096,
-      "normalized_sha256": "57221f9fd91544d2ff7518829a30f14d28bd6b26a3ceb813a5c2338fadbb4df6"
+      "sha256": "6801cf8046c91e967e24a89e37d96be234f78564729b2a2c40ed4b40ea4b7811",
+      "size": 18737,
+      "normalized_sha256": "6801cf8046c91e967e24a89e37d96be234f78564729b2a2c40ed4b40ea4b7811"
     },
     "src/buddy_proxy/core/__init__.py": {
       "role": "index",
@@ -484,8 +484,9 @@
     },
     "src/buddy_proxy/gemini/__init__.py": {
       "role": "index",
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "normalized_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      "sha256": "7d6adf3ec417be409b96eeb794bd999ab037600782e0275462db7aa2220de309",
+      "size": 895,
+      "normalized_sha256": "7d6adf3ec417be409b96eeb794bd999ab037600782e0275462db7aa2220de309"
     },
     "src/buddy_proxy/gemini/cli_bridge.py": {
       "role": "index",
@@ -1029,9 +1030,9 @@
     },
     "src/buddy_proxy/web/static/benefits_checkin.js": {
       "role": "index",
-      "sha256": "31a02e610f68ca120fe5cb37584063e07e0a8fe9a2ea432649831feb4e14bd8b",
-      "size": 27723,
-      "normalized_sha256": "31a02e610f68ca120fe5cb37584063e07e0a8fe9a2ea432649831feb4e14bd8b"
+      "sha256": "5db935fdec7f686661a2d4d19d3034b2e17c224eab167aecbfa4919cb4b6494e",
+      "size": 32259,
+      "normalized_sha256": "5db935fdec7f686661a2d4d19d3034b2e17c224eab167aecbfa4919cb4b6494e"
     },
     "src/buddy_proxy/web/static/benefits_panels.js": {
       "role": "index",
@@ -1311,9 +1312,9 @@
     },
     "tests/test_codex_failover.py": {
       "role": "observe",
-      "sha256": "3677689e30aeff84f56a4fc8fe8d764151159e9799182faddb02b7927b88acd5",
-      "size": 23725,
-      "normalized_sha256": "3677689e30aeff84f56a4fc8fe8d764151159e9799182faddb02b7927b88acd5"
+      "sha256": "cc794b7d1b87adecf06c784a040383adec8fc2fe84577f092beea683c2e412e0",
+      "size": 29753,
+      "normalized_sha256": "cc794b7d1b87adecf06c784a040383adec8fc2fe84577f092beea683c2e412e0"
     },
     "tests/test_codex_login.py": {
       "role": "observe",
@@ -1335,9 +1336,9 @@
     },
     "tests/test_codex_panel_ui.py": {
       "role": "observe",
-      "sha256": "cc426c60b6a17491afc915a125e6b811a31529850da500a961f7a286e43b0bdb",
-      "size": 15321,
-      "normalized_sha256": "cc426c60b6a17491afc915a125e6b811a31529850da500a961f7a286e43b0bdb"
+      "sha256": "ebf90025549492bf8ccd90488be98f3d083c1498410d51e1b2e24b29eecb8d93",
+      "size": 21962,
+      "normalized_sha256": "ebf90025549492bf8ccd90488be98f3d083c1498410d51e1b2e24b29eecb8d93"
     },
     "tests/test_codex_projection.py": {
       "role": "observe",

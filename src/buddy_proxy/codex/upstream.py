@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -271,6 +272,91 @@ def _window_seconds(window: dict[str, Any]) -> float:
 #: 额度查询 payload 里被当成「一个窗口」的对象名（有序：先主后次）。
 _WINDOW_KEYS = ("primary_window", "secondary_window", "primary", "secondary")
 
+#: 重置券张数的合理上限。超过它的值一律当脏数据丢弃（不钳制——钳到上限
+#: 会凭空造出一个不存在的数字）。
+_RESET_CREDITS_MAX = 9999
+
+
+def _count(value: Any) -> int | None:
+    """把「张数」类字段收成非负整数；非法一律 None。
+
+    与 :func:`_num` 不同：这里是**计数**，``1.5`` 不是 1.5 张而是脏数据，
+    所以只收无损整数（``3``、``3.0``、``"3"``、``" 3 "``）；``True`` 是
+    Python 的 int 子类但显然不是张数；NaN/Infinity 与超大值直接丢弃。
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+    if not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(number) or number < 0 or number != int(number):
+        return None
+    count = int(number)
+    if count > _RESET_CREDITS_MAX:
+        return None
+    return count
+
+
+def _pick(block: dict[str, Any], snake: str, camel: str) -> Any:
+    """snake 优先、camel 兜底；只认第一个「存在」的键（值可以是 None）。"""
+    if snake in block:
+        return block[snake]
+    return block.get(camel)
+
+
+def _reset_credits_item(blocks: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """``rate_limit_reset_credits`` → 一条独立的「重置券」条目（无就不返回）。
+
+    上游 (``GET /wham/usage``) 附带::
+
+        "rate_limit_reset_credits": {"available_count": 3,
+                                     "applicable_available_count": 0}
+
+    ``available_count`` 是账号里全部可用的重置券；``applicable_available_count``
+    是「当前此刻可以套用」的张数（上游无公开文档，只按字面展示，不据此推算）。
+
+    返回的条目**故意不带** ``used/total/remaining/percent/reset_ts/expire_ts``
+    ——它不是额度水位，只是张数说明；额度合计、进度条、低余额/到期告警与
+    「已用完」折叠都靠这些字段判定，这里全空才不会被误当额度。
+    """
+    block: dict[str, Any] | None = None
+    for source in blocks:
+        candidate = _pick(source, "rate_limit_reset_credits", "rateLimitResetCredits")
+        if isinstance(candidate, dict):
+            block = candidate
+            break
+    if block is None:
+        return None
+    available = _count(_pick(block, "available_count", "availableCount"))
+    if available is None:
+        return None
+    counts: dict[str, int] = {"available": available}
+    applicable = _count(
+        _pick(block, "applicable_available_count", "applicableAvailableCount"))
+    if applicable is not None:
+        counts["applicable"] = applicable
+    return {
+        "label": "重置券",
+        "unit": "reset_credit",
+        "reset_credit": True,
+        "reset_credits": counts,
+        "used": None,
+        "total": None,
+        "remaining": None,
+        "percent": None,
+    }
+
 
 def _quotas_from_window_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """``GET /wham/usage`` 的形状 → ``{"items", "level"}``。
@@ -285,10 +371,14 @@ def _quotas_from_window_payload(payload: dict[str, Any]) -> dict[str, Any]:
                         "secondary_window": {"used_percent": 17,
                                             "limit_window_seconds": 604800,
                                             "reset_at": 1792940980}},
-         "credits": {"has_credits": false, "unlimited": false, "balance": null}}
+         "credits": {"has_credits": false, "unlimited": false, "balance": null},
+         "rate_limit_reset_credits": {"available_count": 3,
+                                      "applicable_available_count": 0}}
 
     窗口身份**按长度认**（5h / 1 天 / 周），不按 primary/secondary 认——
-    上游把滚动窗口和周窗口在这两个槽之间挪过。
+    上游把滚动窗口和周窗口在这两个槽之间挪过。重置券见
+    :func:`_reset_credits_item`（``applicable_available_count`` 无官方语义，
+    只按字面展示）。
     """
     items: list[dict[str, Any]] = []
     level = payload.get("plan_type")
@@ -351,6 +441,11 @@ def _quotas_from_window_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     "remaining": round(balance, 2),
                     "percent": None, "unit": "credit",
                 })
+
+    # 重置券排在窗口之后：面板按账号分组时它自然落在卡片末尾。
+    reset = _reset_credits_item([payload, limit])
+    if reset is not None:
+        items.append(reset)
 
     return {"items": items, "level": level}
 

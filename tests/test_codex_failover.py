@@ -620,6 +620,113 @@ def test_quota_failure_is_notice_and_isolated(monkeypatch, two_accounts):
     assert any(it.get("percent") == 17.0 for it in items)
 
 
+_RESET_PAYLOAD = {**_USAGE_PAYLOAD,
+                  "rate_limit_reset_credits": {"available_count": 3,
+                                               "applicable_available_count": 0}}
+
+
+def _resets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [it for it in items if it.get("unit") == "reset_credit"]
+
+
+def test_quota_reset_credits_bound_to_each_account(monkeypatch, two_accounts):
+    """``rate_limit_reset_credits`` → 每个账号一条独立标记行。
+
+    关键是不伪装成额度：percent/remaining/total 全空、没有 note/reset_ts/
+    expire_ts，否则会被额度合计、进度条、低余额/到期告警和「已用完」折叠捡走。
+    归属靠 ``who``（账号标题），必须和该账号百分条目的前缀逐字一致。
+    """
+    prov, _ = two_accounts
+    _patch_usage(monkeypatch, _RESET_PAYLOAD)
+    items = prov.quota()["items"]
+    resets = _resets(items)
+    assert len(resets) == 2
+    pct = [it for it in items if it.get("unit") == "percent"]
+    assert len(pct) == 4, "券行不能被当成窗口，百分条目仍是 2 账号 × 2 窗口"
+    prefixes = {it["label"].rsplit(" · ", 1)[0] for it in pct}
+    assert {it["who"] for it in resets} == prefixes
+    for it in resets:
+        assert it["reset_credits"] == {"available": 3, "applicable": 0}
+        assert it["reset_credit"] is True
+        assert it["percent"] is None and it["remaining"] is None
+        assert it["used"] is None and it["total"] is None
+        assert "note" not in it and "reset_ts" not in it and "expire_ts" not in it
+
+
+@pytest.mark.parametrize("shape", ["camel", "nested"])
+def test_quota_reset_credits_camel_and_nested(monkeypatch, two_accounts, shape):
+    """camelCase 与嵌在 rate_limit 下都要认；字符串数字是无损整数就收。"""
+    from buddy_proxy.codex.upstream import parse_usage
+    payload = {"plan_type": "plus",
+               "rate_limit": {"primary_window": {"used_percent": 5,
+                                                 "limit_window_seconds": 18000}}}
+    if shape == "camel":
+        payload["rateLimitResetCredits"] = {"availableCount": "2",
+                                            "applicableAvailableCount": 1}
+    else:
+        payload["rate_limit"]["rate_limit_reset_credits"] = {
+            "available_count": 2, "applicable_available_count": 1}
+    resets = _resets(parse_usage(payload)["items"])
+    assert len(resets) == 1
+    assert resets[0]["reset_credits"] == {"available": 2, "applicable": 1}
+
+
+@pytest.mark.parametrize("bad", [True, -1, 1.5, "1.5", float("nan"),
+                                 float("inf"), 10 ** 9, "abc"])
+def test_quota_reset_credits_invalid_available_hidden(bad):
+    """脏的张数不显示，也不钳到上限（钳制会凭空造数字）。"""
+    from buddy_proxy.codex.upstream import parse_usage
+    payload = {"rate_limit": {}, "rate_limit_reset_credits": {"available_count": bad}}
+    assert _resets(parse_usage(payload)["items"]) == []
+
+
+@pytest.mark.parametrize("bad", [True, -1, 1.5, "1.5", float("nan"), float("inf"), "abc"])
+def test_quota_reset_credits_invalid_applicable_omitted(bad):
+    """applicable 非法时仍显示总张数，只是不显示「当前可用」。"""
+    from buddy_proxy.codex.upstream import parse_usage
+    payload = {"rate_limit": {},
+               "rate_limit_reset_credits": {"available_count": 3,
+                                            "applicable_available_count": bad}}
+    resets = _resets(parse_usage(payload)["items"])
+    assert resets and resets[0]["reset_credits"] == {"available": 3}
+
+
+def test_quota_reset_credits_single_account_has_no_prefix(monkeypatch):
+    _write_account("acct-a", email="a@x.y")
+    _patch_token(monkeypatch)
+    prov = CodexProvider()
+    _patch_usage(monkeypatch, _RESET_PAYLOAD)
+    resets = _resets(prov.quota()["items"])
+    assert len(resets) == 1
+    assert resets[0]["who"] == "a@x.y" and "Codex #" not in resets[0]["who"]
+
+
+def test_quota_reset_credits_without_windows(monkeypatch, two_accounts):
+    """只有券没有窗口：券行照出，同时保留「上游未返回可用额度窗口」说明条。"""
+    prov, _ = two_accounts
+    _patch_usage(monkeypatch, {"rate_limit": {},
+                               "rate_limit_reset_credits": {"available_count": 1}})
+    items = prov.quota()["items"]
+    assert len(_resets(items)) == 2
+    assert any("上游未返回可用额度窗口" in str(it.get("display")) for it in items)
+
+
+def test_quota_reset_credits_skipped_when_account_fails(monkeypatch, two_accounts):
+    """查询失败的账号不出券行——没拿到数据就不编 0 张。"""
+    prov, _ = two_accounts
+    _patch_token(monkeypatch)
+
+    def fake_get(url, headers=None, timeout=None, **kw):
+        req = httpx.Request("GET", url, headers=headers or {})
+        if (headers or {}).get("Chatgpt-Account-Id", "").endswith("acct-a"):
+            return httpx.Response(401, json={"error": "nope"}, request=req)
+        return httpx.Response(200, json=_RESET_PAYLOAD, request=req)
+
+    monkeypatch.setattr("buddy_proxy.codex.provider.httpx.get", fake_get)
+    resets = _resets(prov.quota()["items"])
+    assert len(resets) == 1 and resets[0]["who"].endswith("b@x.y")
+
+
 def test_quota_epoch_changes_with_accounts(two_accounts):
     prov, _ = two_accounts
     before = prov.quota_epoch()
@@ -633,3 +740,17 @@ def test_health_shape(two_accounts):
     assert h["id"] == "codex"
     assert h["accounts"] == 2
     assert h["plan_type"] == "plus"
+
+
+def test_quota_credits_survive_without_windows(monkeypatch, two_accounts):
+    """只有附加额度、没有进度条窗口：余额行不能被「未返回窗口」那句一起吞掉。"""
+    prov, _ = two_accounts
+    _patch_usage(monkeypatch, {"rate_limit": {}, "rate_limit_reset_credits":
+                               {"available_count": 1},
+                               "credits": {"has_credits": True, "unlimited": False,
+                                           "balance": 12.5}})
+    credits = [it for it in prov.quota()["items"] if it.get("unit") == "credit"]
+    assert len(credits) == 2, credits
+    assert all(it.get("remaining") == 12.5 for it in credits)
+    assert {it["label"] for it in credits} == {
+        "Codex #1 · a@x.y · 附加额度", "Codex #2 · b@x.y · 附加额度"}
