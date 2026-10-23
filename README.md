@@ -323,7 +323,7 @@ buddy start
 | Response (`anthropic`) | Reuses `protocols.anthropic_adapter.sse_to_anthropic_stream` (the same event machine as dumate: thinking / tool_use / usage minus cache reads); non-streaming returns one Message |
 | First-event gate | One gate on the parsing path (`_iter_upstream_events`) **and one on the pass-through path** (`_pass_through_stream` → `_gate_inband_error`); an upstream 200 carrying in-band errors becomes an `HTTPException` |
 | Error passthrough | Upstream ≥400: `aread()` then `aclose()` (otherwise the real error body is lost), status and body passed through verbatim; network error → 502, timeout → 504 |
-| Public model name | Always `ark/<id>` (in `message_start.model` and `response.model`); `ep-...` never leaks |
+| Public model name | Always `ark/<id>` (in `message_start.model` and `response.model`); neither `ep-...` nor the platform model behind it leaks |
 | Quota | `quota()` is always `None` — no public balance API, so no card and no invented numbers |
 
 ### MiMo provider (optional)
@@ -623,7 +623,7 @@ python -m buddy_proxy --ark           # or ARK_ENABLED=1; the default EXTRA_ARGS
 - **All three protocols.** `/v1/chat/completions`, `/v1/responses` and `/v1/messages` all work. The Anthropic exit reuses the same event machine as `dumate` (`reasoning_content` → thinking block, `tool_calls` → `tool_use` + `input_json_delta`), so Claude Code can connect directly; a non-streaming `/v1/messages` returns one Message JSON, not an SSE stream.
 - **First-event gate.** When the upstream answers 200 but the payload is an in-band `error` / `response.failed` frame, it is restored to an HTTP error before a single byte reaches the client — both on the parsing path (`_iter_upstream_events`) and the pass-through path (`_pass_through_stream`) — never a “200 empty stream”.
 - **Quota.** Ark has no public balance endpoint, so `quota()` returns `None` and the admin UI shows no quota card (no invented numbers).
-- Requests to the upstream are always `stream: true`, with non-streaming clients aggregated locally. The model name returned to clients is always `ark/<id>`; `ep-...` never leaks.
+- Requests to the upstream are always `stream: true`, with non-streaming clients aggregated locally. The model name returned to clients is always `ark/<id>`. The platform model actually hosted behind an endpoint (Ark reports its real name in Responses events, e.g. `deepseek-v4-1-flash-261017`, which is unrelated to `ep-...`) is rewritten to the public name too — the config can't know that name, so the pass-through layer learns it from the first upstream event and applies it to that same line.
 
 ## Connect clients
 

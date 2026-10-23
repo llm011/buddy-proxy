@@ -400,7 +400,9 @@ python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS �
 - **额度**：方舟没有可匿名查询余额的公开接口，本通道 `quota()` 返回 `None`，管理页不出
   额度卡（不编造数字）。
 - 发往上游恒为 `stream: true`，非流式客户端在本地聚合；回给客户端的模型名永远是
-  `ark/<id>`，不会把 `ep-...` 透出去。
+  `ark/<id>`。接入点背后托管的平台模型名（实测方舟在 Responses 事件里回的是
+  `deepseek-v4-1-flash-261017` 这类底层真名，和 `ep-...` 毫无字面关系）也会被改写成
+  对外名——这个名字配置里写不出来，所以由透传层从上游首条事件里学到，同一行即生效。
 
 ## 模型列表
 
@@ -1250,7 +1252,7 @@ JSON，上限 8 个）。旧的单账号文件 `~/.buddy-proxy/antigravity_oauth
 | 响应（`anthropic`） | 复用 `protocols.anthropic_adapter.sse_to_anthropic_stream`（与 dumate 同一份事件机：thinking / tool_use / usage 扣缓存），非流式回整条 Message |
 | 首事件闸门 | `_iter_upstream_events`（解析路径）与 `_pass_through_stream` → `_gate_inband_error`（透传路径）**各一道**；上游 200 带内报错还原成 `HTTPException` |
 | 错误透传 | 上游 ≥400 先 `aread()` 再 `aclose()`（否则拿不到真实错误体），状态码与错误体原样回客户端；网络异常 → 502，超时 → 504 |
-| 对外模型名 | 恒为 `ark/<id>`（`message_start.model`、`response.model` 都是它），`ep-...` 绝不外泄 |
+| 对外模型名 | 恒为 `ark/<id>`（`message_start.model`、`response.model` 都是它）；`ep-...` 与接入点背后的平台模型真名都不外泄 |
 | 额度 | `quota()` 恒 `None`——无公开余额接口，不出卡、不编数字 |
 
 配置示例（**占位符**，真实接入点与 key 只写在本地）：
