@@ -166,7 +166,7 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 #: 独立开关，只在有海外区账号时挂到 ``--trae`` / ``--qoder`` / codebuddy 主通道
 #: 分支下注册。
 KNOWN_PROVIDER_IDS = frozenset(
-    {"codebuddy", "codebuddyintl", "zcode", "glm", "mimo", "qoder", "qoderintl",
+    {"codebuddy", "codebuddyintl", "zcode", "glm", "ark", "mimo", "qoder", "qoderintl",
      "doubao", "dumate", "trae", "traepat", "traeintl", "kimi", "codex"}
 )
 
@@ -180,6 +180,7 @@ KNOWN_PROVIDER_IDS = frozenset(
 PROVIDER_ENABLE_HINTS: dict[str, str] = {
     "zcode": "加 --zcode（或设 ZCODE_ENABLED=1）",
     "glm": "加 --glm（或设 GLM_ENABLED=1）",
+    "ark": "加 --ark（或设 ARK_ENABLED=1），并在 ~/.buddy-proxy/ark.json 配置接入点",
     "mimo": "加 --mimo（或设 MIMO_ENABLED=1）",
     "qoder": "加 --qoder（或设 QODER_ENABLED=1）",
     "doubao": "加 --doubao（或设 DOUBAO_ENABLED=1）",

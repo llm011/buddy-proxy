@@ -10,11 +10,14 @@ Chat Completions 协议。本模块做双向转换：
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
-from typing import Any
+from typing import Any, AsyncIterator
 
 from buddy_proxy.core.metrics import _credit_field
+
+log = logging.getLogger(__name__)
 
 
 def _rand_id(prefix: str = "msg_") -> str:
@@ -779,3 +782,89 @@ def chat_completion_to_anthropic_message(
 
 # 向后兼容别名
 anthropic_to_chat = anthropic_request_to_chat
+
+
+# ---------------------------------------------------------------------------
+# 流式出口：上游 OpenAI chat SSE → Anthropic Messages 事件流
+# ---------------------------------------------------------------------------
+
+
+async def sse_to_anthropic_stream(resp: Any, model: str) -> AsyncIterator[str]:
+    """把上游 OpenAI chat SSE 响应翻译成 ``/v1/messages`` 客户端要的事件流。
+
+    凡「上游只回 chat chunk、但客户端走 Anthropic 协议」的通道都要用这一份：
+    dumate（本地代理）、ark（火山方舟）等。``resp`` 是已 ``send(stream=True)``
+    的 ``httpx.Response``，这里自行消费并**保证连接释放**。
+
+    ``reasoning_content`` → thinking 块、``tool_calls`` → tool_use 块，全在
+    :class:`AnthropicStreamConverter` 里。
+
+    两个收尾细节不能省（否则客户端只会拿到半截流更难排查）：
+
+    - 上游在流里报错 / 转换途中抛异常：先 ``close_open_blocks()`` 把已打开的
+      内容块补上 ``content_block_stop``，再补一个 ``error`` 事件——
+      内容块悬空会让严格的 Anthropic 客户端卡死；
+    - 正常收尾：``finish()`` 产出 ``message_delta`` + ``message_stop``，
+      最后补 ``data: [DONE]``。
+
+    ``model`` 必须是**客户端认识的对外名**（如 ``ark/xxx``），不是上游真名——
+    ``message_start.message.model`` 会原样回给客户端，回 ``ep-...`` 会让它
+    以为是另一个模型。
+    """
+    converter = AnthropicStreamConverter(model)
+
+    def _emit(event_name: str, payload: dict[str, Any]) -> str:
+        return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _close_open() -> list[str]:
+        """把已开出的内容块收尾（best-effort：收尾本身再炸也不能盖掉原错误）。"""
+        try:
+            return [_emit(n, p) for n, p in converter.close_open_blocks()]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def _abort(msg: str) -> list[str]:
+        """收尾 + 补一个 error 事件，让客户端拿到结构完整的结束。"""
+        out = _close_open()
+        out.append(_emit("error", {
+            "type": "error",
+            "error": {"type": "api_error", "message": msg},
+        }))
+        return out
+
+    try:
+        async for line in resp.aiter_lines():
+            line = line.strip()
+            if not line or line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("error"):
+                err = chunk["error"]
+                msg = str(err.get("message", err)) if isinstance(err, dict) else str(err)
+                for event in _abort(msg):
+                    yield event
+                return
+            for name, payload in converter.feed_chunk(chunk):
+                yield _emit(name, payload)
+        for name, payload in converter.finish():
+            yield _emit(name, payload)
+    except Exception as exc:  # noqa: BLE001 — 上游畸形数据不该让客户端只收到半截流
+        log.warning("anthropic stream aborted: %s: %s", type(exc).__name__, exc)
+        for event in _abort(f"{type(exc).__name__}: {exc}"):
+            yield event
+        return
+    finally:
+        # 上游连接必须显式回收：调用方把本生成器交给 StreamingResponse 后，
+        # 中途断连（客户端取消）走的是 GeneratorExit → finally，不关就漏连接。
+        await resp.aclose()
+    yield "data: [DONE]\n\n"
