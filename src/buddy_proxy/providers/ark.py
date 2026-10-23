@@ -63,7 +63,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Sequence
+from typing import Any, AsyncIterator, Iterable, Sequence
 
 import httpx
 from fastapi import HTTPException
@@ -232,6 +232,9 @@ class ArkProvider(BaseProvider):
         #: 降级记忆：``auto`` 模式下探测到 responses 端点不可用后置位，
         #: 后续请求直接走 chat，不再每条请求都白撞一次 404。
         self._responses_unsupported = False
+        #: 上游事件里学到的底层模型真名（接入点后面托管的是哪个平台模型，
+        #: 配置里写不出来）。只做 model 字段改写，不参与路由。
+        self._observed_upstream_models: set[str] = set()
         _harden_config_permissions()
 
     # ---- BaseProvider 接口 ----
@@ -262,6 +265,10 @@ class ArkProvider(BaseProvider):
         want = (model or "").strip().removeprefix(f"{self.id}/")
         found = next((e for e in self._entries if e["id"] == want), None)
         return found["id"] if found else None
+
+    def _upstream_names(self) -> list[str]:
+        """本通道配过的全部上游名；只用于识别「这个 model 字段是我自己的」。"""
+        return [e["upstream"] for e in self._entries]
 
     def ensure_auth(self) -> None:
         """启动/转发前校验：key 与模型表都得有，缺哪个就报哪个。"""
@@ -379,8 +386,10 @@ class ArkProvider(BaseProvider):
         upstream_model = entry["upstream"]
         # 回给客户端的模型名永远是**对外名**：anthropic 的 message_start.model、
         # responses 的 response.model 都会原样透出，回 ep-... 会让客户端以为
-        # 自己连的是另一个模型。
+        # 自己连的是另一个模型。别名集合按本通道全部上游名算——接入点后面
+        # 托管的是哪个底层模型，只有上游事件自己说，配置里写不出来。
         client_model = f"{self.id}/{entry['id']}"
+        own_aliases = _model_aliases(upstream_model)
         stream = bool(body.get("stream", False))
 
         upstream_protocol = await self._pick_upstream(body, upstream_model, stream)
@@ -436,7 +445,8 @@ class ArkProvider(BaseProvider):
                     return StreamingResponse(
                         _pass_through_stream(
                             resp, "responses",
-                            upstream_model=upstream_model, client_model=client_model),
+                            own_aliases=own_aliases, client_model=client_model,
+                            extra_model_names=self._observed_upstream_models),
                         media_type="text/event-stream", headers=_SSE_HEADERS)
                 chunks = _responses_to_chat_stream(events, client_model, close=False)
                 return StreamingResponse(
@@ -555,8 +565,9 @@ def _upstream_error_response(resp: httpx.Response) -> JSONResponse:
 async def _gate_inband_error(
     lines: AsyncIterator[str],
     upstream_protocol: str,
-    upstream_model: str | None = None,
+    own_aliases: frozenset[str] | None = None,
     client_model: str | None = None,
+    extra_model_names: set[str] | None = None,
 ) -> AsyncIterator[str]:
     """首事件闸门的**字节侧**版本：原样透传行，但首帧是带内报错时抛异常。
 
@@ -565,9 +576,9 @@ async def _gate_inband_error(
     上游 200 带 ``error`` 帧会被原样泵给客户端，正是「200 空流/假成功」那个坑。
     这里只嗅探错误帧，其余行一字不动地往下传。
 
-    给了 ``upstream_model`` / ``client_model`` 时顺带把 ``model`` 字段改写成
-    对外名：responses 透传会把上游真名（``ep-...``，或裸模型 ID 大小写/连字符
-    被上游归一后的形态）原样吐给客户端，等于把本地映射白做了。
+    给了 ``own_aliases`` / ``client_model`` 时顺带把 ``model`` 字段改写成
+    对外名：responses 透传会把上游真名（``ep-...``，或接入点背后那个平台
+    托管模型的真名）原样吐给客户端，等于把本地映射白做了。
     """
     from ..codex.projection import is_error_event
 
@@ -597,17 +608,17 @@ async def _gate_inband_error(
                         "message": f"ark 上游错误: {message}",
                         "type": "upstream_error",
                     }})
-            if client_model and upstream_model:
-                response = payload.get("response") if isinstance(payload, dict) else None
-                aliases = _model_aliases(upstream_model)
-                if (
-                    (isinstance(payload, dict)
-                     and _is_own_upstream_model(payload.get("model"), aliases))
-                    or (isinstance(response, dict)
-                        and _is_own_upstream_model(response.get("model"), aliases))
-                ):
-                    _rewrite_model(payload, client_model, upstream_model)
-                    out = "data: " + json.dumps(payload, ensure_ascii=False)
+            if client_model and own_aliases:
+                # 先改写本次请求自己的上游名，再学「剩下的那一个」——接入点背后
+                # 托管的平台真名只可能出现在 model 字段里，学它是安全的；学完
+                # 同一行也能用上（首帧就干净，客户端不会先看到一次真名）。
+                # 逐字段替换而不解析再序列化：response 对象深度不限（output[]、
+                # usage 旁都有 model），只换顶层会漏，全量 dumps 又会改键序/转义。
+                out = _rewrite_model_fields(line, client_model, own_aliases, frozenset())
+                if extra_model_names is not None:
+                    _remember_upstream_model(out, extra_model_names, own_aliases)
+                    out = _rewrite_model_fields(
+                        out, client_model, own_aliases, _known_extra(extra_model_names))
             if not saw_event and upstream_protocol == "responses":
                 status, message = is_error_event(name, payload)
                 if status or message:
@@ -626,9 +637,9 @@ async def _gate_inband_error(
 def _model_aliases(upstream_model: str) -> frozenset[str]:
     """上游真名 + 它的**归一形态**。
 
-    接入点 ``ep-...`` 上游会原样回；但写成裸模型 ID 时，上游回的是自己规范化
-    后的名字——实测 ``deepseek-v4.1-flash`` 回来是 ``deepseek-v4-1-flash-261017``
-    （点换连字符、补上日期后缀）。只按精确相等比对会一个都改不到。
+    接入点 ``ep-...`` 上游会原样回；写成裸模型 ID 时上游回的是自己规范化后的
+    名字——实测 ``deepseek-v4.1-flash`` 回来是 ``deepseek-v4-1-flash-261017``
+    （点换连字符、补日期后缀）。只按精确相等比对会一个都改不到。
     """
     aliases = {upstream_model}
     normalized = re.sub(r"[^0-9a-z]+", "-", upstream_model.lower()).strip("-")
@@ -647,19 +658,58 @@ def _is_own_upstream_model(value: Any, aliases: frozenset[str]) -> bool:
     return any(normalized == a or normalized.startswith(a + "-") for a in aliases)
 
 
-def _rewrite_model(
-    payload: dict[str, Any], client_model: str, upstream_model: str,
-) -> None:
-    """把 responses 事件里的模型名改成对外名（顶层 ``model`` 与 ``response.model``）。
+def _known_extra(observed: set[str] | None) -> frozenset[str]:
+    """已见过的底层真名快照（复制一份，避免边迭代边被并发写）。"""
+    return frozenset(observed) if observed else frozenset()
 
-    只改**确实属于本次请求**的模型名：上游回的是别的模型（路由/切换）时如实
-    透出，不能一律抹成对外名——那会把「实际跑的是谁」这条排障线索一起藏掉。
+
+def _remember_upstream_model(
+    line: str, observed: set[str] | None, own: frozenset[str],
+) -> None:
+    """记下这一行里出现的、不属于本次请求的底层模型真名。
+
+    接入点 ``ep-...`` 后面托管的是平台模型（实测 responses 事件回的是
+    ``deepseek-v4-1-flash-261017``），这个真名配置里写不出来，只能从上游自己
+    的话里学：第一条事件学到，后续事件就都改得掉。只收「像模型名」的值——
+    带 ``/`` 的对外名、以及本次请求自己的上游名都不记，免得把别人的名字抹掉。
     """
-    aliases = _model_aliases(upstream_model)
-    for holder in (payload, payload.get("response")):
-        if isinstance(holder, dict) and _is_own_upstream_model(
-                holder.get("model"), aliases):
-            holder["model"] = client_model
+    if observed is None:
+        return
+    for match in _MODEL_FIELD_RE.finditer(line):
+        value = match.group(1).strip()
+        if value and value not in own and "/" not in value:
+            observed.add(value)
+
+
+_MODEL_FIELD_RE = re.compile(r'"model"\s*:\s*"([^"\\]*)"')
+
+
+def _rewrite_model_fields(
+    line: str, client_model: str, own: frozenset[str], extra: frozenset[str],
+) -> str:
+    """把一行 SSE 里**全部**已知上游模型名换成对外名（含嵌套与转义形状）。
+
+    - ``own``：本次请求实际打的上游名（含 ``ep-`` 前缀、归一形态），精确或
+      前缀命中都改；
+    - ``extra``：本通道见过的**底层真名**（如 ``deepseek-v4-1-flash-261017``）。
+      接入点后面托管的是哪个平台模型，配置里写不出来，只有上游事件自己说；
+      这类名字与 ``ep-`` 毫无字面关系，只能精确命中——用前缀会把
+      ``deepseek-v4`` 系的其它模型一起误伤。
+
+    不做 JSON 解析：responses 事件把完整 response 对象塞在 ``response`` 里，
+    深度不限，而这里只想换 ``"model": "..."`` 这一种叶子。解析再序列化还要
+    担心中文转义与键序变化，逐字段替换更贴近「原样透传」的本意。
+    """
+    def sub(match: re.Match[str]) -> str:
+        value = match.group(1).strip()
+        if not (_is_own_upstream_model(value, own) or value in extra):
+            return match.group(0)
+        # 只换值，保留上游的原有空白/键格式，其余字节一字不动。
+        start, end = match.span(1)
+        whole = match.string
+        return whole[match.start():start] + client_model + whole[end:match.end()]
+
+    return _MODEL_FIELD_RE.sub(sub, line)
 
 
 async def _iter_upstream_events(
@@ -762,8 +812,9 @@ async def _chat_chunks_to_sse(
 async def _pass_through_stream(
     resp: httpx.Response,
     upstream_protocol: str = "chat",
-    upstream_model: str | None = None,
+    own_aliases: frozenset[str] | None = None,
     client_model: str | None = None,
+    extra_model_names: set[str] | None = None,
 ) -> AsyncIterator[str]:
     """把上游 SSE 原样泵给客户端（只过错误嗅探 + 模型名改写）；结束后释放连接。"""
     from ..codex.sse import iter_sse_lines
@@ -771,7 +822,8 @@ async def _pass_through_stream(
     try:
         async for line in _gate_inband_error(
             iter_sse_lines(resp), upstream_protocol,
-            upstream_model=upstream_model, client_model=client_model,
+            own_aliases=own_aliases, client_model=client_model,
+            extra_model_names=extra_model_names,
         ):
             yield line
     finally:

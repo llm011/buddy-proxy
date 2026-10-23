@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import httpx
 import pytest
@@ -117,7 +118,14 @@ def cfg(tmp_path, monkeypatch):
 
 
 def _provider(monkeypatch, transport, config=None, key="test-key") -> ArkProvider:
-    """构造 provider 并把它的 httpx client 换成 MockTransport。"""
+    """构造 provider 并把它的 httpx client 换成 MockTransport。
+
+    只接受 ``cfg`` fixture 的返回值作 ``monkeypatch``——它已经把状态目录隔离
+    到 tmp_path。传真的 ``pytest.MonkeyPatch``（或任何没重定向
+    ``BUDDY_PROXY_STATE_DIR`` 的对象）会把 fixture 的假配置写进用户真实的
+    ``~/.buddy-proxy/ark.json`` / ``ark_api_key``（踩过一次，真 key 被覆盖）。
+    """
+    assert "BUDDY_PROXY_STATE_DIR" in os.environ, "状态目录没隔离，拒绝写真实配置"
     if config is not None:
         config_file_path().write_text(json.dumps(config))
     if key is not None:
@@ -125,6 +133,13 @@ def _provider(monkeypatch, transport, config=None, key="test-key") -> ArkProvide
     p = ArkProvider()
     p._client = _mock_transport(transport)
     return p
+
+
+@pytest.fixture(autouse=True)
+def _never_touch_real_state(tmp_path, monkeypatch):
+    """兜底：任何用例（含将来新写的）都不许碰到 ``~/.buddy-proxy``。"""
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(tmp_path / "state"))
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
 
 
 _BASE_CFG = {"models": [{"id": "ds-flash", "endpoint": "ep-test"}]}
@@ -635,9 +650,9 @@ def test_responses_stream_rewrites_upstream_model_to_public_name(cfg, monkeypatc
     sse = (
         'event: response.created\n'
         'data: {"type":"response.created","response":{"id":"r1","object":"response",'
-        '"model":"ep-test","output":[]}}\n\n'
+        '"model": "ep-test", "output":[]}}\n\n'
         'event: response.output_text.delta\n'
-        'data: {"type":"response.output_text.delta","model":"ep-test","delta":"hi"}\n\n'
+        'data: {"type":"response.output_text.delta","model": "ep-test","delta":"hi"}\n\n'
         'event: response.completed\n'
         'data: {"type":"response.completed","response":{"id":"r1","model":"ep-test",'
         '"output":[{"type":"message","role":"assistant","content":[{"type":"output_text",'
@@ -651,8 +666,53 @@ def test_responses_stream_rewrites_upstream_model_to_public_name(cfg, monkeypatc
             "input": [{"role": "user", "content": "hi"}]}, "responses")
     assert "ep-test" not in body, "上游模型名泄漏给了客户端"
     # 三帧都带 model（created.response / delta / completed.response），逐个改写
-    assert body.count('"model": "ark/ds-flash"') == 3
+    assert body.count("ark/ds-flash") == 3
     assert "response.completed" in body
+    # 只换值：上游的原有空白/键格式一字不动（原样透传的本意）
+    assert '"model": "ark/ds-flash", "output":[]' in body
+    assert '"model": "ark/ds-flash","delta"' in body
+
+
+def test_responses_stream_rewrites_platform_model_behind_endpoint(cfg, monkeypatch):
+    """接入点背后托管的平台模型真名也要改成对外名。
+
+    实测：``ep-...`` 后面挂的是平台托管的模型，responses 事件里回的 ``model``
+    是底层真名（如 ``deepseek-v4-1-flash-261017``），和接入点 id 毫无字面关系。
+    这个真名配置里写不出来，只能从上游自己说的话里学；学到之后同一路流里
+    后续事件也要一并改写（否则客户端会看到两个不同的模型名）。
+    """
+    monkeypatch.delenv("ARK_UPSTREAM_PROTOCOL", raising=False)
+    sse = (
+        'data: {"type":"response.created","response":{"id":"r1",'
+        '"model":"deepseek-v4-1-flash-261017","output":[]}}\n\n'
+        'data: {"type":"response.completed","response":{"id":"r1",'
+        '"model":"deepseek-v4-1-flash-261017","output":[]}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    p = _provider(monkeypatch, lambda r: httpx.Response(200, text=sse),
+                  config=_BASE_CFG)
+    _, body = _run_forward(
+        p, {"model": "ds-flash", "stream": True,
+            "input": [{"role": "user", "content": "hi"}]}, "responses")
+    assert "deepseek-v4-1-flash-261017" not in body
+    assert body.count("ark/ds-flash") == 2
+
+
+def test_rewrite_never_crashes_on_unrecognised_model_name(cfg, monkeypatch):
+    """模型名对不上时不能崩：改写是尽力而为，流必须照常走到 [DONE]。"""
+    monkeypatch.delenv("ARK_UPSTREAM_PROTOCOL", raising=False)
+    sse = (
+        'data: {"type":"response.created","response":{"id":"r1",'
+        '"model":"some-third-party-model","output":[]}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    p = _provider(monkeypatch, lambda r: httpx.Response(200, text=sse),
+                  config=_BASE_CFG)
+    _, body = _run_forward(
+        p, {"model": "ds-flash", "stream": True,
+            "input": [{"role": "user", "content": "hi"}]}, "responses")
+    assert "[DONE]" in body
+    assert body.count("data: ") == 2
 
 
 def test_passthrough_preserves_sse_frame_boundaries(cfg, monkeypatch):
