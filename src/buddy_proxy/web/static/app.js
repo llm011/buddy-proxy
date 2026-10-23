@@ -801,8 +801,8 @@ function orderPageCard(r) {
       <div class="order-head-main" onclick="orderToggle('${esc(key)}')">
         <span class="chev" style="transform:rotate(${open ? 0 : -90}deg)">▾</span>
         <span class="mono order-title">${esc(r.m)}</span>
-        <button class="ghost copy-model"
-                title="复制 ${esc(key)}（本卡片的键；要带通道前缀的全名请用「复制」在下面某一档）"
+        <button class="ghost copy-model" data-label="复制键名"
+                title="复制 ${esc(key)}（本卡片的键；要带通道前缀的全名请用下面某一档的「复制」）"
                 onclick="event.stopPropagation();copyModelName(this,${jsq(key)})">复制键名</button>
         <span class="tag order-count">${orderCount(items)} 档</span>
         ${markCount ? `<span class="tag bad" style="cursor:pointer" title="有目标处于冷却中，点击清除全部冷却，立即重试" onclick="event.stopPropagation();clearOrderMarks('${esc(key)}','${esc(key)}')">⏸ ${markCount}</span>` : ''}
@@ -1158,7 +1158,7 @@ function orderRow(item, idx, marks, scope) {
       ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
     </span>
     <span class="order-btns">
-      <button class="ghost copy-model" title="复制这一档的「通道/模型」全名（可直接填客户端 model 字段）"
+      <button class="ghost copy-model" data-label="复制" title="复制这一档的「通道/模型」全名（可直接填客户端 model 字段）"
         onclick="copyOrderTarget(this)">复制</button>
       <button class="ghost" title="上移" onclick="orderMove(this,-1)">▲</button>
       <button class="ghost" title="下移" onclick="orderMove(this,1)">▼</button>

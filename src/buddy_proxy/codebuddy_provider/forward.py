@@ -198,9 +198,12 @@ def _resolve_auto(state: Any, requested_model: str) -> Any:
     能否精确认领」判断归属。``auto`` 正是 CodeBuddy 的默认模型，而 Qoder 本地
     合成的档位模型（TIER_MODELS）也叫 ``auto``，不挡住就会静默改道。
 
-    ⚠️ 只挡别名轮，不挡精确轮：精确轮是各通道按自己发布的 id 认领，trae/zcode
-    等通道的模型名可能与静态表重合（两边都真有这个模型），让他们照常先认领，
-    与既有路由行为一致。
+    ⚠️ 精确轮**也会**挡：名字同时出现在静态表和某个通道的 id 里时（方舟的
+    ``ark.json`` 可以直接把对外名配成 ``deepseek-v4.1-flash`` 这种公共模型名），
+    那个通道只有在声明了更高的 ``route_priority`` 时才认领，否则让给 CodeBuddy。
+    没有声明 ``route_priority`` 的通道（trae/zcode 等）行为不变，照常先认领——
+    它们的模型名与静态表重合是因为两边真有这个模型，不是配置写出来的。
+    别名轮则整轮跳过静态表 id，见上。
     """
     providers = getattr(state, "providers", {}) or {}
     for allow_aliases in (False, True):

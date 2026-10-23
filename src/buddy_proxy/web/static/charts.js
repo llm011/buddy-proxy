@@ -624,7 +624,7 @@ document.getElementById('mix-legend').addEventListener('mouseleave', hideChartTi
 function _copyBtnHtml(provider, model) {
   const full = provider + '/' + model;
   // 不放文案进 title 之外的属性：整串要能原样塞进 onclick 的单引号字面量
-  return `<button class="ghost copy-model" title="复制 ${esc(full)}" data-copy="${esc(full)}" onclick='copyModelName(this,${jsq(full)})'>复制</button>`;
+  return `<button class="ghost copy-model" title="复制 ${esc(full)}" data-copy="${esc(full)}" data-label="复制" onclick='copyModelName(this,${jsq(full)})'>复制</button>`;
 }
 
 async function copyModelName(btn, full) {
@@ -646,9 +646,14 @@ async function copyModelName(btn, full) {
     }
     toast(`已复制 ${full}`);
     if (btn) {
-      const old = btn.textContent;
+      // 复原文案必须是**模板里的初始常量**，不能读当前 textContent：连点两次时
+      // 第二次读到的已经是「已复制」，两个 timer 一前一后会把它写回去再等 1.2s，
+      // 看起来像卡住。各按钮初始文案不同（「复制」/「复制键名」），由模板用
+      // data-label 声明，缺省回退「复制」。
+      const label = btn.dataset.label || '复制';
       btn.textContent = '已复制';
-      setTimeout(() => { btn.textContent = old; }, 1200);
+      clearTimeout(btn._copyT);
+      btn._copyT = setTimeout(() => { btn.textContent = label; }, 1200);
     }
   } catch (e) {
     toast('复制失败，请手动选择：' + full, true);
