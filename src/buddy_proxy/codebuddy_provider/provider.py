@@ -591,10 +591,12 @@ class CodeBuddyProvider(BaseProvider):
                     log.warning("codebuddy 资源实例查询失败（%s）: %s",
                                 acct.id, payload.get("msg") or payload.get("code"))
                     return {}
-                # 包门面 _unwrap 过的外层是 {data: Response.Data.Accounts}，
-                # api_post_as 拿的是未解包 envelope，同 summary 的取法。
-                resp = ((payload.get("data") or {}).get("Response") or {})
-                d = resp.get("Data") or resp
+                # api_post_as 拿的是未解包 envelope，实测形状恒为
+                # {data: {Response: {Data: {TotalCount, Accounts}}}}；形状变了
+                # 拿不到 rows/total 就自然落「空 rows → 下一轮 break」，或被
+                # 外层 except 吞成空表——有效期不显示，额度数字照常。
+                d = (((payload.get("data") or {}).get("Response") or {})
+                     .get("Data") or {})
                 rows = d.get("Accounts") or []
                 total = d.get("TotalCount") or 0
                 for it in rows:
@@ -612,7 +614,15 @@ class CodeBuddyProvider(BaseProvider):
                             expiry[code] = end
                     all_ends.setdefault(code, []).append(end)
                 offset += len(rows)
-                if not rows or offset >= total:
+                if not rows:
+                    if offset < total:
+                        # 页提前空了但 TotalCount 声称还有:Limit 被上游忽略
+                        # 或计数虚高。不空转——照常收手,留条日志可观察。
+                        log.warning("codebuddy 资源实例翻页提前终止（%s）: "
+                                    "offset=%d < TotalCount=%d",
+                                    acct.id, offset, total)
+                    break
+                if offset >= total:
                     break
             # 没有生效实例的包退全实例最晚周期（见上）；全空的丢弃。
             for code, ends in all_ends.items():
