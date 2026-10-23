@@ -500,6 +500,7 @@ class CodeBuddyProvider(BaseProvider):
             raise RuntimeError(payload.get("msg") or f"code={payload.get('code')}")
         data = payload.get("data") or {}
         sub_code = data.get("SubscriptionPackageCode") or ""
+        expiry = self._package_expiry_map(acct)
 
         def to_float(v) -> float | None:
             try:
@@ -534,11 +535,14 @@ class CodeBuddyProvider(BaseProvider):
                 "used": used, "total": total, "remaining": remain,
                 "percent": round(used / total * 100) if total else 0,
                 # 上游 ``Packages[]`` 只有周期容量字段（CycleUsed/Total/
-                # Remain/CapacityUnit），**没有任何日期字段**（2026-10-03
-                # 实测），所以到期/重置都无从谈起，恒 None——本通道不会
-                # 出现在到期横幅里，除非上游换接口。
+                # Remain/CapacityUnit），没有任何日期字段（2026-10-03 实测）。
+                # 有效期（expire_ts）改从 ``get-user-resource`` 逐包聚合而来
+                # （见 :meth:`_package_expiry_map`）；聚合接口失败时拿不到就
+                # 恒 None，条目照出——有效期是补充信息，不能把它变成整卡
+                # 失败的理由。重置时间依然无从谈起（周期按发放时刻滚动，
+                # 各包互不相同，单一 reset_ts 表达不了）。
                 "reset_ts": None,
-                "expire_ts": None,
+                "expire_ts": expiry.get(p.get("PackageCode") or ""),
                 "unit": "credit",
             })
         # 不再造一条「积分余额合计」明细：它是标题行的信息（前端 quotaHeadSum
@@ -546,6 +550,78 @@ class CodeBuddyProvider(BaseProvider):
         # 不一致（用户 2026-10-03：「其它的都没有」）。声明 sum_items 让前端
         # 自己合计，明细就只剩真正的各资源包。
         return packs, ("pro" if data.get("IsPaidUser") else "free")
+
+    #: ``get-user-resource`` 单页最大条数（裂变包一日一实例，41+ 条是常态，
+    #: 两页拿全即可；超出按 TotalCount 继续翻）。
+    _RESOURCE_PAGE_SIZE = 100
+    #: 资源实例翻页的硬上限：超过按截断处理（有效期取已见实例的），不无限翻。
+    _RESOURCE_MAX_ITEMS = 1000
+
+    def _package_expiry_map(self, acct: Any) -> dict[str, int]:
+        """逐包的资源包有效期（epoch 秒），键是 PackageCode；拿不到返回空表。
+
+        汇总接口（get-user-resource-summary）没有日期字段，有效期要从
+        ``/billing/meter/get-user-resource``（资源实例列表，WorkBuddy web
+        「我的资源」同源，2026-10-23 实测 200）聚合：
+
+        - 每条实例是一个订单周期（裂变包一天一条），带 ``CycleEndTime``
+          （本周期作废时刻）与 ``Status``（0=生效中，3=已耗尽/已结束）。
+        - 上游 summary 的 CycleTotal/Remain = **全部实例**（含已耗尽）的
+          周期容量之和（实测对账一致），所以明细里那份额度是「账号当前的
+          总盘子」。用户要的有效期是「现在还能用的这份额度到哪天作废」，
+          口径取**生效中（Status=0）实例里最晚的 CycleEndTime**——它对
+          订阅包等于月结周期结束、对裂变包等于最近一次发放的窗口结束。
+          没有生效实例时退全实例最晚值（包还在盘子里，只是当前周期用完，
+          界面照样该有个日期）。
+        - ``ExpiredTime``（发放后固定过期）与这里无关：已耗尽实例的它
+          全在过去，不解释当前余量还能用多久，不采用。
+        - 任何失败（404/风控/形状变了）都吞成空表：summary 主数据照常
+          出条目，只是没有「N 天后到期」。这是**第二数据源**，不能让它
+          有把整卡额度打挂的能力。
+        """
+        try:
+            expiry: dict[str, int] = {}
+            all_ends: dict[str, list[int]] = {}
+            offset = 0
+            while offset < self._RESOURCE_MAX_ITEMS:
+                payload = creds.api_post_as(
+                    acct.id, "/billing/meter/get-user-resource",
+                    {"Offset": offset, "Limit": self._RESOURCE_PAGE_SIZE})
+                if payload.get("code") not in (0, None):
+                    log.warning("codebuddy 资源实例查询失败（%s）: %s",
+                                acct.id, payload.get("msg") or payload.get("code"))
+                    return {}
+                # 包门面 _unwrap 过的外层是 {data: Response.Data.Accounts}，
+                # api_post_as 拿的是未解包 envelope，同 summary 的取法。
+                resp = ((payload.get("data") or {}).get("Response") or {})
+                d = resp.get("Data") or resp
+                rows = d.get("Accounts") or []
+                total = d.get("TotalCount") or 0
+                for it in rows:
+                    if not isinstance(it, dict):
+                        continue
+                    code = it.get("PackageCode") or ""
+                    if not code:
+                        continue
+                    end = parse_upstream_datetime(it.get("CycleEndTime"))
+                    if end is None:
+                        continue
+                    if it.get("Status") == 0:
+                        cur = expiry.get(code)
+                        if cur is None or end > cur:
+                            expiry[code] = end
+                    all_ends.setdefault(code, []).append(end)
+                offset += len(rows)
+                if not rows or offset >= total:
+                    break
+            # 没有生效实例的包退全实例最晚周期（见上）；全空的丢弃。
+            for code, ends in all_ends.items():
+                if code not in expiry and ends:
+                    expiry[code] = max(ends)
+            return expiry
+        except Exception as e:  # noqa: BLE001 — 第二数据源失败不阻塞额度卡
+            log.warning("codebuddy 资源包有效期查询失败（%s）: %s", acct.id, e)
+            return {}
 
     def quota_epoch(self) -> str:
         """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。"""

@@ -60,7 +60,11 @@ src/buddy_proxy/
   quota capabilities.
 - **`codebuddy_provider/`** contains the default provider's routing,
   instrumentation, upstream pipeline, provider implementation, and the
-  `client.py` CodeBuddy HTTP client.
+  `client.py` CodeBuddy HTTP client. Its quota path layers two upstream
+  sources: `get-user-resource-summary` for the per-pack capacity numbers and
+  `get-user-resource` (resource instances) aggregated per pack for the
+  expiry dates — the second source is best-effort and must never fail the
+  quota card.
 - **`trae/`** is split by responsibility (credentials, transport, SSE,
   native tools, text fallback, and PAT). `trae_provider.py` remains the
   published `trae-cli` entrypoint and trae façade (not a shim to remove).
