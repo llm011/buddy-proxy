@@ -668,9 +668,9 @@ def test_responses_stream_rewrites_upstream_model_to_public_name(cfg, monkeypatc
     # 三帧都带 model（created.response / delta / completed.response），逐个改写
     assert body.count("ark/ds-flash") == 3
     assert "response.completed" in body
-    # 只换值：上游的原有空白/键格式一字不动（原样透传的本意）
-    assert '"model": "ark/ds-flash", "output":[]' in body
-    assert '"model": "ark/ds-flash","delta"' in body
+    # 改写走 JSON 重序列化：字段值正确，且其它内容（delta/output）原样保留
+    assert '"delta": "hi"' in body
+    assert '"text": "hi"' in body
 
 
 def test_responses_stream_rewrites_platform_model_behind_endpoint(cfg, monkeypatch):
@@ -713,6 +713,96 @@ def test_rewrite_never_crashes_on_unrecognised_model_name(cfg, monkeypatch):
             "input": [{"role": "user", "content": "hi"}]}, "responses")
     assert "[DONE]" in body
     assert body.count("data: ") == 2
+
+
+def test_reasoning_first_frame_is_not_treated_as_error(cfg, monkeypatch):
+    """首帧是 reasoning 事件时不能 502。
+
+    方舟的正常帧带 ``"error": null``；``is_error_event`` 对不认识的 event 名
+    仍会去读 ``response.error``，那里是 ``None``——不按事件名过滤就会抛
+    AttributeError，把一条正常流做成 502。
+    """
+    sse = (
+        'event: response.created\n'
+        'data: {"type":"response.created","response":{"id":"r1","error":null,'
+        '"model":"ep-test","output":[]}}\n\n'
+        'event: response.reasoning_summary_text.delta\n'
+        'data: {"type":"response.reasoning_summary_text.delta","error":null,'
+        '"item_id":"rs_1","delta":"thinking"}\n\n'
+        'event: response.completed\n'
+        'data: {"type":"response.completed","response":{"id":"r1","error":null,'
+        '"model":"ep-test","output":[]}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    p = _provider(monkeypatch, lambda r: httpx.Response(200, text=sse),
+                  config=_BASE_CFG)
+    resp, body, exc = _run_forward_capture(
+        p, {"model": "ds-flash", "stream": True,
+            "input": [{"role": "user", "content": "hi"}]}, "responses")
+    assert exc is None, f"正常 reasoning 流被当成错误: {exc!r}"
+    assert "thinking" in body
+    assert "response.completed" in body
+
+
+def test_rewrite_leaves_tool_arguments_untouched(cfg, monkeypatch):
+    """tool call 的 arguments 字符串里出现同名字段，不能被改写。"""
+    sse = (
+        'event: response.output_item.added\n'
+        'data: {"type":"response.output_item.added","output_index":0,'
+        '"item":{"type":"function_call","name":"f","arguments":'
+        '"{\\"model\\": \\"ep-test\\"}"}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    p = _provider(monkeypatch, lambda r: httpx.Response(200, text=sse),
+                  config=_BASE_CFG)
+    _, body, exc = _run_forward_capture(
+        p, {"model": "ds-flash", "stream": True,
+            "input": [{"role": "user", "content": "hi"}]}, "responses")
+    assert exc is None
+    assert '\\"model\\": \\"ep-test\\"' in body, "工具参数被误改"
+
+
+def test_short_configured_name_does_not_prefix_match(cfg, monkeypatch):
+    """配置里是短名（``deepseek-v4``）时，不能把 ``deepseek-v4-1-flash`` 认成自己。"""
+    own = ark_mod._model_aliases("deepseek-v4")
+    assert ark_mod._is_own_upstream_model("deepseek-v4-1-flash", own) is False
+    # 归一形态仍认得出（点换连字符）
+    norm = ark_mod._model_aliases("deepseek-v4.1-flash")
+    assert ark_mod._is_own_upstream_model("deepseek-v4-1-flash", norm) is True
+
+
+def test_client_cancel_closes_upstream(cfg, monkeypatch):
+    """客户端中途取消（GeneratorExit）也要 aclose 上游，不能漏连接。"""
+    import asyncio
+
+    closed = []
+
+    class _Tracking(httpx.Response):
+        async def aclose(self):
+            closed.append(True)
+            await super().aclose()
+
+    body_stream = (
+        'data: {"type":"response.created","response":{"id":"r1",'
+        '"model":"ep-test","output":[]}}\n\n'
+    ) * 5 + "data: [DONE]\n\n"
+
+    def handler(request):
+        return _Tracking(200, text=body_stream,
+                         headers={"content-type": "text/event-stream"})
+
+    p = _provider(monkeypatch, handler, config=_BASE_CFG)
+
+    async def consume_then_cancel():
+        resp = await p.forward(
+            {"model": "ds-flash", "stream": True,
+             "input": [{"role": "user", "content": "hi"}]}, "responses")
+        it = resp.body_iterator
+        await it.__anext__()          # 只读第一帧
+        await it.aclose()             # 模拟客户端断开
+
+    asyncio.run(consume_then_cancel())
+    assert closed, "客户端取消后上游响应没被 aclose"
 
 
 def test_passthrough_preserves_sse_frame_boundaries(cfg, monkeypatch):

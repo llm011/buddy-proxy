@@ -63,7 +63,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterable, Sequence
+from typing import Any, AsyncIterator, Iterable, Iterator, Sequence
 
 import httpx
 from fastapi import HTTPException
@@ -580,8 +580,6 @@ async def _gate_inband_error(
     对外名：responses 透传会把上游真名（``ep-...``，或接入点背后那个平台
     托管模型的真名）原样吐给客户端，等于把本地映射白做了。
     """
-    from ..codex.projection import is_error_event
-
     saw_event = False
     async for line in lines:
         # 空行是**帧分隔符**，必须先跳过：`"".strip().startswith("data:")` 为假
@@ -608,19 +606,22 @@ async def _gate_inband_error(
                         "message": f"ark 上游错误: {message}",
                         "type": "upstream_error",
                     }})
-            if client_model and own_aliases:
-                # 先改写本次请求自己的上游名，再学「剩下的那一个」——接入点背后
-                # 托管的平台真名只可能出现在 model 字段里，学它是安全的；学完
-                # 同一行也能用上（首帧就干净，客户端不会先看到一次真名）。
-                # 逐字段替换而不解析再序列化：response 对象深度不限（output[]、
-                # usage 旁都有 model），只换顶层会漏，全量 dumps 又会改键序/转义。
-                out = _rewrite_model_fields(line, client_model, own_aliases, frozenset())
-                if extra_model_names is not None:
-                    _remember_upstream_model(out, extra_model_names, own_aliases)
-                    out = _rewrite_model_fields(
-                        out, client_model, own_aliases, _known_extra(extra_model_names))
+            if (client_model and own_aliases and upstream_protocol == "responses"
+                    and isinstance(payload, dict)):
+                # 只在 responses 事件上改写：chat chunk 的 ``model`` 已经是上游
+                # 配置名，客户端也不认，没必要动。改写与学习同一次完成——接入点
+                # 背后托管的平台真名只可能出现在 ``model`` 叶子，学它安全；学完
+                # 同一行即生效，客户端不会先看到一次真名。
+                # 按路径白名单改写：tool call 的 arguments 字符串、工具结果回显里
+                # 的同名字段一律不碰（逐行正则不认层级，会误伤）。
+                out = line
+                if _rewrite_model_payload(
+                    payload, client_model, own_aliases,
+                    _known_extra(extra_model_names), extra_model_names,
+                ):
+                    out = "data: " + json.dumps(payload, ensure_ascii=False)
             if not saw_event and upstream_protocol == "responses":
-                status, message = is_error_event(name, payload)
+                status, message = _inband_error(name, payload)
                 if status or message:
                     raise HTTPException(status_code=status or 502, detail={"error": {
                         "message": f"ark 上游错误: {message}" if message
@@ -632,6 +633,21 @@ async def _gate_inband_error(
         # iter_sse_lines 剥掉行尾，这里补回 "\n"：SSE 以空行分帧，丢换行
         # 客户端会读到一整块没有分隔符的垃圾（老版本按字节原样泵没这问题）。
         yield line + "\n"
+
+
+#: ``is_error_event`` 真正认识的错误事件名。事件名对不上时它仍会去看
+#: ``response.error``——而方舟的正常帧带的是 ``"error": null``，``None.get()``
+#: 直接抛 AttributeError，把一条好流做成 502。所以先按名字过滤再调用。
+_ERROR_EVENT_NAMES = frozenset({"error", "response.failed", "response.incomplete"})
+
+
+def _inband_error(name: str, payload: Any) -> tuple[int, str]:
+    """只对错误事件调用 ``is_error_event``，其余事件直接放过。"""
+    from ..codex.projection import is_error_event
+
+    if name not in _ERROR_EVENT_NAMES or not isinstance(payload, dict):
+        return 0, ""
+    return is_error_event(name, payload)
 
 
 def _model_aliases(upstream_model: str) -> frozenset[str]:
@@ -649,13 +665,19 @@ def _model_aliases(upstream_model: str) -> frozenset[str]:
 
 
 def _is_own_upstream_model(value: Any, aliases: frozenset[str]) -> bool:
-    """``value`` 是否就是本次请求的那个上游模型（精确名或归一后前缀匹配）。"""
+    """``value`` 是否就是本次请求的那个上游模型（精确名或归一后**完全**相等）。
+
+    不做前缀匹配：配置里写 ``deepseek-v4`` 这种短名时，前缀匹配会把
+    ``deepseek-v4-1-flash`` 也认成自己，改掉本来就该如实透出的别的模型名。
+    上游归一形态（``deepseek-v4.1-flash`` → ``deepseek-v4-1-flash-261017``）
+    靠 :func:`_remember_upstream_model` 从首帧里学，不需要模糊匹配。
+    """
     if not isinstance(value, str) or not value:
         return False
     if value in aliases:
         return True
     normalized = re.sub(r"[^0-9a-z]+", "-", value.lower()).strip("-")
-    return any(normalized == a or normalized.startswith(a + "-") for a in aliases)
+    return normalized in aliases
 
 
 def _known_extra(observed: set[str] | None) -> frozenset[str]:
@@ -663,53 +685,64 @@ def _known_extra(observed: set[str] | None) -> frozenset[str]:
     return frozenset(observed) if observed else frozenset()
 
 
-def _remember_upstream_model(
-    line: str, observed: set[str] | None, own: frozenset[str],
-) -> None:
-    """记下这一行里出现的、不属于本次请求的底层模型真名。
+#: 一条 SSE 行里的 ``"model": "..."`` 叶子。替换时只动捕获组，其余字节不动。
+_MODEL_FIELD_RE = re.compile(r'("model"\s*:\s*)"((?:[^"\\]|\\.)*)"')
 
-    接入点 ``ep-...`` 后面托管的是平台模型（实测 responses 事件回的是
-    ``deepseek-v4-1-flash-261017``），这个真名配置里写不出来，只能从上游自己
-    的话里学：第一条事件学到，后续事件就都改得掉。只收「像模型名」的值——
-    带 ``/`` 的对外名、以及本次请求自己的上游名都不记，免得把别人的名字抹掉。
+#: 允许改写 / 学习的键路径。只有这些位置上的 ``model`` 才是「本次请求用的模型」，
+#: 其余（tool call 的 ``arguments`` 字符串、工具结果回显、别的对象上的同名字段）
+#: 一律不碰——逐行正则不认层级，只靠白名单路径兜住。
+_RESPONSES_PATHS = frozenset({
+    ("model",),                      # response.output_text.delta 等事件的顶层 model
+    ("response", "model"),           # response.created / in_progress / completed
+})
+
+
+def _walk_payload(payload: Any) -> Iterator[tuple[str, dict[str, Any], str]]:
+    """``(键路径, 父对象, 键名)``：遍历出所有可做白名单判定的 ``"model"`` 位置。
+
+    只降入 dict / list；字符串值里的同名字段（JSON-in-string）永远走不到。
     """
-    if observed is None:
-        return
-    for match in _MODEL_FIELD_RE.finditer(line):
-        value = match.group(1).strip()
-        if value and value not in own and "/" not in value:
-            observed.add(value)
+    stack: list[tuple[tuple[str, ...], Any]] = [((), payload)]
+    while stack:
+        path, node = stack.pop()
+        if isinstance(node, dict):
+            for key, value in node.items():
+                child = (*path, str(key))
+                if key == "model":
+                    yield child, node, key
+                stack.append((child, value))
+        elif isinstance(node, list):
+            for index, item in enumerate(node):
+                stack.append(((*path, str(index)), item))
 
 
-_MODEL_FIELD_RE = re.compile(r'"model"\s*:\s*"([^"\\]*)"')
+def _rewrite_model_payload(
+    payload: Any, client_model: str, own: frozenset[str], extra: frozenset[str],
+    learned: set[str] | None = None,
+) -> bool:
+    """按路径白名单改写 ``payload`` 里的模型名；顺带学习底层真名。
 
-
-def _rewrite_model_fields(
-    line: str, client_model: str, own: frozenset[str], extra: frozenset[str],
-) -> str:
-    """把一行 SSE 里**全部**已知上游模型名换成对外名（含嵌套与转义形状）。
-
-    - ``own``：本次请求实际打的上游名（含 ``ep-`` 前缀、归一形态），精确或
-      前缀命中都改；
-    - ``extra``：本通道见过的**底层真名**（如 ``deepseek-v4-1-flash-261017``）。
-      接入点后面托管的是哪个平台模型，配置里写不出来，只有上游事件自己说；
-      这类名字与 ``ep-`` 毫无字面关系，只能精确命中——用前缀会把
-      ``deepseek-v4`` 系的其它模型一起误伤。
-
-    不做 JSON 解析：responses 事件把完整 response 对象塞在 ``response`` 里，
-    深度不限，而这里只想换 ``"model": "..."`` 这一种叶子。解析再序列化还要
-    担心中文转义与键序变化，逐字段替换更贴近「原样透传」的本意。
+    返回 ``True`` 表示有字段被改写（调用方据此重新序列化）。
     """
-    def sub(match: re.Match[str]) -> str:
-        value = match.group(1).strip()
-        if not (_is_own_upstream_model(value, own) or value in extra):
-            return match.group(0)
-        # 只换值，保留上游的原有空白/键格式，其余字节一字不动。
-        start, end = match.span(1)
-        whole = match.string
-        return whole[match.start():start] + client_model + whole[end:match.end()]
-
-    return _MODEL_FIELD_RE.sub(sub, line)
+    changed = False
+    for path, holder, key in _walk_payload(payload):
+        if path not in _RESPONSES_PATHS:
+            continue
+        value = holder.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if _is_own_upstream_model(value, own) or value.strip() in extra:
+            holder[key] = client_model
+            changed = True
+        elif learned is not None and "/" not in value:
+            # 不是本次请求的上游名 → 先当接入点背后托管的平台真名学下来
+            # （首帧就出现在 response.model 里，改不动它就漏给客户端了）。
+            learned.add(value.strip())
+            # 首帧才学到的名字，本次即可改写：它落在已知的 model 叶子上，
+            # 且不是任何「对外名」形状（带 / 的都在前面被排除了）。
+            holder[key] = client_model
+            changed = True
+    return changed
 
 
 async def _iter_upstream_events(
@@ -724,13 +757,13 @@ async def _iter_upstream_events(
     ``response.failed``）时，必须在**向客户端吐第一个字节前**还原成异常——
     codebuddy/trae/codex 都因为漏了这步把失败做成了「200 空流」。
     """
-    from ..codex.projection import aiter_sse_events, is_error_event
+    from ..codex.projection import aiter_sse_events
     from ..codex.sse import iter_sse_lines
 
     lines = iter_sse_lines(resp)
     if upstream_protocol == "responses":
         async for name, payload in aiter_sse_events(lines):
-            status, message = is_error_event(name, payload)
+            status, message = _inband_error(name, payload)
             if status or message:
                 raise HTTPException(
                     status_code=status or 502,
@@ -792,15 +825,23 @@ async def _responses_to_chat_stream(
             for chunk in converter.finish():
                 yield chunk
     finally:
-        # events 已绑定的上游响应由它自己的生成器 finally 关闭（见
-        # _iter_upstream_events 的调用方 in forward 里 aclose）。
-        pass
+        # events 已绑定的上游响应由下游出口的 finally 关闭（_chat_chunks_to_sse /
+        # _iter_upstream_events 的调用方）；这里只负责让事件迭代器及时收摊，
+        # 否则客户端中途取消时它会被搁置到下个 GC 周期。
+        aclose = getattr(events, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
 
 async def _chat_chunks_to_sse(
     chunks: AsyncIterator[dict[str, Any]], resp: httpx.Response,
 ) -> AsyncIterator[str]:
-    """chat chunk → ``data: {...}`` SSE 文本，结束后补 ``[DONE]`` 并释放上游。"""
+    """chat chunk → ``data: {...}`` SSE 文本，结束后补 ``[DONE]`` 并释放上游。
+
+    ``finally`` 是这条路径上 ``resp`` 的**唯一**主人：客户端中途取消时
+    Starlette 会在 yield 处抛 ``GeneratorExit``，靠「走到最后一个 yield」释放
+    等于每次取消都漏一条上游连接（方舟那头还在继续生成、继续计费）。
+    """
     try:
         async for chunk in chunks:
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
