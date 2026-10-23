@@ -618,6 +618,43 @@ document.getElementById('mix-legend').addEventListener('mousemove', e => {
 });
 document.getElementById('mix-legend').addEventListener('mouseleave', hideChartTip);
 
+// 每行模型 id 旁的复制按钮：点一下把**带通道前缀的完整模型名**（就是客户端
+// 请求 model 字段该填的值）写进剪贴板。裸名常常在多通道撞车（ark 与 codebuddy
+// 都有 deepseek-v4.1-flash），只复制裸名等于没告诉用户走哪条通道。
+function _copyBtnHtml(provider, model) {
+  const full = provider + '/' + model;
+  // 不放文案进 title 之外的属性：整串要能原样塞进 onclick 的单引号字面量
+  return `<button class="ghost copy-model" title="复制 ${esc(full)}" data-copy="${esc(full)}" onclick='copyModelName(this,${jsq(full)})'>复制</button>`;
+}
+
+async function copyModelName(btn, full) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(full);
+    } else {
+      // 非安全上下文（http://局域网IP:8787 访问是常见情况）没有 clipboard API，
+      // 退回 textarea + execCommand；失败才报错，不能静默什么都不发生。
+      const ta = document.createElement('textarea');
+      ta.value = full;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (!ok) throw new Error('execCommand 失败');
+    }
+    toast(`已复制 ${full}`);
+    if (btn) {
+      const old = btn.textContent;
+      btn.textContent = '已复制';
+      setTimeout(() => { btn.textContent = old; }, 1200);
+    }
+  } catch (e) {
+    toast('复制失败，请手动选择：' + full, true);
+  }
+}
+
 function renderGroups() {
   const el = document.getElementById('groups');
   // 搜索时基于原始 MODELS.groups 生成过滤视图（浅拷贝组、过滤模型行），
@@ -671,6 +708,7 @@ function renderGroups() {
         : '';
       return `<tr>
         <td${dim}><span class="mono">${esc(bareModelId(m.id, g.id))}</span>
+            ${_copyBtnHtml(g.id, bareModelId(m.id, g.id))}
             ${m.is_default ? '<span class="badge-default">✦ 默认</span>' : ''}
             ${dis ? '<span class="tag bad">已停用</span>' : ''}
             ${schTag}

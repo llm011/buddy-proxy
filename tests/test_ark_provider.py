@@ -805,6 +805,32 @@ def test_client_cancel_closes_upstream(cfg, monkeypatch):
     assert closed, "客户端取消后上游响应没被 aclose"
 
 
+def test_incomplete_is_truncation_not_error(cfg, monkeypatch):
+    """``response.incomplete`` 是正常截断（max_output_tokens 用满），不是 502。
+
+    方舟截断时直接发 ``response.incomplete``、不发 ``response.completed``；
+    当成错误就会让「输出被截短」变成 502。
+    """
+    sse = (
+        'event: response.output_text.delta\n'
+        'data: {"type":"response.output_text.delta","delta":"partial","error":null}\n\n'
+        'event: response.incomplete\n'
+        'data: {"type":"response.incomplete","response":{"id":"r1","status":"incomplete",'
+        '"model":"ep-test","output":[],"incomplete_details":{"reason":"max_output_tokens"}}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    p = _provider(monkeypatch, lambda r: httpx.Response(200, text=sse),
+                  config=_BASE_CFG)
+    resp, body, exc = _run_forward_capture(
+        p, {"model": "ds-flash", "stream": False,
+            "input": [{"role": "user", "content": "hi"}]}, "openai")
+    assert exc is None, f"正常截断被当成错误: {exc!r}"
+    assert resp.status_code == 200
+    payload = json.loads(body)
+    # 不抛 502 就是这条用例的核心；截断语义要如实转成 finish_reason=length
+    assert payload["choices"][0]["finish_reason"] == "length"
+
+
 def test_passthrough_preserves_sse_frame_boundaries(cfg, monkeypatch):
     """透传时行尾换行要保留，客户端才能按空行切帧。"""
     monkeypatch.setenv("ARK_UPSTREAM_PROTOCOL", "chat")

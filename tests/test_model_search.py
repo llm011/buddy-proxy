@@ -78,6 +78,11 @@ globalThis.bareModelId = (id, provider) => {{
   return p && s.startsWith(p + '/') ? s.slice(p.length + 1) : s;
 }};
 globalThis.fmtMs = ms => ms + 'ms';
+// 复制按钮的 helper：模板里每行都会调用，缺失会让整段渲染抛 ReferenceError
+let CLIPBOARD = [];
+globalThis.copyModelName = (btn, full) => CLIPBOARD.push(full);
+globalThis._copyBtnHtml = (provider, model) =>
+  `<button class="ghost copy-model" data-copy="${{provider}}/${{model}}">复制</button>`;
 globalThis.fmtNum = n => String(n);
 globalThis.refreshStickyVars = () => {{}};
 globalThis.MODELS = {json.dumps(MODELS)};
@@ -95,6 +100,8 @@ globalThis.snapshot = () => {{
     models: [...html.matchAll(/<span class="mono">([^<]*)<\\/span>/g)].map(m => m[1]),
     empty: /class="empty"/.test(html),
     hasClearBtn: html.includes('data-clear-model-search'),
+    // 每行模型 id 旁的「复制」按钮，data-copy 必须是带通道前缀的全名
+    copies: [...html.matchAll(/data-copy="([^"]*)"/g)].map(m => m[1]),
     summary: getEl('model-summary').textContent,
   }};
 }};
@@ -218,3 +225,14 @@ console.log(JSON.stringify({r1, r2}));
 """)
     assert data["r1"] == data["r2"]
     assert data["r2"]["models"] == ["claude-opus-4"]
+
+
+def test_copy_button_carries_provider_prefix():
+    """每个模型行都有复制按钮，复制的是 `provider/model` 全名（客户端 model 字段直接可用）。"""
+    data = _run_search_js("""
+renderGroups();
+console.log(JSON.stringify({r: snapshot()}));
+""")
+    assert data["r"]["copies"] == [
+        "trae/gpt-6", "trae/claude-opus-4", "qoder/qwen-max",
+    ]

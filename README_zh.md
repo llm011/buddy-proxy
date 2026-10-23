@@ -11,7 +11,7 @@
 - **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**火山方舟**（Volcengine Ark，模型/接入点走本地 `ark.json`、不进代码，Responses 优先自动降级 chat，三协议可直连 Claude Code）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
 - **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / codex / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
-- **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
+- **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、每个模型一键复制**带通道前缀**的全名（`trae/gpt-6`、`ark/ds-flash`——正是客户端 `model` 字段该填的值；「模型顺序」页每一档也可单独复制）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
 - **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）；本地隐藏项会同时从该端点、管理页目录和模型顺序候选中移除
 - **脱敏**（`--desensitize`）— 向 system 消息里的合规关键词插入零宽空格，避免后端关键词审核误拦
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
@@ -403,6 +403,12 @@ python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS �
   `ark/<id>`。接入点背后托管的平台模型名（实测方舟在 Responses 事件里回的是
   `deepseek-v4-1-flash-261017` 这类底层真名，和 `ep-...` 毫无字面关系）也会被改写成
   对外名——这个名字配置里写不出来，所以由透传层从上游首条事件里学到，同一行即生效。
+  另外 `response.incomplete`（`incomplete_details.reason == "max_output_tokens"`）是**正常的
+  截断收尾**而不是错误：它终止流并把 `finish_reason` 标成 `length`。
+- **裸名撞车**：`ark.json` 的 `id` 若与 CodeBuddy / Trae 静态目录里的模型同名，裸名仍归
+  那些通道（否则新增 ark 会悄悄抢走既有流量），ark 的这个模型用 `ark/<id>` 调用
+  （`route_priority = 50`，CodeBuddy 是 100）。模型页每行「复制」按钮复制的就是带前缀的
+  全名，直接填进客户端的 `model` 字段即可。
 
 ## 模型列表
 

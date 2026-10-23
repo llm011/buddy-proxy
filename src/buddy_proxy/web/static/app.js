@@ -801,6 +801,9 @@ function orderPageCard(r) {
       <div class="order-head-main" onclick="orderToggle('${esc(key)}')">
         <span class="chev" style="transform:rotate(${open ? 0 : -90}deg)">▾</span>
         <span class="mono order-title">${esc(r.m)}</span>
+        <button class="ghost copy-model"
+                title="复制 ${esc(key)}（本卡片的键；要带通道前缀的全名请用「复制」在下面某一档）"
+                onclick="event.stopPropagation();copyModelName(this,${jsq(key)})">复制键名</button>
         <span class="tag order-count">${orderCount(items)} 档</span>
         ${markCount ? `<span class="tag bad" style="cursor:pointer" title="有目标处于冷却中，点击清除全部冷却，立即重试" onclick="event.stopPropagation();clearOrderMarks('${esc(key)}','${esc(key)}')">⏸ ${markCount}</span>` : ''}
         <span class="tag bad order-dirty" title="有未保存的修改" style="${orderIsDirty(key) ? '' : 'display:none'}">未保存</span>
@@ -1155,6 +1158,8 @@ function orderRow(item, idx, marks, scope) {
       ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
     </span>
     <span class="order-btns">
+      <button class="ghost copy-model" title="复制这一档的「通道/模型」全名（可直接填客户端 model 字段）"
+        onclick="copyOrderTarget(this)">复制</button>
       <button class="ghost" title="上移" onclick="orderMove(this,-1)">▲</button>
       <button class="ghost" title="下移" onclick="orderMove(this,1)">▼</button>
       <button class="ghost danger" title="删除此目标" onclick="orderRemove(this)">✕</button>
@@ -1168,6 +1173,18 @@ function orderProviderOf(rowEl) {
   const t = (rowEl.querySelector('.order-provider') || {}).textContent || '';
   const v = t.trim();
   return ORDER_PROVIDER_LIST.includes(v) ? v : '';
+}
+
+// 「顺序」页某一档的复制：读**当前界面**的通道按钮文字与模型输入框，拼成
+// `通道/模型`。不能拿草稿或服务端 targets 拼——用户刚改了通道/模型还没保存时，
+// 复制到的必须是屏幕上看到的那个名字，否则贴进客户端一定 404。
+function copyOrderTarget(btn) {
+  const row = btn && btn.closest && btn.closest('.order-row');
+  if (!row) return;
+  const provider = orderProviderOf(row);
+  const model = ((row.querySelector('.order-model') || {}).value || '').trim();
+  if (!provider || !model) { toast('这一档还没选好通道和模型', true); return; }
+  copyModelName(btn, provider + '/' + model);
 }
 
 // 从事件元素定位它所属的行：作用域 + 下标 + 对应的可变数组

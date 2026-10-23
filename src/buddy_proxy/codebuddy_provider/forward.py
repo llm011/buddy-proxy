@@ -81,6 +81,12 @@ def _codebuddy_static_ids() -> frozenset[str]:
         return frozenset()
 
 
+#: 默认 CodeBuddy 通道的「名分」——静态表里有的名字优先归它。
+#: 非默认通道用类属性 ``route_priority`` 声明自己的名分，低于这个值就在裸名
+#: 撞车时让位（见 :func:`_resolve_auto`）。
+_CODEBUDDY_ROUTE_PRIORITY = 100
+
+
 def _is_codebuddy_model(model: str) -> bool:
     """该名字是否是 CodeBuddy 静态表里的模型 id。
 
@@ -203,6 +209,14 @@ def _resolve_auto(state: Any, requested_model: str) -> Any:
         for p in providers.values():
             try:
                 if p.accepts_model(requested_model, aliases=allow_aliases):
+                    # 裸名与 CodeBuddy 静态表撞车时，真身是 CodeBuddy 的
+                    # （deepseek-v4.1-flash 两边都叫这个名）：精确轮也把归属
+                    # 让给兜底通道，否则加了 --ark 就静默改道。真要对方舟这
+                    # 条，用 ark/<id> 前缀，那条路径不经过这里。
+                    if (not allow_aliases and _is_codebuddy_model(requested_model)
+                            and hasattr(p, "route_priority")
+                            and p.route_priority < _CODEBUDDY_ROUTE_PRIORITY):
+                        continue
                     return p
             except Exception:  # noqa: BLE001 - 单个通道判断失败不该阻断路由
                 continue
