@@ -222,6 +222,10 @@ def main():
                         help="启用 GLM 官方 provider（智谱 BigModel Coding Plan 官方 key，"
                              "Anthropic 端点直通，与 zcode 同上游但凭据独立；"
                              "凭据取 GLM_API_KEY / ~/.buddy-proxy/glm_api_key）")
+    parser.add_argument("--ark", action="store_true", default=os.getenv("ARK_ENABLED", "") == "1",
+                        help="启用火山方舟 (Volcengine Ark) provider（Responses 优先、自动降级 chat，"
+                             "支持 openai/responses/anthropic 三协议；凭据取 ARK_API_KEY / "
+                             "~/.buddy-proxy/ark_api_key，接入点表取 ~/.buddy-proxy/ark.json）")
     parser.add_argument("--mimo", action="store_true", default=os.getenv("MIMO_ENABLED", "") == "1",
                         help="启用 MiMo provider（小米 MiMo 桌面端；"
                              "凭据取 MIMO_API_KEY 或复用桌面端小米账号登录态）")
@@ -299,6 +303,26 @@ def main():
         print("[GLM] Enabled (BigModel Coding Plan 官方 key)")
     else:
         print("[GLM] Disabled (pass --glm or GLM_ENABLED=1 to enable)")
+
+    # 火山方舟：模型表与 key 全在本地配置，代码里没有任何默认模型/接入点。
+    # 缺配置时只告警不阻断启动（用户可能只是暂时没填），转发时 ensure_auth 再报。
+    if args.ark:
+        from buddy_proxy.providers.ark import ArkProvider
+
+        ark = ArkProvider()
+        try:
+            ark.ensure_auth()  # 启动时校验 key 与模型表，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("ark provider 认证未就绪: %s", exc.detail)
+        providers[ark.id] = ark
+        health = ark.health()
+        logger.info("Ark provider enabled (%s, %d models, upstream=%s)",
+                    health.get("base_url"), health.get("models"),
+                    health.get("upstream_protocol"))
+        print(f"[Ark] Enabled (火山方舟, {health.get('models')} 个接入点, "
+              f"上游 {health.get('upstream_protocol')})")
+    else:
+        print("[Ark] Disabled (pass --ark or ARK_ENABLED=1 to enable)")
 
     if args.mimo:
         from buddy_proxy.mimo.provider import MimoProvider

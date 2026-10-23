@@ -8,7 +8,7 @@
 
 ## 特性
 
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**火山方舟**（Volcengine Ark，模型/接入点走本地 `ark.json`、不进代码，Responses 优先自动降级 chat，三协议可直连 Claude Code）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
 - **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / codex / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
 - **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
@@ -352,6 +352,57 @@ buddy login codex    # 浏览器授权（回环 1455 收回调）；打不开浏
   `choices[0].message.images[]`（`/v1/messages` 出口转成 Anthropic `image` 块，
   `/v1/responses` 出口转成 `output_image`）。上游首帧是十几秒的 `keepalive` 心跳，
   心跳不计入「已提交」，生图失败同样按 401/403/429 换号。
+
+### 10. 火山方舟 Provider（`providers/ark.py`，可选）
+
+把 **火山引擎方舟（Volcengine Ark）** 的 API key 变成一条上游通道，以 `ark/<id>` 寻址：
+
+```bash
+python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS 里已带 --ark
+```
+
+- **模型与 key 一律不进代码**：方舟按**自定义推理接入点**（`ep-...`）计费，接入点 id 是
+  账号私有资源（本通道**故意不带任何默认模型表**），所以模型表完全来自本地配置：
+
+  ```bash
+  # 1) key：首行一个裸 key，权限 0600
+  mkdir -p ~/.buddy-proxy && printf '%s\n' 'YOUR_ARK_API_KEY' > ~/.buddy-proxy/ark_api_key
+  chmod 600 ~/.buddy-proxy/ark_api_key
+  ```
+
+  ```json
+  // 2) ~/.buddy-proxy/ark.json
+  {
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "models": [
+      {"id": "ds-flash", "endpoint": "ep-xxxxxxxxxxxxxxxx", "name": "DeepSeek Flash"}
+    ]
+  }
+  ```
+
+  `id` 是**对外模型名**（`/v1/models` 里就是 `ark/ds-flash`），`endpoint` 是上游真名
+  `ep-...`（裸模型名的账号改写成 `"model": "..."` 亦可，二者择一）。`base_url` 可选，
+  缺省北京区。配置缺失或写坏时**模型表为空而不报错**，`ensure_auth()` 会给出指向这两个
+  文件的提示。环境变量 `ARK_API_KEY` / `ARK_BASE_URL` 优先于文件。
+
+- **上游 Responses 优先、自动降级**：默认打 `/api/v3/responses`；若该接入点回
+  `404 InvalidEndpointOrModel*`（明确「这个接入点干不了 responses」），本进程后续改走
+  `/api/v3/chat/completions` 并只记一次日志。**400/401/403/429 一律不降级**——那是请求
+  或账号的问题，换端点只会把真错误洗成另一种形状。`ARK_UPSTREAM_PROTOCOL=auto|responses|chat`
+  可强制指定。
+- **三协议全支持**：`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 都通。
+  Anthropic 出口复用 `dumate` 同一套事件机（`reasoning_content` → thinking 块、
+  `tool_calls` → `tool_use` + `input_json_delta`），Claude Code 可直连；非流式
+  `/v1/messages` 回一整个 Message JSON，不是 SSE。
+- **首事件闸门**：上游 200 但带内是 `error` / `response.failed` 帧时，在吐第一个字节前
+  还原成 HTTP 错误（`_iter_upstream_events` 解析路径与 `_pass_through_stream` 透传路径
+  各有一道），不会变成「200 空流」。
+- **额度**：方舟没有可匿名查询余额的公开接口，本通道 `quota()` 返回 `None`，管理页不出
+  额度卡（不编造数字）。
+- 发往上游恒为 `stream: true`，非流式客户端在本地聚合；回给客户端的模型名永远是
+  `ark/<id>`。接入点背后托管的平台模型名（实测方舟在 Responses 事件里回的是
+  `deepseek-v4-1-flash-261017` 这类底层真名，和 `ep-...` 毫无字面关系）也会被改写成
+  对外名——这个名字配置里写不出来，所以由透传层从上游首条事件里学到，同一行即生效。
 
 ## 模型列表
 
@@ -713,6 +764,9 @@ providers:
 --zcode                   启用 ZCode provider（智谱 GLM，Anthropic 端点直通）
 --glm                    启用 GLM 官方 provider（BigModel Coding Plan 官方 key，
                           与 zcode 同上游、凭据独立）
+--ark                     启用火山方舟 provider（Responses 优先、自动降级 chat；
+                          模型表取 ~/.buddy-proxy/ark.json，key 取 ARK_API_KEY /
+                          ~/.buddy-proxy/ark_api_key）
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --dumate                  启用百度搭子 provider（DuMate 本地代理，需 App 在运行）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
@@ -729,7 +783,7 @@ providers:
 --mock-dir DIR            使用录制的响应（测试用）
 ```
 
-环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` / `QODER_ENABLED` / `GEMINI_ENABLED`（置 `1` 等同对应开关）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`MIMO_API_KEY` / `MIMO_BASE_URL`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
+环境变量：`BUDDY_PROXY_HOST`、`BUDDY_PROXY_PORT`、`CODEBUDDY_ENDPOINT`、`CODEBUDDY_MODEL`、`BUDDY_PROXY_LOG_FILE`、`BUDDY_PROXY_SETTINGS`（设置文件路径）、`BUDDY_PROXY_STATE_DIR`、`BUDDY_PROXY_ADMIN_OPEN=1`（放开管理接口的本机限制）、`PROXY_DEFAULT_PROVIDER`（兜底通道，默认 `codebuddy`）、`TRAE_ENABLED` / `ZCODE_ENABLED` / `ARK_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` / `QODER_ENABLED` / `GEMINI_ENABLED`（置 `1` 等同对应开关）、`ARK_API_KEY` / `ARK_BASE_URL` / `ARK_UPSTREAM_PROTOCOL`（`auto` / `responses` / `chat`）、`TRAE_TOKEN` / `TRAE_USER_ID`（跳过 Trae IDE 解密，直接用这两个值）、`ZCODE_API_KEY`、`ZCODE_OPENAI_BASE`、`MIMO_API_KEY` / `MIMO_BASE_URL`、`BUDDY_CLIENT_NAMES_FILE`（覆盖请求日志里的客户端名映射）。
 
 Trae 流式调优：`WB_TRAE_HEARTBEAT_INTERVAL`（等待上游缓冲响应期间的心跳秒数，默认 45，`0` 关闭——避免像 Ethan 那种 120s 分块超时的客户端中断长生成）、`WB_TRAE_NATIVE_TOOLS`（全部 Trae 请求是否走原生通道，默认 `1`，`0` 回落到旧的提示词教文本协议）、`WB_TRAE_IDE_VERSION_CODE`（Trae 客户端版本头，默认 `20260906`——上游按此头放开各模型能力，某模型突然 4001 时调高它）、`WB_TRAE_NONSTREAM_MAX_S`（非流式聚合上限）、`WB_TRAE_SEMANTIC_TIMEOUT`、`WB_TRAE_TOKEN_KEEPALIVE_S`（后台 Token 刷新间隔）。
 
@@ -1180,6 +1234,39 @@ JSON，上限 8 个）。旧的单账号文件 `~/.buddy-proxy/antigravity_oauth
 
 > `--antigravity` 只在想用这条通道时才需要；不加则 provider 不注册，
 > `antigravity/...` 模型名落到兜底通道。
+
+### 10. 火山方舟 Provider（`providers/ark.py`）
+
+`ArkProvider` 只做三件事：**读本地配置 → 选上游端点 → 按客户端协议翻译**。它**不带任何
+默认模型表、不含任何 key**——方舟按自定义推理接入点（`ep-...`）计费，接入点 id 是账号私有
+资源，写进代码既越权又没法维护。
+
+| 接口 | 说明 |
+| --- | --- |
+| 配置 | 模型表：`~/.buddy-proxy/ark.json`（`{"base_url"?, "models":[{"id","endpoint"\|"model",...}]}`）；key：`ARK_API_KEY` > `~/.buddy-proxy/ark_api_key`（首行裸 key，0600）；base_url：`ARK_BASE_URL` > 文件 > 北京区默认值 |
+| 配置容错 | 文件缺失/JSON 坏掉/条目非法（缺 `id`、缺接入点、`id` 重复）一律**跳过而不抛**，模型表可能为空；可操作提示留给 `ensure_auth()`（401 + 指向这两个文件的文案） |
+| 上游选择 | `ARK_UPSTREAM_PROTOCOL=auto`（默认）先打 `/responses`，只有 `404 + InvalidEndpointOrModel*` 才降级 `/chat/completions` 并在进程内记忆；`responses` / `chat` 可强制。400/401/403/429 **不降级** |
+| 请求 | 一律 `stream: true`；chat 上游自动补 `stream_options.include_usage`（不开就拿不到 usage）；responses 上游经 `codex.projection.chat_to_responses_request` 投影 |
+| 响应（`openai`） | 上游 chat → 原样透传；上游 responses → `ResponsesToChatStream` 折叠成 chat chunk。非流式输出 `chat.completion` |
+| 响应（`responses`） | 上游 responses → 原样透传；上游 chat → `ResponsesStreamConverter` 反向转换。非流式输出 `response` 对象 |
+| 响应（`anthropic`） | 复用 `protocols.anthropic_adapter.sse_to_anthropic_stream`（与 dumate 同一份事件机：thinking / tool_use / usage 扣缓存），非流式回整条 Message |
+| 首事件闸门 | `_iter_upstream_events`（解析路径）与 `_pass_through_stream` → `_gate_inband_error`（透传路径）**各一道**；上游 200 带内报错还原成 `HTTPException` |
+| 错误透传 | 上游 ≥400 先 `aread()` 再 `aclose()`（否则拿不到真实错误体），状态码与错误体原样回客户端；网络异常 → 502，超时 → 504 |
+| 对外模型名 | 恒为 `ark/<id>`（`message_start.model`、`response.model` 都是它）；`ep-...` 与接入点背后的平台模型真名都不外泄 |
+| 额度 | `quota()` 恒 `None`——无公开余额接口，不出卡、不编数字 |
+
+配置示例（**占位符**，真实接入点与 key 只写在本地）：
+
+```json
+{
+  "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+  "models": [
+    {"id": "ds-flash", "endpoint": "ep-xxxxxxxxxxxxxxxx", "name": "DeepSeek Flash"}
+  ]
+}
+```
+
+> `--ark` 只在想用这条通道时才需要；不加则 provider 不注册，`ark/...` 模型名落到兜底通道。
 
 ## 免责声明
 

@@ -39,7 +39,7 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # 某个 flag 被拿掉就失效。早先这里写的是 trae——但 settings.json 的
 # ``default_provider`` 会覆盖本参数（见 __main__.py「管理页设置优先于 CLI」），
 # 两处常年不一致却毫无提示，排查时极易被带偏。
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --zcode-start --mimo --qoder --antigravity --kimi --codex --default-provider codebuddy}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --ark --zcode-start --mimo --qoder --antigravity --kimi --codex --default-provider codebuddy}"
 
 # 优先使用项目自带 .venv（uv 已装好依赖），否则退回系统 python
 if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then

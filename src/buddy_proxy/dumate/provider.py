@@ -402,66 +402,14 @@ async def _pass_through_stream(resp: httpx.Response) -> AsyncIterator[bytes]:
 async def _to_anthropic_stream(resp: httpx.Response, model: str) -> AsyncIterator[str]:
     """上游 OpenAI SSE → Anthropic 事件流（``/v1/messages`` 客户端要的形状）。
 
-    DuMate 本地代理只回 OpenAI chat chunk；复用 ``anthropic_adapter.
-    AnthropicStreamConverter``（kimi/mimo 同款），``reasoning_content`` →
-    thinking 块、``tool_calls`` → tool_use 块。转换途中任何异常先收尾再抛
-    （不兜的话客户端拿到「内容块悬空、没有 message_stop」的残流，更难排查）。
+    实现已上移到 ``protocols.anthropic_adapter.sse_to_anthropic_stream``——
+    ark 等同形态通道与这里共用同一份事件机，不许各写一套。保留本名是因为
+    它仍是被 provider 内部调用与测试引用的接缝名。
     """
-    from ..protocols.anthropic_adapter import AnthropicStreamConverter
+    from ..protocols.anthropic_adapter import sse_to_anthropic_stream
 
-    converter = AnthropicStreamConverter(model)
-
-    def _emit(event_name: str, payload: dict[str, Any]) -> str:
-        return f"event: {event_name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
-
-    def _close_open() -> list[str]:
-        """把已开出的内容块收尾（best-effort：收尾本身再炸也不能盖掉原错误）。"""
-        try:
-            return [_emit(n, p) for n, p in converter.close_open_blocks()]
-        except Exception:  # noqa: BLE001
-            return []
-
-    def _abort(msg: str) -> list[str]:
-        """收尾 + 补一个 error 事件，让客户端拿到结构完整的结束。"""
-        out = _close_open()
-        out.append(_emit("error", {
-            "type": "error",
-            "error": {"type": "api_error", "message": msg},
-        }))
-        return out
-
-    try:
-        async for line in resp.aiter_lines():
-            line = line.strip()
-            if not line or line.startswith(":"):
-                continue
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(chunk, dict):
-                continue
-            if chunk.get("error"):
-                err = chunk["error"]
-                msg = str(err.get("message", err)) if isinstance(err, dict) else str(err)
-                for event in _abort(msg):
-                    yield event
-                return
-            for name, payload in converter.feed_chunk(chunk):
-                yield _emit(name, payload)
-        for name, payload in converter.finish():
-            yield _emit(name, payload)
-    except Exception as exc:  # noqa: BLE001 — 上游畸形数据不该让客户端只收到半截流
-        log.warning("dumate anthropic stream aborted: %s: %s", type(exc).__name__, exc)
-        for event in _abort(f"{type(exc).__name__}: {exc}"):
-            yield event
-        return
-    yield "data: [DONE]\n\n"
+    async for event in sse_to_anthropic_stream(resp, model):
+        yield event
 
 
 def _upstream_error_response(resp: httpx.Response) -> JSONResponse:

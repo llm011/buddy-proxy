@@ -8,7 +8,7 @@
 
 ## Features
 
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **GLM official** (BigModel Coding Plan key — same upstream as ZCode, independent credentials), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **GLM official** (BigModel Coding Plan key — same upstream as ZCode, independent credentials), **Volcengine Ark** (models/endpoints from a local `ark.json`, never in code; Responses first with automatic chat fallback; all three protocols, including Claude Code over `/v1/messages`), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state); all listed by `/v1/models` and routed by model name
 - **Multi-account failover** — most subscription channels (codebuddy / trae / qoder / kimi / codex / antigravity…) support multiple accounts: rotated in login order as primary/backup; account-level errors (401 expired credentials / 429 quota exhausted) cool the current account down and switch to the next automatically. Per-account quota, check-in, rename / reorder / delete are all managed in the admin UI
 - **Protocol conversion** — `/v1/chat/completions` (OpenAI), `/v1/responses` (Codex CLI), `/v1/messages` (Anthropic / Claude Code)
 - **Admin UI** — built-in web console at `/ui`: browse models grouped by provider, one-click "set as default model", one-click test per model (sends a "hi"), and per-model request stats with charts. Providers backed by a reliable upstream catalog (Qoder / QoderIntl / Kimi / Antigravity) can refresh their model list in place. Any model can be hidden from catalogs and selectors without disabling direct requests, then restored from the “Hidden” manager; disabling remains the separate hard-rejection control. Loads lazily per tab, so the first paint never waits on the slowest endpoint (the request log)
@@ -308,6 +308,24 @@ buddy start
 
 `buddy login glm` reports state and prints the key setup steps, same style as zcode (no automatable browser login — the key is minted by hand in the Zhipu console). Plan access measured 2026-10-06 (lite): `glm-5.3` / `glm-5.3-flash` / `glm-5-turbo` work; `glm-5.3-flashx` is refused with `1311 套餐暂未开放` until the plan is upgraded — the model stays in the table as a reserve, no code change needed when it unlocks.
 
+### Ark provider interface (`providers/ark.py`)
+
+`ArkProvider` does exactly three things: **read local config → pick the upstream endpoint → translate per client protocol**. It ships **no default model table and no key** — Ark bills per custom inference endpoint (`ep-...`), and endpoint IDs are account-private, so baking them into code would be both over-reaching and unmaintainable.
+
+| Aspect | Behavior |
+| --- | --- |
+| Config | Model table: `~/.buddy-proxy/ark.json` (`{"base_url"?, "models":[{"id","endpoint"\|"model",...}]}`); key: `ARK_API_KEY` > `~/.buddy-proxy/ark_api_key` (bare key on the first line, 0600); base_url: `ARK_BASE_URL` > file > Beijing default |
+| Config tolerance | Missing file / broken JSON / invalid entries (no `id`, no endpoint, duplicate `id`) are **skipped, not raised**; the table may end up empty, and `ensure_auth()` (401) points at both files |
+| Upstream choice | `ARK_UPSTREAM_PROTOCOL=auto` (default) tries `/responses` first and downgrades to `/chat/completions` **only** on `404 + InvalidEndpointOrModel*`, memoized for the process; `responses` / `chat` force a choice. 400/401/403/429 **never** downgrade |
+| Request | Always `stream: true`; chat upstream gets `stream_options.include_usage` injected (without it usage never arrives); responses upstream goes through `codex.projection.chat_to_responses_request` |
+| Response (`openai`) | chat upstream → pass through; responses upstream → `ResponsesToChatStream` folds it into chat chunks. Non-streaming returns `chat.completion` |
+| Response (`responses`) | responses upstream → verbatim pass-through; chat upstream → `ResponsesStreamConverter`. Non-streaming returns a `response` object |
+| Response (`anthropic`) | Reuses `protocols.anthropic_adapter.sse_to_anthropic_stream` (the same event machine as dumate: thinking / tool_use / usage minus cache reads); non-streaming returns one Message |
+| First-event gate | One gate on the parsing path (`_iter_upstream_events`) **and one on the pass-through path** (`_pass_through_stream` → `_gate_inband_error`); an upstream 200 carrying in-band errors becomes an `HTTPException` |
+| Error passthrough | Upstream ≥400: `aread()` then `aclose()` (otherwise the real error body is lost), status and body passed through verbatim; network error → 502, timeout → 504 |
+| Public model name | Always `ark/<id>` (in `message_start.model` and `response.model`); neither `ep-...` nor the platform model behind it leaks |
+| Quota | `quota()` is always `None` — no public balance API, so no card and no invented numbers |
+
 ### MiMo provider (optional)
 
 Xiaomi **MiMo** (platform.xiaomimimo.com), exposed under the `mimo/` prefix (`mimo-auto`, `mimo-pro`):
@@ -573,6 +591,40 @@ buddy login codex    # browser OAuth (loopback callback on 1455); paste the call
 - **Catalog + “refresh”.** Chat models come from `GET /backend-api/codex/models?client_version=` (the table is generation-gated by client version, so an old version hides new models — we pin `0.159.0`), keeping only `visibility=list` and `supported_in_api!=false`. The model page's refresh button re-fetches with the current account and writes `~/.buddy-proxy/codex/models.json` (a runtime snapshot that takes precedence over the bundled `codex/models.json`; repository files stay untouched). An empty upstream answer keeps the old snapshot instead of wiping the catalog. Currently visible: `gpt-6.1-sol` (default, 500K context), `gpt-6-astra`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`; `gpt-reserve` / `codex-auto-review` are internal (`visibility=hide`) and not listed.
 - **Image generation.** `gpt-image-2.5` (default), `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, `gpt-image-2`, `gpt-image-1.5` go through `POST /backend-api/codex/images/generations`. Use them like chat models — put the prompt in the user message — and the image comes back as a data URL in `choices[0].message.images[]` (converted to an Anthropic `image` block on `/v1/messages` and an `output_image` part on `/v1/responses`). The first upstream frame is a `keepalive` heartbeat that can take 15+ seconds; heartbeats don't count as “committed”, and image failures fail over on 401/403/429 like chat.
 
+### Volcengine Ark provider (optional)
+
+Turns a **Volcengine Ark (火山方舟)** API key into an upstream channel, addressed as `ark/<id>`:
+
+```bash
+python -m buddy_proxy --ark           # or ARK_ENABLED=1; the default EXTRA_ARGS already includes --ark
+```
+
+- **No models and no key in the code.** Ark bills per **custom inference endpoint** (`ep-...`), and those IDs are account-private resources (this channel deliberately ships **no default model table**), so the catalog lives entirely in local config:
+
+  ```bash
+  # 1) key: a single bare key on the first line, mode 0600
+  mkdir -p ~/.buddy-proxy && printf '%s\n' 'YOUR_ARK_API_KEY' > ~/.buddy-proxy/ark_api_key
+  chmod 600 ~/.buddy-proxy/ark_api_key
+  ```
+
+  ```json
+  // 2) ~/.buddy-proxy/ark.json
+  {
+    "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+    "models": [
+      {"id": "ds-flash", "endpoint": "ep-xxxxxxxxxxxxxxxx", "name": "DeepSeek Flash"}
+    ]
+  }
+  ```
+
+  `id` is the **public model name** (`ark/ds-flash` in `/v1/models`); `endpoint` is the real upstream name `ep-...` (accounts that accept bare model IDs can use `"model": "..."` instead — one of the two). `base_url` is optional and defaults to the Beijing region. A missing or broken config **yields an empty model table without raising**; `ensure_auth()` then returns a 401 pointing at these two files. `ARK_API_KEY` / `ARK_BASE_URL` override the files.
+
+- **Responses first, automatic downgrade.** Requests hit `/api/v3/responses` by default; if the endpoint answers `404 InvalidEndpointOrModel*` (i.e. this endpoint genuinely can't do responses), the process switches to `/api/v3/chat/completions` for the rest of its life and logs it once. **400/401/403/429 never downgrade** — those are request or account problems, and switching endpoints would only launder a real error into a different shape. `ARK_UPSTREAM_PROTOCOL=auto|responses|chat` forces a choice.
+- **All three protocols.** `/v1/chat/completions`, `/v1/responses` and `/v1/messages` all work. The Anthropic exit reuses the same event machine as `dumate` (`reasoning_content` → thinking block, `tool_calls` → `tool_use` + `input_json_delta`), so Claude Code can connect directly; a non-streaming `/v1/messages` returns one Message JSON, not an SSE stream.
+- **First-event gate.** When the upstream answers 200 but the payload is an in-band `error` / `response.failed` frame, it is restored to an HTTP error before a single byte reaches the client — both on the parsing path (`_iter_upstream_events`) and the pass-through path (`_pass_through_stream`) — never a “200 empty stream”.
+- **Quota.** Ark has no public balance endpoint, so `quota()` returns `None` and the admin UI shows no quota card (no invented numbers).
+- Requests to the upstream are always `stream: true`, with non-streaming clients aggregated locally. The model name returned to clients is always `ark/<id>`. The platform model actually hosted behind an endpoint (Ark reports its real name in Responses events, e.g. `deepseek-v4-1-flash-261017`, which is unrelated to `ep-...`) is rewritten to the public name too — the config can't know that name, so the pass-through layer learns it from the first upstream event and applies it to that same line.
+
 ## Connect clients
 
 ### Codex CLI
@@ -699,6 +751,9 @@ providers:
 --zcode                   enable the ZCode provider (Zhipu GLM, Anthropic passthrough)
 --glm                     enable the GLM official provider (BigModel Coding Plan key,
                           same upstream as zcode but independent credentials)
+--ark                     enable the Volcengine Ark provider (Responses first, automatic
+                          chat fallback; model table from ~/.buddy-proxy/ark.json, key from
+                          ARK_API_KEY / ~/.buddy-proxy/ark_api_key)
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
 --qoder                   enable the Qoder provider (COSY-signed, Qwen3.8/GLM/Kimi)
@@ -713,7 +768,7 @@ providers:
 --mock-dir DIR            serve recorded fixtures (testing)
 ```
 
-Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` / `QODER_ENABLED` / `GEMINI_ENABLED` (`1` enables that provider, same as the flags), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `MIMO_API_KEY` / `MIMO_BASE_URL`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
+Env vars: `BUDDY_PROXY_HOST`, `BUDDY_PROXY_PORT`, `CODEBUDDY_ENDPOINT`, `CODEBUDDY_MODEL`, `BUDDY_PROXY_LOG_FILE`, `BUDDY_PROXY_SETTINGS` (settings file path), `BUDDY_PROXY_STATE_DIR`, `BUDDY_PROXY_ADMIN_OPEN=1` (lift the localhost-only restriction on admin endpoints), `PROXY_DEFAULT_PROVIDER` (fallback channel, default `codebuddy`), `TRAE_ENABLED` / `ZCODE_ENABLED` / `ARK_ENABLED` / `DOUBAO_ENABLED` / `MIMO_ENABLED` / `QODER_ENABLED` / `GEMINI_ENABLED` (`1` enables that provider, same as the flags), `ARK_API_KEY` / `ARK_BASE_URL` / `ARK_UPSTREAM_PROTOCOL` (`auto` / `responses` / `chat`), `TRAE_TOKEN` / `TRAE_USER_ID` (skip Trae IDE decryption and use these directly), `ZCODE_API_KEY`, `ZCODE_OPENAI_BASE`, `MIMO_API_KEY` / `MIMO_BASE_URL`, `BUDDY_CLIENT_NAMES_FILE` (override the client-name map used in the request log).
 
 Trae stream tuning: `WB_TRAE_HEARTBEAT_INTERVAL` (heartbeat while waiting for the buffered upstream response, seconds, default 45, `0` disables — keeps clients with per-chunk timeouts like Ethan's 120s from aborting long generations), `WB_TRAE_NATIVE_TOOLS` (native channel for all Trae requests — native function calling for tool requests, preset-free chat for plain ones; default `1`; `0` falls back to the legacy prompt-taught text protocol with leak guards), `WB_TRAE_IDE_VERSION_CODE` (Trae client version header, default `20260906` — the upstream gates per-model capabilities by this header; raise it when a model suddenly 4001s), `WB_TRAE_NONSTREAM_MAX_S` (non-streaming aggregation cap), `WB_TRAE_SEMANTIC_TIMEOUT`, `WB_TRAE_TOKEN_KEEPALIVE_S` (background token refresh interval).
 

@@ -180,6 +180,56 @@ def test_forward_anthropic_stream_emits_events():
     assert "input_tokens" in body and "output_tokens" in body
 
 
+def test_anthropic_stream_delegates_to_shared_protocol_machine():
+    """``_to_anthropic_stream`` 已上移到 ``protocols.anthropic_adapter``。
+
+    这里只钉住**接缝仍在且行为一致**（ark 通道复用同一份实现）：同一份上游
+    SSE，经过 dumate 的 ``_to_anthropic_stream`` 与协议层
+    ``sse_to_anthropic_stream`` 产出的事件字节必须逐段相等。万一以后有人把
+    其中一边改歪，两边的差异会在这里暴露。
+    """
+    import asyncio
+
+    from buddy_proxy.dumate import provider as prov_mod
+    from buddy_proxy.protocols.anthropic_adapter import sse_to_anthropic_stream
+
+    sse_lines = "\n".join([
+        'data: {"choices":[{"delta":{"content":"hi"},"index":0}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+        '"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}',
+        "data: [DONE]",
+        "",
+    ])
+
+    class _FakeResp:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for ln in sse_lines.splitlines():
+                yield ln
+
+        async def aclose(self):
+            pass
+
+    async def _collect(fn):
+        return [c async for c in fn(_FakeResp(), "kimi-k3")]
+
+    via_dumate = asyncio.run(_collect(prov_mod._to_anthropic_stream))
+    via_protocol = asyncio.run(_collect(sse_to_anthropic_stream))
+
+    # 消息 id 每次随机（msg_<uuid 前缀>），比对前抹掉
+    import re
+
+    def _norm(chunks):
+        text = "".join(chunks)
+        text = re.sub(r'"id": "msg_[0-9a-f]+"', '"id": "msg_X"', text)
+        return text.split("\n\n")
+
+    assert _norm(via_dumate) == _norm(via_protocol)
+    joined = "".join(via_dumate)
+    assert "message_start" in joined and "message_stop" in joined
+
+
 # --- 转发直通（mock httpx） -------------------------------------------------
 
 
