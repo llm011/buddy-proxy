@@ -122,6 +122,10 @@
   button.primary:hover { filter: brightness(1.1); }
   button.ghost { background: transparent; }
   button:disabled { opacity: .45; cursor: not-allowed; }
+  /* 模型行里紧贴模型 id 的「复制」：字号跟正文走、别把行高撑高 */
+  button.copy-model { padding: 1px 6px; margin-left: 6px; font-size: 11px;
+    line-height: 1.4; vertical-align: middle; opacity: .75; }
+  button.copy-model:hover { opacity: 1; }
   /* 表单控件：浏览器默认是白底 + 浅色边框，放在深色卡片上会刺眼（且 select
      的默认箭头在暗色下几乎看不见）。统一成与 button 同一套配色。 */
   input:not([type="checkbox"]):not([type="radio"]), select, textarea {

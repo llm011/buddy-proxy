@@ -23,6 +23,11 @@ STATE_RE = re.compile(
     r"let COLLAPSED = new Set\(\);.*?(?=\n// 打卡日历悬停 tooltip)", re.S
 )
 RENDER_RE = re.compile(r"function renderGroups\(\) \{.*?(?=\nlet RECENT_PAGE)", re.S)
+# 复制 helper 本体（_copyBtnHtml / copyModelName）：单独切片，测试里不替身，
+# 这样「回写的文案是不是模板常量」才是真代码在跑
+COPY_RE = re.compile(
+    r"function _copyBtnHtml\(provider, model\).*?(?=\nfunction renderGroups\(\))", re.S
+)
 
 MODELS = {
     "default_model": "gpt-6",
@@ -38,10 +43,15 @@ MODELS = {
 }
 
 
-def _run_search_js(body: str, collapsed: list[str] | None = None) -> dict:
+def _run_search_js(body: str, collapsed: list[str] | None = None,
+                   with_copy: bool = False) -> dict:
     text = CHARTS_JS.read_text(encoding="utf-8")
     state, render = STATE_RE.search(text), RENDER_RE.search(text)
+    copy = COPY_RE.search(text)
     assert state and render, "charts.js 里找不到模型分组搜索/渲染切片"
+    if with_copy:
+        assert copy, "charts.js 里找不到复制 helper 切片"
+        copy = copy.group(0)
     script = f"""
 const listeners = new Map();   // id:type -> [fn]（同一元素同一事件可多个）
 const elements = new Map();
@@ -78,11 +88,26 @@ globalThis.bareModelId = (id, provider) => {{
   return p && s.startsWith(p + '/') ? s.slice(p.length + 1) : s;
 }};
 globalThis.fmtMs = ms => ms + 'ms';
+// 复制按钮的 helper：模板里每行都会调用，缺失会让整段渲染抛 ReferenceError。
+// with_copy=True 时改用 charts.js 里的真实现（下面注入），这里就不替身。
+const WITH_REAL_COPY = {json.dumps(with_copy)};
+let CLIPBOARD = [];
+if (!WITH_REAL_COPY) {{
+  globalThis.copyModelName = (btn, full) => CLIPBOARD.push(full);
+  globalThis._copyBtnHtml = (provider, model) =>
+    `<button class="ghost copy-model" data-copy="${{provider}}/${{model}}">复制</button>`;
+}}
+globalThis.toast = (msg, isErr) => {{ globalThis.LAST_TOAST = [msg, !!isErr]; }};
+globalThis.window = {{ isSecureContext: true }};
+Object.defineProperty(globalThis, 'navigator', {{ configurable: true, value: {{ clipboard: {{ writeText: async (t) => CLIPBOARD.push(t) }} }} }});
+globalThis.document.createElement = () => ({{ style: {{}} }});
+globalThis.document.body = {{ appendChild() {{}}, removeChild() {{}} }};
 globalThis.fmtNum = n => String(n);
 globalThis.refreshStickyVars = () => {{}};
 globalThis.MODELS = {json.dumps(MODELS)};
 {state.group(0)}
 {render.group(0)}
+{(copy or "") if with_copy else ""}
 globalThis.lsWrites = lsWrites;
 globalThis.fire = fire;
 globalThis.getEl = element;
@@ -95,6 +120,8 @@ globalThis.snapshot = () => {{
     models: [...html.matchAll(/<span class="mono">([^<]*)<\\/span>/g)].map(m => m[1]),
     empty: /class="empty"/.test(html),
     hasClearBtn: html.includes('data-clear-model-search'),
+    // 每行模型 id 旁的「复制」按钮，data-copy 必须是带通道前缀的全名
+    copies: [...html.matchAll(/data-copy="([^"]*)"/g)].map(m => m[1]),
     summary: getEl('model-summary').textContent,
   }};
 }};
@@ -218,3 +245,46 @@ console.log(JSON.stringify({r1, r2}));
 """)
     assert data["r1"] == data["r2"]
     assert data["r2"]["models"] == ["claude-opus-4"]
+
+
+def test_copy_button_carries_provider_prefix():
+    """每个模型行都有复制按钮，复制的是 `provider/model` 全名（客户端 model 字段直接可用）。"""
+    data = _run_search_js("""
+renderGroups();
+console.log(JSON.stringify({r: snapshot()}));
+""")
+    assert data["r"]["copies"] == [
+        "trae/gpt-6", "trae/claude-opus-4", "qoder/qwen-max",
+    ]
+
+
+def test_copy_button_restores_label_after_repeated_clicks():
+    """连点两次也不会把「已复制」当成初始文案写回（回写的是模板里的 data-label）。
+
+    回归风险：早先 ``const old = btn.textContent`` 取当前文案，第二次点读到的是
+    「已复制」，两个 1.2s 定时器一前一后把按钮留在「已复制」更久，看着像卡住。
+    这里跑 charts.js 里的**真实现**，并把 setTimeout 换成手动推进的队列。
+    """
+    data = _run_search_js("""
+renderGroups();
+const html = getEl('groups').innerHTML;
+const m = html.match(/class="ghost copy-model"[^>]*data-label="([^"]*)"/);
+const btn = { dataset: { label: m && m[1] }, textContent: m ? '复制' : '' };
+const timers = [];
+globalThis.setTimeout = (fn) => { timers.push(fn); return timers.length; };
+globalThis.clearTimeout = () => {};
+await copyModelName(btn, 'trae/gpt-6');
+const afterFirst = btn.textContent;
+await copyModelName(btn, 'trae/gpt-6');   // 1.2s 内再点一次
+// 两个定时器都到期：最终必须回到模板初始文案，不能停在「已复制」
+timers.forEach(fn => fn());
+console.log(JSON.stringify({
+  afterFirst, afterSecond: timers.length, label: m && m[1],
+  finalText: btn.textContent, copied: CLIPBOARD, toast: LAST_TOAST[0],
+}));
+""", with_copy=True)
+    assert data["label"] == "复制"
+    assert data["afterFirst"] == "已复制"
+    assert data["copied"] == ["trae/gpt-6", "trae/gpt-6"]
+    assert data["finalText"] == "复制", "两个定时器都触发后必须回到初始文案"
+    assert data["toast"] == "已复制 trae/gpt-6"

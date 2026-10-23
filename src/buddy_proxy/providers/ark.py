@@ -257,6 +257,11 @@ class ArkProvider(BaseProvider):
             out.append(item)
         return out
 
+    #: 裸名与 CodeBuddy 静态表撞车时让位（见 forward._CODEBUDDY_ROUTE_PRIORITY）。
+    #: 本通道的对外名是用户自定义的（可能就叫 ``deepseek-v4.1-flash`` 这种公共
+    #: 模型名），撞车时应当让兜底通道继续认领；要走方舟请用 ``ark/<id>``。
+    route_priority = 50
+
     def accepts_model(self, model: str, aliases: bool = True) -> bool:
         want = (model or "").strip().removeprefix(f"{self.id}/")
         return any(entry["id"] == want for entry in self._entries)
@@ -635,10 +640,16 @@ async def _gate_inband_error(
         yield line + "\n"
 
 
-#: ``is_error_event`` 真正认识的错误事件名。事件名对不上时它仍会去看
-#: ``response.error``——而方舟的正常帧带的是 ``"error": null``，``None.get()``
-#: 直接抛 AttributeError，把一条好流做成 502。所以先按名字过滤再调用。
-_ERROR_EVENT_NAMES = frozenset({"error", "response.failed", "response.incomplete"})
+#: 真正可能表示失败的事件名。
+#:
+#: 两处都要挡：
+#: 1. ``is_error_event`` 对不认识的 event 名也会去读 ``response.error``，而方舟的
+#:    正常帧带 ``"error": null``——``None.get()`` 直接抛 AttributeError，把一条好流
+#:    做成 502；
+#: 2. ``response.incomplete`` 是**正常截断**（``max_output_tokens`` 用满），
+#:    方舟在截断时直接发它、根本不发 ``response.completed``。当成错误就会让
+#:    「输出被截短」变成 502（codex 那边也是把 incomplete 当终态处理的）。
+_ERROR_EVENT_NAMES = frozenset({"error", "response.failed"})
 
 
 def _inband_error(name: str, payload: Any) -> tuple[int, str]:
@@ -960,11 +971,11 @@ async def _collect_responses(
     """非流式：把 responses 事件流聚合成最终 response 对象。"""
     final: dict[str, Any] | None = None
     async for name, payload in events:
-        if name == "response.completed":
+        if name in ("response.completed", "response.incomplete"):
             response = payload.get("response")
             if isinstance(response, dict):
                 final = response
-        elif name in ("response.failed", "response.incomplete"):
+        elif name == "response.failed":
             response = payload.get("response") or {}
             err = response.get("error") if isinstance(response, dict) else None
             raise HTTPException(status_code=502, detail={"error": {

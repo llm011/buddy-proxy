@@ -395,6 +395,75 @@ def test_codebuddy_guard_applies_only_to_alias_round():
             assert "_resolve_auto(state, requested_model)" in src
 
 
+class _CollidingProvider(BaseProvider):
+    """模拟方舟：对外名直接配成静态表里也有的公共模型名。"""
+
+    id = "collide"
+    name = "Colliding Provider"
+
+    def __init__(self, model: str, priority: int | None):
+        self._model = model
+        if priority is not None:
+            # 实例属性也能被 getattr 取到；真身份在类属性上，这里实例化两份互不影响
+            self.route_priority = priority
+
+    def models(self):
+        return [{"id": self._model}]
+
+    def ensure_auth(self):
+        pass
+
+    def accepts_model(self, model: str, aliases: bool = True) -> bool:
+        # 与真实 provider 同口径：带前缀的名字按剥前缀后的 id 认领
+        want = (model or "").strip().removeprefix(f"{self.id}/")
+        return want == self._model
+
+    async def forward(self, body, protocol, original=None):  # pragma: no cover
+        raise AssertionError("不该路由到这里")
+
+
+_COLLIDING_NAME = "deepseek-v4.1-flash"
+
+
+def test_route_priority_yields_bare_name_to_codebuddy():
+    """``route_priority`` 低于 CodeBuddy 时，撞车的裸名归兜底通道。
+
+    回归：``ark.json`` 的对外名常直接写成公共模型名，而 CodeBuddy 静态表里
+    也有同名条目；精确轮先到先得，于是加了 ``--ark`` 之后原本走 CodeBuddy 的
+    裸名请求被静默改道，并按方舟计费。
+    """
+    from buddy_proxy.codebuddy_provider.forward import _is_codebuddy_model, _resolve_auto
+
+    assert _is_codebuddy_model(_COLLIDING_NAME), "前提：这个名字在静态表里"
+    p = _CollidingProvider(_COLLIDING_NAME, priority=50)
+    assert _resolve_auto(SimpleNamespace(providers={"collide": p}), _COLLIDING_NAME) is None
+    # 前缀形式不受影响：那条路径不经过 _resolve_auto
+    assert p.accepts_model(f"collide/{_COLLIDING_NAME}") is True
+
+
+def test_route_priority_above_codebuddy_still_claims():
+    """高于 100（或压根没声明）的通道照常认领——不能让这个机制误伤既有通道。"""
+
+    from buddy_proxy.codebuddy_provider.forward import _resolve_auto
+
+    high = _CollidingProvider(_COLLIDING_NAME, priority=150)
+    assert _resolve_auto(
+        SimpleNamespace(providers={"collide": high}), _COLLIDING_NAME) is high
+    plain = _CollidingProvider(_COLLIDING_NAME, priority=None)
+    assert _resolve_auto(
+        SimpleNamespace(providers={"collide": plain}), _COLLIDING_NAME) is plain
+
+
+def test_route_priority_only_shields_static_table_names():
+    """不撞静态表的裸名照常由低优先级通道认领（让位只针对撞车）。"""
+
+    from buddy_proxy.codebuddy_provider.forward import _resolve_auto
+
+    p = _CollidingProvider("my-private-flash", priority=50)
+    assert _resolve_auto(
+        SimpleNamespace(providers={"collide": p}), "my-private-flash") is p
+
+
 # --- 真实通道：Qoder 不得在精确轮抢走属于别人的名字 -------------------------
 #
 # 上面几组用的都是**替身**通道（AliasOnly / Exact / PrefixedAliasProvider），
