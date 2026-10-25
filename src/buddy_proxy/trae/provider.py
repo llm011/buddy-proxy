@@ -27,6 +27,7 @@ from .config import (
     TRAE_SEMANTIC_TIMEOUT,
     _NATIVE_TOOLS_ENABLED,
     _debug_dump,
+    credit_multiplier,
     model_tables,
     resolve_trae_region,
 )
@@ -172,8 +173,9 @@ def _first_num(obj: dict[str, Any], keys: Sequence[str]) -> float | None:
     return None
 
 
-# 目录探测结果缓存：region -> {model: 可用}。进程内记忆，避免每次点
-# 「重新拉取」全表重打上游；重启即清（探测语义是「现在的可用性」）。
+# 兼容旧调用点保留（原「全表逐模型探测」的可用性缓存）。2026-10-25 起刷新
+# 改为「拉上游目录 + 抄倍率 + 只验证新名字」，不再往这里写；留变量只为外部
+# 脚本/旧测试引用时不炸。
 _PROBE_CACHE: dict[str, dict[str, bool]] = {}
 
 
@@ -197,81 +199,167 @@ class TraeProvider(BaseProvider):
         # base_url 仍可显式传入（测试注入点/自定义网关），缺省按区域取。
         self._region = resolve_trae_region(region)
         self._base_url = base_url or self._region.chat_base
+        # 目录发现快照（上游 config_name -> {display_name, context_window,
+        # multimodal}）：「↻ 重新拉取」成功后原子替换，models() 里与静态底表
+        # 合并展示。内存态、重启即回底表——与 traeintl / qoder 同款生命周期。
+        self._discovered: dict[str, dict[str, Any]] = {}
 
     def models(self) -> Sequence[dict[str, Any]]:
         # 按区域取模型表：CN 与海外是两套几乎不重叠的目录（GLM/Doubao/Qwen vs
         # Claude/GPT/Gemini 系），必须各用各的——见 config.model_tables。
-        model_map, model_ids, model_credits, supports_images = model_tables(
-            self._region.key)
+        model_map, model_ids, _, supports_images = model_tables(self._region.key)
         result = []
         seen = set()
+
+        def _entry(mid: str, **extra: Any) -> dict[str, Any]:
+            info = self._discovered.get(mid) or {}
+            out = {
+                "id": mid,
+                "object": "model",
+                "created": 0,
+                "owned_by": self.id,
+                # 倍率走 credit_multiplier：刷新抄回的 consumption_rate 优先，
+                # 其次静态底表（两者分工见 config.DISCOVERED_CREDITS 注释）
+                "credits": credit_multiplier(self._region.key, mid),
+                # 图片能力：与 CodeBuddy 通道同口径（供 /v1/models 的
+                # input_modalities 判定），漏报会让客户端误剥图片
+                "images": mid in supports_images or bool(info.get("multimodal")),
+                "description": "Trae 模型",
+            }
+            # 展示名只在**真的不同**时给（比 id 时忽略大小写：上游
+            # ``MiniMax-M3.1-Flash`` 只是官方排版，别让 /v1/models 多一个
+            # 与 id 仅大小写不同的冗余字段）
+            display = info.get("display_name")
+            if display and display.lower() != mid.lower():
+                out["name"] = display
+            if info.get("context_window") is not None:
+                out["context_window"] = info["context_window"]
+            out.update(extra)
+            return out
+
         for m in model_ids:
             if m in seen:
                 continue
             seen.add(m)
-            result.append({
-                "id": m,
-                "object": "model",
-                "created": 0,
-                "owned_by": self.id,
-                "credits": model_credits.get(m),
-                # 图片能力：与 CodeBuddy 通道同口径（供 /v1/models 的
-                # input_modalities 判定），漏报会让客户端误剥图片
-                "images": m in supports_images,
-                "description": "Trae 模型",
-            })
+            result.append(_entry(m))
         # 加别名（外部名映射）——倍率与图片能力均跟随映射到的内部模型
         for external, internal in model_map.items():
             if external not in seen:
                 seen.add(external)
-                result.append({
-                    "id": external,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": self.id,
-                    "maps_to": internal,
-                    "credits": model_credits.get(internal),
-                    "images": internal in supports_images,
-                    "description": f"Trae 别名 -> {internal}",
-                })
+                result.append(_entry(external, maps_to=internal,
+                                     description=f"Trae 别名 -> {internal}"))
+        # 目录发现的新名字排在底表之后（同 traeintl）：底表已有同名条目时
+        # 上面的 _entry 已经带上了它的展示名/上下文/读图能力
+        for name in sorted(self._discovered):
+            if name not in seen:
+                seen.add(name)
+                result.append(_entry(name, description="Trae 模型（目录发现）"))
         return result
 
     def ensure_auth(self) -> None:
         _auth()
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
-        """目录「重新拉取」：trae 没有可拉的官方目录端点（CN/海外目录都靠
-        截图 + probe 实测维护，见 config 模块头），这里做的是**可用性探测**——
-        逐模型发一条最小真实请求，上游 4001 的标记为失效并从 models() 里
-        剔除（本进程内），其余原样保留。返回探测后的目录。
+        """目录「重新拉取」：从上游目录端点拉全量候选 + 抄倍率，再剔失效。
 
-        与 kimi/qoder 的「从上游目录拉取」语义不同：这里不能发现新模型
-        （新模型要照 repo 铁律真发请求收录），只能发现「目录里已死」的。
-        探测失败的模型**不写盘**——可能是瞬态网络问题，重启进程即恢复全表；
-        稳定失效会在下次探测里再现。单模型探测失败（网络抖动）按可用保留，
-        只有拿到上游明确的 4001 拒绝才剔除。"""
-        model_map, model_ids, _, _ = model_tables(self._region.key)
-        # 探测只覆盖内部名（别名跟着内部名走），跳过探测中已确认可用的
-        # ——同一模型的探测结果进程内缓存，避免每次点按钮全表重打
-        cache = _PROBE_CACHE.setdefault(self._region.key, {})
-        dead: set[str] = set()
-        probed_any = False
-        for m in model_ids:
-            if not force and m in cache:
-                continue
-            probed_any = True
+        2026-10-25 改造（用户要求「拉取倍率」）：此前是纯探测——没有可拉的
+        目录端点、只能逐模型 ping 然后剔 4001。实测 CN 网关的
+        ``get_detail_param`` 返回完整目录，每条带 ``consumption_rate``（**就是
+        客户端「模型倍率」面板显示的值**）与展示名/上下文/读图能力，于是：
+
+        1. **拉目录**：CN 走 ``cn_catalog.fetch_cn_catalog``（IN 账号全量并集，
+           不剔冷却——目录发现与冷却无关）；海外走继承的 ``intl_catalog``
+           路径（``TraeIntlProvider.refresh_models`` 覆写，本方法到那里不执行）。
+           单账号失败只 log 跳过；全失败抛错，旧快照保留（models_api 转 502）。
+        2. **抄倍率**：写进 ``config.DISCOVERED_CREDITS``（运行时合成，不落盘。
+           静态底表是人工核过的值，刷新不覆盖它，重启即回底表）。
+        3. **验证可用性**：只对底表/发现里**没有**记录的**新名字**发一条真实
+           请求（repo 铁律：上游收下名字 ≠ 能服务），4001/1005 拒收的不并入。
+           已有模型不再逐个 ping——旧实现每点一次按钮就全表打一遍，既慢又会
+           白付积分。
+        4. **合并**：新名字进 ``self._discovered``（展示名/上下文/读图能力）。
+        ``force`` 保留兼容通用刷新接口（本实现恒强拉）。"""
+        from .config import DISCOVERED_CREDITS
+        from .credentials import ensure_account_token
+
+        accounts = [a for a in list_accounts() if (a.region or "cn") == self._region.key]
+        if not accounts:
+            raise RuntimeError(f"trae({self._region.key}) 没有账号可用于刷新模型目录")
+
+        from . import cn_catalog
+
+        union: dict[str, dict[str, Any]] = {}
+        succeeded = 0
+        for acct in accounts:
             try:
-                ok = await asyncio.to_thread(self._probe_model, m)
-            except Exception:  # noqa: BLE001 - 网络/凭据瞬态：按可用保留
-                cache[m] = True
+                await asyncio.to_thread(ensure_account_token, acct.id)
+                cred = await asyncio.to_thread(load_account_cred, acct.id)
+                if not cred:
+                    raise RuntimeError("凭据缺失或无 access_token")
+                entries = await asyncio.to_thread(cn_catalog.fetch_cn_catalog, cred)
+            except Exception as exc:  # noqa: BLE001 - 单账号失败不阻断并集
+                log.warning("trae(%s) 目录刷新跳过账号 %s: %s",
+                            self._region.key, acct.id, exc)
                 continue
-            cache[m] = ok
-            if not ok:
-                dead.add(m)
-        if probed_any and dead:
-            log.info("trae(%s) 目录探测剔除 %d 个失效模型: %s",
-                     self._region.key, len(dead), ", ".join(sorted(dead)))
-        return [m for m in self.models() if m["id"] not in dead]
+            succeeded += 1
+            for e in entries:
+                # 按**上游 config_name** 去重（跨账号同一条），元数据与倍率
+                # 都是账号无关的，先到先得即可
+                union.setdefault(e["name"], e)
+        if not succeeded:
+            raise RuntimeError(f"trae({self._region.key}) 目录刷新全部账号均未成功")
+
+        _, model_ids, static_credits, _ = model_tables(self._region.key)
+        # 对外 id 一律小写（cn_catalog 已归一），与底表 / model_order 同口径
+        known = {m.lower() for m in model_ids} | set(self._discovered)
+        # 上游真名 -> 对外 id（转发时由 map_model_for 还原大小写，见 MODEL_MAP）
+        upstream_by_id = {e["id"]: e["name"] for e in union.values() if e.get("id")}
+        verified = await self._verify_candidates(
+            [e["id"] for e in union.values() if e.get("id") not in known])
+
+        discovered: dict[str, dict[str, Any]] = {}
+        for mid in verified + [e["id"] for e in union.values() if e.get("id") in known]:
+            e = next((x for x in union.values() if x.get("id") == mid), None)
+            if e is None:
+                continue
+            discovered[mid] = {
+                "display_name": e.get("display_name"),
+                "context_window": e.get("context_window"),
+                "multimodal": e.get("multimodal"),
+                "upstream": upstream_by_id.get(mid),
+            }
+            if e.get("rate") is None:
+                continue
+            # 静态底表有的模型不抄倍率（人工核过的活动折扣口径），只补新名字
+            if mid not in {m.lower() for m in static_credits}:
+                DISCOVERED_CREDITS[mid] = f"x{float(e['rate']):.2f}"
+        # 快照只替换「底表里没有的新名字」，底表的元数据补充合并进去（不因
+        # 某次刷新少了一条就丢展示名/上下文）
+        self._discovered = {**self._discovered, **discovered}
+        log.info("trae(%s) 目录刷新：上游 %d 条，新收录 %d 个，倍率抄回 %d 条",
+                 self._region.key, len(union), len(verified), len(DISCOVERED_CREDITS))
+        return list(self.models())
+
+    async def _verify_candidates(self, names: list[str]) -> list[str]:
+        """新名字逐个发一条最小真实请求，只留上游真能服务的。
+
+        判定口径：``_probe_model`` 返回 False（4001 「参数非法」——名字/客户端
+        版本不被接受）即不收；**能解析出错误码的其它拒绝**（1005 会员档位不足、
+        4011 日额度等）说明名字本身有效、只是当前账号没权限，照收——它们与
+        已收录模型同属「按账号诚实报错」的一类。网络/凭据瞬态按可用保留。
+        """
+        ok_names: list[str] = []
+        for name in names:
+            try:
+                ok = await asyncio.to_thread(self._probe_model, name)
+            except Exception:  # noqa: BLE001 - 网络/凭据瞬态：按可用保留
+                ok = True
+            if ok:
+                ok_names.append(name)
+            else:
+                log.info("trae(%s) 新模型 %s 被上游拒绝（4001），不收录",
+                         self._region.key, name)
+        return ok_names
 
     def _probe_model(self, model: str) -> bool:
         """单模型最小真实请求。返回 True=可用；False=上游明确拒绝（4001）。

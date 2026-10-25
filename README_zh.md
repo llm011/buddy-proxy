@@ -257,7 +257,8 @@ trae-cli chat -m glm-5.3 -q "你好"    # 发一条对话测试
 历史单账号 `~/.buddy-proxy/trae_work.json`（及遗留 `~/.ethan/trae_work.json`）会在首次读取时自动
 迁移为账号 #1。其次解密本机 Trae IDE `storage.json`，无需手动配置 token。
 
-国内版 Trae Work 模型目录使用小写 ID，方便与其他 provider 的 `model_order` 统一配置；例如 `doubao-seed-evolving`、`deepseek-v4-pro`。转发时会自动转换成上游要求的大小写敏感名称（如 `Doubao-Seed-Evolving`），客户端和顺序配置无需写大写。旧模型 `kimi-k2.7-code`、`glm-5.2`、`deepseek-v4-flash`、`glm-5`、`glm-5-turbo`、`qwen-3.7-plus` 已从目录移除。
+国内版 Trae Work 模型目录使用小写 ID，方便与其他 provider 的 `model_order` 统一配置；例如 `doubao-seed-evolving`、`deepseek-v4-pro`。转发时会自动转换成上游要求的大小写敏感名称（如 `Doubao-Seed-Evolving`），客户端和顺序配置无需写大写。旧模型 `kimi-k2.7-code`、`deepseek-v4-flash`、`glm-5`、`glm-5-turbo` 已从目录移除
+（`glm-5.2` 与 `qwen-3.7-plus` 2026-10-25 实测重新可用，已收录）。
 
 Work 通道多账号**主备 failover**：按登录顺位优先用 #1，账号级错误（401 凭据失效 /
 429 额度）冷却 60s/5min 后自动换下一个——上游 SSE 的额度码（4008 quota exceeded /
@@ -444,7 +445,8 @@ python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS �
 > ——这一个请显式写 `codebuddy/glm-5.3-flashx`。官方 **`glm/`** 渠道（下文）与
 > zcode 同上游同模型表，想走官方套餐的 key 时显式写 `glm/<模型>` 前缀。
 
-**Trae Work 通道**（15 个国内模型，ID 统一小写）。倍率是当前目录值；`—` 表示没有公开倍率：
+**Trae Work 通道**（20 个国内模型，ID 统一小写）。倍率是当前目录值；`—` 表示没有公开倍率
+（`kimi-k2.6` / `glm-5.1` 已不在上游目录的可见列表里，保留名字仅为兼容旧配置）：
 
 | 模型 ID | 倍率 |
 |---|---|
@@ -463,6 +465,26 @@ python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS �
 | `glm-5.1` | — |
 | `step-5-preview` | x0.48 |
 | `doubao-seed-code` | x0.06 |
+| `mimo-v2.6-flash` | x0.06 |
+| `mimo-v2.6-pro` | x0.15 |
+| `qwen-3.7-plus` | x0.25 |
+| `kimi-k2.8-preview` | x0.98 |
+| `qwen3.8-flash` | x0.08 |
+| `kimi-k3.1-pro` | x1.20 |
+| `minimax-m3.1-flash` | x0.09 |
+| `glm-5.2` | x0.78 |
+| `deepseek-v4-flash-official` | x0.20 |
+| `deepseek-v4-pro-official` | x0.72 |
+
+`kimi-k3.1-pro` 在客户端面板带「会员档位不足」灰锁，本机两个 CN 账号实测都回
+`1005`——名字与倍率照目录收录，能不能调由上游按账号诚实报错。
+
+**「↻ 重新拉取」拉的是真目录**：CN 网关 `get_detail_param` 返回完整候选目录，每条带
+`consumption_rate`（就是客户端「模型倍率」面板显示的数值，2026-10-25 与面板截图逐条核对过）、
+展示名、上下文窗口与读图能力。刷新时遍历本区全部账号取并集（不剔冷却），**倍率按
+`consumption_rate` 抄回**到进程内 `DISCOVERED_CREDITS`（不覆盖人工核过的静态底表，重启
+即回底表）；目录里**没有的新名字**会先真发一条最小请求验证（上游收下名字 ≠ 能服务，4001
+拒收的不收录），已有模型不再逐条 ping。
 
 目录顺序沿用上游客户端的展示顺序。PAT 通道仍可通过 `traepat/<模型>` 使用，但这里不再列出 PAT 模型表。要新增 / 调整 CodeBuddy 或 Trae PAT 静态模型，编辑 `src/buddy_proxy/web/models_config.json` 后重启生效。
 

@@ -205,10 +205,13 @@ benefits, and unrelated model routes in the same process.
   `BaseProvider.models()`.
 - A provider that implements optional async `refresh_models(force=True)` is
   capability-discovered by `web/ui/models_api.py`; only then does its group show
-  “↻ 重新拉取”. Qoder/Kimi/Antigravity refresh every account and publish the
-  successful union. Catalog discovery must not reuse the cooldown-filtered chat
+  “↻ 重新拉取”. Every refreshable provider walks every account in its region and
+  publishes the successful union (Trae CN additionally copies the upstream
+  `consumption_rate` back as the credit multiplier; it only probe-verifies
+  previously unknown names, never the whole table). Catalog discovery must not
+  reuse the cooldown-filtered chat
   failover list: cooldown is transient and cannot prove an account-only model was
-  removed. For Kimi/Antigravity a partially successful round is therefore
+  removed. For Kimi/Antigravity/Trae a partially successful round is therefore
   monotonic (new ids may be added, previous ids stay); only an all-account success
   may confirm removals. The replacement is provider-instance local and atomic;
   an all-failed or valid-but-empty round raises and leaves the previous catalog

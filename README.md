@@ -127,7 +127,7 @@ The static catalog in `src/buddy_proxy/web/models_config.json` contains **51 Cod
 
 > Note on `glm-*`: the bare name resolves to whichever channel claims it first in registration order (**zcode**, which serves `glm-5.3` / `glm-5.3-flash`). For `glm-5.3-flashx` the zcode subscription reports `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限` while **CodeBuddy serves it fine** — so use the explicit `codebuddy/glm-5.3-flashx` prefix for that one. The official **`glm/`** channel (below) shares the same upstream and model table; use its explicit prefix to route a request over the official plan's key.
 
-**Trae Work channel** (15 domestic models; IDs are lowercase). Credit multipliers are the current catalog values; `—` means no multiplier is published:
+**Trae Work channel** (20 domestic models; IDs are lowercase). Credit multipliers are the current catalog values; `—` means no multiplier is published (`kimi-k2.6` / `glm-5.1` are no longer visible in the upstream catalog; their names are kept only for compatibility with old configs):
 
 | id | credits |
 |---|---|
@@ -146,6 +146,30 @@ The static catalog in `src/buddy_proxy/web/models_config.json` contains **51 Cod
 | `glm-5.1` | — |
 | `step-5-preview` | x0.48 |
 | `doubao-seed-code` | x0.06 |
+| `mimo-v2.6-flash` | x0.06 |
+| `mimo-v2.6-pro` | x0.15 |
+| `qwen-3.7-plus` | x0.25 |
+| `kimi-k2.8-preview` | x0.98 |
+| `qwen3.8-flash` | x0.08 |
+| `kimi-k3.1-pro` | x1.20 |
+| `minimax-m3.1-flash` | x0.09 |
+| `glm-5.2` | x0.78 |
+| `deepseek-v4-flash-official` | x0.20 |
+| `deepseek-v4-pro-official` | x0.72 |
+
+`kimi-k3.1-pro` carries a "membership tier insufficient" grey lock in the client panel and returns
+`1005` on both CN accounts tested here — the name and multiplier are recorded as published, and actual
+availability is reported honestly by the upstream per account.
+
+**"↻ Refresh" pulls the real catalog**: the CN gateway's `get_detail_param` returns the full candidate
+catalog, each entry carrying `consumption_rate` (exactly what the client's "model multiplier" panel shows,
+cross-checked row-by-row against a screenshot on 2026-10-25), the display name, context window, and image
+support. Refreshing walks every account in the region and takes the union (cooldowns are not filtered), then
+**copies `consumption_rate` back** as the multiplier into the in-process `DISCOVERED_CREDITS` (it never
+overwrites the hand-verified static table, and a restart reverts to it). Names **not already known** in the
+catalog get one minimal real request to verify serviceability first (the upstream accepting a name does not
+mean it can serve it; anything rejected with 4001 is dropped), while existing models are never pinged one by
+one.
 
 The catalog order mirrors the upstream client's display order. The PAT provider remains available at `traepat/<model>` but its model table is intentionally omitted here. Edit `src/buddy_proxy/web/models_config.json` to add or tweak the static CodeBuddy / Trae PAT entries — changes take effect on restart.
 
@@ -270,7 +294,8 @@ trae-cli chat -m glm-5.3 -q "hello"
 
 `uv sync` installs this entry point in the project virtualenv; a package install exposes it in that Python environment. Auth is loaded automatically: the Work multi-account state dir `~/.buddy-proxy/trae/` (`index.json` + one 0600 cred per account; generated/appended by `buddy login trae`, upserted by uid/refresh_token — relogin updates, a new account appends) first. The legacy single-account `~/.buddy-proxy/trae_work.json` (and `~/.ethan/trae_work.json`) is auto-migrated to account #1 on first read. Then the decrypted local Trae IDE `storage.json`. No manual token setup.
 
-The domestic Trae Work model catalog exposes lowercase IDs so `model_order` stays consistent across providers (for example, `doubao-seed-evolving` and `deepseek-v4-pro`). Requests are translated to the case-sensitive upstream names (such as `Doubao-Seed-Evolving`) automatically. The old `kimi-k2.7-code`, `glm-5.2`, `deepseek-v4-flash`, `glm-5`, `glm-5-turbo`, and `qwen-3.7-plus` entries have been removed.
+The domestic Trae Work model catalog exposes lowercase IDs so `model_order` stays consistent across providers (for example, `doubao-seed-evolving` and `deepseek-v4-pro`). Requests are translated to the case-sensitive upstream names (such as `Doubao-Seed-Evolving`) automatically. The old `kimi-k2.7-code`, `deepseek-v4-flash`, `glm-5`, and `glm-5-turbo` entries have been removed
+(`glm-5.2` and `qwen-3.7-plus` were re-verified as available on 2026-10-25 and are listed again).
 
 Work channel multi-account **primary/backup failover**: account #1 by login order is preferred; account-level errors (401 credential expired / 429 quota) cool down for 60s/5min then fail over to the next. Upstream SSE quota codes (4008 quota exceeded / 4011 / 4021 / 4031) and auth codes (1001 / 4010) are mapped to 429/401 into the same classification (since 2026-10-06: previously everything passed through as 502 without switching, so with two accounts — one drained, one funded — the request still failed outright). Checkin/quota query and claim **every account**; the admin panel has `▲▼` reorder / `✕` delete (same as qoder/kimi/antigravity). With multiple accounts, the check-in status carries a per-account breakdown (`accounts`: index/name/state) and the check-in card renders one line per account (已签到 / 可领 / 查询失败 with the reason) — the aggregated badge alone could not tell which account actually failed; manual claims toast each account's result (who got +N, who failed). Each line's name follows the alias > nickname > uid > id display chain (an ✎ rename shows up here too, matching the quota panels) and carries an ✎ rename button of its own. Single-account setups stay unchanged (no breakdown, same badge semantics).
 
