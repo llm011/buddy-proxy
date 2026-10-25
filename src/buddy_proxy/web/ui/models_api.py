@@ -362,6 +362,7 @@ async def ui_models(request: Request):
                 # 14 天均值在模型换代/上游调参后与当下体感差太远。recent_ms 是
                 # 明细（新→旧），前端 tooltip 逐条列出；样本不足三次就只有几条
                 "recent_avg_ms": st.get("recent_avg_ms"),
+                "recent_count": st.get("recent_count", 0),
                 "recent_ms": st.get("recent_ms") or [],
                 "last_ts": st.get("last_ts", 0),
             }

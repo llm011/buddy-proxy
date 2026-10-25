@@ -729,7 +729,7 @@ function renderGroups() {
         <td class="muted"${dim}>${esc(m.name || '')}</td>
         <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
-        <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.count ? fmtMs(st.recent_avg_ms != null ? st.recent_avg_ms : st.avg_ms) : '—'}</td>
+        <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.recent_count ? fmtMs(st.recent_avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
             ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick='setDefault(${jsq(g.id)},${jsq(m.id)})'>设为默认</button>`}
             <button class="primary" onclick='runTest(${jsq(g.id)},${jsq(bareModelId(m.id, g.id))})'>测试</button>
