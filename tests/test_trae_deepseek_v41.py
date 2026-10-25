@@ -44,8 +44,9 @@ def test_v41_flash_listed_by_trae_catalog():
     """目录里要有 v4.1-flash（/v1/models 与前端模型选择器都读它）。"""
     ids = [m["id"] for m in TraeProvider().models()]
     assert "deepseek-v4.1-flash" in ids
-    # 保留的 V4-Pro 对外名也统一小写；用户决定移除旧 V4-Flash。
-    assert "deepseek-v4-pro" in ids
+    # V4 代（deepseek-v4-pro / 两条 -Official）仍在底表、仍可点名调用，但同家族
+    # 已有 v4.1 在场，按代际收敛不再列出（用户 2026-10-25）。V4-Flash 已移除。
+    assert "deepseek-v4-pro" not in ids
     assert "deepseek-v4-flash" not in ids
     assert all(model_id == model_id.lower() for model_id in ids)
 
@@ -63,9 +64,18 @@ def test_work_catalog_ids_are_lowercase_and_map_upstream_names():
     assert map_model_for("cn", "step-5-preview") == "step-5-preview"
     # qwen-3.7-plus 2026-10-12 实测收录（上游只认带连字符名）；无连字符的
     # qwen3.7-plus / qwen-3.8-max 仍是被拒变体
-    assert not {"glm-5.2", "kimi-k2.7-code", "deepseek-v4-flash",
+    # **仍可点名调用但不再列出**（代际收敛，用户 2026-10-25）：底表里挂着
+    # glm-5.2 / qwen-3.7-plus 这些上一代，但同家族更高代际在场时 models()
+    # 不再展示；-Official 两条（V4 代）同理让位给 deepseek-v4.1-flash。
+    # MODEL_MAP 的映射仍然有效——点名调用照旧转上游大写真名。
+    assert not {"kimi-k2.7-code", "deepseek-v4-flash",
                 "glm-5", "glm-5-turbo", "qwen3.7-plus", "qwen-3.8-max"} & ids
-    assert "qwen-3.7-plus" in ids
+    assert not {"qwen-3.7-plus", "glm-5.1", "glm-5.2", "minimax-m3",
+                "kimi-k3", "deepseek-v4-flash-official",
+                "deepseek-v4-pro-official"} & ids
+    assert {"glm-5.3", "qwen3.8-max", "minimax-m3.1-flash",
+            "kimi-k3.1-pro"} <= ids
+    assert map_model_for("cn", "deepseek-v4-pro-official") == "DeepSeek-V4-Pro-Official"
 
 
 def test_v41_flash_precedes_legacy_v4_pro():

@@ -204,6 +204,11 @@ MODEL_MAP: dict[str, str] = {
     "doubao-seed-2.1-pro": "Doubao-Seed-2.1-Pro",
     "doubao-seed-2.1-turbo": "Doubao-Seed-2.1-Turbo",
     "doubao-seed-code": "Doubao-Seed-Code",
+    # 上游把「官方直连」两条独立条目挂在 -Official 后缀下（大小写敏感）。
+    # 对外 id 用小写：一是与全站目录口径一致，二是避开与 deepseek-v4-pro /
+    # deepseek-v4-flash 的裸名撞车（后者不在目录里，但客户端可能照写）。
+    "deepseek-v4-flash-official": "DeepSeek-V4-Flash-Official",
+    "deepseek-v4-pro-official": "DeepSeek-V4-Pro-Official",
     # 注意 step-5-preview **不在此表**（原样透传）：上游只认全小写，见目录注释。
 }
 
@@ -247,6 +252,11 @@ MODEL_IDS: list[str] = [
     # 2026-10-12 probe 实测收录（见下注）
     "mimo-v2.6-flash", "mimo-v2.6-pro", "qwen-3.7-plus",
     "kimi-k2.8-preview", "qwen3.8-flash",
+    # 2026-10-25 probe 实测收录（来源＝客户端「模型倍率」面板 + 目录接口）。
+    # kimi-k3.1-pro 目录可见、但本机两个 CN 账号实测都回 1005（extra.plan=1，
+    # 会员档位不足）——名字与倍率照面板收，能不能调由上游按账号诚实裁决。
+    "kimi-k3.1-pro", "minimax-m3.1-flash",
+    "glm-5.2", "deepseek-v4-flash-official", "deepseek-v4-pro-official",
 ]
 
 # 模型积分倍率：整理自知识库《模型及成本整理-workbuddy-trae-含选用建议》
@@ -297,6 +307,20 @@ MODEL_CREDITS: dict[str, str] = {
     "kimi-k2.8-preview": "x0.98",
     "qwen3.8-flash": "x0.08",
     "qwen-3.7-plus": "x0.25",
+    # 2026-10-25 用户从客户端「模型倍率」面板截图 + 目录接口 consumption_rate
+    # 双向核对（kimi-k3 1.83 / minimax-m3.1-flash 0.09 / kimi-k3.1-pro 1.20 /
+    # qwen3.8-max 1.50 等面板值与接口逐条吻合，故接口值可直接抄）：
+    #   - kimi-k3.1-pro x1.20：面板带「会员档位不足」灰锁，见 MODEL_IDS 注；
+    #   - minimax-m3.1-flash x0.09：native chat_v3 实测出流 + tool_calls 正常；
+    #   - glm-5.2 x0.78 / deepseek-v4-flash-official x0.20 /
+    #     deepseek-v4-pro-official x0.72：目录里 is_new 前就已上架（后者两条上游
+    #     名为 `-Official` 后缀的独立条目）、此前漏收，三条均实测 200 出流
+    #     （对外 id 统一小写；转发时按 MODEL_MAP 还原上游大写 config_name）。
+    "kimi-k3.1-pro": "x1.20",
+    "minimax-m3.1-flash": "x0.09",
+    "glm-5.2": "x0.78",
+    "deepseek-v4-flash-official": "x0.20",
+    "deepseek-v4-pro-official": "x0.72",
     # glm-5.3 面板 0.39（带「会员5折」徽章，原 0.40 小差）；deepseek-v4-flash
     # 0.10（「闲时折扣」）不进表——内部目录只有 deepseek-v4.1-flash
 }
@@ -459,7 +483,8 @@ MODEL_IDS_INTL: list[str] = [
     "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "gpt-5.5", "gpt-5.4", "kimi-k3", "glm-5.2", "minimax-m3",
 ]
-# 海外是**次数制**（Premium 快速请求 N 次/月 + Basic 美元额度），没有 CN 的
+# 海外是**美元额度制**（Basic 用量 $N/月；`premium_model_fast_request_limit`
+# 只是快速请求档位的能力位，不是可花额度——用户 2026-10-25 纠正），没有 CN 的
 # 积分倍率概念——留空，额度展示走 _quota_items 的海外分支（见 provider.py）。
 MODEL_CREDITS_INTL: dict[str, str] = {}
 # 图片能力未实测（probe 只发了纯文本）；空集 = 模型目录里不声明读图，
@@ -476,6 +501,35 @@ def model_tables(region_key: str = "cn"):
         return (MODEL_MAP_INTL, MODEL_IDS_INTL, MODEL_CREDITS_INTL,
                 MODEL_SUPPORTS_IMAGES_INTL)
     return (MODEL_MAP, MODEL_IDS, MODEL_CREDITS, MODEL_SUPPORTS_IMAGES)
+
+
+#: 目录刷新（「↻ 重新拉取」）抄回来的倍率：模型 id -> "x0.09" 这类展示串。
+#: 只对 **CN** 生效——海外是次数制、没有倍率概念（见 MODEL_CREDITS_INTL）。
+#: 与 ``MODEL_CREDITS`` 分开存：静态表是人工核过的底表（含活动/补贴备注），
+#: 这里只放「上游 consumption_rate 原值」，两者由 ``credit_multiplier`` 合成，
+#: 刷新不清空、重启即回底表（内存态，同 intl 的目录快照生命周期）。
+DISCOVERED_CREDITS: dict[str, str] = {}
+
+
+def credit_multiplier(region_key: str, model: str) -> str | None:
+    """模型倍率的唯一取值口：刷新抄回的值优先，其次静态底表。
+
+    ``model`` 可以是内部名或对外 id——两者在 ``MODEL_MAP`` 里成对出现时取同一
+    倍率（与 ``models()`` 的别名口径一致）。大小写按上游 config_name 匹配，
+    再退化到小写（DeepSeek-V4-Pro-Official 这类大写前缀别名）。
+    """
+    region = (region_key or "cn").strip().lower()
+    model_map, _, credits, _ = model_tables(region)
+    internal = model_map.get(model, model)
+    for key in (internal, internal.lower()):
+        value = credits.get(key)
+        if value:
+            return value
+        if region == "cn":
+            value = DISCOVERED_CREDITS.get(key)
+            if value:
+                return value
+    return None
 
 
 def map_model_for(region_key: str, requested: str) -> str:

@@ -358,6 +358,12 @@ async def ui_models(request: Request):
                 "count": st.get("count", 0),
                 "errors": st.get("errors", 0),
                 "avg_ms": st.get("avg_ms", 0),
+                # 「平均耗时」列显示的是**近三次实测**（用户 2026-10-25 要求）：
+                # 14 天均值在模型换代/上游调参后与当下体感差太远。recent_ms 是
+                # 明细（新→旧），前端 tooltip 逐条列出；样本不足三次就只有几条
+                "recent_avg_ms": st.get("recent_avg_ms"),
+                "recent_count": st.get("recent_count", 0),
+                "recent_ms": st.get("recent_ms") or [],
                 "last_ts": st.get("last_ts", 0),
             }
             # 键必须用**剥前缀后的裸名**构造：通道目录里 m["id"] 带前缀
