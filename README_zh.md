@@ -235,8 +235,9 @@ buddy start
   （纯字符串上游 400 反序列化错）；function 绑定按区分表——gpt-5.6 系 / `glm-5.2` /
   `minimax-m3` 在默认 `solo_work_lite` 下 4001，自动改走 `chat_v3`。IDE 下拉里有但实测
   agent 通道全 4001 的（`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`）
-  不收录。额度是**次数制 + 美元混量纲**（Pro 包）：「Premium 快速请求」600 次/月
-  （上游不给已用次数，显示「—」）+「Basic 用量」$ 美元真实已用；`is_hide` 的垃圾包自动过滤
+  不收录。额度只有 **Basic 美元用量**（Pro 包，`$` 真实已用/上限）：`premium_model_fast_request_limit`
+  是「快速请求档位可用」的能力位、不是可花的额度（2026-10-25 用户纠正），不铺成额度行；
+  `is_hide` 的垃圾包自动过滤
 
 #### Trae 账号工具（可选：`trae-cli`）
 
@@ -258,7 +259,8 @@ trae-cli chat -m glm-5.3 -q "你好"    # 发一条对话测试
 迁移为账号 #1。其次解密本机 Trae IDE `storage.json`，无需手动配置 token。
 
 国内版 Trae Work 模型目录使用小写 ID，方便与其他 provider 的 `model_order` 统一配置；例如 `doubao-seed-evolving`、`deepseek-v4-pro`。转发时会自动转换成上游要求的大小写敏感名称（如 `Doubao-Seed-Evolving`），客户端和顺序配置无需写大写。旧模型 `kimi-k2.7-code`、`deepseek-v4-flash`、`glm-5`、`glm-5-turbo` 已从目录移除
-（`glm-5.2` 与 `qwen-3.7-plus` 2026-10-25 实测重新可用，已收录）。
+（`glm-5.2` 与 `qwen-3.7-plus` 2026-10-25 实测重新可用，但被「代际收敛」从列表隐藏——
+点名写 `trae/glm-5.2` / `trae/qwen-3.7-plus` 仍可调用）。
 
 Work 通道多账号**主备 failover**：按登录顺位优先用 #1，账号级错误（401 凭据失效 /
 429 额度）冷却 60s/5min 后自动换下一个——上游 SSE 的额度码（4008 quota exceeded /
@@ -445,36 +447,33 @@ python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS �
 > ——这一个请显式写 `codebuddy/glm-5.3-flashx`。官方 **`glm/`** 渠道（下文）与
 > zcode 同上游同模型表，想走官方套餐的 key 时显式写 `glm/<模型>` 前缀。
 
-**Trae Work 通道**（20 个国内模型，ID 统一小写）。倍率是当前目录值；`—` 表示没有公开倍率
-（`kimi-k2.6` / `glm-5.1` 已不在上游目录的可见列表里，保留名字仅为兼容旧配置）：
+**Trae Work 通道**（对外列出 15 个国内模型，ID 统一小写）。倍率是当前目录值：
 
 | 模型 ID | 倍率 |
 |---|---|
-| `glm-5.3` | x0.40 |
+| `glm-5.3` | x0.39 |
 | `glm-5.3-flash` | x0.06 |
 | `glm-5.3-flashx` | x0.31 |
 | `deepseek-v4.1-flash` | x0.08 |
 | `doubao-seed-evolving` | x0.08 |
-| `kimi-k3` | x1.83 |
 | `doubao-seed-2.1-pro` | x0.08 |
-| `deepseek-v4-pro` | x0.72 |
 | `qwen3.8-max` | x1.50 |
 | `doubao-seed-2.1-turbo` | x0.20 |
-| `minimax-m3` | x0.26 |
-| `kimi-k2.6` | — |
-| `glm-5.1` | — |
 | `step-5-preview` | x0.48 |
 | `doubao-seed-code` | x0.06 |
 | `mimo-v2.6-flash` | x0.06 |
 | `mimo-v2.6-pro` | x0.15 |
-| `qwen-3.7-plus` | x0.25 |
-| `kimi-k2.8-preview` | x0.98 |
 | `qwen3.8-flash` | x0.08 |
 | `kimi-k3.1-pro` | x1.20 |
 | `minimax-m3.1-flash` | x0.09 |
-| `glm-5.2` | x0.78 |
-| `deepseek-v4-flash-official` | x0.20 |
-| `deepseek-v4-pro-official` | x0.72 |
+
+**代际收敛**：同一家族只要目录里有更高代际在列，旧代就不再出现在 `/v1/models`
+里，但**点名照样能调**（显式写 `trae/<旧名>` 即可）。上面这批把下面这些旧代收掉了：
+`glm-5.1` / `glm-5.2` 让位给 `glm-5.3`，`minimax-m3` 让位给 `minimax-m3.1-flash`，
+`kimi-k3` 让位给 `kimi-k3.1-pro`，`qwen-3.7-plus` 让位给 `qwen3.8-max` / `qwen3.8-flash`，
+`deepseek-v4-pro` 与 `deepseek-v4-flash-official` / `deepseek-v4-pro-official`
+让位给 `deepseek-v4.1-flash`。倍率仍按静态底表留着（旧配置继续可用）。
+解析不出代际的名字（如 `doubao-seed-*`、`mimo-*`）不参与收敛，照常列出。
 
 `kimi-k3.1-pro` 在客户端面板带「会员档位不足」灰锁，本机两个 CN 账号实测都回
 `1005`——名字与倍率照目录收录，能不能调由上游按账号诚实报错。
@@ -646,6 +645,8 @@ python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS �
   输入量大不代表扣得多。
 - **统计图表** — 按 provider/模型维度聚合请求数、错误数、平均耗时、token 用量：
   近 14 天按通道堆叠的柱状图、模型请求 Top 榜、最近 50 条请求明细。
+  模型页的耗时列**取最近 3 次**有耗时的实测均值（悬停看逐次数值与 14 天均值对照）——
+  14 天均值跟近期体感差得多，看近三次更贴近「现在快不快」。
   多账号通道（qoder / kimi / antigravity / trae / traepat）的明细会在通道名后
   用括号标注实际服务的账号（failover 后是最终成功的那个）。
   每次请求完成追加一行到 `logs/metrics.jsonl`，重启后自动回读恢复历史（保留 30 天）
@@ -883,7 +884,7 @@ Trae PAT 频控：部分扩展模型上游按「账号 × 模型」限频（队�
 | 签到 | `benefits_api.fetch_checkin_status()` / `claim_checkin_credits()` | 查询/领取签到积分（`/trae/api/v2/ug/checkin_credits/*`） |
 | 权益 | `benefits_api.fetch_ent_usage()` | 查询积分总额 / 已用量 / 权益包 |
 | 双区域 | `config.TRAE_REGIONS` / `model_tables(region)` / `work_function_override(region)` | CN/global 两套取址（chat 网关 / UG 域 / 额度版本 v2 vs v1）、两套模型目录与按区分表的 function 绑定（海外 `messages[].content` 需内容块数组，见 `transport._intl_content_blocks`） |
-| 海外额度 | `provider._quota_items` dollar 分支 | 次数制 + 美元混量纲分行展示：Premium 快速请求（已用次数上游不给 → 「—」）与 Basic 用量（`usage.basic_usage_amount` 真实已用）各一行；`is_hide` 的 UI 不展示包过滤 |
+| 海外额度 | `provider._quota_items` dollar 分支 | 只展示 Basic 美元用量（`usage.basic_usage_amount` 真实已用 / `basic_usage_limit`）；`premium_model_fast_request_limit` 是能力位不是额度、不单列；`is_hide` 的 UI 不展示包过滤 |
 | 模型 | `config._map_model()` | 模型目录与外部名别名 |
 | 错误 | `sse._trae_error_text()` | 14+ 个官方错误码 → 中文文案（4011 今日额度 / 1005 plan 权益不足等） |
 | 账号工具 | `cli`（`trae-cli status` / `claim` / `usage` / `chat`） | 命令行查询/领取签到、看权益、发测试对话 |

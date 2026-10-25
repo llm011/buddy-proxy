@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 import uuid
@@ -55,6 +56,66 @@ from .text_toolcall import _StreamToolCallSplitter, _parse_tool_calls, _tool_nam
 from .transport import send_trae_chat
 
 log = logging.getLogger(__name__)
+
+#: 「家族名 + 数字版本」解析（glm-5.2 → ("glm", 5.2)；gpt-5.6-sol →
+#: ("gpt", 5.6)——代号尾巴不影响代际比较）。解析不出的（如
+#: doubao-seed-2.1-pro）返回 None，不参与代际比较。
+_GENERATION_RE = re.compile(
+    r"^(?P<family>[a-z]+(?:\d+)?)[-_]?v?(?P<major>\d+)(?:\.(?P<minor>\d+))?"
+    r"(?:[-_].*)?$")
+# 代号系（minimax-m3 / kimi-k3）：家族名与版本号之间只隔一个字母代号，
+# 没有纯数字版本（``minimax-m3.1-flash`` → 家族 minimax-m，版本 3.1）。
+# 不认它们的话 m3 / m3.1 之间永远比不出代际，只能靠黑名单手工维护。
+_GENERATION_CODENAME_RE = re.compile(
+    r"^(?P<family>[a-z]+)-(?P<code>[a-z])(?P<major>\d+)"
+    r"(?:\.(?P<minor>\d+))?(?:[-_].*)?$")
+
+
+def _parse_generation(name: str) -> tuple[str, float] | None:
+    """模型名 -> (家族, 版本数)；解析不出返回 None（不参与代际收敛）。
+
+    - ``glm-5.2`` → ("glm", 5.2)；``gpt-5.6-sol`` → ("gpt", 5.6)
+    - ``qwen3.8-max`` → ("qwen", 3.8)：家族名后的数字算家族一部分，
+      所以 qwen3.8 与 qwen-3.7 同族，能比出代际
+    - ``deepseek-v3.2`` → ("deepseek", 3.2)——家族后缀 ``v`` 由正则吞掉；
+      ``deepseek-v4-flash-0731`` → ("deepseek", 4.0)，flash/日期尾巴归进
+      代号、不影响代际
+    - ``minimax-m3.1-flash`` → ("minimax-m", 3.1)；``kimi-k3`` → ("kimi-k", 3.0)
+      ——代号字母进家族名（minimax-m 与 minimax 是两个家族，kimi-k 同理），
+      这样 m3 遇 m3.1 能收敛、kimi-k3.1-pro 也能顶掉 kimi-k3
+    """
+    text = name.strip().lower()
+    m = _GENERATION_RE.match(text) or _GENERATION_CODENAME_RE.match(text)
+    if not m:
+        return None
+    family = m.group("family")
+    if "code" in m.groupdict() and m.group("code"):
+        family = f"{family}-{m.group('code')}"
+    minor = m.group("minor")
+    version = float(m.group("major")) + (float(minor) / 10 if minor else 0.0)
+    return family, version
+
+
+def _is_old_generation(name: str, pool: set[str]) -> bool:
+    """同家族有更高代际在 pool 里时，name 视为旧代（如 glm-5.2 遇 glm-5.3）。
+
+    只在**双方都能解析出版本、且家族/代号都相同**时比较：目录里出现
+    glm-5.3 后 glm-5.2 就没必要再展示（用户 2026-10-12；2026-10-25 用户再次
+    点名 glm-5.1 / glm-5.2 / qwen-3.7-plus / minimax-m3 / kimi-k3 这批老模型
+    没用——「有了 kimi-k3.1-pro 就不需要 kimi-k3」）。纯代号尾巴（gpt-6-sol
+    的 sol）不进家族名，永不因此淘汰。
+    """
+    parsed = _parse_generation(name)
+    if parsed is None:
+        return False
+    family, version = parsed
+    for other in pool:
+        if other == name:
+            continue
+        op = _parse_generation(other)
+        if op is not None and op[0] == family and op[1] > version:
+            return True
+    return False
 
 #: 4001 后的安静节流窗口：上游对**刚失败**的账号有快速重试惩罚（2026-10-07
 #: 实测：流式探测 4001 会把该模型「毒」~30-60s，期间**连非流式也一并 4001**，
@@ -254,7 +315,14 @@ class TraeProvider(BaseProvider):
             if name not in seen:
                 seen.add(name)
                 result.append(_entry(name, description="Trae 模型（目录发现）"))
-        return result
+        # 代际收敛（与海外通道同一个函数）：同家族更高代际在场时旧代不再列出。
+        # 静态底表是**人工确认可用**的清单，但没有理由把 glm-5.2 摆在新一代
+        # 旁边（用户 2026-10-25 点名 glm-5.1 / glm-5.2 / qwen-3.7-plus /
+        # minimax-m3 这批「没用」的老模型）。名字仍可点名调用，只是不进
+        # /v1/models —— 与海外通道 2026-10-12 的口径一致。
+        pool = {str(m.get("id") or "") for m in result}
+        return [m for m in result
+                if not _is_old_generation(str(m.get("id") or ""), pool)]
 
     def ensure_auth(self) -> None:
         _auth()
@@ -318,26 +386,46 @@ class TraeProvider(BaseProvider):
             [e["id"] for e in union.values() if e.get("id") not in known])
 
         discovered: dict[str, dict[str, Any]] = {}
+        seen_ids: set[str] = set()
         for mid in verified + [e["id"] for e in union.values() if e.get("id") in known]:
-            e = next((x for x in union.values() if x.get("id") == mid), None)
+            if mid in seen_ids:
+                continue
+            e = union.get(upstream_by_id.get(mid) or "")
             if e is None:
                 continue
+            seen_ids.add(mid)
             discovered[mid] = {
                 "display_name": e.get("display_name"),
                 "context_window": e.get("context_window"),
                 "multimodal": e.get("multimodal"),
                 "upstream": upstream_by_id.get(mid),
             }
-            if e.get("rate") is None:
-                continue
-            # 静态底表有的模型不抄倍率（人工核过的活动折扣口径），只补新名字
-            if mid not in {m.lower() for m in static_credits}:
-                DISCOVERED_CREDITS[mid] = f"x{float(e['rate']):.2f}"
-        # 快照只替换「底表里没有的新名字」，底表的元数据补充合并进去（不因
-        # 某次刷新少了一条就丢展示名/上下文）
-        self._discovered = {**self._discovered, **discovered}
-        log.info("trae(%s) 目录刷新：上游 %d 条，新收录 %d 个，倍率抄回 %d 条",
-                 self._region.key, len(union), len(verified), len(DISCOVERED_CREDITS))
+        upstream_seen = set(upstream_by_id)
+        if succeeded == len(accounts):
+            self._discovered = discovered
+        else:
+            self._discovered = {**self._discovered, **discovered}
+        # 运行时倍率表与快照**同口径**维护：全号成功按本轮结果重建（上游下架
+        # 的模型不能继续挂着倍率）；部分成功只覆盖本轮拉到的名字、其余留着。
+        # 底表有的模型仍不抄（人工核过的活动折扣口径）。
+        static_ids = {m.lower() for m in static_credits}
+        if succeeded == len(accounts):
+            DISCOVERED_CREDITS.clear()
+        elif upstream_seen:
+            for gone in upstream_seen:
+                DISCOVERED_CREDITS.pop(gone, None)
+        kept_ids = set(self._discovered)
+        for e in union.values():
+            # 只给**真的进了目录**的名字挂倍率：被 4001 拒收的候选不收录，
+            # 也就不该在倍率表里留一条（否则 credit_multiplier 会给出一个
+            # models() 根本不展示的模型的倍率）
+            if (e.get("rate") is not None and e.get("id") in kept_ids
+                    and e.get("id") not in static_ids):
+                DISCOVERED_CREDITS[e["id"]] = f"x{float(e['rate']):.2f}"
+        log.info("trae(%s) 目录刷新：上游 %d 条，新收录 %d 个，发现条目 %d 个%s",
+                 self._region.key, len(union), len(verified),
+                 len(self._discovered),
+                 "" if succeeded == len(accounts) else "（部分账号失败，只增不删）")
         return list(self.models())
 
     async def _verify_candidates(self, names: list[str]) -> list[str]:
@@ -842,28 +930,25 @@ class TraeProvider(BaseProvider):
                     # 包全 0 配额仍会出现在列表里）。只在海外结构下过滤——
                     # CN 快照没有这个字段，别让新过滤改变 CN 行为。
                     continue
-                # 海外实测结构（2026-10-06，Pro plan 快照）：额度字段与 CN
-                # 完全不同名，且**一个包里混两种量纲**——Premium 快速请求是
-                # 次数（``premium_model_fast_request_limit: 600``），Basic 是
-                # 美元（``basic_usage_limit: 20`` + 已用
+                # 海外实测结构（2026-10-06 Pro plan 快照；2026-10-25 用户确认
+                # **没有「Premium 快速请求」这种额度**，只有 Basic 用量）：
+                # ``premium_model_fast_request_limit: 600`` 是「快速请求档位可用」
+                # 的能力位，不是按月可花的额度；把它铺成一条额度行会让人以为
+                # 还有 600 次可以烧，而实际上这种额度上游根本不统计（已用恒
+                # 未知）。真按次数扣的只有一个计数池，在聊天 SSE 的
+                # ``notify_usage.remain_usage`` 里（本次实测 0），额度接口这边
+                # 拿不到已用量，故不再单列。
+                # Basic 是美元（``basic_usage_limit: 20`` + 已用
                 # ``usage.basic_usage_amount``）。原通用键表
                 # （``_LIMIT_KEYS_DOLLAR`` 命中 credits_limit=0）在这里只能
                 # 解析出 0/0 的空条目，这就是「海外版查不到额度」的根因。
-                # 两条量纲分开成两行，不能相加也不能共用一个 percent。
-                fast = _first_num(quota, ("premium_model_fast_request_limit",))
-                if fast is not None and fast > 0:
-                    # 已用次数上游不给（usage 只有 basic/bonus/credits_amount
-                    # 三个键）——used=None 显示「—」，好过拿美元已用配次数
-                    # 上限算出一个错百分比对用户撒谎。
-                    rows.append(("Premium 快速请求", None, float(fast), "count"))
-                slow = _first_num(quota, ("premium_model_slow_request_limit",))
                 basic = _first_num(quota, ("basic_usage_limit",))
                 if basic is not None and basic > 0:
                     amt = _first_num(p.get("usage") or {}, ("basic_usage_amount",))
-                    rows.append(("Basic 用量", round(float(amt), 4) if amt is not None else None,
+                    rows.append(("", round(float(amt), 4) if amt is not None else None,
                                  float(basic), "dollar"))
-                # slow / advanced / auto_completion 的 -1 是「无限」，不占
-                # 条目——无限没有进度可画，铺出来只是噪声。
+                # bonus / advanced / slow / auto_completion 的 -1 是「无限」，
+                # 不占条目——无限没有进度可画，铺出来只是噪声。
             limit = None if rows else _first_num(
                 quota, _LIMIT_KEYS_DOLLAR if dollar else _LIMIT_KEYS_CREDITS)
             if not rows and limit is not None and limit > 0:

@@ -27,10 +27,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import Any
 
-from .provider import TraeProvider
+from .provider import TraeProvider, _is_old_generation, _parse_generation
 
 log = logging.getLogger(__name__)
 
@@ -39,49 +38,6 @@ log = logging.getLogger(__name__)
 _INTL_NEVER_LIST = frozenset({
     "kimi-k2.7-code", "kimi-k2.5", "minimax-m2.7", "gpt-5.2",
 })
-
-#: 「家族名 + 数字版本」解析（glm-5.2 → ("glm", 5.2)；gpt-5.6-sol →
-#: ("gpt", 5.6)——代号尾巴不影响代际比较）。解析不出的（minimax-m3 的 m3
-#: 不是纯数字版本……实际是，m 是家族；见 _parse_generation）返回 None。
-_VERSION_RE = re.compile(r"^(?P<family>[a-z]+)[-_]v?(?P<major>\d+)(?:\.(?P<minor>\d+))?(?:[-_].*)?$")
-
-
-def _parse_generation(name: str) -> tuple[str, float] | None:
-    """模型名 -> (家族, 版本数)；解析不出返回 None（不参与代际收敛）。
-
-    - ``glm-5.2`` → ("glm", 5.2)；``gpt-5.6-sol`` → ("gpt", 5.6)
-    - ``deepseek-v3.2`` → ("deepseek", 3.2)——家族后缀 ``v`` 由正则吞掉；
-      ``deepseek-v4-flash-0731`` → ("deepseek", 4.0)，flash/日期尾巴归进
-      代号、不影响代际
-    - ``minimax-m3`` → None（m 不是数字，代号系不比代际，m2.7/m3 由黑名单/
-      静态表管）；``kimi-k3`` → None（同理）
-    """
-    m = _VERSION_RE.match(name.strip().lower())
-    if not m:
-        return None
-    minor = m.group("minor")
-    version = float(m.group("major")) + (float(minor) / 10 if minor else 0.0)
-    return m.group("family"), version
-
-
-def _is_old_generation(name: str, pool: set[str]) -> bool:
-    """同家族有更高代际在 pool 里时，name 视为旧代（如 glm-5.2 遇 glm-5.3）。
-
-    只在**双方都能解析出版本**时比较：目录里出现 glm-5.3 后，glm-5.2 就
-    没必要再展示（用户 2026-10-12）；代号系（gpt-6-sol 等）永不因此淘汰。
-    """
-    parsed = _parse_generation(name)
-    if parsed is None:
-        return False
-    family, version = parsed
-    for other in pool:
-        if other == name:
-            continue
-        op = _parse_generation(other)
-        if op is not None and op[0] == family and op[1] > version:
-            return True
-    return False
-
 
 def intl_enabled() -> bool:
     """有没有海外区账号（``--trae`` 分支据此决定注册 ``traeintl``）。

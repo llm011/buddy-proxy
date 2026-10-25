@@ -18,7 +18,8 @@ CN 是 ``trae-api-cn.mchost.guru``。返回的 ``config_info_list`` 每条带
 ``summary`` / ``fast_apply`` / ``title_generation`` / ``input_optimization``
 （IDE 内部 function）不是对话模型，一律丢弃；``config_switch`` 为 False 的
 视为已下架；``is_invisible_to_user`` 为 True 的不进目录（曾经手 probe 收录过
-的 glm-5.1 / kimi-k2.7-code 现在就藏在这个标记后）。
+的 glm-5.1 / kimi-k2.7-code 现在就藏在这个标记后）；``display_config`` 带
+``is_custom_model`` / ``builder`` 的是用户自建模型，同样不收。
 
 **目录 ≠ 可调**：``kimi-k3.1-pro`` 在目录里可见，但本机两个 CN 账号实测都回
 ``code:1005``（``extra.plan=1``，会员档位不足），所以拉取侧只负责「发现 +
@@ -118,6 +119,13 @@ def fetch_cn_catalog(cred: dict[str, Any]) -> list[dict[str, Any]]:
         if entry.get("is_invisible_to_user") is True:
             continue
         display = _as_obj(entry.get("display_config"))
+        # 用户自己在 IDE 里加的自定义模型（实测：BC-GLM-5.3-Flash /
+        # BC-Kimi-K3 / gpt-5.5 …）：``config_name`` 不带 custom_model 前缀、
+        # ``is_invisible_to_user`` 是 None 而不是 True，只能靠 display_config
+        # 里的 ``is_custom_model`` / ``builder`` 认出来。这类名字是**别人
+        # 账号的私有配置**，既不该发布进 /v1/models，也不该拿去探测。
+        if display.get("is_custom_model") or display.get("builder"):
+            continue
         ctx = entry.get("context_window_tokens")
         dev_ctx = ctx.get("dev") if isinstance(ctx, dict) else None
         entries.append({

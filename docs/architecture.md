@@ -208,7 +208,13 @@ benefits, and unrelated model routes in the same process.
   “↻ 重新拉取”. Every refreshable provider walks every account in its region and
   publishes the successful union (Trae CN additionally copies the upstream
   `consumption_rate` back as the credit multiplier; it only probe-verifies
-  previously unknown names, never the whole table). Catalog discovery must not
+  previously unknown names, never the whole table). Trae CN also filters
+  client-private models at fetch time (`display_config.is_custom_model` /
+  `builder` — other accounts' hand-added entries must never be republished),
+  and both Trae regions run the same **generation convergence** in `models()`:
+  when a family has a higher parseable generation in the pool, the lower one is
+  omitted from the listing (still callable by name, multiplier untouched).
+  Names without a parseable generation never converge. Catalog discovery must not
   reuse the cooldown-filtered chat
   failover list: cooldown is transient and cannot prove an account-only model was
   removed. For Kimi/Antigravity/Trae a partially successful round is therefore

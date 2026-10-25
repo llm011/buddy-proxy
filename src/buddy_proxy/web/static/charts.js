@@ -661,6 +661,14 @@ async function copyModelName(btn, full) {
 }
 
 function renderGroups() {
+  // 「近 3 次耗时」单元格的 tooltip：逐条列出样本（新→旧），并对照 14 天均值
+  function _recentMsTitle(st) {
+    const ring = (st && st.recent_ms) || [];
+    if (!ring.length) return '';
+    const list = ring.map((ms, i) => `第 ${i + 1} 近：${fmtMs(ms)}`).join('；');
+    const avg = st.avg_ms ? `；14 天均值 ${fmtMs(st.avg_ms)}` : '';
+    return ` title="${esc(`近 ${ring.length} 次实测：${list}${avg}`)}"`;
+  }
   const el = document.getElementById('groups');
   // 搜索时基于原始 MODELS.groups 生成过滤视图（浅拷贝组、过滤模型行），
   // 不改数据源；COLLAPSED 完全不参与搜索态的折叠判断。
@@ -721,7 +729,7 @@ function renderGroups() {
         <td class="muted"${dim}>${esc(m.name || '')}</td>
         <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
-        <td class="num mono muted"${dim}>${st.count ? fmtMs(st.avg_ms) : '—'}</td>
+        <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.count ? fmtMs(st.recent_avg_ms != null ? st.recent_avg_ms : st.avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
             ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick='setDefault(${jsq(g.id)},${jsq(m.id)})'>设为默认</button>`}
             <button class="primary" onclick='runTest(${jsq(g.id)},${jsq(bareModelId(m.id, g.id))})'>测试</button>
@@ -756,7 +764,7 @@ function renderGroups() {
       <table>
         <thead><tr><th>模型 ID</th><th>名称</th><th>标签</th>
           <th class="num" title="本代理转发的、近 14 天的成功+失败请求数。按实际转发的通道和模型名统计（不是按客户端原始请求里的名字），最久保留 30 天。">近 14 天请求</th>
-          <th class="num" title="仅统计有耗时的请求">平均耗时</th><th class="num">操作</th></tr></thead>
+          <th class="num" title="取最近 3 次有耗时的实测（悬停看逐次明细）。14 天均值在模型换代、上游调参后和当下体感差得太远，所以这里只看近几次">近 3 次耗时</th><th class="num">操作</th></tr></thead>
         <tbody>${rows}</tbody>
       </table></div>`;
   }).join('');

@@ -222,3 +222,16 @@ def test_rebuild_from_archive_matches_live_counts(tmp_path):
     again = reloaded.model_distribution()
     assert again["total"] == live["total"] == 2
     assert again["models"] == live["models"]
+
+
+def test_recent_ms_ring_keeps_last_three(tmp_path):
+    """模型页「平均耗时」= 近三次实测（用户 2026-10-25）：环形窗只留 3 条。"""
+    m = MetricsCollector(tmp_path / "metrics.jsonl")
+    for ms in (100, 200, 300, 400, 500):
+        m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=ms)
+    # 没耗时的请求不进窗（0 会把近三次均值拉偏）
+    m.record(provider="zcode", model="glm-5.3", status=200, duration_ms=0)
+    row = next(r for r in m.snapshot()["models"] if r["model"] == "glm-5.3")
+    assert row["recent_ms"] == [500, 400, 300]      # 新→旧
+    assert row["recent_avg_ms"] == 400
+    assert row["avg_ms"] == 250                     # 全窗口均值照旧保留（0 也计入次数）

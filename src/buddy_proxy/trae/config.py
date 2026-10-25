@@ -483,7 +483,8 @@ MODEL_IDS_INTL: list[str] = [
     "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
     "gpt-5.5", "gpt-5.4", "kimi-k3", "glm-5.2", "minimax-m3",
 ]
-# 海外是**次数制**（Premium 快速请求 N 次/月 + Basic 美元额度），没有 CN 的
+# 海外是**美元额度制**（Basic 用量 $N/月；`premium_model_fast_request_limit`
+# 只是快速请求档位的能力位，不是可花额度——用户 2026-10-25 纠正），没有 CN 的
 # 积分倍率概念——留空，额度展示走 _quota_items 的海外分支（见 provider.py）。
 MODEL_CREDITS_INTL: dict[str, str] = {}
 # 图片能力未实测（probe 只发了纯文本）；空集 = 模型目录里不声明读图，

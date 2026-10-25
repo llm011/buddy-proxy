@@ -79,6 +79,22 @@ def test_fetch_filters_internal_and_invisible(monkeypatch):
     assert rows[0]["context_window"] == 200000
 
 
+def test_fetch_filters_client_custom_models(monkeypatch):
+    """用户自建模型（实测 BC-GLM-5.3-Flash / gpt-5.5）不进目录、不被探测。
+
+    这类条目 ``config_name`` 不带 custom_model 前缀、``is_invisible_to_user``
+    是 None 而非 True，只能靠 display_config 的 is_custom_model / builder 认。
+    """
+    custom = _entry("BC-GLM-5.3-Flash", None, display="BC-GLM-5.3-Flash")
+    custom["display_config"]["is_custom_model"] = True
+    builder = _entry("gpt-5.5", None, display="gpt-5.5")
+    builder["display_config"]["builder"] = "user"
+    monkeypatch.setattr(cn_catalog.urllib.request, "urlopen", _fake_urlopen(
+        {"config_info_list": [custom, builder, _entry("glm-5.3", 0.39)]}))
+    rows = cn_catalog.fetch_cn_catalog({"access_token": "t"})
+    assert [r["id"] for r in rows] == ["glm-5.3"]
+
+
 def test_fetch_accepts_object_shaped_display_config(monkeypatch):
     """display_contact_config 有时是对象而非字符串（实测两种都有）。"""
     entry = _entry("glm-5.3", 0.39)
@@ -163,11 +179,9 @@ def test_refresh_copies_rate_and_adds_new_names(monkeypatch, trae_env):
     # 展示名与 id 相同时不重复塞 name 字段（客户端用 id 即可）
     assert "name" not in new
     assert new.get("context_window") == 200000
-    # 底表里的 kimi-k3 倍率仍取静态值（不被刷新改写），展示名/上下文被补齐
-    k3 = next(m for m in models if m["id"] == "kimi-k3")
-    assert k3["credits"] == "x1.83"
-    # 底表条目也被补上了目录里的展示名信息（上下文窗口），但倍率仍是底表值
-    assert k3.get("context_window") == 200000 and "name" not in k3
+    # kimi-k3.1-pro 在场后 kimi-k3 不再列出（代际收敛），但底表值没被刷新改写
+    assert "kimi-k3" not in ids
+    assert trae_config.credit_multiplier("cn", "kimi-k3") == "x1.83"
     assert "kimi-k3.1-pro" in ids, "静态底表里的新条目仍在（mock 目录没给）"
 
 
@@ -195,6 +209,27 @@ def test_refresh_keeps_rate_activities_out_of_static_table(monkeypatch, trae_env
     assert trae_config.DISCOVERED_CREDITS == {}
 
 
+def test_refresh_all_success_prunes_delisted_models(monkeypatch, trae_env):
+    """全号成功时快照按本轮结果替换：上游下架的名字与倍率一起消失。
+
+    旧实现只 ``update``，下架的模型会一直挂在 /v1/models 到重启为止。
+    """
+    from buddy_proxy.trae.provider import TraeProvider
+
+    p = TraeProvider()
+    _patch_catalog(monkeypatch, [_entry("newm", 0.5)])
+    monkeypatch.setattr(TraeProvider, "_probe_model", lambda self, m: True)
+    asyncio.run(p.refresh_models(force=True))
+    assert "newm" in {m["id"] for m in p.models()}
+    assert trae_config.DISCOVERED_CREDITS.get("newm") == "x0.50"
+
+    _patch_catalog(monkeypatch, [_entry("other", 0.1)])
+    models = asyncio.run(p.refresh_models(force=True))
+    assert "newm" not in {m["id"] for m in models}
+    assert "newm" not in trae_config.DISCOVERED_CREDITS
+    assert trae_config.DISCOVERED_CREDITS.get("other") == "x0.10"
+
+
 def test_refresh_all_accounts_failed_keeps_old_snapshot(monkeypatch, trae_env):
     from buddy_proxy.trae.provider import TraeProvider
 
@@ -205,7 +240,7 @@ def test_refresh_all_accounts_failed_keeps_old_snapshot(monkeypatch, trae_env):
     p = TraeProvider()
     with pytest.raises(RuntimeError, match="全部账号均未成功"):
         asyncio.run(p.refresh_models(force=True))
-    assert {m["id"] for m in p.models()} >= {"glm-5.3", "kimi-k3"}
+    assert {m["id"] for m in p.models()} >= {"glm-5.3", "kimi-k3.1-pro"}
 
 
 def test_refresh_partial_failure_unions_success(monkeypatch, trae_env):
@@ -214,22 +249,30 @@ def test_refresh_partial_failure_unions_success(monkeypatch, trae_env):
     trae_env.accounts.append(
         types.SimpleNamespace(id="9876543210", region="cn", priority=1))
 
-    def fetch(cred):
-        # 账号顺序由 list_accounts 决定，第二个账号抛错
-        if cred.get("fail"):
-            raise RuntimeError("HTTP 500")
-        return [_entry("brand-new-model", 0.33)]
-
-    monkeypatch.setattr(cn_catalog, "fetch_cn_catalog", fetch)
-    monkeypatch.setattr(trae_env.credentials, "load_account_cred",
-                        lambda aid: {"access_token": "tok", "region": "cn",
-                                     "fail": aid == "9876543210"})
+    # 第二个账号的凭据读不出来（模拟单号失败）；目录替身直接给「已解析」
+    # 形状（与 cn_catalog 返回一致），注意别再调 _patch_catalog 覆盖它
+    resolved = [{
+        "name": "brand-new-model", "id": "brand-new-model",
+        "display_name": "brand-new-model", "rate": 0.33,
+        "context_window": 116000, "multimodal": False,
+    }]
+    monkeypatch.setattr(cn_catalog, "fetch_cn_catalog", lambda cred: list(resolved))
+    # provider 模块在导入时把 load_account_cred 绑成本地名，这条也得打；
+    # ensure_account_token 更是**函数内**才 import，只能打在 credentials 上
+    # （见上面的 trae_env fixture）
+    from buddy_proxy.trae import provider as provider_mod
+    monkeypatch.setattr(provider_mod, "load_account_cred",
+                        lambda aid: (None if aid == "9876543210"
+                                     else {"access_token": "tok", "region": "cn"}))
     monkeypatch.setattr(TraeProvider, "_probe_model", lambda self, m: True)
-    # _patch_catalog 的替身要按「已解析」形状给（这里直接覆盖上面那个同名字段）
-    _patch_catalog(monkeypatch, [_entry("brand-new-model", 0.33)])
     p = TraeProvider()
+    p._discovered["kept-from-before"] = {"display_name": None,
+                                         "context_window": None,
+                                         "multimodal": False, "upstream": None}
     models = asyncio.run(p.refresh_models(force=True))
     assert "brand-new-model" in {m["id"] for m in models}
+    # 部分成功只增不删：上一版发现的名字不能因单号抖动被下架
+    assert "kept-from-before" in {m["id"] for m in models}
 
 
 # --- 倍率取值口 --------------------------------------------------------------
