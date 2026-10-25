@@ -385,6 +385,11 @@ class TraeProvider(BaseProvider):
         verified = await self._verify_candidates(
             [e["id"] for e in union.values() if e.get("id") not in known])
 
+        # 合并只看「这一轮到底进了目录的 id」：新名字须先过验证（verified），
+        # 底表/上一版已有的 id 直接沿用。两段拼起来**不按上游顺序反而按
+        # 「新 → 已有」**，是因为 ``discovered`` 只存元数据、最终展示顺序由
+        # models() 决定（底表在前、发现项按字母序在后），这里顺序只影响
+        # dict 的键序，纯为日志/调试时先看到新增的那几个。
         discovered: dict[str, dict[str, Any]] = {}
         seen_ids: set[str] = set()
         for mid in verified + [e["id"] for e in union.values() if e.get("id") in known]:

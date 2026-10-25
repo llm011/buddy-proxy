@@ -664,7 +664,11 @@ function renderGroups() {
   // 「近 3 次耗时」单元格的 tooltip：逐条列出样本（新→旧），并对照 14 天均值
   function _recentMsTitle(st) {
     const ring = (st && st.recent_ms) || [];
-    if (!ring.length) return '';
+    // 无样本（新模型 / 只有 0 耗时的失败请求）：单元格显示 —，这里也给一句
+    // 说明，别让悬停什么反应都没有
+    if (!ring.length) {
+      return st && st.count ? ' title="还没有带耗时的实测；重启后的前几次请求会陆续补上"' : '';
+    }
     const list = ring.map((ms, i) => `第 ${i + 1} 近：${fmtMs(ms)}`).join('；');
     const avg = st.avg_ms ? `；14 天均值 ${fmtMs(st.avg_ms)}` : '';
     return ` title="${esc(`近 ${ring.length} 次实测：${list}${avg}`)}"`;
@@ -729,7 +733,7 @@ function renderGroups() {
         <td class="muted"${dim}>${esc(m.name || '')}</td>
         <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
-        <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.recent_count ? fmtMs(st.recent_avg_ms) : '—'}</td>
+        <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.recent_count && st.recent_avg_ms != null ? fmtMs(st.recent_avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
             ${(m.is_default || dis) ? '' : `<button title="客户端请求未带 model 字段时，自动改用此模型（不影响已指定 model 的请求）" onclick='setDefault(${jsq(g.id)},${jsq(m.id)})'>设为默认</button>`}
             <button class="primary" onclick='runTest(${jsq(g.id)},${jsq(bareModelId(m.id, g.id))})'>测试</button>

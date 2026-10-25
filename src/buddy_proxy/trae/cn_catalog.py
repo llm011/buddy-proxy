@@ -19,7 +19,11 @@ CN 是 ``trae-api-cn.mchost.guru``。返回的 ``config_info_list`` 每条带
 （IDE 内部 function）不是对话模型，一律丢弃；``config_switch`` 为 False 的
 视为已下架；``is_invisible_to_user`` 为 True 的不进目录（曾经手 probe 收录过
 的 glm-5.1 / kimi-k2.7-code 现在就藏在这个标记后）；``display_config`` 带
-``is_custom_model`` / ``builder`` 的是用户自建模型，同样不收。
+``is_custom_model`` / ``builder`` 的是用户自建模型，同样不收。这条判据只有
+两个字段撑着（2026-10-25 实测：这类条目 ``config_name`` 不带前缀、
+``is_invisible_to_user`` 是 None 而非 True，除此之外与正常条目没有区别）——
+上游形状一变，用户自建模型就会重新漏进 ``/v1/models`` 并被拿去探测，届时
+要在 ``display_config`` 里重新找新的标记字段。
 
 **目录 ≠ 可调**：``kimi-k3.1-pro`` 在目录里可见，但本机两个 CN 账号实测都回
 ``code:1005``（``extra.plan=1``，会员档位不足），所以拉取侧只负责「发现 +
