@@ -1602,10 +1602,12 @@ def test_trae_models_carry_credits():
     # 用户可见模型 ID 统一小写，旧模型不再出现在目录里。
     assert all(model_id == model_id.lower() for model_id in models)
     # qwen-3.7-plus（带连字符）2026-10-12 实测收录；qwen3.7-plus（无连字符）
-    # 才是被上游拒的变体名
-    assert not {"deepseek-v4-flash", "glm-5", "glm-5-turbo", "glm-5.2",
+    # 才是被上游拒的变体名。glm-5.2 2026-10-25 实测出流后已收进目录。
+    assert not {"deepseek-v4-flash", "glm-5", "glm-5-turbo",
                 "kimi-k2.7-code", "qwen3.7-plus"} & models.keys()
     assert "qwen-3.7-plus" in models
+    assert models["glm-5.2"]["credits"] == "x0.78"
+    assert models["deepseek-v4-pro-official"]["credits"] == "x0.72"
 
 
 def test_metrics_daily_series_zero_filled(tmp_path):
