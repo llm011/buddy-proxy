@@ -285,8 +285,10 @@ _QWEN_ONLY = [
 _FULL_EXTRA = [
     {"key": "gmodel", "display_name": "GLM-5.3", "enable": True,
      "price_factor": 0.8, "max_input_tokens": 180000},
-    {"key": "kmodel_latest", "display_name": "Kimi-K3", "enable": True,
-     "price_factor": 1.4, "max_input_tokens": 180000},
+    {"key": "kmodel_pro", "display_name": "Kimi-K3.1-Pro", "enable": True,
+     "price_factor": 1.0, "max_input_tokens": 180000},
+    {"key": "mmodel_flash", "display_name": "MiniMax-M3.1-Flash", "enable": True,
+     "price_factor": 0.1, "max_input_tokens": 180000},
 ]
 
 
@@ -304,7 +306,7 @@ def test_refresh_models_union_across_accounts(monkeypatch, _override):
     assert "qoder/glm-5.3" in ids, "全量号的三方模型必须在并集里"
     assert "qoder/qwen3.8-flash" in ids
     # 并集落盘，后续同步 models()/accepts_model() 同视角
-    assert any(m["id"] == "qoder/kimi-k3" for m in prov.models())
+    assert any(m["id"] == "qoder/kimi-k3.1-pro" for m in prov.models())
     assert prov.accepts_model("glm-5.3", aliases=False)
 
 
@@ -314,6 +316,7 @@ def test_refresh_models_hides_retired_catalog_entries(monkeypatch, _override):
     _patch_fetch(monkeypatch, {
         "uid-acct-a": _QWEN_ONLY + [
             {"key": "gm51model", "display_name": "GLM-5.2", "enable": True},
+            {"key": "kmodel_latest", "display_name": "Kimi-K3", "enable": True},
             {"key": "kmodel", "display_name": "Kimi-K2.8-Preview", "enable": True},
             {"key": "mmodel", "display_name": "MiniMax-M2.7", "enable": True},
         ],
@@ -321,9 +324,11 @@ def test_refresh_models_hides_retired_catalog_entries(monkeypatch, _override):
     prov = QoderProvider()
     ids = {m["id"] for m in asyncio.run(prov.refresh_models())}
     assert {"qoder/qwen3.8-max", "qoder/qwen3.8-flash"} <= ids
-    assert not {"qoder/glm-5.2", "qoder/kimi-k2.8-preview", "qoder/minimax-m2.7"} & ids
+    assert not {"qoder/glm-5.2", "qoder/kimi-k3", "qoder/kimi-k2.8-preview",
+                "qoder/minimax-m2.7"} & ids
 
     catalog = prov._catalog_for(prov._region.key)
+    assert catalog.resolve_key("qoder/kimi-k3") == "kmodel_latest"
     assert catalog.resolve_key("qoder/glm-5.2") == "gm51model"
     assert catalog.resolve_key("qoder/kimi-k2.8-preview") == "kmodel"
     assert catalog.resolve_key("qoder/minimax-m2.7") == "mmodel"
@@ -359,12 +364,14 @@ def test_override_missing_model_synthesized(monkeypatch, _override):
 def test_fallback_models_restored_with_measured_prices():
     """兜底表恢复三方模型，实测倍率修正到位（0.0 免费档必须保留）。"""
     by_key = {m["key"]: m for m in FALLBACK_MODELS}
-    for key in ("gmodel", "gfmodel", "dmodel", "dfmodel", "kmodel_latest",
-                "kmodel", "gm51model", "mmodel"):
+    for key in ("gmodel", "gfmodel", "dmodel", "dfmodel", "kmodel_pro",
+                "kmodel_latest", "kmodel", "mmodel_flash", "gm51model", "mmodel"):
         assert key in by_key, f"兜底表缺三方模型 {key}"
     assert by_key["qfmodel"]["price_factor"] == 0.0
     assert by_key["qmodel_latest"]["price_factor"] == 0.5
     assert by_key["q37fmodel"]["price_factor"] == 0.1
+    assert by_key["kmodel_pro"]["price_factor"] == 1.0
+    assert by_key["mmodel_flash"]["price_factor"] == 0.1
     assert by_key["kmodel_latest"]["price_factor"] == 1.4
     # 0.0 倍率必须进 OpenAI 元数据（credits 字段曾因真值判断丢失）
     m = to_openai_model(by_key["qfmodel"], "qoder")

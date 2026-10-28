@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-19T18:07:13Z",
-  "updated_at": "2026-10-25T15:18:13Z",
+  "updated_at": "2026-10-28T05:40:29Z",
   "files": {
     ".gitattributes": {
       "role": "index",
@@ -34,21 +34,21 @@
     },
     "README.md": {
       "role": "index",
-      "sha256": "27d6bcbca7bee9179197b2b80a36b45a2523b2f457d4cf39ef58bd14540ec2b4",
-      "size": 104176,
-      "normalized_sha256": "27d6bcbca7bee9179197b2b80a36b45a2523b2f457d4cf39ef58bd14540ec2b4"
+      "sha256": "92c1142d32d59cfda71c6133ba1024f2598d1e0acf295c7a72f1088fc9131168",
+      "size": 104238,
+      "normalized_sha256": "92c1142d32d59cfda71c6133ba1024f2598d1e0acf295c7a72f1088fc9131168"
     },
     "README_zh.md": {
       "role": "index",
-      "sha256": "c7cf57ee8df41ef0203c7884f0fc7dc2100ba3175fb726d80d8c73ee531f20c3",
-      "size": 103243,
-      "normalized_sha256": "c7cf57ee8df41ef0203c7884f0fc7dc2100ba3175fb726d80d8c73ee531f20c3"
+      "sha256": "c22c04b4f9ce197f8a6e791187f9790b30f955940e058a405d661a33417b687f",
+      "size": 103306,
+      "normalized_sha256": "c22c04b4f9ce197f8a6e791187f9790b30f955940e058a405d661a33417b687f"
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "ec30bd65e89b7c6821039755b6526e641e885ab6d7877c433c7f68af386adf23",
-      "size": 75991,
-      "normalized_sha256": "ec30bd65e89b7c6821039755b6526e641e885ab6d7877c433c7f68af386adf23"
+      "sha256": "54869cc903f0505cf0e057473ee6dbbfad6bd9eb8e9f88ed5d18565bd1ba75d8",
+      "size": 76039,
+      "normalized_sha256": "54869cc903f0505cf0e057473ee6dbbfad6bd9eb8e9f88ed5d18565bd1ba75d8"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -718,9 +718,9 @@
     },
     "src/buddy_proxy/qoder/catalog.py": {
       "role": "index",
-      "sha256": "ac2cc570a7484be6709196c3551a60a7e4e6350209453cb1d0286532e3927c98",
-      "size": 22372,
-      "normalized_sha256": "ac2cc570a7484be6709196c3551a60a7e4e6350209453cb1d0286532e3927c98"
+      "sha256": "7e452b5f75cd85ebb0fa5d5ea74af42efbff97cbcf1919bf3922fc96ab4280ed",
+      "size": 23171,
+      "normalized_sha256": "7e452b5f75cd85ebb0fa5d5ea74af42efbff97cbcf1919bf3922fc96ab4280ed"
     },
     "src/buddy_proxy/qoder/config.py": {
       "role": "index",
@@ -1600,15 +1600,15 @@
     },
     "tests/test_qoder_per_account_models.py": {
       "role": "observe",
-      "sha256": "a87b9c3c831be374f6dfb6ca97950d0742afc2e500e64420170ffcf2f9400faa",
-      "size": 17841,
-      "normalized_sha256": "a87b9c3c831be374f6dfb6ca97950d0742afc2e500e64420170ffcf2f9400faa"
+      "sha256": "3bfd346a0ee06e2912dc11d6de006a8a42f32c2dc9defcd3f829301d16bbc8d2",
+      "size": 18310,
+      "normalized_sha256": "3bfd346a0ee06e2912dc11d6de006a8a42f32c2dc9defcd3f829301d16bbc8d2"
     },
     "tests/test_qoder_provider.py": {
       "role": "observe",
-      "sha256": "00565071da774d760b38ff294f0ef71544a0e604fc630f5ce2c6f84053ed0bba",
-      "size": 55268,
-      "normalized_sha256": "00565071da774d760b38ff294f0ef71544a0e604fc630f5ce2c6f84053ed0bba"
+      "sha256": "f1e8fc8a316b08902f57216ff282e7bbbe174c0f1a09a9767e00194b5863c52c",
+      "size": 55801,
+      "normalized_sha256": "f1e8fc8a316b08902f57216ff282e7bbbe174c0f1a09a9767e00194b5863c52c"
     },
     "tests/test_qoder_provider_failover.py": {
       "role": "observe",

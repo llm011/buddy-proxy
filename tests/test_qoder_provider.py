@@ -644,7 +644,8 @@ def test_fallback_models_third_party_restored_measured():
     """
     keys = {str(m.get("key")) for m in Catalog.fallback()}
     for key in ("dmodel", "dfmodel", "gmodel", "gfmodel", "gm51model",
-                "kmodel", "kmodel_latest", "mmodel"):
+                "kmodel", "kmodel_latest", "kmodel_pro",
+                "mmodel", "mmodel_flash"):
         assert key in keys, key
     assert "cmodel" not in keys
     assert "smodel" not in keys
@@ -925,25 +926,33 @@ def test_models_hide_legacy_but_keep_current():
 
     2026-10-05 复测三方模型恢复（账号级分桶），兜底目录重建后三方模型
     回到列表；auto 档位仍停用（TIER_MODELS enable=False）。Qwen 3.7、GLM-5.2、
-    Kimi-K2.8-Preview 和 MiniMax-M2.7 按 HIDDEN_KEYS 隐藏，cantus/sonus 已消失。
+    Kimi-K3 / K2.8-Preview 和 MiniMax-M2.7 按 HIDDEN_KEYS 隐藏，cantus/sonus 已消失。
+
+    2026-10 目录换代：Kimi-K3.1-Pro（1×）顶掉 Kimi-K3，MiniMax 只出
+    M3.1-Flash（0.1×）顶掉 M2.7——新一代在列表里，旧一代照旧点名可调。
     """
     ids = [m["id"] for m in _provider().models()]
     assert "qoder/qwen3.8-max" in ids
     assert "qoder/qwen3.8-flash" in ids
     assert "qoder/glm-5.3" in ids
-    assert "qoder/kimi-k3" in ids
+    assert "qoder/kimi-k3.1-pro" in ids
+    assert "qoder/minimax-m3.1-flash" in ids
     # 隐藏/停用/消失的：不展示
     assert "qoder/auto" not in ids
     assert "qoder/qwen3.7-max" not in ids
     assert "qoder/glm-5.2" not in ids
+    assert "qoder/kimi-k3" not in ids
     assert "qoder/kimi-k2.8-preview" not in ids
     assert "qoder/minimax-m2.7" not in ids
     assert "qoder/cantus" not in ids
     # 隐藏只影响目录展示，已有客户端仍可按别名解析到上游 key。
     catalog = Catalog(REGIONS["cn"])
     assert catalog.resolve_key("qoder/glm-5.2") == "gm51model"
+    assert catalog.resolve_key("qoder/kimi-k3") == "kmodel_latest"
     assert catalog.resolve_key("qoder/kimi-k2.8-preview") == "kmodel"
     assert catalog.resolve_key("qoder/minimax-m2.7") == "mmodel"
+    assert catalog.resolve_key("qoder/kimi-k3.1-pro") == "kmodel_pro"
+    assert catalog.resolve_key("qoder/minimax-m3.1-flash") == "mmodel_flash"
 
 
 def test_models_does_not_list_openai_style_ids():
