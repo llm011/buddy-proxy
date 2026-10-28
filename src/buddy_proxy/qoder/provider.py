@@ -124,6 +124,15 @@ _ATTEMPT_DEADLINE_S = 300.0
 #: 流式首事件闸门的缓冲行上限（防异常上游无界攒内存）。
 _GATE_BUFFER_MAX_LINES = 256
 
+#: 10605（RESOURCE_LIMIT）是上游按 (账号, 模型) 的**周期性排队**，不是额度耗尽：
+#: 载荷自带 ``retryAfterSeconds``（实测 2s / 30s 两档）与 ``serviceAvailable``，
+#: 同账号等过这段时间就能出流（实测 15s、60s 后复现可用）。所以按它给的时长
+#: 原地等待后重放首事件闸门，**不冷却、不换号**——账号是好的，换号也躲不开
+#: （实测两个 CN 号同时被挡）。
+_QUEUE_WAIT_MAX_ROUNDS = 2
+#: 单次等待封顶（防上游给个离谱的大数把请求挂死）。
+_QUEUE_WAIT_MAX_S = 60.0
+
 #: 多账号额度并发查询：整轮 deadline + 常驻线程池（kimi 同款，理由见
 #: trae/pat/quota.py：每轮新建池会让慢轮线程后台累积；常驻池上限封顶自然排队）。
 _QUOTA_ROUND_DEADLINE_S = 8.0
@@ -892,27 +901,56 @@ class QoderProvider(BaseProvider):
             if meta is not None:
                 meta["account"] = acct.id
 
+            queue_waited = 0.0
+            gate: _Gate | None = None
+
             reg = with_cached_endpoints(resolve_region(cred.region))
             catalog = self._catalog_for(reg.key)
             upstream = self._build_upstream(body, model, catalog)
             body_json = json.dumps(upstream, ensure_ascii=False, separators=(",", ":"))
             url = reg.chat_url()
-            enc_body, headers = sign(
-                url, body_json,
-                cred.uid, token, cred.machine_id,
-                name=cred.name, email=cred.email,
-                model_key=model,
-            )
-            headers["Accept"] = "text/event-stream"
 
-            client = httpx.AsyncClient(timeout=_TIMEOUT_STREAM)
-            try:
-                req = client.build_request("POST", url, headers=headers, content=enc_body.encode())
-                resp = await client.send(req, stream=True)
-            except httpx.HTTPError as exc:
-                await client.aclose()
-                last_status, last_detail = 502, f"上游连接失败: {exc}"
-                failover.mark_cooldown(acct.id, reason=f"网络错误: {exc}")
+            # 10605 排队重放在**同账号内**循环：等上游给的时长后重发同一请求。
+            # 不冷却、不换号——账号是好的，且实测多个账号会同时被挡。
+            for _queue_round in range(_QUEUE_WAIT_MAX_ROUNDS + 1):
+                enc_body, headers = sign(
+                    url, body_json,
+                    cred.uid, token, cred.machine_id,
+                    name=cred.name, email=cred.email,
+                    model_key=model,
+                )
+                headers["Accept"] = "text/event-stream"
+
+                client = httpx.AsyncClient(timeout=_TIMEOUT_STREAM)
+                try:
+                    req = client.build_request("POST", url, headers=headers,
+                                               content=enc_body.encode())
+                    resp = await client.send(req, stream=True)
+                except httpx.HTTPError as exc:
+                    await client.aclose()
+                    last_status, last_detail = 502, f"上游连接失败: {exc}"
+                    failover.mark_cooldown(acct.id, reason=f"网络错误: {exc}")
+                    continue
+
+                if resp.status_code != 200:
+                    break  # 非 200 交给下方原有分支处理
+                gate = await _gate_first_event(resp, stream)
+                if gate.queue_wait_s <= 0:
+                    break  # 正常提交 / 账号级错误 / EOF，交给下方原有分支处理
+                # 10605：上游明确要求等一会儿再试
+                await _drain_and_close(gate.resp, client, gate.lines)
+                if _queue_round >= _QUEUE_WAIT_MAX_ROUNDS:
+                    last_status, last_detail = 403, (
+                        f"上游排队已等待 {queue_waited:.0f}s 仍未放行（code 10605）")
+                    gate = None  # 别让下方把这条已关闭的响应当提交结果
+                    break
+                wait = gate.queue_wait_s
+                log.info("qoder %s 上游排队（10605），%.0fs 后重试（%s）",
+                         model, wait, acct.id)
+                await asyncio.sleep(wait)
+                queue_waited += wait
+                continue
+            else:  # pragma: no cover - range 保证不会走到
                 continue
 
             if resp.status_code != 200:
@@ -969,6 +1007,8 @@ class QoderProvider(BaseProvider):
                             continue
                         raise HTTPException(status_code=resp.status_code,
                                             detail=f"qoder 上游 HTTP {resp.status_code}: {text}")
+                    # 强刷后 200：这条路径绕过了上面的排队循环，闸门还没过。
+                    gate = await _gate_first_event(resp, stream)
                 else:
                     await client.aclose()
                 if resp.status_code == 429:
@@ -992,9 +1032,13 @@ class QoderProvider(BaseProvider):
                 raise HTTPException(status_code=resp.status_code,
                                     detail=f"qoder 上游 HTTP {resp.status_code}: {text}")
 
-            # 200：过首事件闸门——首个内层 chunk / 带内错误帧到达前，没向客户端
-            # 吐过任何字节，可以安全冷却换号；见到语义事件后绝不重放（防重复计费）。
-            gate = await _gate_first_event(resp, stream)
+            # 200：闸门已在上面的排队循环里过完（gate 由循环带出）——首个内层
+            # chunk / 带内错误帧到达前没向客户端吐过任何字节，可以安全冷却换号；
+            # 见到语义事件后绝不重放（防重复计费）。
+            if gate is None:
+                # 排队等待用尽（响应已在循环里排空关闭）：不是账号故障——不冷却，
+                # 直接试下一个账号（多个账号同时被挡时等待也多半白等）。
+                continue
             if gate.account_error:
                 last_status, last_detail = gate.code, gate.message
                 failover.mark_cooldown(
@@ -1151,19 +1195,63 @@ class _Gate:
     code: int = 0
     message: str = ""
     eof: bool = False
+    #: 10605 排队：上游要求的等待秒数（>0 表示这不是真错误，等一下重试即可）。
+    queue_wait_s: float = 0.0
+
+
+def _queue_wait_seconds(error: str) -> float | None:
+    """从 10605 错误链里挖出上游要求的等待秒数；非 10605 返回 ``None``。
+
+    上游把真正的载荷埋了三层（信封 ``body`` → ``{"code":"10605","message":...}``
+    → 内层 JSON 才有 ``retryAfterSeconds``），而且 ``_unwrap`` 已把最外层拍平成
+    一行文本，所以这里顺着 ``message`` 逐层 ``json.loads`` 往下钻。挖不到就退
+    到 :data:`_QUEUE_WAIT_MAX_S`——既然认出了 10605，等一会儿总比立刻失败好。
+    """
+    if "10605" not in error:
+        return None
+    payload: Any = error
+    for _ in range(4):  # 层数有限，防环
+        if isinstance(payload, dict):
+            secs = payload.get("retryAfterSeconds")
+            if isinstance(secs, (int, float)):
+                return min(float(secs), _QUEUE_WAIT_MAX_S)
+            # 10605 内层给了 serviceAvailable=false 时上游确实在排空，
+            # 但仍按 retryAfterSeconds 走；这里只做兜底取值。
+            payload = payload.get("message")
+            continue
+        if not isinstance(payload, str):
+            break
+        text = payload.strip()
+        start = text.find("{")
+        if start < 0:
+            break
+        try:
+            payload = json.loads(text[start:])
+        except ValueError:
+            # 错误串后面常挂 ``| code=403`` 之类的尾巴（``_describe_upstream_error``
+            # 拼的），整体 json.loads 必失败——退到 raw_decode 只吃第一个对象。
+            try:
+                payload = json.JSONDecoder().raw_decode(text, start)[0]
+            except ValueError:
+                break
+    return _QUEUE_WAIT_MAX_S
 
 
 def _classify_frame(payload: str) -> str:
-    """单个上游信封帧定性：``account_error`` / ``semantic`` / ``wait``。
+    """单个上游信封帧定性：``account_error`` / ``queue_wait`` / ``semantic`` / ``wait``。
 
     - 带内错误（:func:`_unwrap` 给出 error——含 envelope 顶层带 code 的权益门
       帧）→ 挖 ``code``：112/429/401 是账号级（权益门/额度/token 失效）冷却换号；
+      **10605 是排队**，返回 ``queue_wait:<秒数>`` 交给闸门原地等待重放；
       其余请求级错误原样透传。
     - 内层 chunk 带 ``choices``/``usage`` → 语义已至（committed）。
     - 尾帧/心跳（无 body 无 code）→ 继续等。
     """
     inner, error, _done = _unwrap(payload)
     if error is not None:
+        wait = _queue_wait_seconds(error)
+        if wait is not None:
+            return f"queue_wait:{wait}"
         code = 0
         try:
             frame = json.loads(payload)
@@ -1201,6 +1289,13 @@ async def _gate_first_event(resp: httpx.Response, stream: bool) -> _Gate:
             if not payload:
                 continue
             verdict = _classify_frame(payload)
+            if verdict.startswith("queue_wait:"):
+                _, _, secs = verdict.partition("queue_wait:")
+                try:
+                    wait = float(secs)
+                except ValueError:
+                    wait = _QUEUE_WAIT_MAX_S
+                return _Gate(resp=resp, code=10605, queue_wait_s=wait, lines=lines)
             if verdict.startswith("account_error:"):
                 _, _, rest = verdict.partition("account_error:")
                 code_s, _, message = rest.partition(":")
