@@ -1016,12 +1016,12 @@ response`）；`_describe_upstream_error` 会把它挖出来，并且失败按 A
 | `qoder/qwen3.8-max` | `qmodel_38max` | 推理 + 读图 |
 | `qoder/qwen3.8-flash` | `qfmodel` | 推理 + 读图 |
 | `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
-| `qoder/kimi-k3.1-pro` | `kmodel_pro` | |
-| `qoder/minimax-m3.1-flash` | `mmodel_flash` | |
+| `qoder/kimi-k3.1-pro` | `kmodel_latest` | |
+| `qoder/minimax-m3.1-flash` | `mmodel` | |
 | `qoder/deepseek-v4-pro` | `dmodel` | |
 | `qoder/auto` | `auto` | 平台路由档位——上游实际**只有这一个档位**；当前也被上游关了（目录 `enable=false`） |
 
-旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K3、Kimi-K2.8-Preview、MiniMax-M2.7、Cantus、Sonus、DeepSeek-Flash）
+旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K2.8-Preview、Cantus、Sonus、DeepSeek-Flash）
 **不列在列表里但仍可点名调用**——列表少一点，反而好找要用的。三种写法都接受：
 对外 id、官方显示名（`Qwen3.8-Flash`）、上游内部 key（`qfmodel`）；内部 key 会在
 `/v1/models` 里以 `upstream_key` 回显，便于排障对照。

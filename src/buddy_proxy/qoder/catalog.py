@@ -65,19 +65,16 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
      "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
     {"key": "gm51model", "display_name": "GLM-5.2", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.6, "max_input_tokens": 180000},
-    # 2026-10 目录换代：Kimi 由 K3 换成 K3.1-Pro（倍率 1×），MiniMax 由 M2.7
-    # 换成 M3.1-Flash（0.1×，目录只给这一档）。旧的 kmodel_latest / mmodel
-    # 条目保留（隐藏 ≠ 停用，老客户端点名仍可调），倍率沿用最后一次实测。
-    {"key": "kmodel_pro", "display_name": "Kimi-K3.1-Pro", "is_reasoning": True,
+    # 2026-10 目录换代：Kimi 升到 K3.1-Pro（1×），MiniMax 升到 M3.1-Flash
+    # （0.1×，只剩这一档）。注意**上游没换 key**——``kmodel_latest`` 与
+    # ``mmodel`` 原地改了显示名与倍率，所以这两条只能改值，不能新造 key：
+    # 远端目录同样只有这些 key，新造的 key 永远解析不中。
+    {"key": "kmodel_latest", "display_name": "Kimi-K3.1-Pro", "is_reasoning": True,
      "is_vl": True, "price_factor": 1.0, "is_free": False, "max_input_tokens": 180000},
-    {"key": "kmodel_latest", "display_name": "Kimi-K3", "is_reasoning": True,
-     "is_vl": True, "price_factor": 1.4, "is_free": False, "max_input_tokens": 180000},
     {"key": "kmodel", "display_name": "Kimi-K2.8-Preview", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.8},
-    {"key": "mmodel_flash", "display_name": "MiniMax-M3.1-Flash", "is_reasoning": True,
+    {"key": "mmodel", "display_name": "MiniMax-M3.1-Flash", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.1, "max_input_tokens": 180000},
-    {"key": "mmodel", "display_name": "MiniMax-M2.7", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.2, "max_input_tokens": 180000},
 )
 
 #: 档位模型（由平台路由，不绑定具体底层模型）。
@@ -110,10 +107,11 @@ HIDDEN_KEYS: frozenset[str] = frozenset({
     "qmodel",          # Qwen3.7-Plus
     "q37fmodel",       # Qwen3.7-Flash
     "gm51model",       # GLM-5.2
-    "kmodel_latest",   # Kimi-K3（已被 Kimi-K3.1-Pro 顶掉）
     "kmodel",          # Kimi-K2.8-Preview
-    "mmodel",          # MiniMax-M2.7（已被 MiniMax-M3.1-Flash 顶掉）
 })
+#: 注意：``kmodel_latest`` / ``mmodel`` **不能隐藏**——2026-10 上游是原地换的
+#: 显示名（Kimi-K3.1-Pro / MiniMax-M3.1-Flash），这两个 key 就是当前一代；
+#: 按名字误判成旧模型会把它从列表里整个删掉。
 #: 注意：``dfmodel``（上游显示名 ``DeepSeek-Flash``，即用户口中的 4.1-Flash）
 #: 曾因「名字看着旧但最常用」而不隐藏；2026-10-03 起它被上游停用，由
 #: :func:`is_enabled` 摘除。
@@ -160,13 +158,18 @@ MODEL_IDS: dict[str, str] = {
     "gmodel": "glm-5.3",
     "gfmodel": "glm-5.3-flash",
     "gm51model": "glm-5.2",
-    "kmodel_pro": "kimi-k3.1-pro",
-    "kmodel_latest": "kimi-k3",
+    "kmodel_latest": "kimi-k3.1-pro",
     "kmodel": "kimi-k2.8-preview",
-    "mmodel_flash": "minimax-m3.1-flash",
-    "mmodel": "minimax-m2.7",
+    "mmodel": "minimax-m3.1-flash",
     "cmodel": "cantus",
     "smodel": "sonus",
+}
+
+#: 改名前的旧对外 id -> 上游 key。上游原地换代时只改 display_name，老客户端的
+#: 配置里还留着旧名字，这里兜住，避免升级后点名直接 400。
+LEGACY_MODEL_ALIASES: dict[str, str] = {
+    "kimi-k3": "kmodel_latest",         # 现为 Kimi-K3.1-Pro
+    "minimax-m2.7": "mmodel",           # 现为 MiniMax-M3.1-Flash
 }
 
 
@@ -330,6 +333,11 @@ class Catalog:
             if public:
                 self._aliases[_normalize(public)] = key
                 self._aliases.setdefault(_canonical_id_slug(public), key)
+        # 改名后老名字仍要能点名（上游原地换代没留旧 id，只能在这里兜）。
+        for old, key in LEGACY_MODEL_ALIASES.items():
+            if key in self._aliases.values():
+                self._aliases.setdefault(_normalize(old), key)
+                self._aliases.setdefault(_canonical_id_slug(old), key)
 
     def entry(self, model: str) -> dict[str, Any]:
         """按 key/显示名取目录原始条目；找不到时返回最小可用条目。
