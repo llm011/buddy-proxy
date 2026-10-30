@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from datetime import date, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -64,6 +66,39 @@ def fetch_checkin_status(timeout: float = 20.0) -> dict[str, Any] | None:
     return _parse_status_payload(data)
 
 
+def _sign_in_streak(days: object, now: float | None = None) -> int:
+    """``signInDays``（``YYYY-MM-DD`` 列表）→ 截至今天/昨天的连续签到天数。
+
+    上游给的是**完整签到日期列表**（实测 27 次 = 27 个日期，跨月也照给），
+    面板上的「连续 N 天」由此直接算，不需要自己攒历史。今天还没签时从昨天
+    往前数——否则每天零点一过「连续」就归零，用户刚打开页面看到 0 天会
+    以为漏签了。
+
+    日期按本地时区解析（与 ``signInDays`` 的自然日口径一致，见
+    ``core.checkin.next_daily_reset`` 的同类说明）。列表里混进坏值就跳过，
+    不为一个脏日期把整条状态打挂。
+    """
+    if not isinstance(days, (list, tuple)):
+        return 0
+    stamp: set[date] = set()
+    for raw in days:
+        if not isinstance(raw, str):
+            continue
+        try:
+            stamp.add(datetime.strptime(raw.strip()[:10], "%Y-%m-%d").date())
+        except ValueError:
+            continue
+    if not stamp:
+        return 0
+    moment = datetime.fromtimestamp(time.time() if now is None else now).date()
+    cursor = moment if moment in stamp else moment - timedelta(days=1)
+    streak = 0
+    while cursor in stamp:
+        streak += 1
+        cursor -= timedelta(days=1)
+    return streak
+
+
 def _parse_status_payload(data: dict[str, Any]) -> dict[str, Any]:
     """loginBonusInfo 响应 → 统一状态 dict（签领与查询共用解析）。"""
     result = data.get("result") or {}
@@ -76,8 +111,12 @@ def _parse_status_payload(data: dict[str, Any]) -> dict[str, Any]:
         # 仅用于界面「每日 +X」展示，不是精确口径。
         "daily_credit": round(int(result.get("totalPoints") or 0)
                               / max(int(result.get("totalTimes") or 1), 1)),
-        # signInDays 是真实签到日期列表，交给 BenefitsManager 记日历
+        # signInDays 是真实签到日期列表：既交给 BenefitsManager 记日历
+        # （``checkin_dates``，与 codebuddy 同字段名、同 ``YYYY-MM-DD`` 口径），
+        # 也直接算出「连续 N 天」——上游给了日期列表，不用再攒本地历史。
         "sign_in_days": result.get("signInDays") or [],
+        "checkin_dates": result.get("signInDays") or [],
+        "streak_days": _sign_in_streak(result.get("signInDays")),
         # 每日零点轮换（百度签到按自然日），上游没给时间字段——同 trae/codebuddy
         # 按本地零点推断，标 inferred，界面注明。
         "next_ts": next_daily_reset(),
