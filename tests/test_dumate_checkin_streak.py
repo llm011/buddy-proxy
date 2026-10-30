@@ -102,6 +102,15 @@ def test_parse_status_streak_zero_without_days():
     assert status["streak_days"] == 0
 
 
+def test_sign_in_days_are_normalized_for_calendar():
+    """重复日期 / 脏值 / 乱序：下发前收干净，日历按字面串比对才不会静默少一天。"""
+    payload = _payload(["2026-07-31", "2026-07-30", "2026-07-31",
+                        "bad", 123, "2026-13-01"])
+    status = dumate_checkin._parse_status_payload(payload)
+    assert status["sign_in_days"] == ["2026-07-30", "2026-07-31"]
+    assert status["checkin_dates"] == ["2026-07-30", "2026-07-31"]
+
+
 # --- 下发到界面的字段（2026-10-30 报障「打卡区域没有豆包」）-------------------
 
 

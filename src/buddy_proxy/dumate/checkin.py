@@ -99,6 +99,25 @@ def _sign_in_streak(days: object, now: float | None = None) -> int:
     return streak
 
 
+def _normalize_sign_in_days(days: object) -> list[str]:
+    """``signInDays`` → 干净的 ``YYYY-MM-DD`` 列表（去重、升序、剔坏值）。
+
+    上游给的是日期列表，打卡日历与「连续 N 天」都从这里来；原样透传会把
+    重复日期和脏值一路带到响应里，日历合并按字面串比对，脏值等于静默少一天。
+    """
+    if not isinstance(days, (list, tuple)):
+        return []
+    stamp: set[date] = set()
+    for raw in days:
+        if not isinstance(raw, str):
+            continue
+        try:
+            stamp.add(datetime.strptime(raw.strip()[:10], "%Y-%m-%d").date())
+        except ValueError:
+            continue
+    return [d.isoformat() for d in sorted(stamp)]
+
+
 def _parse_status_payload(data: dict[str, Any]) -> dict[str, Any]:
     """loginBonusInfo 响应 → 统一状态 dict（签领与查询共用解析）。"""
     result = data.get("result") or {}
@@ -114,8 +133,8 @@ def _parse_status_payload(data: dict[str, Any]) -> dict[str, Any]:
         # signInDays 是真实签到日期列表：既交给 BenefitsManager 记日历
         # （``checkin_dates``，与 codebuddy 同字段名、同 ``YYYY-MM-DD`` 口径），
         # 也直接算出「连续 N 天」——上游给了日期列表，不用再攒本地历史。
-        "sign_in_days": result.get("signInDays") or [],
-        "checkin_dates": result.get("signInDays") or [],
+        "sign_in_days": _normalize_sign_in_days(result.get("signInDays")),
+        "checkin_dates": _normalize_sign_in_days(result.get("signInDays")),
         "streak_days": _sign_in_streak(result.get("signInDays")),
         # 每日零点轮换（百度签到按自然日），上游没给时间字段——同 trae/codebuddy
         # 按本地零点推断，标 inferred，界面注明。
