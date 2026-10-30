@@ -294,6 +294,103 @@ def test_no_account_in_region_gives_401(monkeypatch):
     assert "跨区" in str(exc_info.value.detail)
 
 
+# ---------------------------------------------------------------------------
+# 10605 排队（RESOURCE_LIMIT）：同账号等过上游给的秒数后重放，不冷却不换号
+# ---------------------------------------------------------------------------
+
+#: 线上实报的三层嵌套错误串（外层信封 body 内的 code/message，尾随 ``| code=403``）。
+_10605_REAL = (
+    '{"code":"10605","message":"{\\"isQueued\\":true,\\"modelKey\\":\\"dfmodel\\",'
+    '\\"queueCount\\":0,\\"queueType\\":\\"p3\\",\\"retryAfterSeconds\\":30,'
+    '\\"serviceAvailable\\":false,\\"subCode\\":\\"RESOURCE_LIMIT\\",\\"waitTime\\":30}",'
+    '"subCode":"RESOURCE_LIMIT"} | code=403'
+)
+
+
+def test_queue_wait_seconds_parses_real_payload():
+    """三层嵌套 + 尾随 ``| code=403`` 的 10605 串必须挖出 retryAfterSeconds。"""
+    assert qoder_provider._queue_wait_seconds(_10605_REAL) == 30.0
+    # 非 10605 一律 None（不能把其它 403 也当排队）
+    assert qoder_provider._queue_wait_seconds('{"code":"112"}') is None
+    # 认出 10605 但挖不到秒数：退回封顶值（等一会儿总比立刻失败好）
+    assert qoder_provider._queue_wait_seconds(
+        '{"code":"10605","message":"busy"}') == qoder_provider._QUEUE_WAIT_MAX_S
+    # 上游给离谱大数时封顶
+    big = '{"code":"10605","message":"{\\"retryAfterSeconds\\":99999}"}'
+    assert qoder_provider._queue_wait_seconds(big) == qoder_provider._QUEUE_WAIT_MAX_S
+
+
+def test_classify_frame_routes_10605_to_queue_wait():
+    frame = json.dumps({"code": "10605", "message": "queued",
+                        "subCode": "RESOURCE_LIMIT"})
+    assert qoder_provider._classify_frame(frame).startswith("queue_wait:")
+
+
+def _queue_then_ok(monkeypatch, waits: list[float]) -> None:
+    """把 asyncio.sleep 换成记录秒数（真 sleep 30s 测试挂死）。"""
+    async def fake_sleep(secs):
+        waits.append(float(secs))
+
+    monkeypatch.setattr(qoder_provider.asyncio, "sleep", fake_sleep)
+
+
+def test_10605_waits_same_account_then_replays(monkeypatch):
+    """10605 → 按 retryAfterSeconds 原地等 → 重发同一账号；不冷却、不换号。"""
+    _write_account("acct-a")
+    _write_account("acct-b")
+    hits = {"a": 0}
+
+    def route_a(req):
+        hits["a"] += 1
+        if hits["a"] == 1:
+            return httpx.Response(
+                200, headers={"content-type": "text/event-stream"},
+                stream=_ChunkedBody([_cosy_error(
+                    "10605", '{"retryAfterSeconds":2,"subCode":"RESOURCE_LIMIT"}')]))
+        return _text_stream("after-wait")
+
+    routes = {"uid-acct-a": route_a,
+              "uid-acct-b": lambda req: _text_stream("from-b")}
+    waits: list[float] = []
+    _queue_then_ok(monkeypatch, waits)
+    body_bytes, calls, _, meta = _run_stream(
+        monkeypatch, routes,
+        {"model": "deepseek-v4.1-flash",
+         "messages": [{"role": "user", "content": "hi"}], "stream": True})
+    assert b"after-wait" in body_bytes
+    assert calls == ["uid-acct-a", "uid-acct-a"], "排队必须同账号重放，不该换号"
+    assert waits == [2.0], "等上游给的 retryAfterSeconds"
+    assert failover.cooldown_left("acct-a")[0] <= 0, "排队不是账号故障，不冷却"
+    assert meta.get("account") == "acct-a"
+
+
+def test_10605_exhausted_fails_over_without_cooldown(monkeypatch):
+    """一直 10605：等满轮数后降级，换号且不冷却原账号。"""
+    _write_account("acct-a")
+    _write_account("acct-b")
+
+    def always_queued(req):
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream"},
+            stream=_ChunkedBody([_cosy_error(
+                "10605", '{"retryAfterSeconds":1}')]))
+
+    routes = {"uid-acct-a": always_queued,
+              "uid-acct-b": lambda req: _text_stream("from-b")}
+    waits: list[float] = []
+    _queue_then_ok(monkeypatch, waits)
+    body_bytes, calls, _, meta = _run_stream(
+        monkeypatch, routes,
+        {"model": "deepseek-v4.1-flash",
+         "messages": [{"role": "user", "content": "hi"}], "stream": True})
+    assert b"from-b" in body_bytes
+    rounds = qoder_provider._QUEUE_WAIT_MAX_ROUNDS + 1
+    assert calls == ["uid-acct-a"] * rounds + ["uid-acct-b"]
+    assert len(waits) == qoder_provider._QUEUE_WAIT_MAX_ROUNDS
+    assert failover.cooldown_left("acct-a")[0] <= 0
+    assert meta.get("account") == "acct-b"
+
+
 def test_empty_stream_before_first_event_fails_over(monkeypatch):
     """首个语义事件前 EOF（假成功）：换号重试。"""
     _write_account("acct-a")

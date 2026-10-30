@@ -160,7 +160,7 @@ errors.py[IG3T]: F:Qoder 上游错误描述与响应整形：挖 details JSON �
 failover.py[IR5S]: F:Qoder 多账号冷却与可用账号枚举（仅同区轮转），账号状态面板数据。 | R:code:src/buddy_proxy/core/account_failover.py,code:src/buddy_proxy/qoder/credentials.py | A:failover,cooldown | S:expires_at_ms 是毫秒，展示前要 /1000（曾显示 4.97 亿小时）；Retry-After 优先于默认冷却。
 intl_provider.py[IN3T]: F:Qoder 海外版独立通道 qoderintl：钉死全球区、按需注册、只认全球账号鉴权。 | R:code:src/buddy_proxy/qoder/provider.py,code:src/buddy_proxy/qoder/failover.py | A:region,intl | S:无全球账号时返回 401「无该区域可用账号」；区域不可用默认区兜底。
 models.json[FL1T]: F:Qoder per-account 模型白名单覆盖表（账号 → 允许模型），空表=不限制。 | R:code:src/buddy_proxy/qoder/catalog.py | A:config,whitelist | S:登记后只出白名单模型，缺的补最小条目；权益漂移会让旧限制失真，复查后清空。
-provider.py[IN8L]: F:Qoder 通道主实现：COSY 面 SSE 信封聊天转发（多账号 failover + 首事件闸门）、跨账号目录并集、签到、额度、健康。 | R:code:src/buddy_proxy/qoder/cosy.py,code:src/buddy_proxy/qoder/catalog.py,code:src/buddy_proxy/qoder/campaigns.py,code:src/buddy_proxy/qoder/credentials.py | A:forward,failover,quota,checkin | S:出站必须带归因信封否则 agent_router 拒；语义事件后绝不重放防重复计费；档位名 auto 归 CodeBuddy 两轮都让开；签到/额度遍历本区全量账号不剔冷却。
+provider.py[IN8L]: F:Qoder 通道主实现：COSY 面 SSE 信封聊天转发（多账号 failover + 首事件闸门与排队重放）、跨账号目录并集、签到、额度、健康。 | R:code:src/buddy_proxy/qoder/cosy.py,code:src/buddy_proxy/qoder/catalog.py,code:src/buddy_proxy/qoder/campaigns.py,code:src/buddy_proxy/qoder/credentials.py | A:forward,failover,quota,checkin,_gate_first_event,_queue_wait_seconds | S:出站必须带归因信封否则 agent_router 拒；语义事件后绝不重放防重复计费；档位名 auto 归 CodeBuddy 两轮都让开；签到/额度遍历本区全量账号不剔冷却；10605 是排队不是坏号，同账号等 retryAfterSeconds 重放、不冷却不换号。
 quota.py[IN5S]: F:Qoder 额度条目小工具：套餐是否生效/标签本地化/到期时间/已用百分比。 | R:code:src/buddy_proxy/qoder/provider.py | A:quota,format | S:上游 percentage 是剩余比例（0–1）不是已用；有 used/total 时优先用它算。
 umid.py[IM5S]: F:复刻 Qoder 桌面 runtime-info 二进制生成机器指纹（MachineIdentity），供活动面定向。 | R:code:src/buddy_proxy/qoder/campaigns.py | A:identity,fingerprint | S:仅在 worker 线程跑并吞 BaseException；成功缓存 1h、失败 60s；有 QODER_UMID_BIN(_CN) 覆盖，无二进制退回静态头。
 
@@ -207,7 +207,7 @@ splitter.py[KM7M]: F:流式工具调用切分器：正文逐 chunk 透传、各�
 ===/Users/jsongo/code/life/buddy-proxy/src/buddy_proxy/web/===
 __init__.py[ZC3T]: F:web 子包说明：对外 API 路由、管理 UI 与模型目录 | R:- | A:- | S:-
 model_list.py[FC6M]: F:模型列表构建：内置静态兜底表、本地 models_config.json 加载与归一、Codex 格式转换 | R:code:src/buddy_proxy/web/models_config.json,code:src/buddy_proxy/web/routes.py | A:build_model_list_static,load_models_from_local_config,normalize_model_format,model_to_codex_format | S:静态表是兜底不是权威，改模型目录要改 models_config.json；本地文件解析失败必须回退静态表而不是抛，否则 /v1/models 整个 500
-models_config.json[FC7M]: F:全通道静态模型目录：CodeBuddy 与 Trae PAT 条目共表，含上游映射、网关、function、频控、倍率与能力 | R:code:src/buddy_proxy/trae/pat/models.py,code:src/buddy_proxy/web/model_list.py | A:- | S:PAT 条目必须带 provider=traepat 才会加载；gateway=plus 与缺省 public 分属独立额度池；function 与 rate_limit 缺失分别表示默认 chat_v3 与不节流；促销倍率 0 是有效值不能按假值丢弃
+models_config.json[FC7M]: F:全通道静态模型目录：CodeBuddy 与 Trae PAT 条目共表，含上游映射、网关、function、频控、倍率与能力 | R:code:src/buddy_proxy/trae/pat/models.py,code:src/buddy_proxy/web/model_list.py,code:src/buddy_proxy/codebuddy_provider/forward.py | A:- | S:PAT 条目必须带 provider=traepat 才加载；gateway=plus 与缺省 public 分属独立额度池；倍率 0 是有效值；CodeBuddy 条目无上游刷新，上新只能手抄本表；同模型可占多行不同倍率，id 必须互异
 routes.py[EA8L]: F:FastAPI 路由：/health、/v1/models、四协议入口（chat/completions、responses、messages、doubao agent）与全局异常兜底 | R:code:src/buddy_proxy/web/model_list.py,code:src/buddy_proxy/providers/base.py | A:_unhandled_exception_handler,client_meta | S:未捕获异常统一回 500 且不回显 exc 原文（细节只进服务端日志），新增端点必须走 forward_chat 否则没有 failover、停用策略与埋点
 
 ===/Users/jsongo/code/life/buddy-proxy/src/buddy_proxy/web/static/===
