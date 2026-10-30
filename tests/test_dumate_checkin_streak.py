@@ -100,3 +100,64 @@ def test_parse_status_streak_zero_without_days():
     status = dumate_checkin._parse_status_payload(payload)
     assert status["checkin_dates"] == []
     assert status["streak_days"] == 0
+
+
+# --- 下发到界面的字段（2026-10-30 报障「打卡区域没有豆包」）-------------------
+
+
+class _CheckinProvider:
+    """最小签到 provider：checkin_status 原样回灌给定状态，quota 不查。"""
+
+    id = "dumate"
+    name = "百度搭子"
+    supports_checkin = True
+
+    def __init__(self, status):
+        self._status = status
+
+    def checkin_status(self):
+        return self._status
+
+    def quota(self):
+        return None
+
+
+def _entry_for(status):
+    """跑一遍 snapshot 的单通道条目，拿前端真正收到的 ``checkin`` 字段。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from buddy_proxy.benefits import BenefitsManager
+
+    mgr = BenefitsManager("/dev/null", SimpleNamespace(providers={}))
+    provider = _CheckinProvider(status)
+    return asyncio.run(
+        mgr._provider_entry("dumate", provider, set(), {}, "2026-10-30"))["checkin"]
+
+
+def test_entry_keeps_streak_and_daily_credit():
+    """「连续 N 天」「每日 +X」必须活到响应里——只算出来不给前端等于没算。
+
+    报障现场：``/ui/api/benefits`` 里 dumate 的 streak_days 是 null，前端
+    ``c.streak_days >= 2`` 恒假，打卡卡上除了一行「已签到」什么都没有，
+    用户以为豆包压根没接进打卡区域。
+    """
+    days = [f"2026-10-{d:02d}" for d in range(5, 31)]
+    entry = _entry_for(dumate_checkin._parse_status_payload(_payload(days)))
+    assert entry["supported"] is True
+    assert entry["streak_days"] == 26
+    assert entry["daily_credit"] == 500
+    assert entry["done_today"] is True
+    assert entry["sign_in_days"] == days
+
+
+def test_entry_drops_calendar_only_field_but_keeps_supported():
+    """``checkin_dates`` 只给日历合并用，不下发；``supported`` 不许被盖掉。"""
+    days = ["2026-10-29", "2026-10-30"]
+    status = dumate_checkin._parse_status_payload(_payload(days))
+    # provider 状态里带了同名字段（qoder 就有 supported），也不能顶掉能力声明
+    status["supported"] = False
+    entry = _entry_for(status)
+    assert entry["supported"] is True
+    assert "checkin_dates" not in entry
+    assert entry["sign_in_days"] == days
