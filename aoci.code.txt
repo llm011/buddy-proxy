@@ -207,7 +207,7 @@ splitter.py[KM7M]: F:流式工具调用切分器：正文逐 chunk 透传、各�
 ===/Users/jsongo/code/life/buddy-proxy/src/buddy_proxy/web/===
 __init__.py[ZC3T]: F:web 子包说明：对外 API 路由、管理 UI 与模型目录 | R:- | A:- | S:-
 model_list.py[FC6M]: F:模型列表构建：内置静态兜底表、本地 models_config.json 加载与归一、Codex 格式转换 | R:code:src/buddy_proxy/web/models_config.json,code:src/buddy_proxy/web/routes.py | A:build_model_list_static,load_models_from_local_config,normalize_model_format,model_to_codex_format | S:静态表是兜底不是权威，改模型目录要改 models_config.json；本地文件解析失败必须回退静态表而不是抛，否则 /v1/models 整个 500
-models_config.json[FC7M]: F:全通道静态模型目录：CodeBuddy 与 Trae PAT 条目共表，含上游映射、网关、function、频控、倍率与能力 | R:code:src/buddy_proxy/trae/pat/models.py,code:src/buddy_proxy/web/model_list.py | A:- | S:PAT 条目必须带 provider=traepat 才会加载；gateway=plus 与缺省 public 分属独立额度池；function 与 rate_limit 缺失分别表示默认 chat_v3 与不节流；促销倍率 0 是有效值不能按假值丢弃
+models_config.json[FC7M]: F:全通道静态模型目录：CodeBuddy 与 Trae PAT 条目共表，含上游映射、网关、function、频控、倍率与能力 | R:code:src/buddy_proxy/trae/pat/models.py,code:src/buddy_proxy/web/model_list.py,code:src/buddy_proxy/codebuddy_provider/forward.py | A:- | S:PAT 条目必须带 provider=traepat 才加载；gateway=plus 与缺省 public 分属独立额度池；倍率 0 是有效值；CodeBuddy 条目无上游刷新，上新只能手抄本表；同模型可占多行不同倍率，id 必须互异
 routes.py[EA8L]: F:FastAPI 路由：/health、/v1/models、四协议入口（chat/completions、responses、messages、doubao agent）与全局异常兜底 | R:code:src/buddy_proxy/web/model_list.py,code:src/buddy_proxy/providers/base.py | A:_unhandled_exception_handler,client_meta | S:未捕获异常统一回 500 且不回显 exc 原文（细节只进服务端日志），新增端点必须走 forward_chat 否则没有 failover、停用策略与埋点
 
 ===/Users/jsongo/code/life/buddy-proxy/src/buddy_proxy/web/static/===

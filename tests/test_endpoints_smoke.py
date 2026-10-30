@@ -131,6 +131,7 @@ def test_models_has_required_ids(client):
     required = {
         "glm-5.3", "glm-5.3-flash", "hy3", "hy4-preview",
         "minimax-m3", "kimi-k3", "kimi-k2.7",
+        "kimi-k3.1-pro", "kimi-k3.1-pro-lite",
         "deepseek-v4-flash", "deepseek-v4-pro",
     }
     body = client.get("/v1/models").json()
@@ -152,6 +153,9 @@ def test_models_credits_and_name(client):
         ("deepseek-v4-flash", "f"): ("x0.17 credits", "Deepseek-V4-Flash"),
         ("deepseek-v4-pro", "f"): ("x0.51 credits", "Deepseek-V4-Pro"),
         ("kimi-k2.7", "f"): ("x0.57 credits", "Kimi-K2.7-Code"),
+        # Kimi-K3.1-Pro 有两档倍率（1.56 订阅优先 / 0.97 普通），同名不同价
+        ("kimi-k3.1-pro", "moonshot"): ("x1.56 credits", "Kimi-K3.1-Pro"),
+        ("kimi-k3.1-pro-lite", "moonshot"): ("x0.97 credits", "Kimi-K3.1-Pro (Lite)"),
     }
     for key, (credit, name) in checks.items():
         entry = by_id.get(key)
