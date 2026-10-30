@@ -720,6 +720,15 @@ def _dumate_account_info() -> dict[str, Any]:
     if status:
         info["checkin_total_points"] = status.get("total_points", 0)
         info["checkin_total_times"] = status.get("total_times", 0)
+        # 账号卡的签到列数据源（benefits_accounts.js 的 acctLoad → cfg.subExtra
+        # 要读这几个字段）。**直接复用上面这次查询的结果**，不再打第二次上游：
+        # 这里是高频只读接口，多一次 bce 往返就是几十到几百毫秒的白等。
+        info["checkin_status"] = {
+            "checked_in": bool(status.get("checked_in")),
+            "claimable": bool(status.get("claimable")),
+            "streak_days": status.get("streak_days") or 0,
+            "daily_credit": status.get("daily_credit") or 0,
+        }
 
     # 今日消耗（真实流水合计，不是估算）：records/usage 区间查「今天 0 点 → 现在」。
     # 同样短超时快速失败，拿不到就缺省（前端不显示这一位）。limit=1：合计走
@@ -761,6 +770,9 @@ async def ui_dumate_accounts(request: Request):
             "display_name": info.get("display_name") or "百度搭子",
             "checkin_total_points": info.get("checkin_total_points"),
             "checkin_total_times": info.get("checkin_total_times"),
+            # 签到列：勾/未勾 + 连续天数。上游查询失败（未登录/网络）时整个
+            # dict 缺省——前端据此显示「状态未知」而不是画成「未签到」。
+            "checkin_status": info.get("checkin_status"),
             "today_consumed": info.get("today_consumed"),
             "today_calls": info.get("today_calls"),
         }],

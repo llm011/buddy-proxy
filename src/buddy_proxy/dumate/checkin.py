@@ -66,6 +66,25 @@ def fetch_checkin_status(timeout: float = 20.0) -> dict[str, Any] | None:
     return _parse_status_payload(data)
 
 
+def _parse_day_set(days: object) -> set[date]:
+    """``signInDays`` → 干净的 ``date`` 集合（去重、剔坏值、与顺序无关）。
+
+    「连续 N 天」与下发给日历的 ``sign_in_days`` 都从这一份解析来——上游哪天
+    改口径（带时间戳、换分隔符）只需改这里，两处不会各自漂。
+    """
+    if not isinstance(days, (list, tuple)):
+        return set()
+    stamp: set[date] = set()
+    for raw in days:
+        if not isinstance(raw, str):
+            continue
+        try:
+            stamp.add(datetime.strptime(raw.strip()[:10], "%Y-%m-%d").date())
+        except ValueError:
+            continue
+    return stamp
+
+
 def _sign_in_streak(days: object, now: float | None = None) -> int:
     """``signInDays``（``YYYY-MM-DD`` 列表）→ 截至今天/昨天的连续签到天数。
 
@@ -78,16 +97,7 @@ def _sign_in_streak(days: object, now: float | None = None) -> int:
     ``core.checkin.next_daily_reset`` 的同类说明）。列表里混进坏值就跳过，
     不为一个脏日期把整条状态打挂。
     """
-    if not isinstance(days, (list, tuple)):
-        return 0
-    stamp: set[date] = set()
-    for raw in days:
-        if not isinstance(raw, str):
-            continue
-        try:
-            stamp.add(datetime.strptime(raw.strip()[:10], "%Y-%m-%d").date())
-        except ValueError:
-            continue
+    stamp = _parse_day_set(days)
     if not stamp:
         return 0
     moment = datetime.fromtimestamp(time.time() if now is None else now).date()
@@ -105,17 +115,7 @@ def _normalize_sign_in_days(days: object) -> list[str]:
     上游给的是日期列表，打卡日历与「连续 N 天」都从这里来；原样透传会把
     重复日期和脏值一路带到响应里，日历合并按字面串比对，脏值等于静默少一天。
     """
-    if not isinstance(days, (list, tuple)):
-        return []
-    stamp: set[date] = set()
-    for raw in days:
-        if not isinstance(raw, str):
-            continue
-        try:
-            stamp.add(datetime.strptime(raw.strip()[:10], "%Y-%m-%d").date())
-        except ValueError:
-            continue
-    return [d.isoformat() for d in sorted(stamp)]
+    return [d.isoformat() for d in sorted(_parse_day_set(days))]
 
 
 def _parse_status_payload(data: dict[str, Any]) -> dict[str, Any]:

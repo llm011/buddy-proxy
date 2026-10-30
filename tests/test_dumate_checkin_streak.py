@@ -170,3 +170,69 @@ def test_entry_drops_calendar_only_field_but_keeps_supported():
     assert entry["supported"] is True
     assert "checkin_dates" not in entry
     assert entry["sign_in_days"] == days
+
+
+# --- 账号卡（/ui/api/dumate/accounts）的签到列 ---------------------------------
+#
+# 2026-10-30 review 抓到：提交说明声称这里补了 checkin_status，实际那版 diff
+# 只动了 checkin.py / benefits.py，端点仍只回 total_points/total_times，
+# benefits_accounts.js 的签到列拿不到数据源——「算了但没下发」的老毛病又犯一次。
+# 这两条把字段钉死在端点上。
+
+
+def test_accounts_endpoint_ships_checkin_status(monkeypatch):
+    """账号卡必须带 checkin_status（今日状态 + 连续天数），否则签到列无数据源。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from buddy_proxy.dumate import discovery
+    from buddy_proxy.web.ui import channels
+
+    days = [f"2026-10-{d:02d}" for d in range(5, 31)]
+    status = dumate_checkin._parse_status_payload(_payload(days))
+
+    monkeypatch.setattr(discovery, "discover", lambda: object())
+    monkeypatch.setattr(
+        channels, "_dumate_account_info_cached",
+        lambda: {
+            "bceconsole_authenticated": True,
+            "account_id": "acct-1",
+            "display_name": "小豆",
+            "checkin_total_points": 13500,
+            "checkin_total_times": 27,
+            "checkin_status": {
+                "checked_in": status["checked_in"],
+                "claimable": status["claimable"],
+                "streak_days": status["streak_days"],
+                "daily_credit": status["daily_credit"],
+            },
+        },
+    )
+    req = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+    out = asyncio.run(channels.ui_dumate_accounts(req))
+    acct = out["accounts"][0]
+    assert acct["checkin_status"]["checked_in"] is True
+    assert acct["checkin_status"]["streak_days"] == 26
+    assert acct["checkin_status"]["daily_credit"] == 500
+
+
+def test_account_info_builds_checkin_status_from_single_query(monkeypatch):
+    """``_dumate_account_info`` 复用同一次签到查询，不多打一次上游。"""
+    from buddy_proxy.dumate import cookies as dumate_cookies
+    from buddy_proxy.web.ui import channels
+
+    calls = []
+
+    def _fetch(timeout=20.0):
+        calls.append(timeout)
+        return dumate_checkin._parse_status_payload(_payload(["2026-10-29", "2026-10-30"]))
+
+    monkeypatch.setattr(dumate_cookies, "resolve_bceconsole_auth", lambda: {"token": "x"})
+    monkeypatch.setattr(dumate_checkin, "fetch_checkin_status", _fetch)
+    monkeypatch.setattr(dumate_checkin, "fetch_usage_records",
+                        lambda **kw: {"consumed_points": 0.0, "total_count": 0})
+
+    info = channels._dumate_account_info()
+    assert len(calls) == 1, "签到查询只该打一次，账号卡状态从中派生"
+    assert info["checkin_status"]["checked_in"] is True
+    assert info["checkin_status"]["streak_days"] == 2
