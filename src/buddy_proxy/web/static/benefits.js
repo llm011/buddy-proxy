@@ -633,6 +633,13 @@ function _dumate_sub_extra(a, bits) {
   if (a.checkin_total_points != null) {
     bits.push(`累计签到 ${a.checkin_total_points} 分（${a.checkin_total_times || 0} 次）`);
   }
+  // 今日签到状态：后端只有真查到上游才下发 checkin_status；缺省＝查询失败
+  // （未登录/网络），此时不显示这一位，免得把「不知道」画成「没签」。
+  const ck = a.checkin_status;
+  if (ck) {
+    bits.push(ck.checked_in ? '今日已签到' : '今日未签到');
+    if (ck.streak_days >= 2) bits.push(`连续 ${ck.streak_days} 天`);
+  }
 }
 
 function renderDumatePanel() {

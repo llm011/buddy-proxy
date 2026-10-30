@@ -505,9 +505,18 @@ class BenefitsManager:
                 today in done.get(pid, set())
                 or bool(status and status.get("checked_in"))
             )
+            # 状态里**不能被顶层覆盖**的键：
+            # - ``supported``：上面的 ``{"supported": supports_checkin}`` 是前端
+            #   ``p.checkin.supported`` 唯一的判据，被 provider 状态盖掉就整行
+            #   打卡卡不渲染（qoder 状态里恰好也有个 supported）；
+            # - ``checkin_dates``：这是**日历合并用的中间字段**（BenefitsManager
+            #   自己消费后写进 calendar），provider 给的完整签到日期列表可达几十
+            #   个日期，每个通道都塞进响应白占带宽；``sign_in_days`` 才是下发给
+            #   界面的那份（多账号面板的签到列要用到，比如打卡日历里点某一天）。
             entry["checkin"].update({
                 "done_today": done_today,
-                **(status or {}),
+                **{k: v for k, v in (status or {}).items()
+                   if k not in ("supported", "checkin_dates")},
             })
             # 声明支持打卡却查不出状态（返回裸 None / 非 dict）：必须标成
             # 「查询失败」而不是让它退化成「未签到」。缺了这个标记，前端只在
