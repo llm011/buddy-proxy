@@ -23,11 +23,11 @@ import subprocess
 import pytest
 
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
-BENEFITS_JS = _STATIC / "benefits_panels.js"
+BENEFITS_JS = _STATIC / "benefits_trae.js"
 HELPERS_JS = _STATIC / "benefits_accounts.js"   # 公共件（acctSubHtml/acctMoveButtons/…）
 BENEFITS_CORE = _STATIC / "benefits_quota.js"   # quotaHeadSum 定义在这
-APP_JS = _STATIC / "app.js"                     # fmtNum
-SEG_TRAE = re.compile(r"// ---- TRAE WORK 面板.*$", re.S)
+APP_JS = _STATIC / "ui_format.js"               # fmtNum
+SEG_TRAE = re.compile(r"// ---- TRAE WORK 面板.*?(?=\n// ---- TRAE INTL 面板)", re.S)
 SEG_HEAD_SUM = re.compile(r"function quotaHeadSum\(q\) \{.*?\n\}", re.S)
 SEG_FMT_NUM = re.compile(r"function fmtNum\(n\) \{.*?\n\}", re.S)
 

@@ -28,7 +28,11 @@ BENEFITS_CORE_JS = STATIC / "benefits.js"
 # 2026-10 前端按职责拆分（benefits.js 超 700 行）：面板段挪到 benefits_panels.js
 # （traepat/antigravity/qoder）与 benefits_checkin.js（kimi）。额度折叠函数
 # （quotaSpent/quotaItemsHtml/syncQuotaFold/quotaFoldToggle）在 benefits_quota.js。
-PANELS_JS = [STATIC / "benefits_panels.js", STATIC / "benefits_checkin.js"]
+PANELS_JS = [STATIC / name for name in (
+    "benefits_panels.js", "benefits_antigravity.js", "benefits_qoder.js",
+    "benefits_trae.js", "benefits_codebuddy.js", "benefits_kimi.js",
+    "benefits_codex.js",
+)]
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"

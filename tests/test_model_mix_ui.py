@@ -32,7 +32,7 @@ import pytest
 
 CHARTS_JS = (
     pathlib.Path(__file__).resolve().parents[1]
-    / "src/buddy_proxy/web/static/charts.js"
+    / "src/buddy_proxy/web/static/chart_mix.js"
 )
 
 pytestmark = pytest.mark.skipif(

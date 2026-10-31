@@ -6,8 +6,9 @@ import pathlib
 
 
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
-APP = (_STATIC / "app.js").read_text(encoding="utf-8")
-CHARTS = (_STATIC / "charts.js").read_text(encoding="utf-8")
+APP = (_STATIC / "app_model_actions.js").read_text(encoding="utf-8")
+CHARTS = (_STATIC / "chart_log.js").read_text(encoding="utf-8")
+FORMAT = (_STATIC / "ui_format.js").read_text(encoding="utf-8")
 INDEX = (_STATIC / "index.html").read_text(encoding="utf-8")
 
 
@@ -35,7 +36,7 @@ def test_hide_and_restore_controls_explain_non_blocking_semantics():
 
 def test_dynamic_model_values_use_safe_js_string_encoding():
     """上游模型 id 不可信，onclick 参数必须先 JSON 编码再 HTML escape。"""
-    assert "function jsq(s)" in APP
+    assert "function jsq(s)" in FORMAT
     assert "hideModel(${jsq(g.id)},${jsq(m.id)})" in CHARTS
     assert "refreshProviderModels(${jsq(g.id)},this)" in CHARTS
     assert "restoreHiddenModel(${jsq(m.provider)},${jsq(m.model)})" in APP

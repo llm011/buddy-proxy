@@ -183,14 +183,18 @@ globalThis.api = async path => {
 
 def test_every_account_loader_goes_through_acct_fetch():
     """各面板自己的 accounts 加载器都经 acctFetch 去重（漏一个就还是刷屏）。"""
-    panels = (_STATIC / "benefits_panels.js").read_text(encoding="utf-8")
-    checkin = CHECKIN_JS.read_text(encoding="utf-8")
+    panel_sources = {
+        pid: (_STATIC / filename).read_text(encoding="utf-8")
+        for pid, filename in {
+            "traepat": "benefits_panels.js", "antigravity": "benefits_antigravity.js",
+            "qoder": "benefits_qoder.js", "trae": "benefits_trae.js",
+            "codebuddy": "benefits_codebuddy.js", "codebuddyintl": "benefits_codebuddy.js",
+            "kimi": "benefits_kimi.js", "codex": "benefits_codex.js",
+        }.items()
+    }
     accounts = ACCOUNTS_JS.read_text(encoding="utf-8")
-    for pid in ("traepat", "antigravity", "qoder", "trae", "codebuddy",
-                "codebuddyintl"):
+    for pid, panels in panel_sources.items():
         assert f"acctFetch('{pid}'" in panels, pid
-    for pid in ("kimi", "codex"):
-        assert f"acctFetch('{pid}'" in checkin, pid
     # dumate 走通用 acctLoad，内部同样经 acctFetch 且受静默开关控制
     assert "acctFetch(cfg.pid" in accounts
     assert "acctNoRerender(cfg.pid)" in accounts

@@ -11,7 +11,7 @@ import pytest
 
 APP_JS = (
     pathlib.Path(__file__).resolve().parents[1]
-    / "src/buddy_proxy/web/static/app.js"
+    / "src/buddy_proxy/web/static/app_state.js"
 )
 
 pytestmark = pytest.mark.skipif(

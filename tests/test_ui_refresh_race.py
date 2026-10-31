@@ -17,10 +17,9 @@ import subprocess
 
 import pytest
 
-APP_JS = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "src/buddy_proxy/web/static/app.js"
-)
+STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
+APP_JS = STATIC / "app.js"
+API_JS = STATIC / "ui_api.js"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"
@@ -29,9 +28,7 @@ pytestmark = pytest.mark.skipif(
 # 刷新机制切片：GET_INFLIGHT/api() → currentTab()（render/renderAlert 之后是
 # DOM 重活，不切片内——render 用桩覆盖）。切片内 loadAll 引用 RECENT_QS
 # 但不被调用。
-SLICE_RE = re.compile(
-    r"const GET_INFLIGHT = new Map\(\);.*?(?=\n// 设置文件告警条幅)", re.S
-)
+SLICE_RE = re.compile(r"\A.*?(?=\n// 设置文件告警条幅)", re.S)
 
 
 _STUB = """
@@ -62,6 +59,7 @@ def _run_js(body: str) -> str:
     assert m, "app.js 里找不到刷新机制切片（边界注释被改了？）"
     script = (
         _STUB
+        + API_JS.read_text(encoding="utf-8") + "\n"
         + "let RECENT_QS = null;\n"  # loadAll 引用但本测试不调用
         + m.group(0)
         + """
@@ -137,14 +135,12 @@ console.log(JSON.stringify({fetches: statsFetches}));
 
 # --- api() 错误消息提取：FastAPI 嵌套 detail 不能变成 [object Object] --------
 
-API_SLICE_RE = re.compile(
-    r"function errMessage\(body, status\).*?(?=\nlet OVERVIEW)", re.S
-)
+API_SLICE_RE = re.compile(r"\A.*\Z", re.S)
 
 
 def _run_api_js(body: str) -> str:
     """抽取 errMessage + api() 两段跑断言（避开大切片里其它 DOM 依赖）。"""
-    text = APP_JS.read_text(encoding="utf-8")
+    text = API_JS.read_text(encoding="utf-8")
     m = API_SLICE_RE.search(text)
     assert m, "app.js 里找不到 errMessage/api 切片（边界注释被改了？）"
     script = m.group(0) + "\n(async () => {\n" + body + \

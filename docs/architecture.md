@@ -12,7 +12,9 @@ backward-compat shims — imports point at the new paths):
 src/buddy_proxy/
   __main__.py            # CLI entry + repo-root resolution (parents[2])
   trae_provider.py       # published trae-cli entrypoint + trae façade
-  core/                  # state, settings, paths, logging_setup, metrics,
+  core/                  # state, settings, paths, logging_setup,
+                         #   metrics (aggregation/persistence), metrics_protocol
+                         #   (usage normalization + SSE extraction),
                          #   credit_estimate, desensitize, checkin, errors
   protocols/             # anthropic_adapter, responses_adapter,
                          #   responses_projection, dsml_parser (解析层),
@@ -70,18 +72,26 @@ src/buddy_proxy/
   published `trae-cli` entrypoint and trae façade (not a shim to remove).
 - **`web/ui/`** provides localhost-only administration endpoints (split by
   responsibility: channels, models, settings, queries, page) and the bundled
-  UI under `web/static/` (an `index.html` skeleton plus `style.css` and nine
-  JS files, served from `/ui/{name}`). The benefits UI is split by
-  responsibility: `benefits.js` holds the calendar, expiry alerts and shared
-  rendering; `benefits_accounts.js` holds the shared multi-account card helpers
-  (delete-confirm modal / move / delete / snapshot backfill) that new
-  multi-account channels reuse, `benefits_checkin.js` the checkin rows + Kimi
-  panel, and `benefits_panels.js` the Trae PAT / Antigravity / Qoder panels.
-  `benefits_quota.js`, `benefits_nav.js` and `benefits_dumate.js` respectively
-  hold quota rendering/folding, side navigation, and the DuMate panel plus the
+  UI under `web/static/`: an `index.html` skeleton, `style.css`, and small
+  classic-script modules served explicitly from `/ui/{name}` (the whitelist in
+  `web/ui/page.py` must list every script). `ui_format.js` / `ui_api.js` hold
+  shared formatting and request helpers. Chart modules separate request trends,
+  credit consumption, latency, the log/model list, and the model-share donut;
+  `app_state.js` owns the shared date range, `app.js` rendering, and
+  `app_run_test.js` the final initialization. Model actions and model-order
+  interactions live in their own modules rather than an oversized `app.js`.
+  The benefits UI is split by responsibility: `benefits.js` holds the calendar,
+  expiry alerts and shared rendering; `benefits_accounts.js` shared account
+  helpers; `benefits_checkin.js` check-in actions; `benefits_quota.js` and
+  `benefits_nav.js` quota folding and side navigation; and the remaining
+  `benefits_<provider>.js` files hold their provider panels. `benefits_panels.js`
+  retains the Trae PAT panel, while `benefits_dumate.js` also owns the
   account-loader registry. Classic scripts share top-level bindings, so the
-  script order in `index.html` keeps these dependencies ahead of `benefits.js`;
-  `app.js` starts rendering only after all of them have loaded.
+  explicit script order in `index.html` preserves initialization dependencies;
+  `app_run_test.js` is intentionally last. `chart_credits.js` consumes
+  `MetricsCollector.snapshot().model_daily` and keeps upstream `credit_sum`
+  separate from locally estimated `credit_est_sum` in both views and tooltips.
+  The overview uses the same date-range predicate as request charts.
   The panel mount order in `index.html` is also the visible quota-card order:
   regional twins stay adjacent (CN then Global), Kimi sits between Trae and
   Qoder, and the operational Trae PAT card is intentionally last. Dedicated
