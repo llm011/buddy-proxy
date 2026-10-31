@@ -45,8 +45,11 @@ CHAT_SCENES = ("chat", "developer", "assistant", "app")
 #: 修正（qmodel_latest 0.1→0.5、q37fmodel 0.02→0.1）。个别账号仍受限的
 #: 情况走 :data:`MODEL_OVERRIDE`（per-account 白名单）处理，兜底表不管。
 FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
+    # 2026-10-31 用户从客户端「模型倍率」面板截图核对：Qwen3.8-Max 是 0.5×
+    # 且**不带 Free 标**（同批只有 Qwen3.8-Flash / DeepSeek-Flash 标了 Free）。
+    # 旧值 0.2 + is_free=True 是低峰期口径，与当前面板不符，按面板修正。
     {"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.2, "is_free": True, "max_input_tokens": 180000},
+     "is_vl": True, "price_factor": 0.5, "is_free": False, "max_input_tokens": 180000},
     {"key": "qfmodel", "display_name": "Qwen3.8-Flash", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.0, "is_free": True, "max_input_tokens": 180000},
     {"key": "qmodel_latest", "display_name": "Qwen3.7-Max", "is_reasoning": True,
@@ -57,8 +60,10 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
      "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
     {"key": "dmodel", "display_name": "DeepSeek-V4-Pro", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.5, "max_input_tokens": 1000000},
+    # 2026-10-31 面板截图：标 Free，倍率 0.1× 划掉显示 0——按免费处理
+    # （同批 Qwen3.8-Flash 口径一致）。price_factor 保留原值，仅补 is_free。
     {"key": "dfmodel", "display_name": "DeepSeek-Flash", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
+     "is_vl": True, "price_factor": 0.1, "is_free": True, "max_input_tokens": 1000000},
     {"key": "gmodel", "display_name": "GLM-5.3", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.8, "is_free": False, "max_input_tokens": 180000},
     {"key": "gfmodel", "display_name": "GLM-5.3-Flash", "is_reasoning": True,

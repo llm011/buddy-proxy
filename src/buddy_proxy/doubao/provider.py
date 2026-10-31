@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
 from ..core.errors import describe_exception
+from .ws import WSClosed
 
 log = logging.getLogger(__name__)
 
@@ -495,6 +496,28 @@ class DoubaoProvider(BaseProvider):
                                 thinking_parts.append(tb["text"])
                             else:
                                 content_parts.append(tb["text"])
+
+        except WSClosed as exc:
+            # 2026-10-31：豆包 App 退出/刷新导致 CDP WebSocket 断开时，原先会
+            # 裸抛到这里再冒泡到 FastAPI，**直接杀死整个网关进程**（launchd
+            # KeepAlive=1 于是反复重启，正在等待上游的其它渠道请求——含 qoder
+            # ——被一起切断，表现为「渠道都测试不能」）。
+            # 转成**不可换档**的 409（见下），客户端看到的是豆包这一条失败，
+            # 网关与其它渠道不受影响。
+            #
+            # 为什么不是 502：`_RETRYABLE_STATUS` 含 502，`_forward_with_order`
+            # 会据此 `cooldown_mod.mark_failed(provider_id, model, status=502)`——
+            # 普通档冷却 5 分钟、窗口内三次升到 1 小时；且 ≥500 还会进机器级突发
+            # 窗口，跟另一通道凑两条就在同一模型上判「本机网络故障」。可 App 被关掉
+            # 不是模型坏了，用户重开 App 后模型仍在冷却里，反而像个新故障。409 不在
+            # 可换档集合内，换档逻辑原样上抛、不打标记（豆包没有同模型替代通道）。
+            self._client.record_failure(0)
+            log.error("doubao CDP connection lost: %s", exc)
+            raise HTTPException(
+                status_code=409,
+                detail="doubao CDP connection lost (App closed or reloaded); "
+                       "reopen Doubao desktop app and retry",
+            ) from exc
 
         except RuntimeError:
             raise

@@ -397,6 +397,14 @@ async def ui_models(request: Request):
                     "windows": windows,
                     "open": settings_mod.model_schedule_open(windows),
                 }
+    # 组内排序：**已停用（disabled_models）的排到最后**，其余保持目录原序。
+    # 用稳定排序（key 只取 0/1），因此同组内可用模型的相对顺序不变——那些顺序
+    # 是上游目录／MATRIX 表本身的意图（新代在前等），不该被这里打乱。
+    # 只按模型级 disabled 判定；整通道停用（group["disabled"]）不搬动组内位置，
+    # 因为那时整组都置灰，搬动只会让用户找不到刚停用的那个。
+    for group in groups:
+        group["models"].sort(key=lambda m: 1 if m.get("disabled") else 0)
+
     return {"groups": groups, "default_model": default_model,
             "hidden_models": hidden_items}
 
