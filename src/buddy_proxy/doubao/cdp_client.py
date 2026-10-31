@@ -338,7 +338,9 @@ class CDPDoubaoClient:
         """
         try:
             r = subprocess.run(
-                ["pgrep", "-f", _BARE_HELPER_PATTERN], capture_output=True
+                # ``--`` 必须加：模式以 ``--`` 开头，否则 pgrep 会把它当选项，
+                # 直接 rc=2 退出（被误读成「没有裸 Helper」这个最危险的假阴性）。
+                ["pgrep", "-f", "--", _BARE_HELPER_PATTERN], capture_output=True
             )
         except OSError:
             return []

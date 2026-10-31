@@ -178,7 +178,9 @@ def _reclaim_harness(monkeypatch, *, bare: bool, app_running: bool):
 
     def fake_run(cmd, *a, **kw):
         if cmd[0] == "pgrep" and cmd[1] == "-f":
-            if cmd[2] == cdp_client._BARE_HELPER_PATTERN:
+            # 裸 Helper 查询带 ``--``，模式在最后一位
+            pattern = cmd[-1]
+            if pattern == cdp_client._BARE_HELPER_PATTERN:
                 out = b"7438\n" if bare else b""
                 return subprocess.CompletedProcess(cmd, 0 if bare else 1, out, b"")
             return subprocess.CompletedProcess(cmd, 0 if app_running else 1, b"", b"")
@@ -238,3 +240,39 @@ def test_bare_helper_pattern_excludes_app_owned_helpers():
     assert pat.search(bare)
     assert not pat.search(app_child)
     assert not pat.search(app_child_big)
+
+
+def test_bare_helper_pgrep_uses_double_dash():
+    """回归：``pgrep`` 收到以 ``--`` 开头的模式时必须带 ``--``。
+
+    否则 pgrep 把模式当选项解析，直接 rc=2 退出，``_bare_helper_pids()``
+    静默返回 ``[]`` —— 表现为「机器上明明躺着裸 Helper，代码却认为没有」，
+    正是这个 bug 最危险的假阴性（2026-10-31 本机实测踩到）。
+    """
+    import subprocess as _sp
+
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, *a, **kw):
+        captured.append(list(cmd))
+        return _sp.CompletedProcess(cmd, 0, b"7438\n", b"")
+
+    orig = cdp_client.subprocess.run
+    cdp_client.subprocess.run = fake_run
+    try:
+        pids = cdp_client.CDPDoubaoClient._bare_helper_pids()
+    finally:
+        cdp_client.subprocess.run = orig
+
+    assert pids == [7438]
+    assert captured[0][:4] == ["pgrep", "-f", "--", cdp_client._BARE_HELPER_PATTERN]
+
+
+def test_bare_helper_pattern_is_valid_pgrep_regex():
+    """模式本身必须能被 pgrep 接受（rc 0/1，绝不是 2）。"""
+    import subprocess as _sp
+
+    r = _sp.run(
+        ["pgrep", "-f", "--", cdp_client._BARE_HELPER_PATTERN], capture_output=True
+    )
+    assert r.returncode in (0, 1), f"pgrep 拒绝该正则: rc={r.returncode}"
