@@ -392,6 +392,14 @@ class CDPDoubaoClient:
             return {"ERROR": str(desc)[:500]}
         return result.get("result", {}).get("value")
 
+    def evaluate(self, expr: str, timeout: float = 20.0) -> Any:
+        """公开的页面求值入口（签到等非对话用途用，同步，由调用方线程化）。
+
+        与 ``_evaluate`` 同一实现、同一把 ``_ws_lock``：对话流与签到请求不会
+        交叉读写同一条 WebSocket。
+        """
+        return self._evaluate(expr, timeout=timeout)
+
     def _fetch_targets(self) -> list[dict[str, Any]]:
         """同步拉取 /json/list（失败返回空列表）。"""
         try:

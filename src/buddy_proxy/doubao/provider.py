@@ -121,6 +121,7 @@ def _extract_prompt(messages: list[dict[str, Any]]) -> str:
 class DoubaoProvider(BaseProvider):
     id = "doubao"
     name = "豆包 (自研内联)"
+    supports_checkin = True  # 每日签到（App 内置 Chromium 的 CDP 通道，见 checkin.py）
 
     def __init__(
         self,
@@ -504,6 +505,79 @@ class DoubaoProvider(BaseProvider):
         if result_conversation_id:
             message["conversation_id"] = result_conversation_id
         return message
+
+    # ------------------------------------------------------------------
+    # 签到（/ui 自动打卡循环消费；同步实现，调用方经 asyncio.to_thread 包装）
+    # ------------------------------------------------------------------
+
+    def _run_checkin(self, fn: Any) -> Any:
+        """在独立事件循环里把 CDP 客户端拉到就绪，再执行同步的签到逻辑。
+
+        ``checkin_status``/``checkin_claim`` 是被 ``benefits`` 用 to_thread
+        调用的**同步**方法，而 CDP 客户端的启动/登录等待是异步的——这里用
+        ``asyncio.run`` 起一个一次性循环（线程里没有运行中的循环，不会冲突；
+        签到查询本身全程同步，不会和代理主循环抢事件循环）。
+        """
+        client = self._client
+
+        async def _ready() -> None:
+            await self._ensure_started()
+            await client.wait_for_login(timeout=15)
+
+        try:
+            asyncio.run(_ready())
+        except HTTPException:
+            return None
+        except Exception as exc:  # noqa: BLE001 - 启动失败按「查询失败」处理
+            log.debug("doubao checkin: client not ready: %s", type(exc).__name__)
+            return None
+        if not client.is_ready:
+            return None
+        return fn(client)
+
+    def checkin_status(self) -> dict[str, Any] | None:
+        """今日签到状态（CDP 内 fetch，见 ``doubao/checkin.py`` 的接口说明）。
+
+        查不到（App 未登录 / 候选端点都没给出可解析响应）时**不返回裸
+        ``None``**：这样面板会画成「状态未知」，不会退化成可点的「未签到」。
+        """
+        from . import checkin as doubao_checkin
+
+        def _query(client: Any) -> dict[str, Any] | None:
+            status, _path = doubao_checkin.fetch_checkin_status(client)
+            return status
+
+        status = self._run_checkin(_query)
+        if isinstance(status, dict):
+            return status
+        return {
+            "checked_in": False,
+            "claimable": False,
+            "inactive": False,
+            "query_failed": True,
+            "message": (
+                "豆包签到状态查询失败：豆包工作 App 未登录，或上游活动接口未识别"
+                "（详见代理日志 doubao checkin）"
+            ),
+        }
+
+    def checkin_claim(self) -> dict[str, Any] | None:
+        from . import checkin as doubao_checkin
+
+        def _claim(client: Any) -> dict[str, Any] | None:
+            status, path = doubao_checkin.fetch_checkin_status(client)
+            if status is None:
+                raise RuntimeError("豆包签到状态查询失败，未发起领取")
+            if not status.get("claimable"):
+                if status.get("checked_in"):
+                    return {**status, "message": "今日已签到（上游记录）"}
+                raise RuntimeError("豆包今日暂无可领签到")
+            claimed = doubao_checkin.claim_checkin(client, path)
+            if claimed is None:
+                raise RuntimeError("豆包签到领取失败（上游未确认）")
+            return {**claimed, "message": "签到成功"}
+
+        return self._run_checkin(_claim)
 
     # ------------------------------------------------------------------
     # 登录辅助（供外部触发扫码）

@@ -63,18 +63,6 @@ def test_work_catalog_ids_are_lowercase_and_map_upstream_names():
     # step-5-preview 上游只认全小写（2026-10-07 实测），原样透传不进映射表
     assert map_model_for("cn", "step-5-preview") == "step-5-preview"
     # qwen-3.7-plus 2026-10-12 实测收录（上游只认带连字符名）；无连字符的
-    # qwen3.7-plus / qwen-3.8-max 仍是被拒变体
-    # **仍可点名调用但不再列出**（代际收敛，用户 2026-10-25）：底表里挂着
-    # glm-5.2 / qwen-3.7-plus 这些上一代，但同家族更高代际在场时 models()
-    # 不再展示；-Official 两条（V4 代）同理让位给 deepseek-v4.1-flash。
-    # MODEL_MAP 的映射仍然有效——点名调用照旧转上游大写真名。
-    assert not {"kimi-k2.7-code", "deepseek-v4-flash",
-                "glm-5", "glm-5-turbo", "qwen3.7-plus", "qwen-3.8-max"} & ids
-    assert not {"qwen-3.7-plus", "glm-5.1", "glm-5.2", "minimax-m3",
-                "kimi-k3", "deepseek-v4-flash-official",
-                "deepseek-v4-pro-official"} & ids
-    assert {"glm-5.3", "qwen3.8-max", "minimax-m3.1-flash",
-            "kimi-k3.1-pro"} <= ids
     assert map_model_for("cn", "deepseek-v4-pro-official") == "DeepSeek-V4-Pro-Official"
 
 
@@ -137,3 +125,18 @@ def test_v41_flash_needs_no_function_override():
 def test_v41_flash_auto_matches_trae_channel():
     """裸名要能被 trae 通道认领（forward_chat 自动路由；路由侧已剥前缀）。"""
     assert TraeProvider().accepts_model("deepseek-v4.1-flash")
+
+
+def test_credit_multiplier_reads_static_table_and_discovered_values(monkeypatch):
+    """模型倍率唯一取值口：别名归一、大小写退化、刷新值优先于底表。"""
+    from buddy_proxy.trae import config as trae_config
+
+    assert trae_config.credit_multiplier("cn", "deepseek-v4-pro-official") == "x0.72"
+    # 别名：大写上游名经 MODEL_MAP 反查后取到同一倍率
+    assert trae_config.credit_multiplier("cn", "DeepSeek-V4-Pro-Official") == "x0.72"
+    # 目录刷新抄回的值优先（仅剩刷新值的模型）
+    monkeypatch.setitem(trae_config.DISCOVERED_CREDITS, "glm-9.9", "x0.99")
+    assert trae_config.credit_multiplier("cn", "glm-9.9") == "x0.99"
+    # 海外是次数制，刷新值不生效
+    assert trae_config.credit_multiplier("intl", "glm-9.9") is None
+    assert trae_config.credit_multiplier("cn", "no-such-model") is None

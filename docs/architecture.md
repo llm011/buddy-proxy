@@ -343,7 +343,13 @@ benefits, and unrelated model routes in the same process.
 Check-in ("打卡") is per-provider: a provider opts in with
 `supports_checkin = True` and implements `checkin_status` / `checkin_claim` /
 `quota`. `benefits.BenefitsManager` aggregates them for the admin UI and runs
-the auto-claim loop. Three invariants matter because getting them wrong is
+the auto-claim loop. Doubao is one of them: its check-in runs in the app's
+embedded Chromium via the same CDP session as chat (`doubao/checkin.py`), tries
+a short ordered list of activity endpoints and only accepts HTTP 200 with
+`{"code": 0}` plus a recognisable field; anything else is returned as a
+`query_failed` status so the card shows as unknown instead of "not signed in". The
+claim POST is only sent against the endpoint prefix that just produced a valid
+status — never blindly. Three invariants matter because getting them wrong is
 silent:
 
 - **Check-in enumeration ignores quota cooldown.** `checkin_status` /

@@ -164,6 +164,13 @@ buddy start
   `gemini-3.7-flash`、`gpt-5.6-sol`（App 内提供的第三方模型）；
   请求体可带 `reasoning_effort`（3低/4中/5高/6极高/7最高，默认 5）
 
+#### 签到
+
+管理页「各通道签到」里豆包占一行，勾选「自动打卡」后由打卡循环每日领取，也可点「立即打卡」。
+签到和对话一样走 App 内置 Chromium（`doubao/checkin.py`）：在页面 JS 环境里 fetch 活动接口，
+风控签名由页面自己注入。查询只认 `{"code": 0}` 的业务成功响应；App 未登录或接口响应认不出时，
+卡片显示「状态未知」（不会误画成「未签到」可点），原因写在代理日志里（`doubao checkin …`）。
+
 ### 百度搭子 Provider（可选）
 
 内置 DuMate（百度搭子 / 千帆桌面端）provider，直连本机 App 的本地 OpenAI 兼容代理：
@@ -507,8 +514,8 @@ python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS �
 - **自动打卡 & 打卡日历** — CodeBuddy / Trae / Qoder 三家上游都提供每日签到：勾选「自动打卡」后
   代理每天定时（默认 09:30，启动时当天未签会立即补签）自动领取，最近 35 天的打卡情况在日历里
   展示；也可点「立即打卡」手动领。签到活动有档期——CodeBuddy 档期未开时界面显示「今日无签到
-  活动」且不会误打。打卡历史逐行落在 `logs/checkin.jsonl`。ZCode（智谱 Coding Plan）/ 豆包没有
-  签到 API
+  活动」且不会误打。打卡历史逐行落在 `logs/checkin.jsonl`。ZCode（智谱 Coding Plan）没有签到
+  API
 - **每通道「下次打卡时间」** — 打卡行上显示下次能领的时刻 + 秒级倒计时（纯本地计算，不打上游；
   离开页签或切走标签页即停）。三家的**轮换周期不一样**，所以时刻来源也不同：Qoder 的活动窗口
   实测是「10:00 → 次日 09:59」（上游给 `startAt`/`endAt`，标 `upstream`），CodeBuddy 与 Trae
