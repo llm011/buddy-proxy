@@ -27,9 +27,11 @@ from buddy_proxy.doubao.provider import DoubaoProvider
 class FakeClient:
     """按「方法 + 路径」回放的假 CDP 客户端（只看 JS 里嵌入的绝对 URL）。"""
 
-    def __init__(self, responses: dict[str, tuple[int, object]], *, ready: bool = True):
+    def __init__(self, responses: dict[str, tuple[int, object]], *, ready: bool = True,
+                 origin: str = "https://www.doubao.com"):
         self.responses = responses
         self.ready = ready
+        self.origin = origin
         self.calls: list[str] = []
         self.methods: list[str] = []
         self.exprs: list[str] = []
@@ -55,6 +57,9 @@ class FakeClient:
     def _build_query_params(self) -> dict[str, str]:
         return {"aid": "1044603", "web_id": "w1"}
 
+    def page_origin(self, timeout: float = 10.0) -> str:
+        return self.origin
+
     def evaluate(self, expr: str, timeout: float = 20.0):
         if "performance.getEntriesByType" in expr:  # 借签名参数
             self.calls.append("signature")
@@ -63,7 +68,7 @@ class FakeClient:
             self.calls.append("discover")
             self.methods.append("GET")
             return self.hints
-        m = re.search(r'https://www\.doubao\.com(/[A-Za-z0-9_/-]+)\?', expr)
+        m = re.search(r'fetch\("(?:https://www\.doubao\.com)?(/[A-Za-z0-9_/-]+)\?', expr)
         url_path = m.group(1) if m else None
         path = next((c for c in self._known if c == url_path), url_path)
         self.calls.append(path or "?")
@@ -151,6 +156,66 @@ def test_login_probe_only_concludes_on_clear_evidence(http, body, expected):
     assert doubao_checkin.login_state_from_probe(http, body) is expected
 
 
+def test_app_internal_page_uses_same_origin_relative_url():
+    """App 聊天页（chrome://）里必须发相对路径：绝对 URL 跨域不带 cookie。"""
+    client = FakeClient({**_LOGGED_IN, "GET /api/activity/sign/info": (200, _signed_payload())},
+                        origin="chrome://doubaowork-chat")
+    status, path = doubao_checkin.fetch_checkin_status(client)
+    assert path == "/api/activity/sign/info"
+    assert status is not None
+    # 相对路径同样带上对话通道查询参数（同源即 App 同款上下文）；
+    # 借签名那一步是 performance 扫描，不算请求
+    req = [e for e in client.exprs if "fetch(" in e]
+    assert all('"https://www.doubao.com' not in e for e in req)
+    assert req and all('"/api/' in e and "aid=1044603&web_id=w1" in e for e in req)
+
+
+def test_doubao_domain_page_keeps_absolute_url():
+    """豆包域名页里绝对 URL 才是同源，别被改成相对路径。"""
+    client = FakeClient({**_LOGGED_IN, "GET /api/activity/sign/info": (200, _signed_payload())})
+    doubao_checkin.fetch_checkin_status(client)
+    assert all('"https://www.doubao.com/api/' in e for e in client.exprs)
+
+
+def test_relative_and_absolute_urls_differ_only_by_origin():
+    client = FakeClient({}, origin="chrome://doubaowork-chat")
+    signed = {"msToken": "m1", "a_bogus": "b1"}
+    rel = doubao_checkin._fetch_target(client, "/api/activity/sign/info", signed)
+    abs_ = doubao_checkin._signed_url(client, "/api/activity/sign/info", signed)
+    assert rel == abs_[len("https://www.doubao.com"):]
+
+
+def test_is_app_internal_page_tolerates_missing_or_broken_origin():
+    class _NoOrigin:
+        pass
+
+    class _Broken:
+        def page_origin(self):
+            raise RuntimeError("no target")
+
+    assert doubao_checkin._is_app_internal_page(_NoOrigin()) is False
+    assert doubao_checkin._is_app_internal_page(_Broken()) is False
+    assert doubao_checkin._is_app_internal_page(FakeClient({}, origin="")) is False
+    assert doubao_checkin._is_app_internal_page(
+        FakeClient({}, origin="chrome://doubaowork-chat")) is True
+
+
+def test_login_probe_html_page_is_unknown_not_logged_in():
+    """200 + SPA HTML（跨域被落回首页）不是 API 应答，不能读成「已登录」。"""
+    assert doubao_checkin.login_state_from_probe(
+        200, None, "<!DOCTYPE html><html><body>app</body></html>") is None
+    assert doubao_checkin.login_state_from_probe(200, None, "  \n<HTML></HTML>") is None
+
+
+def test_login_probe_html_only_downgrades_unparsed_200():
+    """明确证据优先：401 仍是未登录，200 + JSON 业务码仍按业务码判。"""
+    assert doubao_checkin.login_state_from_probe(401, None, "<html>unauth</html>") is False
+    assert doubao_checkin.login_state_from_probe(
+        200, {"code": 10001}, "<html>ignored</html>") is True
+    assert doubao_checkin.login_state_from_probe(
+        200, {"code": 710012001}, None) is False
+
+
 def test_cdp_login_state_reuses_probe_rules():
     """CDP 同步探针与 checkin.login_state 同一口径（两处判定不能漂）。"""
     client = CDPDoubaoClient.__new__(CDPDoubaoClient)
@@ -161,6 +226,10 @@ def test_cdp_login_state_reuses_probe_rules():
         probe = {"http": http, "body": body}
         client._evaluate = lambda expr, timeout=0, _p=probe: _p
         assert client.login_state_sync() is expected
+    # 200 + SPA HTML（跨域不带 cookie 被落回首页）同样只算「没下结论」
+    probe = {"http": 200, "body": "<!DOCTYPE html><html><body>app</body></html>"}
+    client._evaluate = lambda expr, timeout=0, _p=probe: _p
+    assert client.login_state_sync() is None
 
 
 def test_status_tries_signed_request_before_unsigned():
