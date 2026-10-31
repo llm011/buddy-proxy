@@ -26,6 +26,8 @@ from typing import Any, Optional
 
 # 内存里保留的最近请求明细条数（「最近请求」表格用）
 MAX_RECENT = 200
+#: 模型页「平均耗时」取最近多少次实测（用户 2026-10-25 要求：近三次）。
+RECENT_LATENCY_N = 3
 # 启动时回读 metrics.jsonl 的尾部字节数（单条约 200B，约万条请求）
 _TAIL_BYTES = 2_000_000
 # 聚合只保留最近 N 天，更早的启动回读时丢弃
@@ -215,6 +217,10 @@ class MetricsCollector:
         # (date, provider, model) -> 聚合桶
         self._daily: dict[tuple[str, str, str], dict[str, Any]] = {}
         self._recent: collections.deque = collections.deque(maxlen=MAX_RECENT)
+        # (provider, model) -> 最近 N 次耗时（新→旧的 deque）。模型页那张表里的
+        # 「平均耗时」要的是**近三次实测**：14 天均值在模型换代/上游调参后
+        # 和当下的体感差得太远（用户 2026-10-25 反馈）。
+        self._recent_ms: dict[tuple[str, str], collections.deque] = {}
         # 请求日志页饼图用：(date, provider, model) -> [次数, 错误数]。
         # 与 _daily 分开放：饼图按天*全量*重算，不需要 token/耗时，独立计数表
         # 更薄、更好整表裁剪（见 model_distribution）。
@@ -272,7 +278,18 @@ class MetricsCollector:
             self._recent.append(rec)
             self._bucket_add(self._bucket(_date_str(ts), rec["provider"], rec["model"]), rec)
             self._count_add(rec)
+            self._recent_add(rec)
         self._append_log(rec)
+
+    def _recent_add(self, rec: dict[str, Any]) -> None:
+        """近三次耗时环 +1（调用方须持有 self._lock 或处于构造期）。"""
+        if int(rec.get("duration_ms") or 0) <= 0:
+            return
+        key = (rec.get("provider") or "codebuddy", rec.get("model") or "(unknown)")
+        ring = self._recent_ms.get(key)
+        if ring is None:
+            ring = self._recent_ms[key] = collections.deque(maxlen=RECENT_LATENCY_N)
+        ring.appendleft(int(rec["duration_ms"]))
 
     def _count_add(self, rec: dict[str, Any]) -> None:
         """饼图计数表 +1（调用方须持有 self._lock 或处于构造期）。"""
@@ -404,6 +421,11 @@ class MetricsCollector:
                     if rec.get("ts", 0) < cutoff:
                         continue
                     self._recent.append(rec)
+                    # 「近 3 次耗时」也靠回读才有内容：只在 record() 里灌环的话，
+                    # 进程一重启整列就空到下一次同模型请求（模型页最常看的恰是
+                    # 刚重启后的状态）。_read_tail 按文件顺序给的是旧→新，
+                    # appendleft 正好让最新的落在最前，与实时路径口径一致。
+                    self._recent_add(rec)
                     normalized = {
                         "status": rec.get("status", 200),
                         "duration_ms": rec.get("duration_ms", 0),
@@ -693,10 +715,23 @@ class MetricsCollector:
             agg["prompt_tokens"] += b["prompt_tokens"]
             agg["completion_tokens"] += b["completion_tokens"]
             agg["last_ts"] = max(agg["last_ts"], b["last_ts"])
+        # 近 N 次耗时：随本次 snapshot 一起快照，供模型页「平均耗时」列用
+        with self._lock:
+            recent_ms = {k: list(v) for k, v in self._recent_ms.items()}
         models = []
         for agg in per_model.values():
             count = agg["count"]
             agg["avg_ms"] = round(agg.pop("duration_ms_sum") / count) if count else 0
+            ring = recent_ms.get((agg["provider"], agg["model"]))
+            agg["recent_count"] = len(ring) if ring else 0
+            if ring:
+                # 「近三次」保留明细分值，前端的 tooltip 能逐条显示
+                agg["recent_ms"] = ring
+                agg["recent_avg_ms"] = round(sum(ring) / len(ring))
+            else:
+                # 空环时留 None：前端按 recent_count 判「没有近几次样本」显示 —，
+                # 不能悄悄退回 14 天均值——那正是用户嫌「跟近期差太大」的数值。
+                agg["recent_avg_ms"] = None
             models.append(agg)
         models.sort(key=lambda m: -m["count"])
 

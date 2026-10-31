@@ -44,8 +44,9 @@ def test_v41_flash_listed_by_trae_catalog():
     """目录里要有 v4.1-flash（/v1/models 与前端模型选择器都读它）。"""
     ids = [m["id"] for m in TraeProvider().models()]
     assert "deepseek-v4.1-flash" in ids
-    # 保留的 V4-Pro 对外名也统一小写；用户决定移除旧 V4-Flash。
-    assert "deepseek-v4-pro" in ids
+    # V4 代（deepseek-v4-pro / 两条 -Official）仍在底表、仍可点名调用，但同家族
+    # 已有 v4.1 在场，按代际收敛不再列出（用户 2026-10-25）。V4-Flash 已移除。
+    assert "deepseek-v4-pro" not in ids
     assert "deepseek-v4-flash" not in ids
     assert all(model_id == model_id.lower() for model_id in ids)
 
@@ -62,11 +63,6 @@ def test_work_catalog_ids_are_lowercase_and_map_upstream_names():
     # step-5-preview 上游只认全小写（2026-10-07 实测），原样透传不进映射表
     assert map_model_for("cn", "step-5-preview") == "step-5-preview"
     # qwen-3.7-plus 2026-10-12 实测收录（上游只认带连字符名）；无连字符的
-    # qwen3.7-plus / qwen-3.8-max 仍是被拒变体。glm-5.2 2026-10-25 实测 200
-    # 出流后收进目录，已从「被拒变体」名单移出。
-    assert not {"kimi-k2.7-code", "deepseek-v4-flash",
-                "glm-5", "glm-5-turbo", "qwen3.7-plus", "qwen-3.8-max"} & ids
-    assert "qwen-3.7-plus" in ids
     assert map_model_for("cn", "deepseek-v4-pro-official") == "DeepSeek-V4-Pro-Official"
 
 

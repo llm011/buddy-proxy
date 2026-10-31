@@ -255,12 +255,11 @@ def test_trae_intl_benefits_snapshot_has_quota_and_unsupported_checkin(
     quota = entry["quota"]
     assert quota["supported"] is True
     assert quota["level"] is None
-    head, fast, basic = quota["items"]
+    head, basic = quota["items"]
     assert head["head_only"] is True and head["unit"] == "dollar"
-    assert fast["label"] == "Pro Plan · Premium 快速请求"
-    assert fast["used"] is None and fast["total"] == 600
-    assert fast["unit"] == "count"
-    assert basic["label"] == "Pro Plan · Basic 用量"
+    # 海外只有 Basic 美元用量这一种额度（「Premium 快速请求」是能力位不是额度，
+    # 用户 2026-10-25 纠正后不再单列）
+    assert basic["label"] == "Pro Plan"
     assert basic["used"] == 0.0001 and basic["total"] == 20
     assert basic["unit"] == "dollar"
     assert calls == [{
@@ -659,24 +658,19 @@ def _intl_usage_fixture() -> dict:
     }
 
 
-def test_intl_quota_dollar_packs_split_by_unit():
-    """海外 Pro 包拆成 count/dollar 两行；is_hide 垃圾包被过滤。"""
+def test_intl_quota_shows_only_basic_dollars():
+    """海外只出 Basic 美元一行；premium fast-request 是能力位不铺条目。"""
     items = TraeIntlProvider()._quota_items(_intl_usage_fixture(), label_prefix="")
     head = items[0]
     assert head["unit"] == "dollar" and head["head_only"] is True
-    labels = [it["label"] for it in items[1:]]
-    # Promo Code（is_hide，UI 不展示）被跳过；通用键表在海外结构下本来
-    # 只能解析出 0/0 空条目——这正是「海外查不到额度」的根因
-    assert labels == ["Pro Plan · Premium 快速请求", "Pro Plan · Basic 用量"], labels
-    fast, basic = items[1], items[2]
-    # 次数制：上游不给已用次数 → used=None（好过拿美元已用配次数上限撒谎）
-    assert fast["total"] == 600 and fast["used"] is None
-    assert fast["unit"] == "count" and fast["percent"] is None
-    # 美元制：已用取 usage.basic_usage_amount
+    # Promo Code（is_hide，UI 不展示）被跳过；premium_model_fast_request_limit
+    # 不是可花的额度，不再单列「Premium 快速请求」行
+    assert [it["label"] for it in items[1:]] == ["Pro Plan"], items[1:]
+    basic = items[1]
     assert basic["used"] == 0.0001 and basic["total"] == 20
     assert basic["unit"] == "dollar"
-    # slow 的 -1（无限）不占条目
-    assert len(items) == 3
+    # slow / advanced 的 -1（无限）同样不占条目
+    assert len(items) == 2
 
 
 def test_quota_cn_credits_branch_unchanged():

@@ -127,25 +127,47 @@ The static catalog in `src/buddy_proxy/web/models_config.json` contains **51 Cod
 
 > Note on `glm-*`: the bare name resolves to whichever channel claims it first in registration order (**zcode**, which serves `glm-5.3` / `glm-5.3-flash`). For `glm-5.3-flashx` the zcode subscription reports `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限` while **CodeBuddy serves it fine** — so use the explicit `codebuddy/glm-5.3-flashx` prefix for that one. The official **`glm/`** channel (below) shares the same upstream and model table; use its explicit prefix to route a request over the official plan's key.
 
-**Trae Work channel** (15 domestic models; IDs are lowercase). Credit multipliers are the current catalog values; `—` means no multiplier is published:
+**Trae Work channel** (15 domestic models listed; IDs are lowercase). Credit multipliers are the current catalog values:
 
 | id | credits |
 |---|---|
-| `glm-5.3` | x0.40 |
+| `glm-5.3` | x0.39 |
 | `glm-5.3-flash` | x0.06 |
 | `glm-5.3-flashx` | x0.31 |
 | `deepseek-v4.1-flash` | x0.08 |
 | `doubao-seed-evolving` | x0.08 |
-| `kimi-k3` | x1.83 |
 | `doubao-seed-2.1-pro` | x0.08 |
-| `deepseek-v4-pro` | x0.72 |
 | `qwen3.8-max` | x1.50 |
 | `doubao-seed-2.1-turbo` | x0.20 |
-| `minimax-m3` | x0.26 |
-| `kimi-k2.6` | — |
-| `glm-5.1` | — |
 | `step-5-preview` | x0.48 |
 | `doubao-seed-code` | x0.06 |
+| `mimo-v2.6-flash` | x0.06 |
+| `mimo-v2.6-pro` | x0.15 |
+| `qwen3.8-flash` | x0.08 |
+| `kimi-k3.1-pro` | x1.20 |
+| `minimax-m3.1-flash` | x0.09 |
+
+**Generation convergence**: once a family has a newer generation in the catalog, the older one stops
+being listed in `/v1/models` but stays callable by its explicit name (`trae/<old-id>`). The list above
+retires `glm-5.1` / `glm-5.2` (behind `glm-5.3`), `minimax-m3` (behind `minimax-m3.1-flash`),
+`kimi-k3` (behind `kimi-k3.1-pro`), `qwen-3.7-plus` (behind `qwen3.8-max` / `qwen3.8-flash`), and
+`deepseek-v4-pro` plus `deepseek-v4-flash-official` / `deepseek-v4-pro-official` (behind
+`deepseek-v4.1-flash`). Their multipliers stay in the static table so old configs keep working.
+Names with no parseable generation (e.g. `doubao-seed-*`, `mimo-*`) never converge and are always listed.
+
+`kimi-k3.1-pro` carries a "membership tier insufficient" grey lock in the client panel and returns
+`1005` on both CN accounts tested here — the name and multiplier are recorded as published, and actual
+availability is reported honestly by the upstream per account.
+
+**"↻ Refresh" pulls the real catalog**: the CN gateway's `get_detail_param` returns the full candidate
+catalog, each entry carrying `consumption_rate` (exactly what the client's "model multiplier" panel shows,
+cross-checked row-by-row against a screenshot on 2026-10-25), the display name, context window, and image
+support. Refreshing walks every account in the region and takes the union (cooldowns are not filtered), then
+**copies `consumption_rate` back** as the multiplier into the in-process `DISCOVERED_CREDITS` (it never
+overwrites the hand-verified static table, and a restart reverts to it). Names **not already known** in the
+catalog get one minimal real request to verify serviceability first (the upstream accepting a name does not
+mean it can serve it; anything rejected with 4001 is dropped), while existing models are never pinged one by
+one.
 
 The catalog order mirrors the upstream client's display order. The PAT provider remains available at `traepat/<model>` but its model table is intentionally omitted here. Edit `src/buddy_proxy/web/models_config.json` to add or tweak the static CodeBuddy / Trae PAT entries — changes take effect on restart.
 
@@ -174,7 +196,7 @@ Open <http://127.0.0.1:8787/ui> in a browser (or just run `buddy start` / `buddy
 - **Provider on/off switch** — each provider group header on the models tab has an "启用" checkbox (default on). Turning a provider off: its calls are rejected with 403 (`provider_disabled`), its models disappear from `/v1/models`, its quota card/panel and alert-banner entries are hidden, and its rows on the model-order tab are greyed out. The groups data stays so the switch can simply be turned back on. `codebuddy` is the default fallback channel and cannot be disabled. Persisted in `settings.json` as `disabled_providers`.
 - **Catalog refresh and hiding** — providers with a live catalog capability (currently Qoder, Kimi and Antigravity) expose “↻ 重新拉取” in the group header. A refresh queries every account (including accounts temporarily excluded from chat failover by cooldown), unions successful results and atomically updates that provider's in-memory catalog. A partially successful round may add models but retains the previous ids because a failed account could be their sole source; removals are confirmed only after every account responds successfully. If every account fails, the last good catalog stays active. For Antigravity the upstream `fetchAvailableModels` list is treated as untrusted input, not ground truth: it still advertises deprecated families (`gemini-2.5-*`, `gemini-3-flash*`, `gemini-3.1-flash*`, `gemini-3.5-*`), so the `blocked_prefixes` list in `models.json` drops them on discovery (gross prefixes stay gross; `blocked_prefix_exceptions` exempts exact base names such as the image model `gemini-3.1-flash-image`), while genuinely new models (not on the list) are still picked up; and it omits premium curated models (`gemini-3.1-pro` / `gemini-3.6-flash`, visible in the IDE and routable but never returned by the catalog endpoint), so every `verified: true` entry is pinned and can never be dropped by a refresh. “隐藏” is deliberately weaker than disable: it removes a model from the models tab, selectors and both arrays returned by `/v1/models`, but an explicit `provider/model` request remains callable. Hidden keys persist in `settings.json` as `hidden_models` and can be restored from the “已隐藏” dialog even after the upstream removes the model.
 - **One-click test** — every model row has a "Test" (测试) button that sends a real `hi` upstream and shows latency, token usage, the reply preview, and the actual responding provider/model (for example, `zcode/glm-5.3`, including when model-order routing selects the provider). Non-streaming, `max_tokens=256` — a real, billable upstream call.
-- **Stats & charts** — per-provider/per-model request counts, errors, average latency and token usage: a 14-day stacked daily chart, a top-models bar list, and the latest 50 requests. Multi-account channels (qoder / kimi / antigravity / trae / traepat) tag each request-log row with the account that actually served it in parentheses (after failover, the one that succeeded). Each completed request appends one line to `logs/metrics.jsonl`; the tail is reloaded on startup so history survives restarts (30 days kept).
+- **Stats & charts** — per-provider/per-model request counts, errors, average latency and token usage: a 14-day stacked daily chart, a top-models bar list, and the latest 50 requests. Multi-account channels (qoder / kimi / antigravity / trae / traepat) tag each request-log row with the account that actually served it in parentheses (after failover, the one that succeeded). Each completed request appends one line to `logs/metrics.jsonl`; the tail is reloaded on startup so history survives restarts (30 days kept). The model page's latency column shows the **average of the last 3 measured** request times (hover for each sample next to the 14-day average) — the 14-day average drifts far from what the channel feels like right now.
 - **Provider health** — login/config status at a glance (CodeBuddy session, zcode key, mimo auth mode, ...).
 - **Auto check-in & calendar** — CodeBuddy / Trae / Qoder expose daily sign-in: tick "Auto check-in" (自动打卡) and the proxy claims them every day at the configured time (default 09:30; if the proxy starts later it catches up immediately). Qoder's Global account uses the same inherited campaign check-in path and appears as its own row when `qoderintl` is registered. The last 35 days are shown as a calendar; "Check in now" (立即打卡) claims manually. Campaigns can be seasonal — when CodeBuddy's is closed the UI shows "no sign-in activity today" and skips it. History is appended to `logs/checkin.jsonl`. ZCode (GLM Coding Plan) / Doubao have no sign-in API; DuMate does (auto-claimed).
 - **Next check-in time per channel** — each row shows when the next claim opens, with a per-second countdown (computed locally — no upstream calls; it stops when you leave the tab or the page is hidden). The three channels **rotate on different schedules**, so the source of the timestamp differs: Qoder's window is `10:00 → 09:59` next day (the upstream returns `startAt`/`endAt`, marked `upstream`), while CodeBuddy and Trae rotate at **local midnight** — neither upstream reports a daily rotation field at all (CodeBuddy only gives the whole campaign season, Trae no time fields whatsoever), so midnight is inferred from the real claim timestamps in `logs/checkin.jsonl`, marked `inferred` and given a dashed border plus an italic timestamp in the UI (a marker on the value itself reads as a typo). While a Qoder claim is still unclaimed the timestamp shown is the **deadline** for this round (miss it and it's gone), not the next round's start. When no next time can be computed (campaign over, season ended, nothing today) it is simply not shown rather than showing a stale timestamp. Once the countdown reaches "即将刷新" the next poll picks up the new state **immediately** — that same moment doubles as the expiry condition for the cached status snapshot (otherwise, with the rotation falling inside the cache's 5-minute TTL, the UI would keep showing "已签到" and a disabled button, and those five minutes are enough for Qoder to lose a whole round). To keep an upstream that keeps returning a long-past value from wedging the cache, this early expiry only applies within a one-hour grace window.
@@ -255,7 +277,7 @@ buddy start
 - **PAT channel** — `traepat/<model>` addresses the underlying-model channel with multi-account failover: each account's `4031` / `4008` / `4011` codes are classified and cooled independently, exhausted channels fail fast with a `429` instead of probing every account, and cooldowns are cleared once real credits are confirmed back.
 - **Quota** — free accounts have daily/weekly caps; when exhausted you get `4011` (today's usage limit reached), forwarded with a friendly Chinese message.
 - **Dependencies** — pure Python standard library (including a zero-dependency AES fallback); no Node.js required.
-- **Overseas edition (`traeintl`, since 2026-10)** — log in with `buddy login trae --region global` and a separate channel spins up automatically (`traeintl/<model>` addressing, its own quota card, no check-in — the overseas upstream has no such endpoint). Its model pool is **entirely separate** from CN (probe-verified 2026-10-06; `gpt-5.2` removed on user request 2026-10-07, 9 models): `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `kimi-k3`, `gpt-5.4`, `glm-5.2`, `minimax-m3`. Two protocol differences from CN: `messages[].content` must be a content-block array (a plain string gets a 400 deserialization error), and the Work function binding is a per-region table — gpt-5.6 family / `glm-5.2` / `minimax-m3` return `4001` under the default `solo_work_lite` and are routed to `chat_v3` automatically. Models visible in the IDE dropdown but rejected by the agent channel across all three functions (`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`) are not listed. Billing is **request-count + dollar mixed** (Pro plan): "Premium fast requests" 600/month (upstream never reports usage count — shown as "—") plus "Basic usage" in real dollars spent; `is_hide` packs (hidden from the upstream UI) are filtered out.
+- **Overseas edition (`traeintl`, since 2026-10)** — log in with `buddy login trae --region global` and a separate channel spins up automatically (`traeintl/<model>` addressing, its own quota card, no check-in — the overseas upstream has no such endpoint). Its model pool is **entirely separate** from CN (probe-verified 2026-10-06; `gpt-5.2` removed on user request 2026-10-07, 9 models): `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `kimi-k3`, `gpt-5.4`, `glm-5.2`, `minimax-m3`. Two protocol differences from CN: `messages[].content` must be a content-block array (a plain string gets a 400 deserialization error), and the Work function binding is a per-region table — gpt-5.6 family / `glm-5.2` / `minimax-m3` return `4001` under the default `solo_work_lite` and are routed to `chat_v3` automatically. Models visible in the IDE dropdown but rejected by the agent channel across all three functions (`gpt-6-astra` / `glm-5.3` / `deepseek-v4.1-flash` / `gemini-*-preview`) are not listed. Billing is **dollar-based** (Pro plan): "Basic usage" in real dollars spent against its limit. `premium_model_fast_request_limit` is a "fast-request tier available" capability flag, not a spendable quota (corrected 2026-10-25), so it is no longer rendered as a quota row; `is_hide` packs (hidden from the upstream UI) are filtered out.
 
 ### Optional Trae account utility (`trae-cli`)
 
@@ -270,7 +292,9 @@ trae-cli chat -m glm-5.3 -q "hello"
 
 `uv sync` installs this entry point in the project virtualenv; a package install exposes it in that Python environment. Auth is loaded automatically: the Work multi-account state dir `~/.buddy-proxy/trae/` (`index.json` + one 0600 cred per account; generated/appended by `buddy login trae`, upserted by uid/refresh_token — relogin updates, a new account appends) first. The legacy single-account `~/.buddy-proxy/trae_work.json` (and `~/.ethan/trae_work.json`) is auto-migrated to account #1 on first read. Then the decrypted local Trae IDE `storage.json`. No manual token setup.
 
-The domestic Trae Work model catalog exposes lowercase IDs so `model_order` stays consistent across providers (for example, `doubao-seed-evolving` and `deepseek-v4-pro`). Requests are translated to the case-sensitive upstream names (such as `Doubao-Seed-Evolving`) automatically. The old `kimi-k2.7-code`, `glm-5.2`, `deepseek-v4-flash`, `glm-5`, `glm-5-turbo`, and `qwen-3.7-plus` entries have been removed.
+The domestic Trae Work model catalog exposes lowercase IDs so `model_order` stays consistent across providers (for example, `doubao-seed-evolving` and `deepseek-v4-pro`). Requests are translated to the case-sensitive upstream names (such as `Doubao-Seed-Evolving`) automatically. The old `kimi-k2.7-code`, `deepseek-v4-flash`, `glm-5`, and `glm-5-turbo` entries have been removed
+(`glm-5.2` and `qwen-3.7-plus` are served again as of 2026-10-25 but are hidden from the listing by
+generation convergence — call them explicitly as `trae/glm-5.2` / `trae/qwen-3.7-plus`).
 
 Work channel multi-account **primary/backup failover**: account #1 by login order is preferred; account-level errors (401 credential expired / 429 quota) cool down for 60s/5min then fail over to the next. Upstream SSE quota codes (4008 quota exceeded / 4011 / 4021 / 4031) and auth codes (1001 / 4010) are mapped to 429/401 into the same classification (since 2026-10-06: previously everything passed through as 502 without switching, so with two accounts — one drained, one funded — the request still failed outright). Checkin/quota query and claim **every account**; the admin panel has `▲▼` reorder / `✕` delete (same as qoder/kimi/antigravity). With multiple accounts, the check-in status carries a per-account breakdown (`accounts`: index/name/state) and the check-in card renders one line per account (已签到 / 可领 / 查询失败 with the reason) — the aggregated badge alone could not tell which account actually failed; manual claims toast each account's result (who got +N, who failed). Each line's name follows the alias > nickname > uid > id display chain (an ✎ rename shows up here too, matching the quota panels) and carries an ✎ rename button of its own. Single-account setups stay unchanged (no breakdown, same badge semantics).
 
@@ -399,11 +423,12 @@ The client talks to Qoder's **COSY-signed** face (`/algo/api/v2/service/pro/sse/
 | `qoder/qwen3.8-max` | `qmodel_38max` | reasoning + vision |
 | `qoder/qwen3.8-flash` | `qfmodel` | reasoning + vision |
 | `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
-| `qoder/kimi-k3` | `kmodel_latest` | |
+| `qoder/kimi-k3.1-pro` | `kmodel_latest` | |
+| `qoder/minimax-m3.1-flash` | `mmodel` | |
 | `qoder/deepseek-v4-pro` | `dmodel` | |
 | `qoder/auto` | `auto` | platform-routed tier — the only tier upstream actually has; currently gated off upstream (directory `enable=false`) |
 
-Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, MiniMax-M2.7, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.
+Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.
 
 **The model catalog is per-account and region-scoped** — a full account reports all 14 models while a restricted one may only see the Qwen3.8 pair (risk control; the gate is account-level, and it has been seen to drift). `refresh_models` therefore walks **every account in this provider's region** and publishes the union ("at least one account supports it"); a background loop fetches it on startup and re-fetches every `CACHE_TTL_S` (the catalog lives in memory only — without the warmup a restart used to leave the list at the bundled static fallback, which is how the UI once showed just 2 qoder models). When specific accounts lost specific models, the per-model allowlist lives in `qoder/models.json` (shipped next to the provider): entries `{"id": "glm-5.3", "accounts": ["<uuid>", ...]}` list the account ids (UUIDs, shown on the account card) that **support** the model — a model not listed, or `accounts: "all"`, means every account. Forwarding **skips** accounts that do not support the requested model (no cooldown, no failure — the account is healthy, it just lacks the entitlement) and fails fast with 404 when no account supports it at all, instead of paying a slow read-timeout / in-band 400 per unsupported account. The bundled fallback catalog mirrors the full-account measurements (third-party models restored with measured price factors); the admin UI tags limited models 「部分账号」 (hover for the supporting accounts) and each qoder account card notes its restrictions with the full model list in a hover tooltip. Editing the JSON requires a restart (loaded once, deliberately static).
 
