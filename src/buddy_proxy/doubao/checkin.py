@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -32,6 +33,10 @@ _CLAIM_PATH = "/alice/ug/campaign/landing/checkin"
 _LOGIN_PROBE = "/chat/completion"
 _CAMPAIGN_GROUP = "pc_incentive_task_mvp_v3"
 _TASK = "daily_signin"
+
+#: 手动领取与后台刷新在不同线程运行；复用同一 target 时，不能让两个 CDP
+#: session 的页面加载 / 请求 / 关闭交叉。RLock 允许领取入口先查状态再领取。
+_PAGE_LOCK = threading.RLock()
 
 #: 页面还没有留下 detail 资源时的已验证参数集。不能用聊天通道的 aid=1044603。
 _PAGE_QUERY = (
@@ -84,6 +89,7 @@ class CheckinPage:
         self.query = _PAGE_QUERY
 
     def __enter__(self) -> CheckinPage:
+        _PAGE_LOCK.acquire()
         try:
             self._open()
         except Exception:
@@ -102,6 +108,7 @@ class CheckinPage:
         if self._ws is not None:
             self._ws.close()
             self._ws = None
+        _PAGE_LOCK.release()
 
     def _shared_cmd(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         ws = self._client._ws
@@ -316,9 +323,12 @@ def _parse_status(payload: Any) -> dict[str, Any] | None:
     status = {
         "checked_in": checked,
         "claimable": claimable,
-        "total_times": daily.get("total_days") if isinstance(daily.get("total_days"), int) else 0,
+        "total_times": daily.get("total_days")
+        if isinstance(daily.get("total_days"), int)
+        and not isinstance(daily.get("total_days"), bool) else 0,
         "streak_days": daily.get("continuous_days")
-        if isinstance(daily.get("continuous_days"), int) else 0,
+        if isinstance(daily.get("continuous_days"), int)
+        and not isinstance(daily.get("continuous_days"), bool) else 0,
         "sign_in_days": days,
         "checkin_dates": days,
         "next_ts": next_daily_reset(),
@@ -394,6 +404,7 @@ def claim_checkin(client: Any, status_path: str, timeout: float = 20.0) -> dict[
             fresh = _parse_status(data) if _is_business_ok(status, data) else None
             if fresh is not None and fresh["checked_in"] and not fresh["claimable"]:
                 return fresh
+            log.warning("doubao checkin: claim accepted but recheck unconfirmed")
     except Exception as exc:  # noqa: BLE001 - 领取未确认，交给上层报错
         log.warning("doubao checkin: claim request failed: %s", type(exc).__name__)
     return None

@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
-import threading
+import time
 
 import pytest
 
@@ -208,6 +209,13 @@ def test_only_unrewarded_daily_task_is_claimable(fake_page, task_status):
     assert status["claimable"] is False
 
 
+def test_status_ignores_boolean_counters(fake_page):
+    client = FakeClient(_responses(checked=True, total_days=True, continuous_days=False))
+    status, _ = doubao_checkin.fetch_checkin_status(client)
+    assert status["checked_in"] is True
+    assert status["total_times"] == 0 and status["streak_days"] == 0
+
+
 def test_login_expired_or_unknown_never_reads_status(fake_page):
     for response in ((401, ""), (200, {"code": 710012001}), (0, ""), (200, "<html>SPA</html>")):
         client = FakeClient({"POST /chat/completion": response})
@@ -282,6 +290,23 @@ def test_claim_uses_daily_checkin_and_rechecks(fake_page, monkeypatch):
                for _, body in client.requests)
 
 
+def test_claim_warns_when_accepted_but_recheck_is_unconfirmed(fake_page, monkeypatch, caplog):
+    client = FakeClient(_responses(checked=False, task_status=1))
+    client.responses["POST /alice/ug/campaign/landing/checkin"] = (
+        200, {"code": 0, "data": {"checked_in": True}})
+    original = FakePage.request
+    def _request(page, path, body, timeout, **kwargs):
+        if path == doubao_checkin._DETAIL_PATH and any(
+                request_path == doubao_checkin._CLAIM_PATH
+                for request_path, _ in page.client.requests):
+            return 0, None, ""
+        return original(page, path, body, timeout, **kwargs)
+    monkeypatch.setattr(FakePage, "request", _request)
+    with caplog.at_level(logging.WARNING):
+        assert doubao_checkin.claim_checkin(client, doubao_checkin._DETAIL_PATH) is None
+    assert "accepted but recheck unconfirmed" in caplog.text
+
+
 def test_claim_already_done_does_not_post(fake_page):
     client = FakeClient(_responses(checked=True))
     result = doubao_checkin.claim_checkin(client, doubao_checkin._DETAIL_PATH)
@@ -354,6 +379,71 @@ def test_open_failure_closes_created_page_and_preserves_shared_socket(monkeypatc
             pass
     assert client.closed_targets == ["new-1"]
     assert client._ws is client
+
+
+def _tracked_page(monkeypatch):
+    """保留真实页面锁和清理，只替换页面打开与 HTTP 请求。"""
+    active = 0
+    maximum = [0]
+    state_lock = threading.Lock()
+
+    class TrackedPage(doubao_checkin.CheckinPage):
+        def __init__(self, client, **kwargs):
+            super().__init__(client, **kwargs)
+            self.client = client
+            self.requests = client.requests
+            self.responses = client.responses
+
+        def _open(self):
+            nonlocal active
+            with state_lock:
+                active += 1
+                maximum[0] = max(maximum[0], active)
+            time.sleep(0.05)
+
+        def __exit__(self, *args):
+            nonlocal active
+            try:
+                time.sleep(0.05)
+                return super().__exit__(*args)
+            finally:
+                with state_lock:
+                    active -= 1
+
+        def request(self, path, body, timeout, **kwargs):
+            return FakePage.request(self, path, body, timeout, **kwargs)
+
+    monkeypatch.setattr(doubao_checkin, "CheckinPage", TrackedPage)
+    return maximum
+
+
+def _join_threads(threads):
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+
+
+def test_status_calls_do_not_overlap_on_a_shared_checkin_page(monkeypatch):
+    client = FakeClient(_responses())
+    maximum = _tracked_page(monkeypatch)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(
+        doubao_checkin.fetch_checkin_status(client))) for _ in range(2)]
+    _join_threads(threads)
+    assert len(results) == 2 and all(status is not None for status, _ in results)
+    assert maximum[0] == 1
+
+
+def test_claim_call_serialises_status_preflight_and_claim(monkeypatch):
+    client = FakeClient(_responses(checked=True))
+    maximum = _tracked_page(monkeypatch)
+    threads = [threading.Thread(
+        target=lambda: doubao_checkin.claim_checkin(client, doubao_checkin._DETAIL_PATH))
+        for _ in range(2)]
+    _join_threads(threads)
+    assert maximum[0] == 1
 
 
 def _provider_with(monkeypatch, responses):

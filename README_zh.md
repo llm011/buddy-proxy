@@ -169,7 +169,7 @@ buddy start
 管理页「各通道签到」里豆包占一行，勾选「自动打卡」后由打卡循环每日领取，也可点「立即打卡」。
 签到走 App 内置 Chromium 的**独立签到页面连接**（`doubao/checkin.py`）：复用已打开的
 `https://www.doubao.com/pc/agent-explore` webview，没有时才创建后台页并只关闭自己创建的页；
-不切换聊天 target、不导航或关闭用户页面。2026-11-01 在 DoubaoWork 2.34.12 实测，真实活动是
+不切换聊天 target、不导航或关闭用户页面。签到会话从选择 target 到请求、清理全程串行，手动领取与后台刷新不会在同一活动页上交叉执行。2026-11-01 在 DoubaoWork 2.34.12 实测，真实活动是
 campaign v3 的 `pc_incentive_task_mvp_v3` / `daily_signin`，状态用
 `POST /alice/ug/campaign/v3/detail/`（body 带 `campaign_group_code`），领取用页面 SDK 同款的
 `POST /alice/ug/campaign/landing/checkin`（body 为 `scene`），不是旧版猜测的 `/api/activity/*`。

@@ -348,6 +348,8 @@ connection to the `pc/agent-explore` target in the app's embedded Chromium
 (`doubao/checkin.py`), not the chat WebSocket. It reuses a user-owned webview or
 creates a temporary background page, closing only the latter; target creation,
 load failure, and query completion all preserve the chat target and user pages.
+Check-in sessions are serialised from target selection through request and
+cleanup so a manual claim and background refresh cannot overlap on the same page.
 The measured campaign v3 flow (DoubaoWork 2.34.12, 2026-11-01) is
 `POST /alice/ug/campaign/v3/detail/` with `campaign_group_code=
 pc_incentive_task_mvp_v3`, then only for an unrewarded `daily_signin`,
