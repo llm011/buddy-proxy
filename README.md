@@ -246,7 +246,7 @@ A built-in provider that drives the local Doubao desktop app (DoubaoWork.app) vi
 | Symptom | Cause | Fix |
 | --- | --- | --- |
 | 502 "…未开启 CDP 调试端口" | Doubao was started before the proxy | Quit Doubao (Cmd+Q) and retry — the proxy relaunches it |
-| requests fail after a Doubao update/restart | stale CDP connection | Quit Doubao and retry, or `buddy restart` |
+| requests fail after a Doubao update/restart | stale CDP connection — the proxy used to keep reusing the dead socket | **Self-healing since this release**: a dropped CDP link is reset (`_drop_connection`) and reconnected, and a request that dies *before emitting any output* is retried once, so reopening the app is enough. Only when reconnecting also fails (app really gone) do you get a 409 "CDP connection lost" — relaunch the app and retry. Non-retryable on purpose: 409 never cools the model down |
 | Doubao app won't open (bounces / never shows a window) after the proxy used Doubao | A headless **bare Helper** (`--saman-from-chat=1`) shares `~/Library/Application Support/DoubaoWork` with the real app and grabs the Chromium singleton lock (`SingletonLock -> <host>-<pid>`). The lock never self-heals, even once its pid is dead, so the app stays locked out | The proxy now reclaims automatically: before reusing a CDP endpoint it checks the port isn't a bare Helper and deletes the stale `SingletonLock`/`SingletonSocket`/`SingletonCookie`. Manual recovery: `kill -9 <bare-helper-pid>` → `rm -f ~/Library/Application\ Support/DoubaoWork/Singleton{Lock,Socket,Cookie}` → `open -a DoubaoWork`. Do **not** use `pkill -f "DoubaoWork Browser"` — it also kills the app's own embedded helpers |
 | 401 "doubao not logged in" | login expired | sign in inside the Doubao app, retry |
 
