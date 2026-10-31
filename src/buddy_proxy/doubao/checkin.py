@@ -59,6 +59,8 @@ _ORIGIN = "https://www.doubao.com"
 #: 认得的响应形状见 :func:`_parse_status`（``data``/``result`` 里带
 #: ``checked_in``/``signed``/``status``/日期列表之一）。
 _CANDIDATES: tuple[str, ...] = (
+    # 2026-10-31 在豆包工作 App 2.32.14 的页面请求记录里实测到此端点
+    # （``performance.getEntriesByType('resource')``），排第一位。
     "/api/activity/check_in/status",
     "/api/activity/checkin/info",
     "/api/activity/task/list",
@@ -123,6 +125,46 @@ def _url(client: Any, path: str) -> str:
     return f"{_ORIGIN}{path}?{_query_string(client)}"
 
 
+def _signed_url(client: Any, path: str, signed: dict[str, str] | None) -> str:
+    """默认查询参数之上叠加签名参数。"""
+    if not signed:
+        return _url(client, path)
+    return f"{_url(client, path)}&" + "&".join(f"{k}={v}" for k, v in signed.items())
+
+
+def signed_query(client: Any, timeout: float = 20.0) -> dict[str, str]:
+    """从页面里已发出的活动请求中借一组签名参数（``msToken`` + ``a_bogus``）。
+
+    为什么必须借：``/api/activity/*`` 的页面请求没带签名时一律空体 401；而
+    ``a_bogus`` 是 ``bdms`` 对**具体 URL** 算的签名，本模块不自己造签名，
+    只能拿页面请求过的（同域名、同会话）。``msToken`` 同一会话内各端点复用，
+    ``a_bogus`` 与 URL 绑定——调用方拿到后**逐个端点按端点拼 URL** 去试
+    （不传活动业务参数，只带签名），命中哪个算哪个。
+
+    取不到（页面没发过活动请求 / 没有 ``a_bogus``）返回 ``{}``：调用方回落到
+    「不带签名试一次」，失败也算没查到，不猜。
+    """
+    expr = r"""
+    (() => {
+      const base = %s + '/';
+      let best = null;
+      for (const e of performance.getEntriesByType('resource')) {
+        if (!e.name.startsWith(base + 'api/activity/')) continue;
+        const u = new URL(e.name);
+        const ms = u.searchParams.get('msToken'), ab = u.searchParams.get('a_bogus');
+        if (!ms || !ab) continue;
+        best = {msToken: ms, a_bogus: ab};  // 越靠后越新，直接覆盖
+      }
+      return best;
+    })()
+    """ % json.dumps(_ORIGIN)
+    raw = _eval(client, expr, timeout)
+    if not isinstance(raw, dict):
+        return {}
+    out = {k: raw[k] for k in ("msToken", "a_bogus") if isinstance(raw.get(k), str) and raw[k]}
+    return out if "msToken" in out and "a_bogus" in out else {}
+
+
 def _eval(client: Any, expr: str, timeout: float) -> Any:
     """在 CDP 页面里求值；客户端未就绪 / 抛错返回 ``None``。"""
     try:
@@ -133,13 +175,15 @@ def _eval(client: Any, expr: str, timeout: float) -> Any:
 
 
 def _request(client: Any, path: str, *, method: str = "GET",
-             body: dict[str, Any] | None = None, timeout: float = 20.0) -> tuple[int, Any]:
+             body: dict[str, Any] | None = None, timeout: float = 20.0,
+             signed: dict[str, str] | None = None) -> tuple[int, Any]:
     """在页面里发一个请求，返回 ``(http_status, parsed_json_or_None)``。
 
     ``http_status`` 为 0 表示网络层失败（页面里抛异常 / 评估超时）。
+    ``signed`` 非空时叠加 :func:`signed_query` 借来的签名参数。
     """
     expr = _FETCH_JS.format(
-        path=_js_path(_url(client, path)),
+        path=_js_path(_signed_url(client, path, signed)),
         method=json.dumps(method),
         body=("body: " + json.dumps(json.dumps(body or {}))) if method != "GET" else "",
     )
@@ -172,18 +216,40 @@ def _is_business_ok(status: int, data: Any) -> bool:
         return False
 
 
+def login_state_from_probe(http: Any, data: Any) -> bool | None:
+    """由登录探针的 HTTP 状态 + 响应体做三态判定（``None`` = 探针没下结论）。
+
+    - ``401`` = 服务端明确说未登录 → ``False``；豆包自家业务码 ``710012001``
+      （登录已过期）同样是 ``False``；
+    - ``200`` 且非上述 → ``True``：Chat 路由到了鉴权层才回参数错误，说明会话可用；
+    - HTTP 0（页面求值失败 / 网络没打通）、非 200 的 404/5xx（过期会话下 Chat
+      路由常先回「Page not found」）、非 JSON → ``None``：**不改写成已登录，
+      也不冒充未登录**，调用方按「状态未知」处理。
+    """
+    if not isinstance(http, int) or http == 0:
+        return None
+    if http == 401:
+        return False
+    code = data.get("code") if isinstance(data, dict) else None
+    try:
+        if code is not None and int(code) == 710012001:  # 豆包「登录已过期」
+            return False
+    except (TypeError, ValueError):
+        pass
+    if http != 200:
+        return None
+    return True
+
+
 def login_state(client: Any, timeout: float = 15.0) -> bool | None:
     """服务端登录态三态：``True`` 已登录 / ``False`` 明确未登录 / ``None`` 没探到。
 
-    打 ``/api/chat/completion/chat`` 空 POST：401 = 未登录；回了业务错误码
-    （如「参数缺失」）说明会话本身是好的。探测本身失败（HTTP 0）返回 ``None``，
-    **不能**折成「已登录」——那会把「探针都没打通」显示成「已登录但接口没偏
-    认出」，用户就被指向错误的方向。
+    打 ``/api/chat/completion/chat`` 空 POST，判定口径见
+    :func:`login_state_from_probe`。探针没打通时不能折成「已登录」——那会把
+    「探针都没打通」显示成「已登录但接口没认出」，用户就被指向错误的方向。
     """
-    status, _data = _request(client, _LOGIN_PROBE, method="POST", body={}, timeout=timeout)
-    if status == 0:
-        return None
-    return status != 401
+    http, data = _request(client, _LOGIN_PROBE, method="POST", body={}, timeout=timeout)
+    return login_state_from_probe(http, data)
 
 
 def discover_paths(client: Any, timeout: float = 20.0) -> list[str]:
@@ -352,18 +418,23 @@ def fetch_checkin_status(client: Any, timeout: float = 20.0) -> tuple[dict[str, 
             log.warning("doubao checkin: 豆包登录态探针未打通，本轮不查候选端点")
         return None, ""
 
-    for path in _ordered_candidates():
-        status, data = _request(client, path, timeout=timeout)
-        if not _is_business_ok(status, data):
-            continue
-        parsed = _parse_status(data)
-        if parsed is None:
-            log.info("doubao checkin: %s ok but unrecognised shape: %s",
-                     path, json.dumps(data, ensure_ascii=False)[:300])
-            continue
-        log.info("doubao checkin status served by %s", path)
-        _HIT_PATH["path"] = path
-        return parsed, path
+    # 活动接口只认带签名的请求：先借页面请求过的签名参数，再回落到不带签名
+    # 的裸请求（老版本接口可能不校验）。两条都没命中就是「没查到」，不猜。
+    signed = signed_query(client, timeout=timeout)
+    for extra in ((signed,) if signed else ()) + (None,):
+        for path in _ordered_candidates():
+            status, data = _request(client, path, timeout=timeout, signed=extra)
+            if not _is_business_ok(status, data):
+                continue
+            parsed = _parse_status(data)
+            if parsed is None:
+                log.info("doubao checkin: %s ok but unrecognised shape: %s",
+                         path, json.dumps(data, ensure_ascii=False)[:300])
+                continue
+            log.info("doubao checkin status served by %s%s", path,
+                     " (signed)" if extra else " (unsigned)")
+            _HIT_PATH["path"] = path
+            return parsed, path
 
     # 候选全落空：扫一遍页面 JS 里的活动接口线索，给下一次上线留证据。
     hints = discover_paths(client, timeout=timeout)

@@ -252,7 +252,9 @@ A built-in provider that drives the local Doubao desktop app (DoubaoWork.app) vi
 
 Models: classic pipeline `doubao` / `doubao-think` / `doubao-expert` (the server routes to its default model — the `model` field is ignored) and agent pipeline `doubao-auto`, `doubao-2.1-turbo`, `doubao-2.1-pro`, `orange-5.0`, `gemini-3.7-flash`, `gpt-5.6-sol` (real per-model routing via the app's own model menu; optional `reasoning_effort` 3–7).
 
-Check-in: the "各通道签到" card lists Doubao and the auto check-in loop claims it daily (or "立即打卡" manually). Like chat, it runs inside the app's embedded Chromium (`doubao/checkin.py`), so the risk-control signature is supplied by the page itself. Only a `{"code": 0}` business-success response counts as a status; when the app is not logged in or the response shape is unrecognised the card says "状态未知" (unknown) instead of pretending "not signed in", and the reason is logged (`doubao checkin …`).
+Check-in: the "各通道签到" card lists Doubao and the auto check-in loop claims it daily (or "立即打卡" manually). Like chat, it runs inside the app's embedded Chromium (`doubao/checkin.py`). The activity APIs reject unsigned requests (empty 401), so it borrows the `msToken` + `a_bogus` pair from the activity request the page already made (`signed_query`) and tries each candidate endpoint signed first, then unsigned. Only a `{"code": 0}` business-success response counts as a status; when the app is not logged in or the response shape is unrecognised the card says "状态未知" (unknown) instead of pretending "not signed in", and the reason is logged (`doubao checkin …`).
+
+Login is decided by the server only, never by `localStorage.flow_web_has_login` (a front-end cache that stays `true` after the session expires): an empty POST to `/api/chat/completion/chat` returning 401 or Doubao's `710012001` (expired) means logged out, 200 means logged in, and anything else (no response, 404/5xx, non-JSON) means *unconfirmed* — which the card reports as unknown, and the failure message distinguishes "not logged in", "logged in but endpoint unrecognised" and "login state unconfirmed".
 
 ### DuMate provider (optional)
 

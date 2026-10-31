@@ -23,7 +23,7 @@ src/buddy_proxy/
   codebuddy_provider/    # default provider pkg; client.py = CodeBuddy HTTP client
   trae/                  # trae domain (credentials, transport, sse, pat, ...)
   qoder/                 # qoder domain (provider + convert/errors/quota helpers)
-  doubao/                # doubao domain (provider, cdp_client, payloads, ws)
+  doubao/                # doubao domain (provider, cdp_client, checkin, payloads, ws)
   dumate/                # DuMate domain (discovery = local-proxy discovery + inapp-key,
                          #   cookies = pure-stdlib AES-256-GCM bceConsole cookie decrypt,
                          #   checkin = daily sign-in + points quota/usage-records, provider)
@@ -349,7 +349,19 @@ a short ordered list of activity endpoints and only accepts HTTP 200 with
 `{"code": 0}` plus a recognisable field; anything else is returned as a
 `query_failed` status so the card shows as unknown instead of "not signed in". The
 claim POST is only sent against the endpoint prefix that just produced a valid
-status — never blindly. Three invariants matter because getting them wrong is
+status — never blindly.
+
+Two request-shape facts, both measured on DoubaoWork 2.32.14 (2026-10-31): the
+activity APIs reject unsigned requests with an empty 401, so `checkin.py` borrows
+the `msToken` / `a_bogus` pair from the activity request the page already made
+(`signed_query`, read from `performance` entries) and retries each candidate with
+it before falling back to an unsigned attempt; and **login is decided by the
+server, never by `localStorage.flow_web_has_login`** — that is a front-end cache
+that stays `true` after the session expires. The probe is an empty POST to
+`/api/chat/completion/chat` and is tri-state (`login_state_from_probe`): 401 or
+Doubao's `710012001` (expired) means logged out, 200 means logged in, and
+everything else (no HTTP response, 404/5xx, non-JSON) means *unknown* — a probe
+that did not conclude must not be reported as either state. Three invariants matter because getting them wrong is
 silent:
 
 - **Check-in enumeration ignores quota cooldown.** `checkin_status` /
