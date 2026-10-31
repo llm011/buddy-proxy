@@ -449,15 +449,9 @@ function render() {
   // 角标 = 配置里有几条 model_order（与页面卡片数一致，一个键一张卡）
   if (ORDER)
     document.getElementById('cnt-order').textContent = orderRows().length || '';
-  if (BENEFITS) {
-    const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
-    const cb = document.getElementById('cnt-benefits');
-    if (ck.length) {
-      const pending = ck.filter(p => !p.checkin.done_today && !p.checkin.inactive && !p.checkin.error);
-      if (!pending.length) { cb.textContent = '✓ 已签'; cb.className = 'cnt ok'; }
-      else { cb.textContent = `未签 ${pending.length}`; cb.className = 'cnt warn'; }
-    } else { cb.textContent = ''; }
-  }
+  // 打卡角标挪进 benefits.js（refreshBenefitsBadge）：签到强刷走静默重绘、
+  // 不再整页 render，得能单独刷新这一个角标
+  if (BENEFITS && typeof refreshBenefitsBadge === 'function') refreshBenefitsBadge();
 
   // 只渲染当前页的区块：模型页/日志页的重活不再随总览页一起跑
   if (tab === 'overview') {

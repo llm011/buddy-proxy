@@ -71,6 +71,10 @@ document.addEventListener('visibilitychange', syncPatStatusAuto);
 
 // 强刷单通道签到状态：绕过 5 分钟快照缓存真打上游（多账号通道逐号重查，
 // 最坏十几秒——和 claimNow 同理必须给反馈，否则像「点了没反应」）。
+// 拿到响应后**只**用返回的快照静默重绘签到区：以前这里走 loadData(['benefits'], true)，
+// 会连带强刷 stats（概览卡片/图表）、重建全部通道面板再各拉一次 accounts、
+// traepat 模型负载、dumate 本地状态——点一下签到打出十来个请求（用户 2026-11-01
+// 实报）。用户点的是「刷这个通道的签到」，其余数据交给 30s 轮询自然更新。
 const CKREFRESH = {};  // pid -> 在飞标记：trae 强刷十几秒，30s 轮询会整页重建
                        // innerHTML 把按钮态刷掉（又能再点），照 QREFRESH 放模块级
 async function refreshCheckin(pid, btn) {
@@ -79,10 +83,17 @@ async function refreshCheckin(pid, btn) {
   if (btn) { btn.disabled = true; btn.textContent = '刷新中…'; }
   const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '强刷'; } };
   try {
-    await api('/ui/api/benefits/refresh', {
+    const snapshot = await api('/ui/api/benefits/refresh', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({provider: pid, checkin: true})});
-    await loadData(['benefits'], true);
+    // refresh 接口已返回作废缓存后的完整快照，直接采用可少一整轮 GET；
+    // 旧服务不回 providers 时才回退——也只强刷 benefits 一个键，不带 stats。
+    if (snapshot && Array.isArray(snapshot.providers)) {
+      BENEFITS = snapshot;
+      renderBenefits({quiet: true});
+    } else {
+      await loadData(['benefits'], true);
+    }
     toast(`✓ ${pid} 签到状态已强刷`);
   } catch (e) { toast('刷新失败: ' + e.message, true); }
   finally {
@@ -194,6 +205,8 @@ async function kimiMoveAccount(idx, delta, id) {
   KIMI_MOVING = true;
   try {
     if (!KIMI_ACCTS) {  // 按钮随额度数据先到、账号状态可能还没回：补一次快照
+      // 这里**不走** acctFetch：加载器整个在飞去重，借到的可能是重排前那趟，
+      // 拿旧顺序去算下一位次就挪错人了
       const r0 = await api('/ui/api/kimi/accounts');
       KIMI_ACCTS = r0.accounts || [];
     }
@@ -333,9 +346,30 @@ function renderKimiPanel() {
   loadKimiAccounts();
 }
 
+// fillKimiAccounts：账号快照的就地回填（首份快照后的回填、以及静默重绘路径都用它）。
+// 组名换成账号名、组名后插副标题（antigravity 同款）。
+// 多账号按 data-kimi-idx 对应，单账号组名没有前缀，直接替换。
+function fillKimiAccounts(accts) {
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderKimiPanel === 'function') { renderKimiPanel(); return; }
+  for (const a of accts) {
+    const el = (accts.length === 1)
+      ? document.querySelector('#kimi-panel .pat-pkg-name')
+      : document.querySelector(`#kimi-panel [data-kimi-idx="${a.index}"]`);
+    if (!el) continue;
+    el.textContent = a.alias || a.name || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-kimi-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = _kimi_sub_html(a);
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  }
+}
+
 async function loadKimiAccounts() {
   try {
-    const r = await api('/ui/api/kimi/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('kimi', () => api('/ui/api/kimi/accounts'));
     if (!r.enabled) { KIMI_ACCTS = []; return; }
     const accts = r.accounts || [];
     // 数据没变就不动 DOM——renderKimiPanel 已用同一份快照渲染过
@@ -346,23 +380,11 @@ async function loadKimiAccounts() {
     if (snapshotMissing) {
       // 首份快照到位：带快照整卡重渲（账号名直出、▲▼/✕ 按钮带上 id），
       // 再拉取数据已同、走早退，不会循环（antigravity 同款）
-      renderKimiPanel();
+      fillKimiAccounts(accts);
       syncQuotaFold();
       return;
     }
-    // 就地回填：组名换成账号名、组名后插副标题（antigravity 同款）
-    for (const a of accts) {
-      const el = (accts.length === 1)
-        ? document.querySelector('#kimi-panel .pat-pkg-name')
-        : document.querySelector(`#kimi-panel [data-kimi-idx="${a.index}"]`);
-      if (!el) continue;
-      el.textContent = a.alias || a.name || a.id;
-      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-kimi-sub')) {
-        el.nextElementSibling.remove();
-      }
-      const sub = _kimi_sub_html(a);
-      if (sub) el.insertAdjacentHTML('afterend', sub);
-    }
+    fillKimiAccounts(accts);
     syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
@@ -425,6 +447,8 @@ async function codexMoveAccount(idx, delta, id) {
   CODEX_MOVING = true;
   try {
     if (!CODEX_ACCTS) {
+      // 这里**不走** acctFetch：加载器整个在飞去重，借到的可能是重排前那趟，
+      // 拿旧顺序去算下一位次就挪错人了
       const r0 = await api('/ui/api/codex/accounts');
       CODEX_ACCTS = r0.accounts || [];
     }
@@ -637,9 +661,29 @@ function renderCodexPanel() {
   loadCodexAccounts();
 }
 
+// fillCodexAccounts：账号快照的就地回填（首份快照后的回填、以及静默重绘路径都用它）。
+// 多账号按 data-codex-idx 对应，单账号组名没有前缀，直接替换。
+function fillCodexAccounts(accts) {
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderCodexPanel === 'function') { renderCodexPanel(); return; }
+  for (const a of accts) {
+    const el = (accts.length === 1)
+      ? document.querySelector('#codex-panel .pat-pkg-name')
+      : document.querySelector(`#codex-panel [data-codex-idx="${a.index}"]`);
+    if (!el) continue;
+    el.textContent = a.alias || a.name || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-codex-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = _codex_sub_html(a);
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  }
+}
+
 async function loadCodexAccounts() {
   try {
-    const r = await api('/ui/api/codex/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('codex', () => api('/ui/api/codex/accounts'));
     if (!r.enabled) { CODEX_ACCTS = []; return; }
     const accts = r.accounts || [];
     if (JSON.stringify(accts) === JSON.stringify(CODEX_ACCTS)) return;
@@ -647,22 +691,11 @@ async function loadCodexAccounts() {
     CODEX_ACCTS = accts;
     if (!accts.length) return;
     if (snapshotMissing) {
-      renderCodexPanel();
+      fillCodexAccounts(accts);
       syncQuotaFold();
       return;
     }
-    for (const a of accts) {
-      const el = (accts.length === 1)
-        ? document.querySelector('#codex-panel .pat-pkg-name')
-        : document.querySelector(`#codex-panel [data-codex-idx="${a.index}"]`);
-      if (!el) continue;
-      el.textContent = a.alias || a.name || a.id;
-      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-codex-sub')) {
-        el.nextElementSibling.remove();
-      }
-      const sub = _codex_sub_html(a);
-      if (sub) el.insertAdjacentHTML('afterend', sub);
-    }
+    fillCodexAccounts(accts);
     syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试

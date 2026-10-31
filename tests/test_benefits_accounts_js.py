@@ -344,17 +344,36 @@ def test_acct_load_first_snapshot_rerenders_then_in_place():
     （换名 + 重写副标题，先删旧的）；数据没变不动 DOM。"""
     out = _run_js("""
 let RENDERED = 0;
+let FILLED = 0;                     // 静默重绘期间只许就地回填，不许整卡重渲
 const state = {accts: null};
 // render 桩按真实消费方（renderDumatePanel）的契约：首渲前把快照填进 state，
 // 这样 acctLoad 才能区分「首份快照」与「后续变化」
 const cfg = {pid: 'dumate', nameOf: a => a.displayName || a.id,
              subExtra: (a, bits) => bits.push('累计签到 ' + a.pts + ' 分'),
-             render: () => { RENDERED++; state.accts = state.accts || [{index: 1, id: 'u1', displayName: '旧名', pts: 100}]; }};
-const load = acctLoad(cfg, state);
+             render: () => { RENDERED++; state.accts = state.accts || [{index: 1, id: 'u1', displayName: '旧名', pts: 100}]; },
+             // fill 桩与消费方一致（acctLoad 第二拍换成 cfg.fill()）
+             // cfg.fill：第二拍起换成就地回填（换名 + 重写副标题）。桩里按真实
+             // 消费方（fillDumateAccounts）的定位规则写一遍，验证 acctLoad 确实调到它
+             fill: () => {
+               FILLED++;
+               for (const a of state.accts || []) {
+                 const e = QS['#dumate-panel .pat-pkg-name'];
+                 if (!e) continue;
+                 e.textContent = a.displayName || a.id;
+                 if (e.nextElementSibling && e.nextElementSibling.hasAttribute('data-dumate-sub')) {
+                   e.nextElementSibling.remove();
+                 }
+                 const sub = acctSubHtml(a, cfg.subExtra, 'data-dumate-sub');
+                 if (sub) e.insertAdjacentHTML('afterend', sub);
+               }
+             }};
+// 采集时直接返回本拍加载的 promise（内部经 acctFetch 去重），调用侧不再包一层
+globalThis.load = () => acctLoad(cfg, state);
 let RESP = {enabled: true, accounts: [
   {index: 1, id: 'u1', displayName: '旧名', pts: 100}]};
 globalThis.api = async () => RESP;
-await load();                                   // 首份快照 → 整卡重渲
+// 首份快照整卡重渲（render 桩把快照写进 state）
+await acctLoad(cfg, state);
 const afterFirst = {rendered: RENDERED, sync: globalThis.__SYNC_CALLS,
                     accts: state.accts.map(a => a.displayName)};
 // 第二拍：数据变了 → 就地回填（快照已在，不整卡重渲）
@@ -369,11 +388,13 @@ await load();
 const afterUpdate = {rendered: RENDERED, sync: globalThis.__SYNC_CALLS,
                      name: nameEl.textContent, sub: nameEl.inserted.join(''),
                      removedOld: !!nameEl.nextElementSibling.removed};
-// 第三拍：数据没变 → 不动 DOM
+// 第三拍：数据没变 → 不动 DOM（名字元素换成哨兵，被重写就露馅）
+const untouched = el('哨兵');
+QS['#dumate-panel .pat-pkg-name'] = untouched;
 globalThis.__SYNC_CALLS = 0;
 await load();
 const afterSame = {rendered: RENDERED, sync: globalThis.__SYNC_CALLS,
-                   name: nameEl.textContent};
+                   name: untouched.textContent};
 console.log(JSON.stringify({afterFirst, afterUpdate, afterSame}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
@@ -385,14 +406,14 @@ console.log(JSON.stringify({afterFirst, afterUpdate, afterSame}));
     assert data["afterUpdate"]["rendered"] == 1, "快照已在就不整卡重渲（就地回填）"
     assert data["afterSame"]["rendered"] == 1 and data["afterSame"]["sync"] == 0, \
         "数据没变不动 DOM、不再校准"
-    assert data["afterSame"]["name"] == "新名", "没变就不重写名字（重写会闪旧代号）"
+    assert data["afterSame"]["name"] == "哨兵", "没变就不重写名字（重写会闪旧代号）"
 
 
 def test_acct_load_disabled_clears_snapshot():
     """enabled=false 清快照（面板渲染侧据此隐藏账号位）。"""
     out = _run_js("""
 const state = {accts: [{index: 1, id: 'u1'}]};
-const load = acctLoad({pid: 'dumate', nameOf: a => a.id, render: () => {}}, state);
+const load = () => acctLoad({pid: 'dumate', nameOf: a => a.id, render: () => {}, fill: () => {}}, state);
 globalThis.api = async () => ({enabled: false});
 await load();
 console.log(JSON.stringify({accts: state.accts}));
@@ -455,23 +476,45 @@ def test_dumate_status_ready_triggers_rerender():
         + "  '<div class=\"qbody\" data-qfold=\"' + esc(key) + '\">' + items.map(globalThis.quotaItemHtml).join('') + '</div>';\n"
         + "globalThis.api = async (path) => path.includes('/accounts')\n"
         + "  ? globalThis.__DM_ACCTS : globalThis.__DM_RESPONSE;\n"
-        + seg.group(0)
+        # 数渲染次数：段里的 renderDumatePanel 声明与函数体里的自调用一起
+        # 改名成 __dumate_render_raw，原函数在段前一行另存成 __orig_render；
+        # 段内按名字调的 loadDumateAccounts 改名成 __dumate_load_raw，段尾的
+        # `const loadDumateAccounts = acctLoad(...)` 被截掉（acctLoad 的调用
+        # 不在本用例关注范围内），名字全部唯一，不用包装声明去盖（同名声明会
+        # 盖掉 const 绑定、cfg.render 与原函数分叉，自递归爆栈）
+        + "let RENDER_COUNT = 0;\n"
+        + re.sub(r"\brenderDumatePanel\b", "__dumate_render_raw",
+                 re.sub(r"\bloadDumateAccounts\b", "__dumate_load_raw",
+                        seg.group(0).split("\nconst loadDumateAccounts = acctLoad(")[0]))
         + """
+const __orig_render = __dumate_render_raw;
+__dumate_render_raw = () => { RENDER_COUNT++; return __orig_render(); };
+// 段尾的 `const loadDumateAccounts = acctLoad(...)` 被截掉了（本用例只盯
+// 渲染/加载的行为，acctLoad 由 test_acct_load_* 覆盖），这里的加载桩照
+// acctLoad 的账本语义：首份快照整卡重渲、之后只回填，数据没变早退
+let __dumate_load_raw = async () => {
+  const r = await api('/ui/api/dumate/accounts');
+  if (!r.enabled) { DUMATE_STATE.accts = []; return; }
+  const list = r.accounts || [];
+  if (JSON.stringify(list) === JSON.stringify(DUMATE_STATE.accts)) return;
+  const snapshotMissing = !DUMATE_STATE.accts || !DUMATE_STATE.accts.length;
+  DUMATE_STATE.accts = list;
+  if (!list.length) return;
+  if (snapshotMissing) __dumate_render_raw();
+  else fillDumateAccounts();
+};
 (async () => {
 globalThis.BENEFITS = {providers: [{id: 'dumate', quota: {supported: true, items: [
   {label: '订阅积分', used: 160.04, total: 1000, remaining: 839.96, percent: 16.0,
    reset_ts: null, expire_ts: null, unit: 'points'},
 ]}}]};
-let RENDER_COUNT = 0;
-const origRender = renderDumatePanel;
-renderDumatePanel = function() { RENDER_COUNT++; return origRender(); };
 // 桩 document.getElementById('dumate-panel') → PANEL
 const origGetEl = document.getElementById.bind(document);
 document.getElementById = id => (id === 'dumate-panel' ? PANEL : origGetEl(id));
 globalThis.__DM_ACCTS = {enabled: false, accounts: []};
 globalThis.__DM_RESPONSE = {ready: false, installed: true, running: false,
                             hint: '已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。'};
-renderDumatePanel();                        // 首渲（status 未到 → 检测中）
+__dumate_render_raw();                      // 首渲（status 未到 → 检测中）
 const firstHtml = PANEL.innerHTML;
 const firstDetecting = firstHtml.includes('检测中…');
 await new Promise(r => setTimeout(r, 5));
@@ -490,7 +533,7 @@ globalThis.__DM_ACCTS = {enabled: true, accounts: [
   {index: 1, id: 'u1', display_name: 'dumateuser',
    today_consumed: 123.45, today_calls: 42,
    checkin_total_points: 1000, checkin_total_times: 2}]};
-await loadDumateAccounts();
+await __dumate_load_raw();     // 首份快照 → 整卡重渲（RENDER_COUNT +1）
 await new Promise(r => setTimeout(r, 5));   // 等重渲尾部的嵌套 load 落定
 const acctHtml = PANEL.innerHTML;
 // 第二拍：消耗数变了 → 就地回填副标题（QS 桩元素观察 insertAdjacentHTML）
@@ -501,7 +544,7 @@ globalThis.__DM_ACCTS = {enabled: true, accounts: [
   {index: 1, id: 'u1', display_name: 'dumateuser',
    today_consumed: 130.05, today_calls: 43,
    checkin_total_points: 1000, checkin_total_times: 2}]};
-await loadDumateAccounts();
+await __dumate_load_raw();     // 第二拍 → 就地回填
 const insertedSub = nameEl.inserted.join('');
 console.log(JSON.stringify({
   firstDetecting,
@@ -532,3 +575,26 @@ console.log(JSON.stringify({
     assert "今日消耗 130 分（43 次）" in data["insertedSub"], \
         f"今日消耗要进副标题: {data['insertedSub']}"
     assert "累计签到 1000 分（2 次）" in data["insertedSub"], "签到累计照旧"
+
+
+def test_acct_load_quiet_mode_fills_instead_of_rerendering():
+    """首份快照期间若在静默重绘（签到强刷），只就地回填、不整卡重渲——
+    整卡重渲会冲掉别处 DOM，还会让面板尾部的加载器再刮一发 accounts。"""
+    out = _run_js("""
+let RENDERED = 0, FILLED = 0;
+const state = {accts: null};
+const cfg = {pid: 'dumate', nameOf: a => a.id, render: () => { RENDERED++; }, fill: () => { FILLED++; }};
+globalThis.api = async () => ({enabled: true, accounts: [{index: 1, id: 'u1'}]});
+ACCT_NO_RERENDER = true;            // loadAllAccounts 打开的那个开关
+await acctLoad(cfg, state);
+ACCT_NO_RERENDER = false;
+await (async () => {
+  state.accts = null;
+  await acctLoad(cfg, state);
+})();
+console.log(JSON.stringify({inQuiet: {rendered: RENDERED, filled: FILLED}, quiet: acctNoRerender('dumate')}));
+""")
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["quiet"] is False, "开关只在 loadAllAccounts 期间打开"
+    # 第一拍静默：filled=1 rendered=0；第二拍非静默：rendered=1 filled 仍是 1
+    assert data["inQuiet"] == {"rendered": 1, "filled": 1}

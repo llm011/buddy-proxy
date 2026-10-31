@@ -42,6 +42,20 @@ pytestmark = pytest.mark.skipif(
 _STUB = """
 let QS = {};                        // 选择器 -> 桩元素（没设的选择器返回 null）
 let PANEL = {innerHTML: ''};        // #antigravity-panel
+// 对账本路径：首份快照之后的就地回填现在直接整卡重渲（与渲染同一份快照，
+// 不叠第二份按钮组）；渲染清空 PANEL 时报一声，用例自己挂的桩元素就能撤掉
+// ——跟真 DOM 一样，面板 innerHTML 一换旧节点就不再挂着了
+globalThis.__ON_RENDER = null;
+let __PANEL_INNER = '';
+Object.defineProperty(PANEL, 'innerHTML', {
+  get() { return __PANEL_INNER; },
+  set(v) {
+    __PANEL_INNER = v;
+    // 旧节点随 innerHTML 一起没了：桩选择器也撤掉，后续 fill 只能补到新节点上
+    QS = {};
+    if (globalThis.__ON_RENDER) globalThis.__ON_RENDER(v);
+  },
+});
 globalThis.esc = s => String(s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;')
   .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -90,6 +104,8 @@ function el(text) {
     nextElementSibling: null,
     inserted: [],
     insertAdjacentHTML(pos, html) { this.inserted.push(html); },
+    closest() { return null; },
+    querySelector() { return null; },
   };
 }
 """
@@ -119,9 +135,15 @@ def _run_js(body: str) -> str:
 def test_accounts_fill_names_and_subtitles():
     """多账号：标题按 data-ag-idx 换成邮箱，副标题带状态且不含 email。"""
     out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'AG #1 · Gemini 组', remaining: 900, total: 1000, percent: 10,
+   used: 100, reset_ts: null, unit: 'permille'},
+  {label: 'AG #2 · Gemini 组', remaining: 800, total: 1000, percent: 20,
+   used: 200, reset_ts: null, unit: 'permille'},
+]}}]};
 globalThis.__RESPONSE = {enabled: true, accounts: [
-  {index: 1, email: 'a@x.com', alias: '生产号', project_id: 'p', hours_left: 3.2, cooling: []},
-  {index: 2, email: 'b@x.com', alias: '', project_id: '', hours_left: null,
+  {index: 1, id: 'a@x.com', email: 'a@x.com', alias: '生产号', project_id: 'p', hours_left: 3.2, cooling: []},
+  {index: 2, id: 'b@x.com', email: 'b@x.com', alias: '', project_id: '', hours_left: null,
    cooling: [{kind: 'quota', minutes_left: 4}]},
 ]};
 // 快照已有旧值（回填路径；null 会走「首份快照整卡重渲」分支）
@@ -129,14 +151,16 @@ AG_ACCTS = [
   {index: 1, email: 'old@x.com', project_id: 'p', hours_left: 9, cooling: []},
   {index: 2, email: 'old2@x.com', project_id: '', hours_left: null, cooling: []},
 ];
-QS['#antigravity-panel [data-ag-idx="1"]'] = el('AG #1');
-QS['#antigravity-panel [data-ag-idx="2"]'] = el('AG #2');
 await loadAntigravityAccounts();
+// 首份快照之后的就地回填直接整卡重渲（同一份快照、不叠第二份按钮组），
+// 名字/副标题从渲染出的 HTML 里看
+const parts = PANEL.innerHTML.split('data-ag-idx="').slice(1);   // 每段=一个账号块
+const nameOf = i => { const seg = parts.find(x => x.startsWith(i + '"')); return seg ? (seg.match(/^[^>]*>([^<]*)</) || [])[1] : ''; };
+const subOf = i => { const seg = parts.find(x => x.startsWith(i + '"')); const m = seg && seg.match(/<[^]*?<div class="qbody"/); return m ? m[0].slice(7, -18) : ''; };
 console.log(JSON.stringify({
-  n1: QS['#antigravity-panel [data-ag-idx="1"]'].textContent,
-  n2: QS['#antigravity-panel [data-ag-idx="2"]'].textContent,
-  sub1: QS['#antigravity-panel [data-ag-idx="1"]'].inserted.join(''),
-  sub2: QS['#antigravity-panel [data-ag-idx="2"]'].inserted.join('')}));
+  n1: nameOf(1), n2: nameOf(2),
+  sub1: subOf(1), sub2: subOf(2),
+  btns: (PANEL.innerHTML.match(/class="ag-move"/g) || []).length}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["n1"] == "生产号", "标题 1 优先显示别名（✎ 改的名）"
@@ -146,20 +170,24 @@ console.log(JSON.stringify({
     assert "缺 project" in data["sub2"] and "额度冷却 4min" in data["sub2"], data["sub2"]
     assert "a@x.com" not in data["sub1"] and "b@x.com" not in data["sub2"], \
         "邮箱在标题上，副标题只放状态"
+    assert data["btns"] == 2, "按钮组每组一份，不能叠成两份（绝对定位叠着看不出来）"
 
 
 def test_single_account_name_and_subtitle_without_index():
     """单账号标题没有 AG #N 前缀（后端 label 不加）→ 唯一标题直接换。"""
     out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'Gemini 组', remaining: 900, total: 1000, percent: 10,
+   used: 100, reset_ts: null, unit: 'permille'}]}}]};
 globalThis.__RESPONSE = {enabled: true, accounts: [
-  {index: 1, email: 'solo@x.com', project_id: 'p', hours_left: 0.7, cooling: []},
+  {index: 1, id: 'solo@x.com', email: 'solo@x.com', project_id: 'p', hours_left: 0.7, cooling: []},
 ]};
 AG_ACCTS = [{index: 1, email: 'stale@x.com', project_id: '', hours_left: null, cooling: []}];
-QS['#antigravity-panel .pat-pkg-name'] = el('Antigravity');
 await loadAntigravityAccounts();
+const html = PANEL.innerHTML;
 console.log(JSON.stringify({
-  name: QS['#antigravity-panel .pat-pkg-name'].textContent,
-  sub: QS['#antigravity-panel .pat-pkg-name'].inserted.join('')}));
+  name: (html.match(/class="pat-pkg-name">([^<]*)</) || [])[1],
+  sub: (html.match(/class="pat-pkg-name">[^<]*<\/span>([\s\S]*?)<div class="qbody"/) || [])[1] || ''}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["name"] == "solo@x.com", "单账号标题应替换成邮箱，而不是停在 'Antigravity'"
@@ -169,25 +197,22 @@ console.log(JSON.stringify({
 def test_changed_data_rewrites_subtitle_without_duplicating():
     """数据变化：副标题**重写**（旧内容消失），而不是在旁边再插一份。"""
     out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'AG #1 · Gemini 组', remaining: 900, total: 1000, percent: 10,
+   used: 100, reset_ts: null, unit: 'permille'}]}}]};
 globalThis.__RESPONSE = {enabled: true, accounts: [
-  {index: 1, email: 'a@x.com', project_id: 'p', hours_left: 2, cooling: []},
+  {index: 1, id: 'a@x.com', email: 'a@x.com', project_id: 'p', hours_left: 2, cooling: []},
 ]};
-AG_ACCTS = [{index: 1, email: 'a@x.com', project_id: 'p', hours_left: 9, cooling: []}];
-const nameEl = el('AG #1');
-nameEl.nextElementSibling = {
-  hasAttribute: t => t === 'data-ag-sub',
-  remove() { this.removed = true; },
-};
-// 单账号（accts.length===1）走 .pat-pkg-name 分支，不走 data-ag-idx
-QS['#antigravity-panel .pat-pkg-name'] = nameEl;
+AG_ACCTS = [];   // 首份快照：整卡重渲，旧副标题随 innerHTML 一起没了
 await loadAntigravityAccounts();
+const html = PANEL.innerHTML;
 console.log(JSON.stringify({
-  removed: !!nameEl.nextElementSibling.removed,
-  sub: nameEl.inserted.join('')}));
+  subs: (html.match(/data-ag-sub/g) || []).length,
+  sub: (html.match(/class="pat-pkg-name">[^<]*<\/span>([\s\S]*?)<div class="qbody"/) || [])[1] || ''}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
-    assert data["removed"], "旧副标题要先移除，否则 30s 一轮会越堆越多"
-    assert data["sub"] == "", "冷却结束后副标题整行消失（token 剩已删，无别的 bit）"
+    assert data["subs"] == 0, "冷却结束后副标题整行消失（token 剩已删，无别的 bit）"
+    assert data["sub"] == "", data["sub"]
 
 
 def test_unchanged_data_leaves_dom_alone():
@@ -641,20 +666,26 @@ console.log(JSON.stringify({calls: CALLS}));
 def test_blacklist_subtitle_label_and_hours():
     """拉黑冷却的副标题标注「疑似拉黑」；2h 以上按小时显示（不是 360min）。"""
     out = _run_js("""
+globalThis.BENEFITS = {providers: [{id: 'antigravity', quota: {supported: true, items: [
+  {label: 'AG #1 · Gemini 组', remaining: 900, total: 1000, percent: 10,
+   used: 100, reset_ts: null, unit: 'permille'},
+  {label: 'AG #2 · Gemini 组', remaining: 800, total: 1000, percent: 20,
+   used: 200, reset_ts: null, unit: 'permille'},
+]}}]};
 globalThis.__RESPONSE = {enabled: true, accounts: [
-  {index: 1, email: 'a@x.com', project_id: 'p', hours_left: 1,
+  {index: 1, id: 'a@x.com', email: 'a@x.com', project_id: 'p', hours_left: 1,
    cooling: [{kind: 'blacklist', minutes_left: 359.5}]},
-  {index: 2, email: 'b@x.com', project_id: 'p', hours_left: 1, cooling: []},
+  {index: 2, id: 'b@x.com', email: 'b@x.com', project_id: 'p', hours_left: 1, cooling: []},
 ]};
-QS['#antigravity-panel [data-ag-idx="1"]'] = el('AG #1');
-QS['#antigravity-panel [data-ag-idx="2"]'] = el('AG #2');
-// 快照已有旧值，走就地回填分支（null 会触发整卡重渲、不经过回填）
+// 快照已有旧值，走就地回填分支（空快照会触发整卡重渲，但那也一样要紧）
 AG_ACCTS = [
   {index: 1, email: 'a@x.com', project_id: 'p', hours_left: 1, cooling: []},
   {index: 2, email: 'b@x.com', project_id: 'p', hours_left: 1, cooling: []},
 ];
 await loadAntigravityAccounts();
-console.log(JSON.stringify({sub: QS['#antigravity-panel [data-ag-idx="1"]'].inserted.join('')}));
+const one = (PANEL.innerHTML.match(/data-ag-idx="1"[^]*?<div class="qbody"/) || [''])[0];
+console.log(JSON.stringify({
+  sub: (one.lastIndexOf('</span>') >= 0 ? one.slice(one.lastIndexOf('</span>') + 7) : '')}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert "疑似拉黑" in data["sub"], data["sub"]

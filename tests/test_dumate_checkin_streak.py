@@ -151,7 +151,10 @@ def test_entry_keeps_streak_and_daily_credit():
     ``c.streak_days >= 2`` 恒假，打卡卡上除了一行「已签到」什么都没有，
     用户以为豆包压根没接进打卡区域。
     """
-    days = [f"2026-10-{d:02d}" for d in range(5, 31)]
+    # 截至「今天 / 昨天」往前数（今天没签就从昨天起，零点不归零），所以日期
+    # 按测试运行日倒推，不能写死某个月——写死一过月「连续」自然归 0
+    today = datetime.date.today()
+    days = [(today - datetime.timedelta(days=i)).isoformat() for i in range(25, -1, -1)]
     entry = _entry_for(dumate_checkin._parse_status_payload(_payload(days)))
     assert entry["supported"] is True
     assert entry["streak_days"] == 26
@@ -188,7 +191,10 @@ def test_accounts_endpoint_ships_checkin_status(monkeypatch):
     from buddy_proxy.dumate import discovery
     from buddy_proxy.web.ui import channels
 
-    days = [f"2026-10-{d:02d}" for d in range(5, 31)]
+    # 截至「今天 / 昨天」往前数（今天没签就从昨天起，零点不归零），所以日期
+    # 按测试运行日倒推，不能写死某个月——写死一过月「连续」自然归 0
+    today = datetime.date.today()
+    days = [(today - datetime.timedelta(days=i)).isoformat() for i in range(25, -1, -1)]
     status = dumate_checkin._parse_status_payload(_payload(days))
 
     monkeypatch.setattr(discovery, "discover", lambda: object())
@@ -225,7 +231,9 @@ def test_account_info_builds_checkin_status_from_single_query(monkeypatch):
 
     def _fetch(timeout=20.0):
         calls.append(timeout)
-        return dumate_checkin._parse_status_payload(_payload(["2026-10-29", "2026-10-30"]))
+        today = datetime.date.today()
+        return dumate_checkin._parse_status_payload(_payload(
+            [(today - datetime.timedelta(days=1)).isoformat(), today.isoformat()]))
 
     monkeypatch.setattr(dumate_cookies, "resolve_bceconsole_auth", lambda: {"token": "x"})
     monkeypatch.setattr(dumate_checkin, "fetch_checkin_status", _fetch)
