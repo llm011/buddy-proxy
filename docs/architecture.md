@@ -349,7 +349,17 @@ a short ordered list of activity endpoints and only accepts HTTP 200 with
 `{"code": 0}` plus a recognisable field; anything else is returned as a
 `query_failed` status so the card shows as unknown instead of "not signed in". The
 claim POST is only sent against the endpoint prefix that just produced a valid
-status — never blindly. Three invariants matter because getting them wrong is
+status — never blindly. Requests use the absolute `https://www.doubao.com` origin
+with the chat channel's query parameters: the CDP seed page is
+`chrome://doubaowork-chat`, so a relative `fetch` never reaches the API and the
+SPA shell would answer 200 + HTML. Login is probed server-side (empty POST to
+`/api/chat/completion/chat`, 401 = logged out) because the cached
+`localStorage.flow_web_has_login` flag survives server-session expiry and made the
+card report "unknown" without saying the app was logged out. The probe is
+tri-state (`True` / `False` / `None` = not observed) so a failed probe is never
+reported as "logged in". When logged in but no candidate matches, the loaded JS
+is scanned for `/api|/alice|/biz` path literals and the matching hints are logged
+only — they are not requested. Three invariants matter because getting them wrong is
 silent:
 
 - **Check-in enumeration ignores quota cooldown.** `checkin_status` /
