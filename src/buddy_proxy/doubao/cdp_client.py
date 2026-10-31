@@ -212,58 +212,42 @@ class CDPDoubaoClient:
         log.info("CDPDoubaoClient: ready (web_id=%s)", self._web_id[:20])
 
     async def start(self) -> None:
-        """确保 CDP 可用：优先复用主 App（共存，不杀用户进程），兜底独立 Helper。"""
+        """确保 CDP 可用：优先复用主 App（共存，不杀用户进程），其次「App 身份
+        启动 Helper」，最后才退回裸 Helper 直连。
+
+        为什么不再「首次请求直接裸 Helper」：裸 Helper 会以同一份 profile 抢走
+        Chromium 单例锁（``SingletonLock -> <host>-<pid>``）。之后用户自己点开
+        豆包工作 App，App 发现锁被一个无 UI 的 Helper 占着就起不来，表现就是
+        「豆包工作打不开」。所以只有「App 身份启动也拿不到 CDP」时才用裸 Helper。
+        """
         # 1) 端口已有 CDP 直接复用（主 App 正在跑且开了调试端口）
         if await asyncio.to_thread(self._probe_cdp):
             log.info("CDPDoubaoClient: reuse existing CDP on port %d", self.port)
             await self._connect_chat()
             return
 
-        # 2) 尝试拉起主 App（不杀进程；主 App 自带 saman-from-chat 开 CDP）
-        # App 未安装时 Helper（在 App bundle 内）必然也缺失，提前给出可操作
-        # 提示，而不是白等 30s 后抛难以理解的 FileNotFoundError。
-        if not _main_app_installed():
-            raise RuntimeError(
-                "未检测到豆包工作 App（DoubaoWork.app 不存在）。"
-                "请先安装豆包工作并完成登录后重试。"
-            )
-        try:
-            await asyncio.to_thread(
-                subprocess.run,
-                ["open", "-a", "DoubaoWork", "--args", f"--remote-debugging-port={self.port}"],
-                capture_output=True,
-                timeout=10,
-            )
-            for _ in range(30):
-                await asyncio.sleep(1)
-                if await asyncio.to_thread(self._probe_cdp):
-                    log.info("CDPDoubaoClient: 主 App CDP ready on port %d", self.port)
-                    await self._connect_chat()
-                    return
-            log.warning("CDPDoubaoClient: 主 App 未开 CDP，回退独立 Helper")
-        except Exception as e:
-            log.warning("CDPDoubaoClient: 主 App 拉起异常（%s），回退独立 Helper", e)
+        # 2) 由 App 身份拉起（主 App 已在跑时 open -a 只激活，不杀进程）
+        self._require_main_app_installed()
+        launched = await asyncio.to_thread(self._launch_main_app)
+        if launched and await self._wait_cdp_ready():
+            log.info("CDPDoubaoClient: 主 App CDP ready on port %d", self.port)
+            await self._connect_chat()
+            return
+        log.warning("CDPDoubaoClient: 主 App 未开 CDP，回退独立 Helper")
 
-        # 3) 兜底：独立 Helper。
-        # 注意：主 App 正在运行但没开调试口时（open -a 对已运行实例只激活、
-        # 不传参），绝不能 pkill 用户正在用的豆包 App —— 明确报错让用户决策。
-        main_app_running = (
-            await asyncio.to_thread(
-                subprocess.run,
-                ["pgrep", "-f", "DoubaoWork.app/Contents/MacOS/DoubaoWork"],
-                capture_output=True,
-            )
-        ).returncode == 0
-        if main_app_running:
+        # 3) 裸 Helper 直连。
+        # 主 App 正在运行但没开调试口时（open -a 对已运行实例只激活、不传参），
+        # 绝不能 pkill 用户正在用的豆包 App，也绝不另起 Helper 去抢它的单例锁
+        # —— 明确报错让用户决策。
+        if await asyncio.to_thread(self._main_app_running):
             raise RuntimeError(
                 "豆包主 App 正在运行但未开启 CDP 调试端口（无法给已运行的实例"
                 "追加启动参数）。请先完全退出豆包（Cmd+Q）后重试；代理不会强杀"
                 "正在使用的豆包 App。"
             )
-        # 主 App 确认未运行时才清理残留 Helper 进程（否则单例锁拦截）
-        await asyncio.to_thread(
-            subprocess.run, ["pkill", "-KILL", "-f", "DoubaoWork"], check=False
-        )
+
+        # App 身份启动失败：先停掉残留进程，否则单例锁仍被占着。
+        await asyncio.to_thread(self._kill_app_processes)
         await asyncio.sleep(2)
         cmd = [self.helper_bin, f"--remote-debugging-port={self.port}", *_STABLE_FLAGS]
         self._proc = subprocess.Popen(
@@ -271,6 +255,71 @@ class CDPDoubaoClient:
         )
         log.info("CDPDoubaoClient: Helper started pid=%s port=%d", self._proc.pid, self.port)
         await self._connect_chat()
+
+    # ------------------------------------------------------------------
+    # 内部：App 进程探测 / 清理
+    # ------------------------------------------------------------------
+
+    def _require_main_app_installed(self) -> None:
+        """App 未安装时 Helper（在 App bundle 内）必然也缺失，提前给出可操作
+        提示，而不是白等 30s 后抛难以理解的 FileNotFoundError。"""
+        if not _main_app_installed():
+            raise RuntimeError(
+                "未检测到豆包工作 App（DoubaoWork.app 不存在）。"
+                "请先安装豆包工作并完成登录后重试。"
+            )
+
+    def _launch_main_app(self) -> bool:
+        """``open -a DoubaoWork --args --remote-debugging-port=<port>``。
+
+        返回是否可能拉起成功；``open`` 自身报错（App 未注册等）时为 False。
+        """
+        try:
+            r = subprocess.run(
+                ["open", "-a", "DoubaoWork", "--args",
+                 f"--remote-debugging-port={self.port}"],
+                capture_output=True,
+                timeout=10,
+            )
+        except Exception as e:  # noqa: BLE001 - 任何拉起异常都走兜底
+            log.warning("CDPDoubaoClient: 主 App 拉起异常（%s）", e)
+            return False
+        if r.returncode != 0:
+            detail = (r.stderr or b"").decode("utf-8", "replace").strip()
+            log.warning("CDPDoubaoClient: 主 App 拉起失败（%s）", detail or r.returncode)
+            return False
+        return True
+
+    async def _wait_cdp_ready(self, timeout: float = _MAIN_APP_CDP_WAIT_S) -> bool:
+        """等 App 把调试端口拉起来（App 冷启动要先拉起内嵌 Chromium）。"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            await asyncio.sleep(1)
+            if await asyncio.to_thread(self._probe_cdp):
+                return True
+        return False
+
+    @staticmethod
+    def _main_app_running() -> bool:
+        """豆包主 App 进程是否在运行（pgrep 不可用时按「在跑」处理，宁可不启动
+        也不抢用户 App 的锁）。"""
+        try:
+            return subprocess.run(
+                ["pgrep", "-f", APP_BIN_PATTERN],
+                capture_output=True,
+            ).returncode == 0
+        except OSError:
+            return True
+
+    @staticmethod
+    def _kill_app_processes() -> None:
+        """清理 App 身份启动残留的 Helper / 主 App 进程（精确路径匹配）。"""
+        try:
+            subprocess.run(
+                ["pkill", "-KILL", "-f", _APP_PROCESS_PATTERN], check=False
+            )
+        except OSError:
+            pass
 
     async def stop(self) -> None:
         if self._ws:
