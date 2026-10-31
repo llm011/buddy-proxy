@@ -377,10 +377,7 @@ class CDPDoubaoClient:
             pids,
         )
         for pid in pids:
-            try:
-                subprocess.run(["kill", "-9", str(pid)], check=False)
-            except OSError:
-                pass
+            self._kill_process_tree(pid)
         # 等进程真正退出，否则锁文件可能被它重建
         for _ in range(20):
             if not self._bare_helper_pids():
@@ -389,8 +386,88 @@ class CDPDoubaoClient:
         self._clear_singleton_files()
 
     @staticmethod
-    def _clear_singleton_files() -> None:
-        """删掉指向已死 pid 的单例锁（这是 App 起不来的直接原因）。"""
+    def _kill_process_tree(pid: int) -> None:
+        """杀掉 ``pid`` 及其所有后代。
+
+        裸 Helper 是 Chromium：主进程被杀后，renderer / network 子进程仍可能
+        继续持有 ``127.0.0.1:<port>`` 的 LISTEN，导致回收完 ``_probe_cdp()``
+        依然为 True，``start()`` 又去「复用」一个半死的 CDP。所以必须整棵树
+        一起收掉（先收子进程，避免它们被 init 收养后找不到 ppid 关系）。
+        """
+        # 先递归收集后代，再从最深的开始杀
+        order: list[int] = []
+
+        def _collect(parent: int) -> None:
+            try:
+                r = subprocess.run(
+                    ["pgrep", "-P", str(parent)], capture_output=True
+                )
+            except OSError:
+                return
+            if r.returncode != 0:
+                return
+            for tok in (r.stdout or b"").decode("utf-8", "replace").split():
+                try:
+                    child = int(tok)
+                except ValueError:
+                    continue
+                _collect(child)
+                order.append(child)
+
+        _collect(pid)
+        for target in order + [pid]:
+            try:
+                subprocess.run(["kill", "-9", str(target)], check=False)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _lock_owner_pid(path: pathlib.Path) -> int | None:
+        """解析 ``SingletonLock`` 指向的 pid（形如 ``<host>-<pid>``）。"""
+        try:
+            target = path.readlink().name
+        except OSError:
+            return None
+        tail = target.rsplit("-", 1)[-1]
+        try:
+            return int(tail)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        """``kill -0`` 探活：进程存在（含僵尸）即可，不发送信号。
+
+        注意 ``kill -0`` 的 rc 不能直接当「存活」用：进程属于别的用户时
+        返回 1 且 stderr 是 ``Operation not permitted``——那是**权限**拒绝，
+        进程明明活着。只有 ``No such process`` 才算真死。把 EPERM 误判成
+        死亡，就会去删一个活着的 App 的锁（正是上一版的问题）。
+        """
+        try:
+            r = subprocess.run(["kill", "-0", str(pid)], capture_output=True)
+        except OSError:
+            return False
+        if r.returncode == 0:
+            return True
+        err = (r.stderr or b"").decode("utf-8", "replace").lower()
+        # ESRCH = 不存在；其余（EPERM 等）都说明进程还在
+        return "no such process" not in err
+
+    @classmethod
+    def _clear_singleton_files(cls) -> None:
+        """删掉**指向已死 pid** 的单例锁（这才是 App 起不来的直接原因）。
+
+        绝不无条件删：``SingletonSocket`` / ``SingletonCookie`` 是 App 活着时
+        正在用的 IPC 通道，误删会打断它。所以 ``SingletonLock`` 先读属主 pid，
+        只有那个 pid 不在了才清；socket/cookie 只在锁确实被清掉时才跟着清。
+        """
+        lock = _PROFILE_DIR / "SingletonLock"
+        owner = cls._lock_owner_pid(lock) if lock.is_symlink() else None
+        if owner is not None and cls._pid_alive(owner):
+            log.info(
+                "CDPDoubaoClient: 单例锁属主 pid=%s 仍存活，保持不动", owner
+            )
+            return
         for name in _SINGLETON_FILES:
             p = _PROFILE_DIR / name
             try:
