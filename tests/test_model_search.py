@@ -9,19 +9,16 @@ import subprocess
 
 import pytest
 
-CHARTS_JS = (
-    pathlib.Path(__file__).resolve().parents[1]
-    / "src/buddy_proxy/web/static/charts.js"
-)
+_STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
+STATE_JS = _STATIC / "chart_models.js"
+RENDER_JS = _STATIC / "chart_log.js"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"
 )
 
 # 两段切片：折叠/搜索状态与监听器（toggleGroup、setAllGroups 在内） + 渲染函数本体
-STATE_RE = re.compile(
-    r"let COLLAPSED = new Set\(\);.*?(?=\n// 打卡日历悬停 tooltip)", re.S
-)
+STATE_RE = re.compile(r"\A.*\Z", re.S)
 RENDER_RE = re.compile(r"function renderGroups\(\) \{.*?(?=\nlet RECENT_PAGE)", re.S)
 # 复制 helper 本体（_copyBtnHtml / copyModelName）：单独切片，测试里不替身，
 # 这样「回写的文案是不是模板常量」才是真代码在跑
@@ -45,9 +42,10 @@ MODELS = {
 
 def _run_search_js(body: str, collapsed: list[str] | None = None,
                    with_copy: bool = False) -> dict:
-    text = CHARTS_JS.read_text(encoding="utf-8")
-    state, render = STATE_RE.search(text), RENDER_RE.search(text)
-    copy = COPY_RE.search(text)
+    text = STATE_JS.read_text(encoding="utf-8")
+    render_text = RENDER_JS.read_text(encoding="utf-8")
+    state, render = STATE_RE.search(text), RENDER_RE.search(render_text)
+    copy = COPY_RE.search(render_text)
     assert state and render, "charts.js 里找不到模型分组搜索/渲染切片"
     if with_copy:
         assert copy, "charts.js 里找不到复制 helper 切片"

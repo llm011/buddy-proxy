@@ -122,7 +122,7 @@ def test_charts_js_prefers_account_name():
     from pathlib import Path
 
     js = (Path(__file__).resolve().parents[1] / "src" / "buddy_proxy" / "web"
-          / "static" / "charts.js").read_text(encoding="utf-8")
+          / "static" / "chart_log.js").read_text(encoding="utf-8")
     assert "r.account_name || r.account" in js, "展示优先用解析出的账号名"
     assert "账号 id：" in js, "有解析名时 hover 应展示原始 id（对账用）"
     assert 'class="muted acct-name"' in js, "长 alias（rename 允许 64 字符）要限宽省略"

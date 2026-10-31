@@ -31,14 +31,14 @@ import pytest
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
 # 2026-10 前端按职责拆分（benefits.js 超 700 行）：ANTIGRAVITY 面板段挪到
 # benefits_panels.js，KIMI 面板段挪到 benefits_checkin.js。这里分两个文件提取拼接。
-BENEFITS_JS_AG = _STATIC / "benefits_panels.js"     # ANTIGRAVITY 段
-BENEFITS_JS_KIMI = _STATIC / "benefits_checkin.js"  # KIMI 段（含导入）
+BENEFITS_JS_AG = _STATIC / "benefits_antigravity.js"  # ANTIGRAVITY 段
+BENEFITS_JS_KIMI = _STATIC / "benefits_kimi.js"       # KIMI 段（含导入）
 HELPERS_JS = _STATIC / "benefits_accounts.js"       # 公共件（✎ 改名等，面板段引用）
 # KIMI 段复用 ANTIGRAVITY 段的组件（confirmAccountDelete / ACCT_CONFIRM_OPEN），
 # 但两段在文件里不相邻：traepat 段挪到 benefits_panels.js 开头，KIMI 段挪到
 # benefits_checkin.js 末尾，中间隔着 QODER 段——分两段提取拼接。
 # ANTIGRAVITY 段尾：后随 QODER 面板段头。
-SEG_AG = re.compile(r"// ---- ANTIGRAVITY 面板.*?(?=\n// ---- QODER 面板)", re.S)
+SEG_AG = re.compile(r"// ---- ANTIGRAVITY 面板.*$", re.S)
 SEG_KIMI = re.compile(r"// ---- KIMI 面板.*$", re.S)
 
 pytestmark = pytest.mark.skipif(

@@ -31,9 +31,9 @@ _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/sta
 # 2026-10 前端按职责拆分（benefits.js 超 700 行）：公共多账号 helper 抽到
 # benefits_accounts.js（confirmAccountDelete 单例 + __acctDelYes），
 # ANTIGRAVITY 面板段挪到 benefits_panels.js（下一段是 QODER 面板段头）。
-BENEFITS_JS = _STATIC / "benefits_panels.js"
+BENEFITS_JS = _STATIC / "benefits_antigravity.js"
 HELPERS_JS = _STATIC / "benefits_accounts.js"
-SEG_RE = re.compile(r"// ---- ANTIGRAVITY 面板.*?(?=\n// ---- QODER 面板)", re.S)
+SEG_RE = re.compile(r"// ---- ANTIGRAVITY 面板.*$", re.S)
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑面板 JS（CI 有，本机可选）"

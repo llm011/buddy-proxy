@@ -1,8 +1,8 @@
 """管理 UI：页面与前端静态文件的 serve。
 
 页面源码在 ``web/static/``：index.html（骨架）+ style.css + 前端 JS
-（app.js / benefits.js / charts.js）。仍是零依赖、无外链 CDN——拆成
-多文件只是为了源码可维护，serve 时一一显式路由（白名单，不做目录
+（公共 helper / 图表 / 模型与顺序 / 通道面板 / 启动入口）。仍是零依赖、
+无外链 CDN——拆成多文件只是为了源码可维护，serve 时一一显式路由（白名单，不做目录
 遍历式的 StaticFiles mount）。
 """
 
@@ -20,15 +20,17 @@ _STATIC = Path(__file__).resolve().parent.parent / "static"
 # 白名单静态文件 → Content-Type。页面随代码更新，一律 no-cache。
 _STATIC_FILES = {
     "style.css": "text/css; charset=utf-8",
-    "app.js": "text/javascript; charset=utf-8",
-    "benefits.js": "text/javascript; charset=utf-8",
-    "benefits_accounts.js": "text/javascript; charset=utf-8",
-    "benefits_checkin.js": "text/javascript; charset=utf-8",
-    "benefits_panels.js": "text/javascript; charset=utf-8",
-    "benefits_quota.js": "text/javascript; charset=utf-8",
-    "benefits_nav.js": "text/javascript; charset=utf-8",
-    "benefits_dumate.js": "text/javascript; charset=utf-8",
-    "charts.js": "text/javascript; charset=utf-8",
+    **{name: "text/javascript; charset=utf-8" for name in (
+        "ui_format.js", "ui_api.js",
+        "benefits_accounts.js", "benefits_checkin.js", "benefits_kimi.js",
+        "benefits_codex.js", "benefits_panels.js", "benefits_antigravity.js",
+        "benefits_qoder.js", "benefits_trae.js", "benefits_codebuddy.js",
+        "benefits_quota.js", "benefits_nav.js", "benefits_dumate.js", "benefits.js",
+        "chart_tooltips.js", "charts.js", "chart_models.js", "chart_credits.js",
+        "chart_latency.js", "chart_log.js", "chart_mix.js",
+        "app_state.js", "app_model_actions.js", "app_order.js", "app_order_rows.js",
+        "app.js", "app_run_test.js",
+    )},
 }
 
 

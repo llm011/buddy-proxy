@@ -24,11 +24,10 @@ import subprocess
 import pytest
 
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
-BENEFITS_JS = _STATIC / "benefits_panels.js"
+BENEFITS_JS = _STATIC / "benefits_qoder.js"
 HELPERS_JS = _STATIC / "benefits_accounts.js"   # 公共件（confirmAccountDelete/acctRename*）
 BENEFITS_CORE = _STATIC / "benefits_quota.js"   # quotaHeadSum 定义在这
-APP_JS = _STATIC / "app.js"                     # fmtNum
-SEG_QODER = re.compile(r"// ---- QODER 面板.*$", re.S)
+APP_JS = _STATIC / "ui_format.js"               # fmtNum
 SEG_HEAD_SUM = re.compile(r"function quotaHeadSum\(q\) \{.*?\n\}", re.S)
 SEG_FMT_NUM = re.compile(r"function fmtNum\(n\) \{.*?\n\}", re.S)
 
@@ -80,8 +79,7 @@ globalThis.document = {
 
 def _run_js(body: str) -> str:
     panels = BENEFITS_JS.read_text(encoding="utf-8")
-    m = SEG_QODER.search(panels)
-    assert m, "benefits_panels.js 里找不到 QODER 面板段（边界注释被改了？）"
+    assert "function renderQoderPanel" in panels and "function renderQoderIntlPanel" in panels
     head = SEG_HEAD_SUM.search(BENEFITS_CORE.read_text(encoding="utf-8"))
     fmt = SEG_FMT_NUM.search(APP_JS.read_text(encoding="utf-8"))
     assert head and fmt, "抽不到 quotaHeadSum / fmtNum（定义被改了？）"
@@ -90,7 +88,7 @@ def _run_js(body: str) -> str:
         + fmt.group(0) + "\n"                 # quotaHeadSum 依赖
         + head.group(0) + "\n"                # 真函数：面板段的调用点一起被验
         + HELPERS_JS.read_text(encoding="utf-8")
-        + m.group(0)
+        + panels
         + "\n(async () => {\n" + body
         + "\n})().catch(e => { console.error(e); process.exit(1); });\n"
     )

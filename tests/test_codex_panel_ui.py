@@ -28,11 +28,12 @@ import pytest
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
 # CODEX 面板段在 benefits_checkin.js 末尾（KIMI 段之后）；组件复用 KIMI 段与
 # ANTIGRAVITY 段（confirmAccountDelete / ACCT_CONFIRM_OPEN），三段拼接执行。
-BENEFITS_JS_AG = _STATIC / "benefits_panels.js"
-BENEFITS_JS_CHECKIN = _STATIC / "benefits_checkin.js"
+BENEFITS_JS_AG = _STATIC / "benefits_antigravity.js"
+BENEFITS_JS_KIMI = _STATIC / "benefits_kimi.js"
+BENEFITS_JS_CODEX = _STATIC / "benefits_codex.js"
 HELPERS_JS = _STATIC / "benefits_accounts.js"
-SEG_AG = re.compile(r"// ---- ANTIGRAVITY 面板.*?(?=\n// ---- QODER 面板)", re.S)
-SEG_KIMI = re.compile(r"// ---- KIMI 面板.*?(?=\n// ---- CODEX 面板)", re.S)
+SEG_AG = re.compile(r"// ---- ANTIGRAVITY 面板.*$", re.S)
+SEG_KIMI = re.compile(r"// ---- KIMI 面板.*$", re.S)
 SEG_CODEX = re.compile(r"// ---- CODEX 面板.*$", re.S)
 
 pytestmark = pytest.mark.skipif(
@@ -90,10 +91,11 @@ globalThis.document = {
 
 def _run_js(body: str) -> str:
     text_ag = BENEFITS_JS_AG.read_text(encoding="utf-8")
-    text_ci = BENEFITS_JS_CHECKIN.read_text(encoding="utf-8")
+    text_kimi = BENEFITS_JS_KIMI.read_text(encoding="utf-8")
+    text_codex = BENEFITS_JS_CODEX.read_text(encoding="utf-8")
     ag = SEG_AG.search(text_ag)
-    kimi = SEG_KIMI.search(text_ci)
-    codex = SEG_CODEX.search(text_ci)
+    kimi = SEG_KIMI.search(text_kimi)
+    codex = SEG_CODEX.search(text_codex)
     assert ag and kimi and codex, "找不到 ANTIGRAVITY/KIMI/CODEX 面板段（边界注释被改了？）"
     script = (
         _STUB

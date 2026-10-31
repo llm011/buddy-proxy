@@ -174,7 +174,7 @@ def _ui_source(client) -> str:
     把两处拼起来，保持测试语义不变。
     """
     text = client.get("/ui").text
-    for name in ("benefits.js", "charts.js", "app.js"):
+    for name in re.findall(r'<script src="/ui/([^"]+\.js)"></script>', text):
         r = client.get(f"/ui/{name}")
         assert r.status_code == 200, f"{name} 未正常 serve: {r.status_code}"
         text += "\n" + r.text

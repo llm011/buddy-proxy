@@ -8,6 +8,12 @@ import pathlib
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
 CORE = (_STATIC / "benefits.js").read_text(encoding="utf-8")
 PANELS = (_STATIC / "benefits_panels.js").read_text(encoding="utf-8")
+ANTIGRAVITY = (_STATIC / "benefits_antigravity.js").read_text(encoding="utf-8")
+TRAE = (_STATIC / "benefits_trae.js").read_text(encoding="utf-8")
+PANELS_ALL = "".join((_STATIC / name).read_text(encoding="utf-8") for name in (
+    "benefits_panels.js", "benefits_antigravity.js", "benefits_qoder.js",
+    "benefits_trae.js", "benefits_codebuddy.js", "benefits_kimi.js", "benefits_codex.js",
+))
 CHECKIN = (_STATIC / "benefits_checkin.js").read_text(encoding="utf-8")
 ACCOUNTS = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
 DUMATE = (_STATIC / "benefits_dumate.js").read_text(encoding="utf-8")
@@ -15,7 +21,7 @@ DUMATE = (_STATIC / "benefits_dumate.js").read_text(encoding="utf-8")
 
 def test_every_dedicated_panel_header_has_provider_refresh():
     """专属面板的 ↻ 全在渠道标题，一次刷新整个 provider。"""
-    combined = CORE + PANELS + CHECKIN + DUMATE
+    combined = CORE + PANELS_ALL + CHECKIN + DUMATE
     for provider in (
         "traepat", "antigravity", "qoder", "qoderintl", "trae", "traeintl",
         "codebuddy", "codebuddyintl", "kimi", "dumate",
@@ -30,13 +36,13 @@ def test_account_rows_do_not_duplicate_quota_refresh():
     helper = ACCOUNTS[ACCOUNTS.index("function acctRowButtons"):]
     helper = helper[:helper.index("function groupAccountsByPrefix")]
     assert "refreshProviderQuota" not in helper
-    assert "${refreshBtn}" not in PANELS
+    assert "${refreshBtn}" not in PANELS_ALL
     assert "${refreshBtn}" not in CHECKIN
 
 
 def test_refresh_uses_returned_snapshot_without_second_get():
     """refresh POST 已给完整快照时直接重绘；旧服务响应才回退强制 GET。"""
-    fn = PANELS[PANELS.index("async function refreshProviderQuota"):]
+    fn = ANTIGRAVITY[ANTIGRAVITY.index("async function refreshProviderQuota"):]
     fn = fn[:fn.index("function renderAntigravityPanel")]
     assert "Array.isArray(snapshot.providers)" in fn
     assert "BENEFITS = snapshot" in fn
@@ -51,8 +57,7 @@ def test_traeintl_has_dedicated_quota_panel_and_explains_no_checkin():
     assert "renderTraeIntlPanel()" in CORE
     assert "p.id !== 'traeintl'" in CORE, "专属面板存在时通用额度卡必须排除，避免重复"
 
-    panel = PANELS[PANELS.index("function renderTraeIntlPanel"):]
-    panel = panel[:panel.index("// ---- CODEBUDDY 面板")]
+    panel = TRAE[TRAE.index("function renderTraeIntlPanel"):]
     assert "p.id === 'traeintl'" in panel
     assert "providerRefreshButton('traeintl')" in panel
     assert "海外版无每日签到" in panel
@@ -68,6 +73,5 @@ def test_checkin_rows_skip_unsupported_providers():
     # 旧的 traeintl 特殊说明行已删
     assert "海外版无每日签到" not in core
     # 专属额度面板里的说明仍在（展示职责移到那里）
-    panel = PANELS[PANELS.index("function renderTraeIntlPanel"):]
-    panel = panel[:panel.index("// ---- CODEBUDDY 面板")]
+    panel = TRAE[TRAE.index("function renderTraeIntlPanel"):]
     assert "海外版无每日签到" in panel

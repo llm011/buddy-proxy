@@ -48,6 +48,18 @@
       <div class="chart-card"><div id="chart-models"></div></div>
     </div>
 
+    <h2>积分消耗 <span class="sub" id="credits-sub">实扣 + 估算（半透明段）；只含上报单次消耗的通道</span></h2>
+    <div class="grid2">
+      <div class="chart-card">
+        <div class="benefit-head"><span class="bh-title">按天堆叠趋势</span><span class="muted" style="font-size:12px">实色：上游实扣 · 半透明：本地估算</span></div>
+        <div id="chart-credits-daily"></div>
+      </div>
+      <div class="chart-card">
+        <div class="benefit-head"><span class="bh-title">按渠道汇总</span><span class="muted" style="font-size:12px">当前日期范围合计</span></div>
+        <div id="chart-credits-providers"></div>
+      </div>
+    </div>
+
     <h2>模型平均耗时 <span class="sub" id="latency-sub">各通道下模型并列对比（点下方图例可只看某模型）</span></h2>
     <div class="chart-card"><div id="chart-latency"></div><div class="legend" id="legend-latency"></div></div>
   </section>
@@ -189,14 +201,33 @@
 <div id="toast"></div>
 <div id="cal-tip"></div>
 <div id="chart-tip"></div>
+<script src="/ui/ui_format.js"></script>
+<script src="/ui/ui_api.js"></script>
 <script src="/ui/benefits_accounts.js"></script>
 <script src="/ui/benefits_checkin.js"></script>
+<script src="/ui/benefits_kimi.js"></script>
+<script src="/ui/benefits_codex.js"></script>
 <script src="/ui/benefits_panels.js"></script>
+<script src="/ui/benefits_antigravity.js"></script>
+<script src="/ui/benefits_qoder.js"></script>
+<script src="/ui/benefits_trae.js"></script>
+<script src="/ui/benefits_codebuddy.js"></script>
 <script src="/ui/benefits_quota.js"></script>
 <script src="/ui/benefits_nav.js"></script>
 <script src="/ui/benefits_dumate.js"></script>
 <script src="/ui/benefits.js"></script>
+<script src="/ui/chart_tooltips.js"></script>
 <script src="/ui/charts.js"></script>
+<script src="/ui/chart_models.js"></script>
+<script src="/ui/chart_credits.js"></script>
+<script src="/ui/chart_latency.js"></script>
+<script src="/ui/chart_log.js"></script>
+<script src="/ui/chart_mix.js"></script>
+<script src="/ui/app_state.js"></script>
+<script src="/ui/app_model_actions.js"></script>
+<script src="/ui/app_order.js"></script>
+<script src="/ui/app_order_rows.js"></script>
 <script src="/ui/app.js"></script>
+<script src="/ui/app_run_test.js"></script>
 </body>
 </html>
