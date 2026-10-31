@@ -359,7 +359,7 @@ def test_render_benefits_calls_the_banner():
     """renderBenefits 必须真的调 renderExpiryBanner——helper 写得再对，
     没接上去界面就还是老样子（横幅永远不出现）。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
-    body = text[text.index("function renderBenefits()"):]
+    body = text[text.index("function renderBenefits(opts)"):]
     body = body[:body.index("\n}\n")]
     assert "renderExpiryBanner()" in body, "renderBenefits 没调用横幅渲染"
 

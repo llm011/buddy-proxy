@@ -453,6 +453,6 @@ def test_all_three_panels_use_the_fold_helper():
 def test_render_benefits_syncs_after_rebuild():
     """重建完要调一次校准——不调的话 clipped / 按钮状态永远停在初始值。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
-    body = text[text.index("function renderBenefits()"):]
+    body = text[text.index("function renderBenefits(opts)"):]
     body = body[:body.index("\n}\n")]
     assert "syncQuotaFold()" in body, "renderBenefits 没调 syncQuotaFold"

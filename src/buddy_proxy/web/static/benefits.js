@@ -136,8 +136,17 @@ function renderExpiryBanner() {
 }
 
 // ---- 打卡日历 + 自动打卡 + 各通道额度 ----
-function renderBenefits() {
+// opts.quiet：静默重绘（签到强刷用 POST 返回的快照重画时走这条）。只换签到区
+// ——签到行 / 日历 / 到期横幅 / 下方通用额度卡 / 角标——不重建各通道的
+// 「多账号」面板和侧边导航：整块重写会让正在点的按钮失效，而且每个面板重渲
+// 尾部都会再拉一发 accounts，一次强刷就刮出一串请求（2026-11-01 用户实报）。
+// 静默期间账号加载器只就地回填（acctNoRerender），已渲染的面板补一次加载器，
+// 让快照里新出现的账号也能把名字/按钮补上——没变就走加载器的早退，不发请求。
+// 非静默路径下 fill<X>Accounts 会整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；
+// 静默才只回填。
+function renderBenefits(opts) {
   if (!BENEFITS) return;
+  const quiet = !!(opts && opts.quiet);
   renderExpiryBanner();
   document.getElementById('auto-checkin').checked = !!BENEFITS.auto_checkin;
   document.getElementById('checkin-time').value = BENEFITS.checkin_time || '09:30';
@@ -276,6 +285,14 @@ function renderBenefits() {
         ${headSum}<span style="flex:1"></span>${providerRefreshButton(p.id)}
       </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
+  if (quiet) {
+    // 上面已把签到区和通用额度卡换成新快照；各通道面板原样留着，只补角标和
+    // 账号回填，然后收工
+    syncQuotaFold();
+    refreshBenefitsBadge();
+    loadAllAccounts();
+    return;
+  }
   renderCodebuddyPanel();
   renderCodebuddyIntlPanel();
   renderTraePanel();
@@ -289,6 +306,47 @@ function renderBenefits() {
   renderDumatePanel();
   syncQuotaFold();  // 样式与布局就位后按实际高度校准（各面板都已重建完）
   renderBenefitsNav();
+}
+
+// 打卡页签角标（「✓ 已签」/「未签 N」）。原先内联在 app.js 的 render() 里，
+// 静默重绘不整页 render 时也得跟着快照更新，挪过来单独一个函数。
+function refreshBenefitsBadge() {
+  if (!BENEFITS) return;
+  const el = document.getElementById('cnt-benefits');
+  if (!el) return;
+  const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
+  if (!ck.length) { el.textContent = ''; return; }
+  const pending = ck.filter(p => !p.checkin.done_today && !p.checkin.inactive && !p.checkin.error);
+  if (!pending.length) { el.textContent = '✓ 已签'; el.className = 'cnt ok'; }
+  else { el.textContent = `未签 ${pending.length}`; el.className = 'cnt warn'; }
+}
+
+// 各通道账号快照加载器登记表（键 = 通道 pid）。loadAllAccounts 只对「当前
+// 已经渲染出来」的面板补一发——静默重绘后快照里出现的账号能就地补上名字和
+// 按钮；数据没变的话加载器自己早退，不发请求。
+const ACCT_LOADERS = {
+  antigravity: () => loadAntigravityAccounts(),
+  qoder: () => loadQoderAccounts(),
+  qoderintl: () => loadQoderIntlAccounts(),
+  trae: () => loadTraeAccounts(),
+  codebuddy: () => loadCodebuddyAccounts(),
+  codebuddyintl: () => loadCodebuddyIntlAccounts(),
+  kimi: () => loadKimiAccounts(),
+  codex: () => loadCodexAccounts(),
+  dumate: () => loadDumateAccounts(),
+};
+
+/** 静默地把已渲染面板的账号快照对一遍（打开静默开关：期间加载器只就地回填，
+ *  不许整卡重渲）。各加载器自带 catch，这里 Promise.all 只防漏网。 */
+function loadAllAccounts() {
+  ACCT_NO_RERENDER = true;
+  const jobs = [];
+  for (const pid of Object.keys(ACCT_LOADERS)) {
+    const panel = document.getElementById(`${pid}-panel`);
+    if (!panel || !panel.innerHTML.trim()) continue;
+    jobs.push(Promise.resolve().then(ACCT_LOADERS[pid]).catch(() => {}));
+  }
+  return Promise.all(jobs).finally(() => { ACCT_NO_RERENDER = false; });
 }
 
 // ---- 额度页侧边导航 ----
@@ -706,12 +764,32 @@ async function loadDumateStatus() {
   }
 }
 
+// dumate 的就地回填（acctLoad 的第二拍与静默重绘路径的 cfg.fill）：账号名 +
+// 副标题按「.pat-pkg-name 紧后兄弟 data-dumate-sub」定位——renderDumatePanel
+// 用同一套输出，两条路径结构一致。
+function fillDumateAccounts() {
+  const list = DUMATE_STATE.accts || [];
+  for (const a of list) {
+    const el = (list.length === 1)
+      ? document.querySelector('#dumate-panel .pat-pkg-name')
+      : document.querySelector(`#dumate-panel [data-dumate-idx="${a.index}"]`);
+    if (!el) continue;
+    el.textContent = a.display_name || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-dumate-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = acctSubHtml(a, _dumate_sub_extra, 'data-dumate-sub');
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  }
+}
+
 const loadDumateAccounts = acctLoad(
   {
     pid: 'dumate',
     nameOf: a => a.display_name || a.id,
     subExtra: _dumate_sub_extra,
     render: renderDumatePanel,
+    fill: fillDumateAccounts,
   },
   DUMATE_STATE,
 );

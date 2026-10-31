@@ -237,11 +237,34 @@ function accountGroupBound(groups, prefix) {
     .map(g => g.match(re)).filter(Boolean).map(mm => Number(mm[1])), 1);
 }
 
+// ---- 账号加载去重 + 静默开关（强刷签到只该刷签到，别刮一串 accounts）----
+// 同一通道的账号加载在飞时复用同一发请求：30s 轮询 + 整页重绘叠加，原来每个通道
+// 会并排发好几发一模一样的 GET。键是通道 pid，单位是「整条加载器」（不只 GET），
+// 这样借到的 promise 落定时快照数组、面板回填也都已经做完。
+const ACCT_INFLIGHT = new Map();  // pid -> Promise（整条加载器）
+// 静默重绘期间为 true（强刷签到用快照重绘）：各加载器不许整卡重渲，只就地回填，
+// 否则会把刚画好的签到区/别处 DOM 冲掉。
+let ACCT_NO_RERENDER = false;
+function acctNoRerender(pid) { return ACCT_NO_RERENDER; }
+
+function acctFetch(pid, fn) {
+  const inflight = ACCT_INFLIGHT.get(pid);
+  if (inflight) return inflight;
+  const p = Promise.resolve().then(fn)
+    .finally(() => { if (ACCT_INFLIGHT.get(pid) === p) ACCT_INFLIGHT.delete(pid); });
+  ACCT_INFLIGHT.set(pid, p);
+  return p;
+}
+
 /** 账号快照回填（通用 load）。行为：enabled=false 清快照；数据没变不动 DOM（避免 30s
  *  轮询闪回内部代号）；首份快照整卡重渲（直出账号名 + 带 id 按钮）并 syncQuotaFold；
- *  之后就地回填（换组名 + 重写副标题）并 syncQuotaFold。acctFor(idx) 按快照取账号。 */
+ *  之后就地回填（换组名 + 重写副标题）并 syncQuotaFold。acctFor(idx) 按快照取账号。
+ *  走 acctFetch 去重；返回的 promise 在本拍加载**开始**时就拿到（数据已同步的通道
+ *  会早早落定，接着调用的加载器这时自己再发起）——别把 acctFetch 包在 async
+ *  里再 await，那样返回的 promise 要等下一个微任务才存在，复用不了。
+ *  静默重绘期间首份快照也只就地回填。 */
 function acctLoad(cfg, state) {
-  return (async function() {
+  return acctFetch(cfg.pid, () => (async function() {
     try {
       const r = await api(`/ui/api/${cfg.pid}/accounts`);
       if (!r.enabled) { state.accts = []; return; }
@@ -251,27 +274,19 @@ function acctLoad(cfg, state) {
       state.accts = list;
       if (!list.length) return;
       if (snapshotMissing) {
-        cfg.render();
+        // 静默重绘期间（强刷签到只换签到区）别整卡重渲——会冲掉别处 DOM，
+        // 改就地回填
+        if (acctNoRerender(cfg.pid)) cfg.fill();
+        else cfg.render();
         syncQuotaFold();
         return;
       }
-      for (const a of list) {
-        const el = (list.length === 1)
-          ? document.querySelector(`#${cfg.pid}-panel .pat-pkg-name`)
-          : document.querySelector(`#${cfg.pid}-panel [data-${cfg.pid}-idx="${a.index}"]`);
-        if (!el) continue;
-        el.textContent = cfg.nameOf(a);
-        if (el.nextElementSibling && el.nextElementSibling.hasAttribute(`data-${cfg.pid}-sub`)) {
-          el.nextElementSibling.remove();
-        }
-        const sub = acctSubHtml(a, cfg.subExtra, `data-${cfg.pid}-sub`);
-        if (sub) el.insertAdjacentHTML('afterend', sub);
-      }
+      cfg.fill();
       syncQuotaFold();
     } catch (e) {
       // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
     }
-  });
+  })());
 }
 
 function acctFor(state, idx) {

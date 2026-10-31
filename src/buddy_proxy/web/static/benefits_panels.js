@@ -69,7 +69,8 @@ async function loadTraepatAccounts() {
   const errorBox = document.getElementById('traepat-account-error');
   if (!panel) return;
   try {
-    const r = await api('/ui/api/traepat/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('traepat', () => api('/ui/api/traepat/accounts'));
     if (!r.enabled) { panel.innerHTML = ''; return; }
     const tokenText = t => t === 'ok' ? 'token 正常' : t === 'expiring' ? 'token 临期' : '无 token';
     for (const [i, a] of (r.accounts || []).entries()) {
@@ -184,6 +185,8 @@ async function agMoveAccount(idx, delta, id) {
   try {
     // 按钮随额度数据先到、账号状态可能还没回：按需补一次快照再算全量 id
     if (!AG_ACCTS) {
+      // 这里**不走** acctFetch：加载器整个在飞去重，借到的可能是重排前那趟，
+      // 拿旧顺序去算下一位次就挪错人了
       const r0 = await api('/ui/api/antigravity/accounts');
       AG_ACCTS = r0.accounts || [];
     }
@@ -357,9 +360,50 @@ function renderAntigravityPanel() {
   loadAntigravityAccounts();
 }
 
+// fillAntigravityAccounts：账号快照的就地回填（首份快照后的变化、以及静默重绘路径都用它）。
+// 就地回填：组名换成邮箱、组名后插副标题。多账号按 data-ag-idx 对应；
+// 单账号组名没有前缀（后端 label 不加），唯一 .pat-pkg-name 直接替换。
+// 名字旁边的按钮组（✎/▲▼/✕）也按账号重建：✕/✎ 要账号 id、▲▼ 把 id 内联在
+// onclick 里——快照（id、顺位）一变，旧按钮就指错人。
+function fillAntigravityAccounts(accts) {
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderAntigravityPanel === 'function') {
+    renderAntigravityPanel();
+    return;
+  }
+  return _fillAntigravityAccounts(accts);
+}
+
+function _fillAntigravityAccounts(accts) {
+  // 界标 n 与 renderAntigravityPanel 同口径：全部「AG #N」序号的最大值
+  const n = Math.max(...accts.map(a => Number(a.index) || 0), accts.length, 1);
+  for (const a of accts) {
+    const el = (accts.length === 1)
+      ? document.querySelector('#antigravity-panel .pat-pkg-name')
+      : document.querySelector(`#antigravity-panel [data-ag-idx="${a.index}"]`);
+    if (!el) continue;
+    el.textContent = a.alias || a.email;
+    // 副标题总是重写：状态变了（冷却结束消失）要跟上，不是只防重复插
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-ag-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = _ag_sub_html(a);
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+    const pkg = el.closest('.pat-pkg');
+    const old = pkg && pkg.querySelector(':scope > .ag-move');
+    if (old) old.remove();
+    const moveBtns = (n > 1) ? _ag_move_btns(a.index, n, a.id) : '';
+    const delBtn = `<button class="ghost danger" title="删除该账号（被 Google 拉黑/不再使用时）" ` +
+      `onclick="agDeleteAccount('${a.id}')">✕</button>`;
+    el.insertAdjacentHTML('beforeend', acctRowButtons('antigravity',
+      acctRenameButton('antigravity', a) + moveBtns, delBtn));
+  }
+}
+
 async function loadAntigravityAccounts() {
   try {
-    const r = await api('/ui/api/antigravity/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('antigravity', () => api('/ui/api/antigravity/accounts'));
     if (!r.enabled) { AG_ACCTS = []; return; }
     const accts = r.accounts || [];
     // 数据没变就不动 DOM——renderAntigravityPanel 已用同一份快照渲染过
@@ -369,31 +413,18 @@ async function loadAntigravityAccounts() {
     if (!accts.length) return;
     if (snapshotMissing) {
       // 首份快照到位（首屏刚开/刚登录）：带着快照整卡重渲——邮箱直出、
-      // ▲▼/✕ 按钮带上账号 id。只靠就地回填不够：回填补不了按钮（✕ 要
-      // id 才能渲），会干等下一轮 30s 重渲才出现。重渲尾部的再拉取数据
-      // 已同、走上面的早退，不会循环。
-      renderAntigravityPanel();
+      // ▲▼/✕ 按钮带上账号 id。重渲尾部的再拉取数据已同、走上面的早退，
+      // 不会循环。
+      // 静默重绘期间（强刷签到只换签到区）别整卡重渲——会冲掉别处 DOM，
+      // 改就地回填；按钮由 fill 一并补上
+      fillAntigravityAccounts(accts);
       // 重渲换了整块 DOM（邮箱、副标题都变了高度），校准要跟着走一次，
       // 否则首屏这次校准要拖到下个 30s 轮询：renderBenefits 末尾那次
       // syncQuotaFold 跑在本函数 await 之前，看不到重渲后的高度。
       syncQuotaFold();
       return;
     }
-    // 就地回填：组名换成邮箱、组名后插副标题。多账号按 data-ag-idx 对应；
-    // 单账号组名没有前缀（后端 label 不加），唯一 .pat-pkg-name 直接替换。
-    for (const a of accts) {
-      const el = (accts.length === 1)
-        ? document.querySelector('#antigravity-panel .pat-pkg-name')
-        : document.querySelector(`#antigravity-panel [data-ag-idx="${a.index}"]`);
-      if (!el) continue;
-      el.textContent = a.alias || a.email;
-      // 副标题总是重写：状态变了（冷却结束消失）要跟上，不是只防重复插
-      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-ag-sub')) {
-        el.nextElementSibling.remove();
-      }
-      const sub = _ag_sub_html(a);
-      if (sub) el.insertAdjacentHTML('afterend', sub);
-    }
+    fillAntigravityAccounts(accts);
     // 就地回填会插入/移除副标题行（高度变了），重新校准一次折叠：
     // 不补这一步，卡在阈值附近的分组会出现「已经裁掉了但按钮不露」。
     syncQuotaFold();
@@ -471,6 +502,8 @@ async function qoderMoveAccount(idx, delta, id) {
   QODER_MOVING = true;
   try {
     if (!QODER_ACCTS) {  // 按钮随额度数据先到、账号状态可能还没回：补一次快照
+      // 这里**不走** acctFetch：加载器整个在飞去重，借到的可能是重排前那趟，
+      // 拿旧顺序去算下一位次就挪错人了
       const r0 = await api('/ui/api/qoder/accounts');
       QODER_ACCTS = r0.accounts || [];
     }
@@ -577,9 +610,35 @@ function renderQoderPanel() {
   loadQoderAccounts();
 }
 
+// fillQoderAccounts：账号快照的就地回填（首份快照后的变化、以及静默重绘路径都用它）。
+// 就地回填：组名换成账号名、组名后插副标题（kimi 同款）。
+// 只回填 CN 账号（面板只显示 CN 额度），位次按区内顺位——与 quota 标签的
+// 「Qoder #N」编号同口径，全球账号排在前面也不串位。
+function fillQoderAccounts(accts) {
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderQoderPanel === 'function') { renderQoderPanel(); return; }
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderQoderPanel === 'function') { renderQoderPanel(); return; }
+  const cnAccts = accts.filter(a => (a.region || 'cn') === 'cn');
+  cnAccts.forEach((a, i) => {
+    const pos = i + 1;
+    const el = (cnAccts.length === 1)
+      ? document.querySelector('#qoder-panel .pat-pkg-name')
+      : document.querySelector(`#qoder-panel [data-qoder-idx="${pos}"]`);
+    if (!el) return;
+    el.textContent = a.alias || a.name || a.email || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-qoder-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = _qoder_sub_html(a);
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  });
+}
+
 async function loadQoderAccounts() {
   try {
-    const r = await api('/ui/api/qoder/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('qoder', () => api('/ui/api/qoder/accounts'));
     if (!r.enabled) { QODER_ACCTS = []; return; }
     const accts = r.accounts || [];
     // 数据没变就不动 DOM——renderQoderPanel 已用同一份快照渲染过
@@ -588,27 +647,12 @@ async function loadQoderAccounts() {
     QODER_ACCTS = accts;
     if (!accts.length) return;
     if (snapshotMissing) {
-      renderQoderPanel();
+      fillQoderAccounts(accts);
       syncQuotaFold();
       return;
     }
-    // 就地回填：组名换成账号名、组名后插副标题（kimi 同款）。
-    // 只回填 CN 账号（面板只显示 CN 额度），位次按区内顺位——与 quota 标签的
-    // 「Qoder #N」编号同口径，全球账号排在前面也不串位。
-    const cnAccts = accts.filter(a => (a.region || 'cn') === 'cn');
-    cnAccts.forEach((a, i) => {
-      const pos = i + 1;
-      const el = (cnAccts.length === 1)
-        ? document.querySelector('#qoder-panel .pat-pkg-name')
-        : document.querySelector(`#qoder-panel [data-qoder-idx="${pos}"]`);
-      if (!el) return;
-      el.textContent = a.alias || a.name || a.email || a.id;
-      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-qoder-sub')) {
-        el.nextElementSibling.remove();
-      }
-      const sub = _qoder_sub_html(a);
-      if (sub) el.insertAdjacentHTML('afterend', sub);
-    });
+    // 就地回填（只回填 CN 账号、按区内顺位，见 fillQoderAccounts）
+    fillQoderAccounts(accts);
     syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
@@ -667,9 +711,32 @@ function renderQoderIntlPanel() {
   loadQoderIntlAccounts();
 }
 
+// fillQoderIntlAccounts：账号快照的就地回填（首份快照后的变化、以及静默重绘路径都用它）。
+// 就地回填：组名换成账号名、组名后插副标题（CN 卡同款）
+function fillQoderIntlAccounts(accts) {
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderQoderIntlPanel === 'function') { renderQoderIntlPanel(); return; }
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderQoderIntlPanel === 'function') { renderQoderIntlPanel(); return; }
+  accts.forEach((a, i) => {
+    const pos = i + 1;
+    const el = (accts.length === 1)
+      ? document.querySelector('#qoderintl-panel .pat-pkg-name')
+      : document.querySelector(`#qoderintl-panel [data-qoderintl-idx="${pos}"]`);
+    if (!el) return;
+    el.textContent = a.alias || a.name || a.email || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-qoder-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = _qoder_sub_html(a, false);
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  });
+}
+
 async function loadQoderIntlAccounts() {
   try {
-    const r = await api('/ui/api/qoder/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('qoderintl', () => api('/ui/api/qoder/accounts'));
     if (!r.enabled) { INTL_ACCTS = []; return; }
     const accts = (r.accounts || []).filter(a => a.region === 'global');
     // 数据没变就不动 DOM——renderQoderIntlPanel 已用同一份快照渲染过
@@ -678,24 +745,11 @@ async function loadQoderIntlAccounts() {
     INTL_ACCTS = accts;
     if (!accts.length) return;
     if (snapshotMissing) {
-      renderQoderIntlPanel();
+      fillQoderIntlAccounts(accts);
       syncQuotaFold();
       return;
     }
-    // 就地回填：组名换成账号名、组名后插副标题（CN 卡同款）
-    accts.forEach((a, i) => {
-      const pos = i + 1;
-      const el = (accts.length === 1)
-        ? document.querySelector('#qoderintl-panel .pat-pkg-name')
-        : document.querySelector(`#qoderintl-panel [data-qoderintl-idx="${pos}"]`);
-      if (!el) return;
-      el.textContent = a.alias || a.name || a.email || a.id;
-      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-qoder-sub')) {
-        el.nextElementSibling.remove();
-      }
-      const sub = _qoder_sub_html(a, false);
-      if (sub) el.insertAdjacentHTML('afterend', sub);
-    });
+    fillQoderIntlAccounts(accts);
     syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
@@ -745,6 +799,8 @@ async function traeMoveAccount(idx, delta, id) {
   TRAE_MOVING = true;
   try {
     if (!TRAE_ACCTS) {  // 按钮随额度数据先到、账号状态可能还没回：补一次快照
+      // 这里**不走** acctFetch：加载器整个在飞去重，借到的可能是重排前那趟，
+      // 拿旧顺序去算下一位次就挪错人了
       const r0 = await api('/ui/api/trae/accounts');
       TRAE_ACCTS = r0.accounts || [];
     }
@@ -871,9 +927,29 @@ function renderTraePanel() {
   loadTraeAccounts();
 }
 
+// fillTraeAccounts：账号快照的就地回填（首份快照后的变化、以及静默重绘路径都用它）。
+// 就地回填：组名换成账号名、组名后插副标题（qoder 同款）
+function fillTraeAccounts(accts) {
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderTraePanel === 'function') { renderTraePanel(); return; }
+  for (const a of accts) {
+    const el = (accts.length === 1)
+      ? document.querySelector('#trae-panel .pat-pkg-name')
+      : document.querySelector(`#trae-panel [data-trae-idx="${a.index}"]`);
+    if (!el) continue;
+    el.textContent = a.alias || a.nickname || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-trae-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = _trae_sub_html(a);
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  }
+}
+
 async function loadTraeAccounts() {
   try {
-    const r = await api('/ui/api/trae/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('trae', () => api('/ui/api/trae/accounts'));
     if (!r.enabled) { TRAE_ACCTS = []; return; }
     const accts = r.accounts || [];
     // 数据没变就不动 DOM——renderTraePanel 已用同一份快照渲染过
@@ -882,23 +958,11 @@ async function loadTraeAccounts() {
     TRAE_ACCTS = accts;
     if (!accts.length) return;
     if (snapshotMissing) {
-      renderTraePanel();
+      fillTraeAccounts(accts);
       syncQuotaFold();
       return;
     }
-    // 就地回填：组名换成账号名、组名后插副标题（qoder 同款）
-    for (const a of accts) {
-      const el = (accts.length === 1)
-        ? document.querySelector('#trae-panel .pat-pkg-name')
-        : document.querySelector(`#trae-panel [data-trae-idx="${a.index}"]`);
-      if (!el) continue;
-      el.textContent = a.alias || a.nickname || a.id;
-      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-trae-sub')) {
-        el.nextElementSibling.remove();
-      }
-      const sub = _trae_sub_html(a);
-      if (sub) el.insertAdjacentHTML('afterend', sub);
-    }
+    fillTraeAccounts(accts);
     syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
@@ -1006,6 +1070,8 @@ async function codebuddyMoveAccount(idx, delta, id) {
   CODEBUDDY_MOVING = true;
   try {
     if (!CODEBUDDY_ACCTS) {  // 按钮随额度数据先到、账号状态可能还没回：补一次快照
+      // 这里**不走** acctFetch：加载器整个在飞去重，借到的可能是重排前那趟，
+      // 拿旧顺序去算下一位次就挪错人了
       const r0 = await api('/ui/api/codebuddy/accounts');
       CODEBUDDY_ACCTS = r0.accounts || [];
     }
@@ -1114,9 +1180,29 @@ function renderCodebuddyPanel() {
   loadCodebuddyAccounts();
 }
 
+// fillCodebuddyAccounts：账号快照的就地回填（首份快照后的变化、以及静默重绘路径都用它）。
+// 就地回填：组名换成账号名、组名后插副标题（qoder 同款）
+function fillCodebuddyAccounts(accts) {
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderCodebuddyPanel === 'function') { renderCodebuddyPanel(); return; }
+  for (const a of accts) {
+    const el = (accts.length === 1)
+      ? document.querySelector('#codebuddy-panel .pat-pkg-name')
+      : document.querySelector(`#codebuddy-panel [data-codebuddy-idx="${a.index}"]`);
+    if (!el) continue;
+    el.textContent = a.alias || a.nickname || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-codebuddy-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = _codebuddy_sub_html(a);
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  }
+}
+
 async function loadCodebuddyAccounts() {
   try {
-    const r = await api('/ui/api/codebuddy/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('codebuddy', () => api('/ui/api/codebuddy/accounts'));
     if (!r.enabled) { CODEBUDDY_ACCTS = []; return; }
     const accts = r.accounts || [];
     // 数据没变就不动 DOM——renderCodebuddyPanel 已用同一份快照渲染过
@@ -1125,23 +1211,11 @@ async function loadCodebuddyAccounts() {
     CODEBUDDY_ACCTS = accts;
     if (!accts.length) return;
     if (snapshotMissing) {
-      renderCodebuddyPanel();
+      fillCodebuddyAccounts(accts);
       syncQuotaFold();
       return;
     }
-    // 就地回填：组名换成账号名、组名后插副标题（qoder 同款）
-    for (const a of accts) {
-      const el = (accts.length === 1)
-        ? document.querySelector('#codebuddy-panel .pat-pkg-name')
-        : document.querySelector(`#codebuddy-panel [data-codebuddy-idx="${a.index}"]`);
-      if (!el) continue;
-      el.textContent = a.alias || a.nickname || a.id;
-      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-codebuddy-sub')) {
-        el.nextElementSibling.remove();
-      }
-      const sub = _codebuddy_sub_html(a);
-      if (sub) el.insertAdjacentHTML('afterend', sub);
-    }
+    fillCodebuddyAccounts(accts);
     syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
@@ -1198,9 +1272,31 @@ function renderCodebuddyIntlPanel() {
   loadCodebuddyIntlAccounts();
 }
 
+// fillCodebuddyIntlAccounts：账号快照的就地回填（首份快照后的变化、以及静默重绘路径都用它）。
+// 就地回填：组名换成账号名、组名后插副标题（CN 卡同款）
+function fillCodebuddyIntlAccounts(accts) {
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderCodebuddyIntlPanel === 'function') { renderCodebuddyIntlPanel(); return; }
+  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
+  if (!ACCT_NO_RERENDER && typeof renderCodebuddyIntlPanel === 'function') { renderCodebuddyIntlPanel(); return; }
+  for (const a of accts) {
+    const el = (accts.length === 1)
+      ? document.querySelector('#codebuddyintl-panel .pat-pkg-name')
+      : document.querySelector(`#codebuddyintl-panel [data-codebuddyintl-idx="${a.index}"]`);
+    if (!el) continue;
+    el.textContent = a.alias || a.nickname || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-codebuddyintl-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = acctSubHtml(a, null, 'data-codebuddyintl-sub');
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  }
+}
+
 async function loadCodebuddyIntlAccounts() {
   try {
-    const r = await api('/ui/api/codebuddyintl/accounts');
+    // 同一通道在飞时复用（acctFetch）：30s 轮询 + 整页重绘叠加不再并排多发
+    const r = await acctFetch('codebuddyintl', () => api('/ui/api/codebuddyintl/accounts'));
     if (!r.enabled) { CODEBUDDY_INTL_ACCTS = []; return; }
     const accts = r.accounts || [];
     // 数据没变就不动 DOM——renderCodebuddyIntlPanel 已用同一份快照渲染过
@@ -1209,23 +1305,11 @@ async function loadCodebuddyIntlAccounts() {
     CODEBUDDY_INTL_ACCTS = accts;
     if (!accts.length) return;
     if (snapshotMissing) {
-      renderCodebuddyIntlPanel();
+      fillCodebuddyIntlAccounts(accts);
       syncQuotaFold();
       return;
     }
-    // 就地回填：组名换成账号名、组名后插副标题（CN 卡同款）
-    for (const a of accts) {
-      const el = (accts.length === 1)
-        ? document.querySelector('#codebuddyintl-panel .pat-pkg-name')
-        : document.querySelector(`#codebuddyintl-panel [data-codebuddyintl-idx="${a.index}"]`);
-      if (!el) continue;
-      el.textContent = a.alias || a.nickname || a.id;
-      if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-codebuddyintl-sub')) {
-        el.nextElementSibling.remove();
-      }
-      const sub = acctSubHtml(a, null, 'data-codebuddyintl-sub');
-      if (sub) el.insertAdjacentHTML('afterend', sub);
-    }
+    fillCodebuddyIntlAccounts(accts);
     syncQuotaFold();
   } catch (e) {
     // 静默：账号接口抖动不清面板（额度还在），下轮 30s 自动重试
