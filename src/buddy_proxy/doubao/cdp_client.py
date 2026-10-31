@@ -683,7 +683,7 @@ class CDPDoubaoClient:
 
         **必须问服务端，不能看 ``localStorage.flow_web_has_login``**：那是前端
         缓存，服务端会话过期后它仍是 ``true``，于是签到面板一直「状态未知」、
-        调用方以为已登录。问法是对 ``/api/chat/completion/chat`` 空 POST 看
+        调用方以为已登录。问法是对真实聊天路由 ``/chat/completion`` 空 POST 看
         401（与 ``doubao/checkin.py`` 的 ``login_state`` 同一判据）。
         """
         if not self._ready:
@@ -708,8 +708,8 @@ class CDPDoubaoClient:
         qs = "&".join(
             f"{k}={v}" for k, v in sorted(self._build_query_params().items())
         )
-        url = f"/api/chat/completion/chat?{qs}" if self._is_app_internal_page() \
-            else f"https://www.doubao.com/api/chat/completion/chat?{qs}"
+        url = f"/chat/completion?{qs}" if self._is_app_internal_page() \
+            else f"https://www.doubao.com/chat/completion?{qs}"
         js = f"""
         (async () => {{
           try {{
@@ -739,7 +739,7 @@ class CDPDoubaoClient:
             log.warning("CDPDoubaoClient: 豆包服务端登录态无效（401/登录已过期），"
                         "需要重新扫码登录")
         elif state is None:
-            log.warning("CDPDoubaoClient: 豆包登录态探针未下结论（http=%s），本次按未登录处理",
+            log.warning("CDPDoubaoClient: 豆包登录态探针未下结论（http=%s），本次按未知处理",
                         http)
         return state
 

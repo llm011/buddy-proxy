@@ -348,26 +348,31 @@ benefits, and unrelated model routes in the same process.
 Check-in ("打卡") is per-provider: a provider opts in with
 `supports_checkin = True` and implements `checkin_status` / `checkin_claim` /
 `quota`. `benefits.BenefitsManager` aggregates them for the admin UI and runs
-the auto-claim loop. Doubao is one of them: its check-in runs in the app's
-embedded Chromium via the same CDP session as chat (`doubao/checkin.py`), tries
-a short ordered list of activity endpoints and only accepts HTTP 200 with
-`{"code": 0}` plus a recognisable field; anything else is returned as a
-`query_failed` status so the card shows as unknown instead of "not signed in". The
-claim POST is only sent against the endpoint prefix that just produced a valid
-status — never blindly.
+the auto-claim loop. Doubao is one of them: its check-in uses an isolated
+connection to the `pc/agent-explore` target in the app's embedded Chromium
+(`doubao/checkin.py`), not the chat WebSocket. It reuses a user-owned webview or
+creates a temporary background page, closing only the latter; target creation,
+load failure, and query completion all preserve the chat target and user pages.
+Check-in sessions are serialised from target selection through request and
+cleanup so a manual claim and background refresh cannot overlap on the same page.
+The measured campaign v3 flow (DoubaoWork 2.34.12, 2026-11-01) is
+`POST /alice/ug/campaign/v3/detail/` with `campaign_group_code=
+pc_incentive_task_mvp_v3`, then only for an unrewarded `daily_signin`,
+`POST /alice/ug/campaign/landing/checkin` with `scene` set to that group. The
+claim response must have `data.checked_in=true` and a subsequent detail read
+must agree. The page-side detail fetch returns only the daily task because the
+full response's `example_cases` exceeds the transport cap. Unknown shapes return
+`query_failed`; already-rewarded days never issue the claim POST.
 
-Two request-shape facts, both measured on DoubaoWork 2.32.14 (2026-10-31): the
-activity APIs reject unsigned requests with an empty 401, so `checkin.py` borrows
-the `msToken` / `a_bogus` pair from the activity request the page already made
-(`signed_query`, read from `performance` entries) and retries each candidate with
-it before falling back to an unsigned attempt; and **login is decided by the
-server, never by `localStorage.flow_web_has_login`** — that is a front-end cache
-that stays `true` after the session expires. The probe is an empty POST to
-`/api/chat/completion/chat` and is tri-state (`login_state_from_probe`): 401 or
-Doubao's `710012001` (expired) means logged out, 200 means logged in, and
-everything else (no HTTP response, 404/5xx, non-JSON) means *unknown* — a probe
-that did not conclude must not be reported as either state. Three invariants matter because getting them wrong is
-silent:
+The same detail request was verified without `msToken` / `a_bogus`, so the old
+candidate-endpoint and borrowed-signature strategy is gone. **Login is decided by
+the server, never by `localStorage.flow_web_has_login`** — that front-end cache
+can stay `true` after the session expires. The probe is an empty POST to the real
+`/chat/completion` route in the same-origin sign-in page and is tri-state
+(`login_state_from_probe`): 401 or `710012001` means logged out; 200 with API
+JSON or an SSE business `error_code` means logged in; no response, 404/5xx, and
+200 + HTML mean *unknown*. A probe that did not conclude must not be reported as
+either state. Three invariants matter because getting them wrong is silent:
 
 - **Check-in enumeration ignores quota cooldown.** `checkin_status` /
   `checkin_claim` walk the full (region-filtered) account list, *not*

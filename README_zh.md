@@ -167,20 +167,22 @@ buddy start
 #### 签到
 
 管理页「各通道签到」里豆包占一行，勾选「自动打卡」后由打卡循环每日领取，也可点「立即打卡」。
-签到和对话一样走 App 内置 Chromium（`doubao/checkin.py`）：在页面 JS 环境里 fetch 活动接口。
-App 的聊天页是 `chrome://doubaowork-chat` 内部页，在它里面请求绝对地址 `https://www.doubao.com/...`
-属于**跨域，不带会话 cookie**——服务端回空体 401 或 200 + SPA HTML，哪怕 App 里明明登录着。
-所以页面 origin 不是 `http(s)` 时，登录探针和签到一律走同源**相对路径**（App 自己发请求的上下文），
-真在豆包域名页时才沿用绝对地址。
-活动接口不认没签名的请求（空体 401），所以借页面自己发过的活动请求上的 `msToken` + `a_bogus`
-（`signed_query`），每个候选端点先带签名试、再回落不带签名。查询只认 `{"code": 0}` 的业务成功
-响应；App 未登录或接口响应认不出时，卡片显示「状态未知」（不会误画成「未签到」可点），原因写在
+签到走 App 内置 Chromium 的**独立签到页面连接**（`doubao/checkin.py`）：复用已打开的
+`https://www.doubao.com/pc/agent-explore` webview，没有时才创建后台页并只关闭自己创建的页；
+不切换聊天 target、不导航或关闭用户页面。签到会话从选择 target 到请求、清理全程串行，手动领取与后台刷新不会在同一活动页上交叉执行。2026-11-01 在 DoubaoWork 2.34.12 实测，真实活动是
+campaign v3 的 `pc_incentive_task_mvp_v3` / `daily_signin`，状态用
+`POST /alice/ug/campaign/v3/detail/`（body 带 `campaign_group_code`），领取用页面 SDK 同款的
+`POST /alice/ug/campaign/landing/checkin`（body 为 `scene`），不是旧版猜测的 `/api/activity/*`。
+详情响应先在页面内提取签到任务，避免大段 `example_cases` 被截断；已签状态不重复领取，
+领取必须看到 `data.checked_in=true`，再由 detail 复查确认。上述请求去掉 `msToken` / `a_bogus`
+仍实测成功，不再借其它 URL 的签名。查询只认 `{"code": 0}` 和明确的 `daily_checkin` 字段；
+App 未登录或响应形状不认识时卡片显示「状态未知」（不会误画成「未签到」可点），原因写在
 代理日志里（`doubao checkin …`）。
 
 登录态**只问服务端**，不看 `localStorage.flow_web_has_login`（前端缓存，服务端会话过期后仍是
-`true`）：对 `/api/chat/completion/chat` 空 POST，401 或豆包业务码 `710012001`（登录已过期）
-= 未登录，200 = 已登录，其余（没拿到响应 / 404 / 5xx / 非 JSON / 200 回的是 HTML 页面而不是接口 JSON）= 未确认——未确认就按「状态未知」
-处理，面板提示也会区分「未登录」「已登录但接口没认出」「登录态未确认」三种。
+`true`）：在豆包同源页对真实聊天路由 `/chat/completion` 空 POST，401 或业务码 `710012001`
+= 未登录；200 + API JSON 或带业务 `error_code` 的 SSE = 已登录；其余（无响应 / 404 / 5xx /
+200 + HTML）= 未确认，按「状态未知」处理，不把探针失败说成已登录或未登录。
 
 ### 百度搭子 Provider（可选）
 

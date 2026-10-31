@@ -666,13 +666,8 @@ class DoubaoProvider(BaseProvider):
 
         async def _ready() -> None:
             await self._ensure_started()
-            # 每次签到都实时问服务端，不吃任何登录缓存：面板卡在「状态未知」
-            # 时用户最想知道的正是「到底登没登」，缓存的 true 会让错误归因跑偏。
-            probe = getattr(client, "login_state_sync", None)
-            if callable(probe):
-                self._login_state = await asyncio.to_thread(probe)  # 同步求值，别嵌套 asyncio.run
-            else:
-                self._login_state = await client.wait_for_login(timeout=15)
+            # 登录探针和签到请求共用独立活动页（见 checkin.py）。不要再从聊天页
+            # 提前探一次：聊天页探针失败不能挡住活动页自己的三态探测与归因。
 
         try:
             asyncio.run(_ready())
@@ -683,12 +678,17 @@ class DoubaoProvider(BaseProvider):
             return None
         if not client.is_ready or self._login_state is False:
             return None
-        return fn(client)
+        result = fn(client)
+        # 活动页的登录探针结果用于失败提示；没有新证据时保持 unknown。
+        probe_state = getattr(client, "_login_state", None)
+        if isinstance(probe_state, bool):
+            self._login_state = probe_state
+        return result
 
     def checkin_status(self) -> dict[str, Any] | None:
         """今日签到状态（CDP 内 fetch，见 ``doubao/checkin.py`` 的接口说明）。
 
-        查不到（App 未登录 / 候选端点都没给出可解析响应）时**不返回裸
+        查不到（App 未登录 / 活动接口没给出可解析响应）时**不返回裸
         ``None``**：这样面板会画成「状态未知」，不会退化成可点的「未签到」。
         """
         from . import checkin as doubao_checkin
