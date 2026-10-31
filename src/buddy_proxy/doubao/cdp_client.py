@@ -576,6 +576,23 @@ class CDPDoubaoClient:
             return {"ERROR": str(desc)[:500]}
         return result.get("result", {}).get("value")
 
+    def page_origin(self, timeout: float = 10.0) -> str:
+        """当前 target 页面的 origin（``chrome://doubaowork-chat`` 之类）。
+
+        签到/登录探针据此决定该用同源相对路径（App 内部页）还是绝对 URL
+        （豆包域名页）。取不到返回空串，调用方按「不是内部页」处理。
+        """
+        try:
+            origin = self._evaluate("location.origin", timeout)
+        except Exception:  # noqa: BLE001 - 探测失败不影响主流程
+            return ""
+        return origin if isinstance(origin, str) else ""
+
+    def _is_app_internal_page(self) -> bool:
+        """本 target 是否为 App 内部页（非 http(s) origin）。"""
+        origin = self.page_origin()
+        return bool(origin) and not origin.startswith(("http://", "https://"))
+
     def evaluate(self, expr: str, timeout: float = 20.0) -> Any:
         """公开的页面求值入口（签到等非对话用途用，同步，由调用方线程化）。
 
@@ -680,12 +697,19 @@ class CDPDoubaoClient:
         签到在 ``asyncio.to_thread`` 的同步路径里跑，不能再套一层 ``asyncio.run``；
         这里直接求值。探针返回 ``{http, body}``，判定口径与
         ``doubao/checkin.py`` 的 ``login_state`` 相同（只有明确证据才下结论）。
+
+        请求地址按页面 origin 走相对路径：App 聊天页是 ``chrome://`` 内部页，
+        在那里发 ``https://www.doubao.com`` 绝对地址属于跨域，**会话 cookie
+        不带**，服务端回 200 + SPA 页面（会被当成「已登录」）。同源相对路径
+        才是 App 自己发请求的上下文（2026-10-31 实测）。
         """
         if not self._ready:
             return None
-        url = f"https://www.doubao.com/api/chat/completion/chat?" + "&".join(
+        qs = "&".join(
             f"{k}={v}" for k, v in sorted(self._build_query_params().items())
         )
+        url = f"/api/chat/completion/chat?{qs}" if self._is_app_internal_page() \
+            else f"https://www.doubao.com/api/chat/completion/chat?{qs}"
         js = f"""
         (async () => {{
           try {{
@@ -704,12 +728,13 @@ class CDPDoubaoClient:
         if not isinstance(probe, dict) or "http" not in probe:
             return None
         http = probe.get("http")
+        body = probe.get("body") or ""
         data: Any = None
         try:
-            data = json.loads(probe.get("body") or "")
+            data = json.loads(body)
         except (TypeError, ValueError):
             data = None  # 非 JSON（SPA 首页 / 404 页）
-        state = login_state_from_probe(http, data)
+        state = login_state_from_probe(http, data, body)
         if state is False:
             log.warning("CDPDoubaoClient: 豆包服务端登录态无效（401/登录已过期），"
                         "需要重新扫码登录")

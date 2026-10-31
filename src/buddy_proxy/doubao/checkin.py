@@ -132,6 +132,33 @@ def _signed_url(client: Any, path: str, signed: dict[str, str] | None) -> str:
     return f"{_url(client, path)}&" + "&".join(f"{k}={v}" for k, v in signed.items())
 
 
+def _is_app_internal_page(client: Any) -> bool:
+    """当前页面是不是 ``chrome://`` / ``doubaowork://`` 这类 App 内部页。"""
+    getter = getattr(client, "page_origin", None)
+    try:
+        origin = getter() if callable(getter) else None
+    except Exception:  # noqa: BLE001 - 探测不该因为取 origin 失败而炸
+        return False
+    return isinstance(origin, str) and bool(origin) and not origin.startswith(
+        ("http://", "https://"))
+
+
+def _fetch_target(client: Any, path: str,
+                  signed: dict[str, str] | None) -> str:
+    """嵌进 JS 的请求地址。
+
+    豆包域名页里发绝对 URL 就是同源；但 App 的聊天页是
+    ``chrome://doubaowork-chat/chat``，在它里面 fetch ``https://www.doubao.com``
+    属于跨域，**会话 cookie 不会被带上**，服务端一律回空体 401——哪怕 App 里
+    明明登录着、App 自己发同一个接口都正常（2026-10-31 实测：探针 401，同一
+    页面里同源相对路径请求 200）。所以 App 内部页改用相对路径，即 App 同款上下文。
+    """
+    if _is_app_internal_page(client):
+        # 只去掉 origin，查询/签名与绝对地址那条分支完全一致
+        return _signed_url(client, path, signed)[len(_ORIGIN):]
+    return _signed_url(client, path, signed)
+
+
 def signed_query(client: Any, timeout: float = 20.0) -> dict[str, str]:
     """从页面里已发出的活动请求中借一组签名参数（``msToken`` + ``a_bogus``）。
 
@@ -174,22 +201,23 @@ def _eval(client: Any, expr: str, timeout: float) -> Any:
         return None
 
 
-def _request(client: Any, path: str, *, method: str = "GET",
-             body: dict[str, Any] | None = None, timeout: float = 20.0,
-             signed: dict[str, str] | None = None) -> tuple[int, Any]:
-    """在页面里发一个请求，返回 ``(http_status, parsed_json_or_None)``。
+def _request_raw(client: Any, path: str, *, method: str = "GET",
+                 body: dict[str, Any] | None = None, timeout: float = 20.0,
+                 signed: dict[str, str] | None = None
+                 ) -> tuple[int, Any, str]:
+    """在页面里发一个请求，返回 ``(http_status, parsed_json_or_None, raw_text)``。
 
     ``http_status`` 为 0 表示网络层失败（页面里抛异常 / 评估超时）。
     ``signed`` 非空时叠加 :func:`signed_query` 借来的签名参数。
     """
     expr = _FETCH_JS.format(
-        path=_js_path(_signed_url(client, path, signed)),
+        path=_js_path(_fetch_target(client, path, signed)),
         method=json.dumps(method),
         body=("body: " + json.dumps(json.dumps(body or {}))) if method != "GET" else "",
     )
     raw = _eval(client, expr, timeout)
     if not isinstance(raw, dict):
-        return 0, None
+        return 0, None, ""
     try:
         status = int(raw.get("http") or 0)
     except (TypeError, ValueError):
@@ -199,6 +227,11 @@ def _request(client: Any, path: str, *, method: str = "GET",
         data = json.loads(text) if text else None
     except ValueError:
         data = None
+    return status, data, text
+
+
+def _request(client: Any, path: str, **kwargs: Any) -> tuple[int, Any]:
+    status, data, _ = _request_raw(client, path, **kwargs)
     return status, data
 
 
@@ -216,11 +249,24 @@ def _is_business_ok(status: int, data: Any) -> bool:
         return False
 
 
-def login_state_from_probe(http: Any, data: Any) -> bool | None:
+def _is_html(body: Any) -> bool:
+    """响应体是不是一张 HTML 页面（SPA 首页 / 错误页 / App 内部页）。"""
+    if not isinstance(body, str):
+        return False
+    head = body.lstrip()[:15].lower()
+    return head.startswith("<!doctype html") or head.startswith("<html")
+
+
+def login_state_from_probe(http: Any, data: Any, body: Any = None) -> bool | None:
     """由登录探针的 HTTP 状态 + 响应体做三态判定（``None`` = 探针没下结论）。
 
     - ``401`` = 服务端明确说未登录 → ``False``；豆包自家业务码 ``710012001``
       （登录已过期）同样是 ``False``；
+    - ``200`` + **HTML 页面** → ``None``：那不是 API 的应答，而是请求落到了
+      SPA 首页 / 404 页。App 聊天页（``chrome://doubaowork-chat/chat``）里发
+      绝对 URL 是跨域请求，没带 cookie，服务端照样回 200 页面——把它读成
+      「已登录」就会一路走到签到、按「已登录」口径去查活动接口。
+      （2026-10-31 实测：探针 200 + HTML，同页面里同源相对路径请求 200 + JSON）
     - ``200`` 且非上述 → ``True``：Chat 路由到了鉴权层才回参数错误，说明会话可用；
     - HTTP 0（页面求值失败 / 网络没打通）、非 200 的 404/5xx（过期会话下 Chat
       路由常先回「Page not found」）、非 JSON → ``None``：**不改写成已登录，
@@ -230,6 +276,8 @@ def login_state_from_probe(http: Any, data: Any) -> bool | None:
         return None
     if http == 401:
         return False
+    if http == 200 and body is not None and data is None and _is_html(body):
+        return None
     code = data.get("code") if isinstance(data, dict) else None
     try:
         if code is not None and int(code) == 710012001:  # 豆包「登录已过期」
@@ -248,8 +296,9 @@ def login_state(client: Any, timeout: float = 15.0) -> bool | None:
     :func:`login_state_from_probe`。探针没打通时不能折成「已登录」——那会把
     「探针都没打通」显示成「已登录但接口没认出」，用户就被指向错误的方向。
     """
-    http, data = _request(client, _LOGIN_PROBE, method="POST", body={}, timeout=timeout)
-    return login_state_from_probe(http, data)
+    http, data, body = _request_raw(
+        client, _LOGIN_PROBE, method="POST", body={}, timeout=timeout)
+    return login_state_from_probe(http, data, body)
 
 
 def discover_paths(client: Any, timeout: float = 20.0) -> list[str]:
