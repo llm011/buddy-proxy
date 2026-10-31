@@ -149,6 +149,7 @@ buddy start
 | --- | --- | --- |
 | 502「豆包主 App 正在运行但未开启 CDP 调试端口」 | 豆包先于代理启动（或你手动开过豆包） | **完全退出豆包（Cmd+Q）→ 再点一次测试/重发请求**，代理会自动以正确参数拉起它 |
 | 豆包 App 升级/重启后请求开始报错 | CDP 连接已失效（代理内存里还标记为已连接） | 同上：退出豆包再重试；或 `buddy restart` 重启代理 |
+| 豆包工作 App 点不开 / 开了又退（代理已连过豆包） | **旧版本**：主 App CDP 没起来时代理会起一个无界面的裸 Helper，它和 App 共用 `~/Library/Application Support/DoubaoWork`，抢走了 Chromium 单例锁（`SingletonLock -> <host>-<pid>`），App 就一直起不来 | 升级到本版本后不会再发生：先由 App 身份拉起（`open -a`），App 确认起不来才回退 Helper，且回退前先确认 App 没在跑、并清掉残留进程。已在旧版本踩坑的机器：先杀掉那个残留的无界面 `DoubaoWork Browser` 进程（`pkill -f "DoubaoWork Browser"`），再正常打开 App 即可 |
 | 401「doubao not logged in」 | 豆包内登录态失效 | 打开豆包 App 重新扫码登录 → 重试 |
 | 报「请先完成豆包扫码登录」 | 首次使用尚未登录 | 代理拉起豆包后在 App 里登录，等几十秒自动就绪 |
 
@@ -855,7 +856,7 @@ Trae PAT 频控：部分扩展模型上游按「账号 × 模型」限频（队�
 
 | 接口 | 说明 |
 | --- | --- |
-| `CDPDoubaoClient.start()` | 确保 CDP：优先复用主 App（`open -a DoubaoWork --args --remote-debugging-port=9223`，不杀进程），兜底独立 Helper |
+| `CDPDoubaoClient.start()` | 确保 CDP：① 复用已有调试口；② `open -a DoubaoWork --args --remote-debugging-port=9223` 让主 App 以调试模式起来（最多等 30s 调试口）；③ 只有前两步都不行、且主 App 已退出时才起独立 Helper（起之前先清理 App 身份启动的残留进程，避免抢单例锁把 App 锁在门外） |
 | `CDPDoubaoClient.chat_completion()` | 页面内 fetch `/chat/completion`（自动带 a_bogus 签名），流式 yield SSE；`model_spec` 传入时走 agent 管线（`_build_agent_payload`，App 同款 `model_item_key` 路由），否则经典管线 |
 | `DoubaoProvider.forward()` | 流式 / 非流式转换，返回 OpenAI 标准格式 |
 | 模型 | 经典：`doubao`（快速）/ `doubao-pro`（旧别名）/ `doubao-think`（深度思考）/ `doubao-expert`（专家）；agent（App 菜单同款）：`doubao-auto` / `doubao-2.1-turbo` / `doubao-2.1-pro` / `orange-5.0` / `gemini-3.7-flash` / `gpt-5.6-sol` |

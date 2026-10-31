@@ -247,6 +247,7 @@ A built-in provider that drives the local Doubao desktop app (DoubaoWork.app) vi
 | --- | --- | --- |
 | 502 "…未开启 CDP 调试端口" | Doubao was started before the proxy | Quit Doubao (Cmd+Q) and retry — the proxy relaunches it |
 | requests fail after a Doubao update/restart | stale CDP connection | Quit Doubao and retry, or `buddy restart` |
+| Doubao app won't open (bounces / never shows a window) after the proxy used Doubao | **Older versions**: when the app's CDP port didn't come up, the proxy launched a headless bare Helper sharing `~/Library/Application Support/DoubaoWork`, which grabbed the Chromium singleton lock (`SingletonLock -> <host>-<pid>`) and locked the app out | Fixed in this version: the proxy first launches the real app (`open -a`) and only falls back to a Helper when the app truly cannot start — and before doing so it verifies the app is not running and clears leftovers. On a machine already hit by the old bug: kill the leftover headless `DoubaoWork Browser` process (`pkill -f "DoubaoWork Browser"`) and reopen the app |
 | 401 "doubao not logged in" | login expired | sign in inside the Doubao app, retry |
 
 Models: classic pipeline `doubao` / `doubao-think` / `doubao-expert` (the server routes to its default model — the `model` field is ignored) and agent pipeline `doubao-auto`, `doubao-2.1-turbo`, `doubao-2.1-pro`, `orange-5.0`, `gemini-3.7-flash`, `gpt-5.6-sol` (real per-model routing via the app's own model menu; optional `reasoning_effort` 3–7).
