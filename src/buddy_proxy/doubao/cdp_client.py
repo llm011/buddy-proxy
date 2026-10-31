@@ -38,6 +38,7 @@ import urllib.request
 import uuid
 from typing import Any, AsyncGenerator, Optional
 
+from .checkin import login_state_from_probe
 from .payloads import _build_agent_payload, _build_classic_payload
 from .ws import _WS
 
@@ -478,13 +479,61 @@ class CDPDoubaoClient:
     # ------------------------------------------------------------------
 
     async def wait_for_login(self, timeout: int = 120) -> bool:
-        """独立 Helper 从磁盘自动加载登录态，通常无需扫码。"""
+        """检查服务端登录态；``timeout`` 只在未就绪时用于启动等待。
+
+        **必须问服务端，不能看 ``localStorage.flow_web_has_login``**：那是前端
+        缓存，服务端会话过期后它仍是 ``true``，于是签到面板一直「状态未知」、
+        调用方以为已登录。问法是对 ``/api/chat/completion/chat`` 空 POST 看
+        401（与 ``doubao/checkin.py`` 的 ``login_state`` 同一判据）。
+        """
         if not self._ready:
             await self.start()
-        # 检查登录态
-        expr = "localStorage.getItem('flow_web_has_login')"
-        r = await asyncio.to_thread(self._evaluate, expr)
-        return r == "true"
+        return await asyncio.to_thread(self.login_state_sync, timeout)
+
+    def login_state_sync(self, timeout: float = 15.0) -> bool | None:
+        """同步版服务端登录态：``True`` 已登录 / ``False`` 明确未登录 / ``None``
+        没探到（页面求值失败、网络没打通、Chat 路由回了非 200 的 404/5xx 页）。
+
+        签到在 ``asyncio.to_thread`` 的同步路径里跑，不能再套一层 ``asyncio.run``；
+        这里直接求值。探针返回 ``{http, body}``，判定口径与
+        ``doubao/checkin.py`` 的 ``login_state`` 相同（只有明确证据才下结论）。
+        """
+        if not self._ready:
+            return None
+        url = f"https://www.doubao.com/api/chat/completion/chat?" + "&".join(
+            f"{k}={v}" for k, v in sorted(self._build_query_params().items())
+        )
+        js = f"""
+        (async () => {{
+          try {{
+            const r = await fetch({url!r}, {{
+              method: 'POST', credentials: 'include',
+              headers: {{'Content-Type': 'application/json'}}, body: '{{}}',
+            }});
+            return {{http: r.status, body: (await r.text()).slice(0, 500)}};
+          }} catch (e) {{ return {{http: 0, body: String(e)}}; }}
+        }})()
+        """
+        try:
+            probe = self._evaluate(js, timeout)
+        except Exception:  # noqa: BLE001 - 探针失败按「没探到」处理
+            return None
+        if not isinstance(probe, dict) or "http" not in probe:
+            return None
+        http = probe.get("http")
+        data: Any = None
+        try:
+            data = json.loads(probe.get("body") or "")
+        except (TypeError, ValueError):
+            data = None  # 非 JSON（SPA 首页 / 404 页）
+        state = login_state_from_probe(http, data)
+        if state is False:
+            log.warning("CDPDoubaoClient: 豆包服务端登录态无效（401/登录已过期），"
+                        "需要重新扫码登录")
+        elif state is None:
+            log.warning("CDPDoubaoClient: 豆包登录态探针未下结论（http=%s），本次按未登录处理",
+                        http)
+        return state
 
     # ------------------------------------------------------------------
     # 核心：chat_completion（对齐 BrowserClient 接口）

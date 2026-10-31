@@ -136,6 +136,8 @@ class DoubaoProvider(BaseProvider):
         self._start_lock = asyncio.Lock()
         # /api/agent/doubao 任务接口的默认会话（缺省续聊最近一次会话）
         self._agent_session: str | None = None
+        # 最近一次签到时的服务端登录态：False=明确未登录，None=没探到/没探过
+        self._login_state: bool | None = None
 
     # ------------------------------------------------------------------
     # BaseProvider 接口
@@ -519,10 +521,18 @@ class DoubaoProvider(BaseProvider):
         签到查询本身全程同步，不会和代理主循环抢事件循环）。
         """
         client = self._client
+        # 服务端登录态三态（None=没探到）；只有明确未登录才在提示里说「未登录」。
+        self._login_state: bool | None = None
 
         async def _ready() -> None:
             await self._ensure_started()
-            await client.wait_for_login(timeout=15)
+            # 每次签到都实时问服务端，不吃任何登录缓存：面板卡在「状态未知」
+            # 时用户最想知道的正是「到底登没登」，缓存的 true 会让错误归因跑偏。
+            probe = getattr(client, "login_state_sync", None)
+            if callable(probe):
+                self._login_state = await asyncio.to_thread(probe)  # 同步求值，别嵌套 asyncio.run
+            else:
+                self._login_state = await client.wait_for_login(timeout=15)
 
         try:
             asyncio.run(_ready())
@@ -531,7 +541,7 @@ class DoubaoProvider(BaseProvider):
         except Exception as exc:  # noqa: BLE001 - 启动失败按「查询失败」处理
             log.debug("doubao checkin: client not ready: %s", type(exc).__name__)
             return None
-        if not client.is_ready:
+        if not client.is_ready or self._login_state is False:
             return None
         return fn(client)
 
@@ -555,11 +565,16 @@ class DoubaoProvider(BaseProvider):
             "claimable": False,
             "inactive": False,
             "query_failed": True,
-            "message": (
-                "豆包签到状态查询失败：豆包工作 App 未登录，或上游活动接口未识别"
-                "（详见代理日志 doubao checkin）"
-            ),
+            "message": self._checkin_failure_message(),
         }
+
+    def _checkin_failure_message(self) -> str:
+        """签到查不到时的提示：区分「没登录」和「接口没认出」，别让用户瞎猜。"""
+        if self._login_state is False:
+            return "豆包未登录：请在豆包 App 里重新扫码登录后重试"
+        if self._login_state is True:
+            return "豆包签到接口未能识别（已登录，详见代理日志 doubao checkin）"
+        return "豆包登录态未确认（探针未下结论），详见代理日志 doubao checkin"
 
     def checkin_claim(self) -> dict[str, Any] | None:
         from . import checkin as doubao_checkin
