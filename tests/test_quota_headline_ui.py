@@ -20,8 +20,9 @@ import subprocess
 import pytest
 
 STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
-# quotaHeadSum 在拆分后的 static/benefits.js（原 index.html 内联 JS，2026-10-03 拆出）
+# quotaHeadSum 在 static/benefits_quota.js；调用方留在 static/benefits.js。
 BENEFITS_JS = STATIC / "benefits.js"
+QUOTA_JS = STATIC / "benefits_quota.js"
 FUNC_RE = re.compile(r"function quotaHeadSum\(q\) \{(.*?)\n\}\n", re.S)
 
 pytestmark = pytest.mark.skipif(
@@ -31,7 +32,7 @@ pytestmark = pytest.mark.skipif(
 
 def _run_js(body: str) -> str:
     """抽出 quotaHeadSum 跑一遍（带最小 DOM 无关的桩）。"""
-    text = BENEFITS_JS.read_text(encoding="utf-8")
+    text = QUOTA_JS.read_text(encoding="utf-8")
     match = FUNC_RE.search(text)
     assert match, "benefits.js 里找不到 quotaHeadSum（被改名/挪走了？）"
     stub = """
@@ -199,7 +200,7 @@ def _extract_fn(text: str, name: str) -> str:
 
 def _run_fn(names: tuple[str, ...], body: str) -> str:
     """抽若干顶层函数在 node 里跑一段脚本（附 DOM 桩）。"""
-    text = BENEFITS_JS.read_text(encoding="utf-8")
+    text = BENEFITS_JS.read_text(encoding="utf-8") + QUOTA_JS.read_text(encoding="utf-8")
     src = "".join(_extract_fn(text, n) for n in names)
     stub = """
 globalThis.esc = s => String(s ?? '').replace(/[&<>"']/g, c =>

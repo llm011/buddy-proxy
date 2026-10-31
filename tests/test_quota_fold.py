@@ -23,10 +23,11 @@ import subprocess
 import pytest
 
 STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
-BENEFITS_JS = STATIC / "benefits.js"
+BENEFITS_JS = STATIC / "benefits_quota.js"
+BENEFITS_CORE_JS = STATIC / "benefits.js"
 # 2026-10 前端按职责拆分（benefits.js 超 700 行）：面板段挪到 benefits_panels.js
 # （traepat/antigravity/qoder）与 benefits_checkin.js（kimi）。额度折叠函数
-# （quotaSpent/quotaItemsHtml/syncQuotaFold/quotaFoldToggle）仍在 benefits.js。
+# （quotaSpent/quotaItemsHtml/syncQuotaFold/quotaFoldToggle）在 benefits_quota.js。
 PANELS_JS = [STATIC / "benefits_panels.js", STATIC / "benefits_checkin.js"]
 
 pytestmark = pytest.mark.skipif(
@@ -440,7 +441,7 @@ def test_all_three_panels_use_the_fold_helper():
 
     只改主列表的话，PAT 和 antigravity 还是老样子——用户看到的仍是「其它通道
     没变」，等于没修。kimi/qoder/trae 面板（复用 antigravity 的分组结构）也要跟上。"""
-    text = BENEFITS_JS.read_text(encoding="utf-8")
+    text = BENEFITS_CORE_JS.read_text(encoding="utf-8")
     assert "quotaItemsHtml(q.items || [], p.id)" in text, "主额度列表没接上折叠"
     # 面板段分布在拆出去的文件（pat/ag/kimi/qoder/trae/codebuddy）——trae 面板
     # 2026-10-06 加回（额度挪到底部专属面板，用户反馈「额度面板看不到」）；
@@ -452,7 +453,7 @@ def test_all_three_panels_use_the_fold_helper():
 
 def test_render_benefits_syncs_after_rebuild():
     """重建完要调一次校准——不调的话 clipped / 按钮状态永远停在初始值。"""
-    text = BENEFITS_JS.read_text(encoding="utf-8")
+    text = BENEFITS_CORE_JS.read_text(encoding="utf-8")
     body = text[text.index("function renderBenefits(opts)"):]
     body = body[:body.index("\n}\n")]
     assert "syncQuotaFold()" in body, "renderBenefits 没调 syncQuotaFold"

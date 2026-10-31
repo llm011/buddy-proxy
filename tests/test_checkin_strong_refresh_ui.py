@@ -133,7 +133,7 @@ def test_account_loader_dedupes_inflight_requests():
     src = ACCOUNTS_JS.read_text(encoding="utf-8")
     # 拼：声明块（含静默开关）+ acctFetch 函数
     decl = src[src.index("const ACCT_INFLIGHT"):src.index("function acctFetch")]
-    # acctFetch 后面紧跟着 acctLoad（ACCT_LOADERS 登记表在前面就用了，不能当界标）
+    # acctLoad 紧随其后且会发请求，不能拼进这个无 DOM 的测试桩
     fetch_fn = _fn(src, "function acctFetch", "\n\n/** 账号快照回填")
     js = decl + fetch_fn + """
 globalThis.__ACCOUNT_DELAY = 40;
@@ -147,6 +147,38 @@ globalThis.__ACCOUNT_DELAY = 40;
     r = _run(js)
     assert r["calls"] == ["/ui/api/qoder/accounts"] * 2, r
     assert r["pending"] == 0, "落定后必须清掉在飞记录，否则下次永远不再发"
+
+
+def test_dumate_panel_and_quiet_refresh_use_callable_loader():
+    """Dumate 直调与静默重绘的登记表都必须拿到函数，不是加载 Promise。"""
+    text = (_STATIC / "benefits_dumate.js").read_text(encoding="utf-8")
+    core = (_STATIC / "benefits.js").read_text(encoding="utf-8")
+    loader_registry = text[text.index("const ACCT_LOADERS"):]
+    quiet_load = core[core.index("function loadAllAccounts"):]
+    script = ACCOUNTS_JS.read_text(encoding="utf-8") + text + quiet_load + """
+globalThis.fmtNum = n => String(n);
+globalThis.syncQuotaFold = () => {};
+const panel = {innerHTML: '已渲染'};
+globalThis.document = {getElementById: id => id === 'dumate-panel' ? panel : null};
+globalThis.BENEFITS = {providers: [{id: 'dumate', quota: {supported: true, items: []}}]};
+globalThis.api = async path => {
+  globalThis.__CALLS.push(String(path));
+  return String(path).endsWith('/accounts') ? {enabled: false, accounts: []} : {ready: false};
+};
+(async () => {
+  document.getElementById('dumate-panel').innerHTML = '已渲染';
+  renderDumatePanel();                 // 面板尾部直接调加载器
+  await new Promise(r => setTimeout(r, 0));
+  await loadAllAccounts();            // 强刷签到后的静默账号对账
+  console.log(JSON.stringify({calls: globalThis.__CALLS, quiet: ACCT_NO_RERENDER}));
+})();
+"""
+    result = _run(script)
+    assert result["calls"] == [
+        "/ui/api/dumate/status", "/ui/api/dumate/accounts", "/ui/api/dumate/accounts",
+    ], result
+    assert result["quiet"] is False, result
+    assert "loadDumateAccounts" in loader_registry, "登记表要覆盖 Dumate"
 
 
 def test_every_account_loader_goes_through_acct_fetch():

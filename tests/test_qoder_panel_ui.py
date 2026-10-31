@@ -2,7 +2,7 @@
 
 与 test_kimi_panel_ui / test_antigravity_panel_ui 同构：面板段 + 公共件抽出来
 用最小 DOM 桩真跑。这卡此前零覆盖（kimi/ag 各有面板测试），而 ✎ 改名和合计行
-都是新加的——renderQoderPanel 直接调 quotaHeadSum（定义在 benefits.js，不在
+都是新加的——renderQoderPanel 直接调 quotaHeadSum（定义在 benefits_quota.js，不在
 面板段里），加载顺序一变整卡 render 当场炸。所以 quotaHeadSum/fmtNum 从源文件
 里抽**真函数**进桩，不另造替身。盯三件事：
 
@@ -26,7 +26,7 @@ import pytest
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
 BENEFITS_JS = _STATIC / "benefits_panels.js"
 HELPERS_JS = _STATIC / "benefits_accounts.js"   # 公共件（confirmAccountDelete/acctRename*）
-BENEFITS_CORE = _STATIC / "benefits.js"         # quotaHeadSum 定义在这
+BENEFITS_CORE = _STATIC / "benefits_quota.js"   # quotaHeadSum 定义在这
 APP_JS = _STATIC / "app.js"                     # fmtNum
 SEG_QODER = re.compile(r"// ---- QODER 面板.*$", re.S)
 SEG_HEAD_SUM = re.compile(r"function quotaHeadSum\(q\) \{.*?\n\}", re.S)

@@ -10,11 +10,12 @@ CORE = (_STATIC / "benefits.js").read_text(encoding="utf-8")
 PANELS = (_STATIC / "benefits_panels.js").read_text(encoding="utf-8")
 CHECKIN = (_STATIC / "benefits_checkin.js").read_text(encoding="utf-8")
 ACCOUNTS = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
+DUMATE = (_STATIC / "benefits_dumate.js").read_text(encoding="utf-8")
 
 
 def test_every_dedicated_panel_header_has_provider_refresh():
     """专属面板的 ↻ 全在渠道标题，一次刷新整个 provider。"""
-    combined = CORE + PANELS + CHECKIN
+    combined = CORE + PANELS + CHECKIN + DUMATE
     for provider in (
         "traepat", "antigravity", "qoder", "qoderintl", "trae", "traeintl",
         "codebuddy", "codebuddyintl", "kimi", "dumate",

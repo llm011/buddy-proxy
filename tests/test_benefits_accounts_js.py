@@ -461,13 +461,13 @@ def test_dumate_status_ready_triggers_rerender():
     - App 未运行（installed=True, ready=False, 带 hint）→ 显示 hint 不显示已就绪
     """
     import re
-    text = (_STATIC / "benefits.js").read_text(encoding="utf-8")
+    text = (_STATIC / "benefits_dumate.js").read_text(encoding="utf-8")
     seg = re.search(
         r"// ---- DUMATE 面板.*$", text, re.S,
     )
-    assert seg, "benefits.js 里找不到 DUMATE 面板段"
-    # benefits_accounts.js 提供 acctLoad/acctFor/acctDeleteButton/acctRowButtons
-    # （loadDumateAccounts 的初始化表达式在加载期就引用 acctLoad），必须先加载
+    assert seg, "benefits_dumate.js 里找不到 DUMATE 面板段"
+    # benefits_accounts.js 提供 acctLoad/acctFor/acctDeleteButton/acctRowButtons；
+    # loadDumateAccounts 是惰性加载函数，只有面板真正调用它才发请求。
     script = (
         _STUB
         + HELPERS_JS.read_text(encoding="utf-8")
@@ -479,17 +479,15 @@ def test_dumate_status_ready_triggers_rerender():
         # 数渲染次数：段里的 renderDumatePanel 声明与函数体里的自调用一起
         # 改名成 __dumate_render_raw，原函数在段前一行另存成 __orig_render；
         # 段内按名字调的 loadDumateAccounts 改名成 __dumate_load_raw，段尾的
-        # `const loadDumateAccounts = acctLoad(...)` 被截掉（acctLoad 的调用
-        # 不在本用例关注范围内），名字全部唯一，不用包装声明去盖（同名声明会
-        # 盖掉 const 绑定、cfg.render 与原函数分叉，自递归爆栈）
+        # 真实惰性加载器被截掉（acctLoad 由单独用例覆盖）。
         + "let RENDER_COUNT = 0;\n"
         + re.sub(r"\brenderDumatePanel\b", "__dumate_render_raw",
                  re.sub(r"\bloadDumateAccounts\b", "__dumate_load_raw",
-                        seg.group(0).split("\nconst loadDumateAccounts = acctLoad(")[0]))
+                        seg.group(0).split("\nfunction loadDumateAccounts()")[0]))
         + """
 const __orig_render = __dumate_render_raw;
 __dumate_render_raw = () => { RENDER_COUNT++; return __orig_render(); };
-// 段尾的 `const loadDumateAccounts = acctLoad(...)` 被截掉了（本用例只盯
+// 段尾的真实惰性加载器被截掉了（本用例只盯
 // 渲染/加载的行为，acctLoad 由 test_acct_load_* 覆盖），这里的加载桩照
 // acctLoad 的账本语义：首份快照整卡重渲、之后只回填，数据没变早退
 let __dumate_load_raw = async () => {
