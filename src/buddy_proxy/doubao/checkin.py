@@ -133,10 +133,16 @@ def _signed_url(client: Any, path: str, signed: dict[str, str] | None) -> str:
 
 
 def _is_app_internal_page(client: Any) -> bool:
-    """当前页面是不是 ``chrome://`` / ``doubaowork://`` 这类 App 内部页。"""
-    getter = getattr(client, "page_origin", None)
+    """当前页面是不是 ``chrome://`` / ``doubaowork://`` 这类 App 内部页。
+
+    取不到 origin（客户端没有 ``page_origin``、求值失败、返回空串）一律按
+    「不是内部页」处理，行为退回旧的绝对地址。
+    """
+    page_origin = getattr(client, "page_origin", None)
+    if page_origin is None:
+        return False
     try:
-        origin = getter() if callable(getter) else None
+        origin = page_origin()
     except Exception:  # noqa: BLE001 - 探测不该因为取 origin 失败而炸
         return False
     return isinstance(origin, str) and bool(origin) and not origin.startswith(
@@ -145,18 +151,19 @@ def _is_app_internal_page(client: Any) -> bool:
 
 def _fetch_target(client: Any, path: str,
                   signed: dict[str, str] | None) -> str:
-    """嵌进 JS 的请求地址。
+    """嵌进 JS 的请求地址：地址拼接只用 :func:`_signed_url` 一处。
 
     豆包域名页里发绝对 URL 就是同源；但 App 的聊天页是
     ``chrome://doubaowork-chat/chat``，在它里面 fetch ``https://www.doubao.com``
     属于跨域，**会话 cookie 不会被带上**，服务端一律回空体 401——哪怕 App 里
     明明登录着、App 自己发同一个接口都正常（2026-10-31 实测：探针 401，同一
-    页面里同源相对路径请求 200）。所以 App 内部页改用相对路径，即 App 同款上下文。
+    页面里同源相对路径请求 200）。所以 App 内部页改用相对路径，即 App 同款上下文：
+    只把 ``_signed_url`` 拼好的绝对地址的 origin 去掉，查询参数与签名完全一致。
     """
-    if _is_app_internal_page(client):
-        # 只去掉 origin，查询/签名与绝对地址那条分支完全一致
-        return _signed_url(client, path, signed)[len(_ORIGIN):]
-    return _signed_url(client, path, signed)
+    url = _signed_url(client, path, signed)
+    if _is_app_internal_page(client) and url.startswith(_ORIGIN):
+        return url[len(_ORIGIN):]
+    return url
 
 
 def signed_query(client: Any, timeout: float = 20.0) -> dict[str, str]:
@@ -230,8 +237,12 @@ def _request_raw(client: Any, path: str, *, method: str = "GET",
     return status, data, text
 
 
-def _request(client: Any, path: str, **kwargs: Any) -> tuple[int, Any]:
-    status, data, _ = _request_raw(client, path, **kwargs)
+def _request(client: Any, path: str, *, method: str = "GET",
+             body: dict[str, Any] | None = None, timeout: float = 20.0,
+             signed: dict[str, str] | None = None) -> tuple[int, Any]:
+    """同 :func:`_request_raw`，只返回 ``(http_status, parsed_json_or_None)``。"""
+    status, data, _ = _request_raw(
+        client, path, method=method, body=body, timeout=timeout, signed=signed)
     return status, data
 
 
