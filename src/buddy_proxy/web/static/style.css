@@ -261,8 +261,11 @@
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(79,140,255,.04); }
   /* 请求日志「通道」列的账号名：alias 是用户自由文本（rename 允许 64 字符），
-     不限宽会把整行撑开；完整原始值已在 hover title 里 */
-  .acct-name { display: inline-block; max-width: 14em; overflow: hidden;
+     不限宽会把整行撑开，把后面的模型/客户端列挤出视口；完整原始值已在
+     hover title 里，所以这里舍得狠切。9em 是实测值：再宽（原 14em）在
+     「Trae PAT (服务账号直连)」这类长名上会把整行推到换行/溢出，9em 刚好
+     不折行。 */
+  .acct-name { display: inline-block; max-width: 9em; overflow: hidden;
                text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
   .muted { color: var(--muted); }
@@ -315,8 +318,12 @@
                         background: transparent; color: var(--muted); font-size: 12px;
                         line-height: 1; }
   #model-search-clear:hover { color: var(--text); }
+  /* nowrap：徽标内容（「⇄ 8」「⏰ 限时」「已停用」…）必须在同一行内。模型 ID
+     列很窄，允许换行时浏览器会把徽标断在「⇄」与数字之间，渲染成
+     「⇄ / 8」两行——用户 2026-11-01 报的正是这个（图里 kimi-k3 / ⇄ / 8、
+     deepseek-v4.1-flash / ⇄ / 4）。整枚徽标换行到下一行是可以的，断开不行。 */
   .tag { font-size: 11px; padding: 1px 8px; border-radius: 6px; background: var(--bg);
-         color: var(--muted); border: 1px solid var(--line); }
+         color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
   .tag.ok { color: var(--ok); border-color: rgba(62,207,142,.35); }
   .tag.bad { color: var(--err); border-color: rgba(255,107,107,.35); }
   .pager { display: flex; align-items: center; gap: 6px; margin: 10px 4px 4px;
@@ -450,8 +457,13 @@
   /* 展开态也别无限撑高：条目多的通道（trae 一次 28 条、qoder 多账号目录
      并集）全铺出来一整卡能把页面撑过一屏。限到收起裁剪线的两倍、超出转
      内部滚动——「展开」从「全部铺出来」变成「固定视口内滚着看」
-     （用户 2026-10-06 反馈）。渐隐 mask 只留给收起态，滚动视口不糊边。 */
-  .qbody.open { max-height: calc(var(--qfold-max) * 2); overflow-y: auto; }
+     （用户 2026-10-06 反馈）。渐隐 mask 只留给收起态，滚动视口不糊边。
+     视口留出 30px：条目多的通道（dumate 十几个积分包）刚压过两倍线
+     时，卡片外面根本滚不动页面，最后一条会卡在视口底边一半露着看不见；
+     留一截余量让它能被滚进来，滚动条本身也提示「下面还有」。
+     （2026-11-01 用户报障「展开后收不回去」的成因不在这里——那是按钮被
+     挤到已用完区块下面、点不到，见 benefits_quota.js 的 quotaItemsHtml。） */
+  .qbody.open { max-height: calc(var(--qfold-max) * 2 + 30px); overflow-y: auto; }
   /* 已用完的区块：默认藏在展开态后面（JS 切 hidden）。展开后沉到底部、
      与还在用的部分用一条分隔线断开，并降一档亮度——它们是历史，不是当前状态 */
   .qspent { margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--line); opacity: .72; }
@@ -461,6 +473,17 @@
            color: var(--muted); }
   .qmore:hover { color: var(--text); border-color: var(--accent); }
   .qmore[hidden] { display: none; }
+  /* 视口底沿的浮层「收起」：展开态 .qbody 自己是滚动区，底下的主按钮被推
+     到滚动区外，用户得一路滚到底才能点回去。浮钮跟着 .pat-pkg（position:
+     relative）定位，条目多到超视口时叠在最后一行上——只给底色和描边，
+     不与条目抢注意力。 */
+  .qfold-float { position: absolute; left: 12px; right: 12px; bottom: 10px;
+                 z-index: 2; background: var(--card2);
+                 box-shadow: 0 -8px 14px -6px var(--card2); }
+  /* 浮钮落进装它的块（.pat-pkg）的底部留白里，别正好叠在最后一条进度条上——
+     留一截让「已用完」那块的尾巴还能被点到。`:has` 不支持时整条规则被丢弃，
+     只表现为少 40px 留白，布局不会坏。 */
+  .pat-pkg:has(.qfold-float:not([hidden])) { padding-bottom: 40px; }
   .qbar > div { height: 100%; border-radius: 4px; }
   /* TRAE PAT 面板：账号额度卡两栏；token 状态并入各自标题；模型负载另起两栏。 */
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -479,7 +502,13 @@
   /* 账号块 = 卡中卡：背景亮一档 + 描边 + 圆角。原先只有一条 rgba(.4) 的
      底线，两栏并排时两个账号的额度内容直接糊成一片（用户截图：分隔看不
      出来）。trae PAT / antigravity / kimi 三个面板共用这个类，一起变样。 */
-  .pat-pkg { position: relative; padding: 10px 12px 12px;
+  /* overflow: hidden 是给 qfold-float（绝对定位的视口浮钮）用的：浮钮
+     left/right 是 12px，只保证不越出 .pat-pkg 的**内容盒**，越不过 padding
+     盒——内容盒右缘到 .pat-pkg 右缘还差 12px padding，而 .pat-pkg 外面是
+     .pat-quota-grid 的 22px 列间距，按钮背景没有裁剪就会伸进列间空白，
+     看着像「一条通栏按钮压到隔壁列」。裁剪顺带把圆角外的背景也切干净。
+     （card2 是纯色，切掉不影响观感；浮钮自带 bottom:10px，不会挨到裁剪线。） */
+  .pat-pkg { position: relative; overflow: hidden; padding: 10px 12px 12px;
              background: var(--card2); border: 1px solid var(--line);
              border-radius: 8px; }
   .pat-pkg-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; min-width: 0; }

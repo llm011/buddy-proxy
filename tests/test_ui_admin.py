@@ -1600,9 +1600,12 @@ def test_trae_models_carry_credits():
     from buddy_proxy.trae_provider import TraeProvider
     models = {m["id"]: m for m in TraeProvider().models()}
     assert models["glm-5.3"]["credits"] == "x0.39"  # 2026-10-12 面板跟价（会员5折徽章）
-    assert models["glm-5.3-flash"]["credits"] == "x0.06"
-    assert models["deepseek-v4.1-flash"]["credits"] == "x0.08"
-    assert models["doubao-seed-evolving"]["credits"] == "x0.08"
+    # 2026-11-01 按目录 consumption_rate 当前值重核：flash 0.06→0.08、
+    # deepseek-v4.1-flash 0.08→0.06（基价 0.16→0.12 五折）、Seed 两条促销
+    # 「限时 1 折」2026-10-15 23:59 到期回到原价 0.8
+    assert models["glm-5.3-flash"]["credits"] == "x0.08"
+    assert models["deepseek-v4.1-flash"]["credits"] == "x0.06"
+    assert models["doubao-seed-evolving"]["credits"] == "x0.80"
     # kimi-k3 已被 kimi-k3.1-pro 顶掉（代际收敛），倍率仍按底表可取
     assert models["kimi-k3.1-pro"]["credits"] == "x1.20"
     assert not {"kimi-k3", "deepseek-v4-pro"} & models.keys()

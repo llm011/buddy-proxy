@@ -58,11 +58,40 @@ CHAT_UA = "mimocode/0.1.0"
 # 模型表
 # ---------------------------------------------------------------------------
 
-#: 小写 id → 展示名。与桌面 ``model-catalog.json`` 的 TEXT 模型对齐；
-#: ``mimo-auto``/``mimo-pro``/``mimo-flash`` 是 asar 里的别名（会被改写）。
+#: 小写 id → 展示名。**以客户端「模型倍率」面板为准**（用户 2026-11-01 截图）。
+#:
+#: MiMo 早已不是「只有自家两个模型」：桌面端的模型选择器是一个**第三方聚合
+#: 面板**（DeepSeek / GLM / Kimi / Qwen / 自家 MiMo），请求体里的 ``model``
+#: 原样发给同一个 chat 端点即可。所以这里平铺全部文本模型，不再只列自家两条。
+#:
+#: 上游确实有目录接口 ``GET /api/model/list``（2026-11-01 实测 200），返回 14
+#: 条，其中 4 条 ASR/TTS（mimo-v2.5-asr/tts/tts-voiceclone/tts-voicedesign）、
+#: 1 条图片（Doubao-Seedream-5.0-pro）——都不是 chat completions 能用的，剔除
+#: 后剩下面 9 条，与面板逐条吻合（面板只比目录少 Seedream 与 ASR/TTS）。
+#: ``/api/route/models`` 是 404，别把目录接口和 chat 路由混在一起猜。
+#:
+#: 模型名**大小写敏感**，一律按目录给出的原样（``qwen3.8-flash`` 而不是
+#: ``Qwen3.8-Flash``）：目录里叫 ``deepseek-v4.1-flash`` 带点、``glm-5.3``
+#: 带连字符，照抄即可；改名会 30012/404。
+#:
+#: 会员门（30012「未开通会员」，2026-11-01 本机实测）：**9 个第三方模型全部**
+#: 回 403 membership_required，自家 mimo-v2.6-* 也一样——门是账号级的
+#: （``/api/user/xiaomi/subscription/self`` 显示只有一个 status=EXPIRED 的
+#: MiMo 入门包，2026-10-22 到期），不是模型级的。目录照实发布，能不能真正
+#: 调用由上游按账号诚实裁决，这里不按本机会员状态裁剪。
+#:
+#: ``mimo-auto``/``mimo-pro``/``mimo-flash`` 是桌面端 asar 里的别名（会被
+#: 改写成正式名），仍保留在目录里以便老客户端点名，但不再是主力。
 DEFAULT_MODELS: dict[str, str] = {
     "mimo-v2.6-pro": "MiMo V2.6 Pro",
     "mimo-v2.6-flash": "MiMo V2.6 Flash",
+    "deepseek-v4-pro": "DeepSeek V4 Pro",
+    "deepseek-v4.1-flash": "DeepSeek V4.1 Flash",
+    "glm-5.3": "GLM 5.3",
+    "glm-5.3-flash": "GLM 5.3 Flash",
+    "kimi-k3": "Kimi K3",
+    "qwen3.8-flash": "Qwen 3.8 Flash",
+    "qwen3.8-max": "Qwen 3.8 Max",
     "mimo-pro": "MiMo Pro (别名)",
     "mimo-flash": "MiMo Flash (别名)",
     "mimo-auto": "MiMo Auto (自动路由)",

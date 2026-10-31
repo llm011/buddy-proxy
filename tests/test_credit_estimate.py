@@ -22,6 +22,12 @@ from buddy_proxy.core.credit_estimate import (  # noqa: E402
 from buddy_proxy.providers.zcode import credit_discount_now  # noqa: E402
 from buddy_proxy.trae import config as trae_config  # noqa: E402
 
+#: 校准当日（2026-09-06）glm-5.3-flash 的面板倍率。样本里的「真实积分」
+#: 是**按这个价**计费出来的，故下面两个校准测试把它钉回去；此后目录接口把
+#: 该模型调到 x0.08（2026-11-01 重核），直接拿新倍率套老样本会整体高 1/3，
+#: 那是调价而不是公式错。公式本身仍由这些断言守护。
+CALIBRATION_MULT = "x0.06"
+
 # (输入 token, 输出 token, 网页真实积分)；顺序即代理记录时间序
 CALIBRATION_SAMPLES = [
     (27863, 147, 0.45),  # 会话首请求：已知偏差样本
@@ -37,20 +43,25 @@ CALIBRATION_SAMPLES = [
 ]
 
 
-def test_steady_state_samples_within_tolerance():
+def test_steady_state_samples_within_tolerance(monkeypatch):
     """稳态请求（样本 2~10）：估算与真实积分误差 ≤ 0.09。
 
     多数样本误差 ≤0.05；43225-in 那条偏差 +0.08，与首请求同类
     （部分隐藏注入计费，token_usage 未体现），属「粗估」口径的预期散布。
+
+    样本是按 ``CALIBRATION_MULT`` 计费出来的，故先把倍率钉回校准值——
+    否则这项测试会变成「今日倍率有没有变」，不再是公式回归。
     """
+    monkeypatch.setitem(trae_config.MODEL_CREDITS, "glm-5.3-flash", CALIBRATION_MULT)
     for prompt, completion, real in CALIBRATION_SAMPLES[1:]:
         est = estimate_credit("trae", "glm-5.3-flash", prompt, completion)
         assert est is not None
         assert abs(est - real) <= 0.09, (prompt, completion, est, real)
 
 
-def test_session_first_request_known_deviation():
+def test_session_first_request_known_deviation(monkeypatch):
     """会话首请求：真实值显著高于公式值（隐藏注入计费），估算必然低估。"""
+    monkeypatch.setitem(trae_config.MODEL_CREDITS, "glm-5.3-flash", CALIBRATION_MULT)
     prompt, completion, real = CALIBRATION_SAMPLES[0]
     est = estimate_credit("trae", "glm-5.3-flash", prompt, completion)
     assert est is not None
@@ -58,11 +69,18 @@ def test_session_first_request_known_deviation():
 
 
 def test_multiplier_scales_across_models():
-    """倍率换算：glm-5.3（x0.39）估算 ≈ 同 token 下 flash（x0.06）的 39/6 倍。"""
+    """倍率换算：估算值随 MODEL_CREDITS 里的倍率线性走。
+
+    glm-5.3-flash 没有实测单价（走倍率粗估），故比值就该**正好**是两表值之比；
+    不写死 39/6，是因为两个模型的目录价都会变——钉住比值等于钉住今天的报价，
+    而这条测试要守护的是「换算按倍率线性」这个不变式。
+    """
+    flash_mult = trae_config.MODEL_CREDITS["glm-5.3-flash"]
+    big_mult = trae_config.MODEL_CREDITS["glm-5.3"]
     flash = estimate_credit("trae", "glm-5.3-flash", 30000, 100)
     big = estimate_credit("trae", "glm-5.3", 30000, 100)
     assert flash is not None and big is not None
-    assert abs(big / flash - 0.39 / 0.06) < 0.01
+    assert abs(big / flash - float(big_mult[1:]) / float(flash_mult[1:])) < 0.02
 
 
 def test_alias_model_resolves_multiplier():

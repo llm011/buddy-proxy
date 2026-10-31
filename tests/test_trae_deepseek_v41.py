@@ -98,19 +98,20 @@ def test_v41_flash_declares_image_support():
 
 
 def test_v41_flash_credit_multiplier():
-    """目录展示倍率 x0.08，积分估算走实测计价（口径不同，同 flashx）。
+    """目录展示倍率 x0.06，积分估算走实测计价（口径不同，同 flashx）。
 
-    x0.08 来自 2026-09-30 官方倍率面板，带「会员5折」徽章（未折价 0.16——
-    对账数据更接近按 0.16 计费，5 折疑似账单外补偿，未证实）。注意与本表
-    ``DeepSeek-V4-Flash`` 的 x0.08 数值撞车但来源不同（旧值出自 2026-09-05
-    知识库）。估算走 ``MEASURED_CREDIT_RATES``：(30000,100) ≈
-    30000×3.41e-5 + 100×1.39e-4 ≈ 1.04。
+    2026-11-01 用目录 consumption_rate 重核：基价 0.16→0.12、会员 5 折后仍
+    是当前实付 0.06（旧值 x0.08 是 2026-09-30 面板的 0.16 五折）。注意与本表
+    ``DeepSeek-V4-Flash`` 的历史 x0.08 数值撞车但来源不同（旧值出自 2026-09-05
+    知识库）。估算走 ``MEASURED_CREDIT_RATES``，单价按「当前倍率/校准倍率」
+    （0.06/0.08）等比缩放：(30000,100) ≈ (30000×3.41e-5 + 100×1.39e-4) × 0.75
+    ≈ 0.78。
     """
-    assert MODEL_CREDITS["deepseek-v4.1-flash"] == "x0.08"
+    assert MODEL_CREDITS["deepseek-v4.1-flash"] == "x0.06"
     entry = next(m for m in TraeProvider().models()
                  if m["id"] == "deepseek-v4.1-flash")
-    assert entry["credits"] == "x0.08"
-    assert estimate_credit("trae", "deepseek-v4.1-flash", 30000, 100) == 1.04
+    assert entry["credits"] == "x0.06"
+    assert estimate_credit("trae", "deepseek-v4.1-flash", 30000, 100) == 0.78
 
 
 def test_v41_flash_needs_no_function_override():
@@ -131,9 +132,9 @@ def test_credit_multiplier_reads_static_table_and_discovered_values(monkeypatch)
     """模型倍率唯一取值口：别名归一、大小写退化、刷新值优先于底表。"""
     from buddy_proxy.trae import config as trae_config
 
-    assert trae_config.credit_multiplier("cn", "deepseek-v4-pro-official") == "x0.72"
+    assert trae_config.credit_multiplier("cn", "deepseek-v4-pro-official") == "x0.36"
     # 别名：大写上游名经 MODEL_MAP 反查后取到同一倍率
-    assert trae_config.credit_multiplier("cn", "DeepSeek-V4-Pro-Official") == "x0.72"
+    assert trae_config.credit_multiplier("cn", "DeepSeek-V4-Pro-Official") == "x0.36"
     # 目录刷新抄回的值优先（仅剩刷新值的模型）
     monkeypatch.setitem(trae_config.DISCOVERED_CREDITS, "glm-9.9", "x0.99")
     assert trae_config.credit_multiplier("cn", "glm-9.9") == "x0.99"

@@ -38,7 +38,8 @@ pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"
 )
 
-_FNS = ("quotaSpent", "quotaItemsHtml", "syncQuotaFold", "quotaFoldToggle", "quotaItemHtml")
+_FNS = ("quotaSpent", "quotaMoreButton", "quotaItemsHtml", "syncQuotaFold",
+        "quotaFoldToggle", "quotaItemHtml")
 
 
 def _extract_fn(text: str, name: str) -> str:
@@ -77,6 +78,9 @@ globalThis.mkBox = (key, scrollHeight, spentCount, actCount) => {
     },
     _cls: cls,
     querySelector: sel => sel === '.qspent' ? spent : null,
+    // 浮钮（.qfold-float）是兄弟元素，按 ``parentElement.children`` 扫。
+    // 默认没有 children → 等价于「没渲染浮钮」的旧形状；要测浮钮用 mkFloat。
+    parentElement: {},
     _spent: spent,
   };
   const btn = {
@@ -88,6 +92,18 @@ globalThis.mkBox = (key, scrollHeight, spentCount, actCount) => {
   box.nextElementSibling = btn;
   globalThis.__boxes.push(box);
   return {box, btn};
+};
+
+// 给 box 挂一枚视口浮钮（兄弟元素），返回它。key 可显式传「带引号的危险名」
+// 来验证属性选择器那条老路会炸、兄弟扫描这条路不会。
+globalThis.mkFloat = (box, key) => {
+  const el = {
+    dataset: {qfold: key === undefined ? box.dataset.qfold : key},
+    hidden: true, textContent: '',
+    classList: {contains: c => c === 'qmore' || c === 'qfold-float'},
+  };
+  box.parentElement = {children: [box, el]};
+  return el;
 };
 
 globalThis.document = {
@@ -308,6 +324,83 @@ console.log(JSON.stringify({
 }));
 """ % _js([_item("签到奖励", 0.0, 200, 200)]))
     assert _last(out) == {"adjacent": True}, out
+
+
+def test_fold_buttons_have_wellformed_attrs():
+    """两枚按钮（主钮 + 视口浮钮）的属性都必须**拼得完整**。
+
+    回归：``quotaMoreButton`` 加第三个参数 ``attrs`` 时，浮钮那一处调用漏改，
+    生成出 ``class="qmore qfold-float" data-act="" ...""`` 这种半截标签——浏览器
+    解析出的属性串位，且按钮被渲染成全宽（用户 2026-11-01 截图：一条通栏的
+    「展开 1 项已用完」压在其它条目上）。这里盯住：qmore 恰好两枚、都带
+    data-qfold、都不含 ``undefined`` / 空属性名残留。
+    """
+    out = _run("""
+const html = quotaItemsHtml(%s, 'mimo');
+const btns = html.match(/<button[^>]*>/g) || [];
+console.log(JSON.stringify({
+  n: btns.length,
+  floats: btns.filter(b => b.includes('qfold-float')).length,
+  allHaveKey: btns.every(b => /data-qfold="mimo"/.test(b)),
+  clean: btns.every(b => !/undefined|=""/.test(b)),
+  handlers: btns.every(b => b.includes('onclick="quotaFoldToggle(this)"')),
+}));
+""" % _js([_item("周窗口", 80.0, 100), _item("5 小时窗口", 0.0, 100)]))
+    assert _last(out) == {"n": 2, "floats": 1, "allHaveKey": True,
+                          "clean": True, "handlers": True}, out
+
+
+def test_float_button_mirrors_main_button():
+    """视口浮钮与主钮同显同藏同文案（展开后主钮被推到滚动区外，靠它点收起）。"""
+    out = _run("""
+const {box, btn} = mkBox('trae', 900, 12);
+const floatBtn = mkFloat(box);
+syncQuotaFold();
+const closed = {floatHidden: floatBtn.hidden, floatText: floatBtn.textContent};
+quotaFoldToggle(btn);
+const opened = {floatHidden: floatBtn.hidden, floatText: floatBtn.textContent};
+console.log(JSON.stringify({closed, opened}));
+""")
+    assert _last(out) == {
+        "closed": {"floatHidden": False, "floatText": "展开全部 15 项 ▾"},
+        "opened": {"floatHidden": False, "floatText": "收起 ▴"},
+    }, out
+
+
+def test_float_lookup_survives_hostile_group_name():
+    """分组名含引号/空格时仍能找到浮钮——**不许**回落成属性选择器。
+
+    key 取自额度 label 的账号分组名，也就是用户可自由 rename 的显示名。
+    老写法 ``querySelector(`.qfold-float[data-qfold="${key}"]`)`` 在这种名字上
+    抛 SyntaxError，异常掀掉整个 forEach，一屏所有按钮一起失联。
+    """
+    out = _run("""
+const hostile = 'qoder #1 · "我的" 号';
+const {box, btn} = mkBox(hostile, 900, 12);
+const floatBtn = mkFloat(box);      // 浮钮的 data-qfold 与 box 相同（这里由 mkBox 给）
+syncQuotaFold();
+console.log(JSON.stringify({
+  found: floatBtn.hidden === false,
+  mainStillAlive: btn.hidden === false,
+  text: floatBtn.textContent,
+}));
+""")
+    assert _last(out) == {"found": True, "mainStillAlive": True,
+                          "text": "展开全部 15 项 ▾"}, out
+
+
+def test_float_lookup_ignores_sibling_with_other_key():
+    """兄弟里另一组的浮钮不会被误认（同容器多组时要按 key 对上号）。"""
+    out = _run("""
+const a = mkBox('grp-a', 900, 12);
+const foreign = mkFloat(a, 'grp-b');   // 挂在 a 的容器里，但 key 不是 a
+syncQuotaFold();
+console.log(JSON.stringify({
+  foreignUntouched: foreign.hidden === true,
+  mainShown: a.btn.hidden === false,
+}));
+""")
+    assert _last(out) == {"foreignUntouched": True, "mainShown": True}, out
 
 
 # ---------------------------------------------------------------------------

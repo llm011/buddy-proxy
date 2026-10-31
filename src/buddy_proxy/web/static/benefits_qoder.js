@@ -181,8 +181,6 @@ function renderQoderPanel() {
 function fillQoderAccounts(accts) {
   // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
   if (!ACCT_NO_RERENDER && typeof renderQoderPanel === 'function') { renderQoderPanel(); return; }
-  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
-  if (!ACCT_NO_RERENDER && typeof renderQoderPanel === 'function') { renderQoderPanel(); return; }
   const cnAccts = accts.filter(a => (a.region || 'cn') === 'cn');
   cnAccts.forEach((a, i) => {
     const pos = i + 1;
@@ -278,8 +276,6 @@ function renderQoderIntlPanel() {
 // fillQoderIntlAccounts：账号快照的就地回填（首份快照后的变化、以及静默重绘路径都用它）。
 // 就地回填：组名换成账号名、组名后插副标题（CN 卡同款）
 function fillQoderIntlAccounts(accts) {
-  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
-  if (!ACCT_NO_RERENDER && typeof renderQoderIntlPanel === 'function') { renderQoderIntlPanel(); return; }
   // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
   if (!ACCT_NO_RERENDER && typeof renderQoderIntlPanel === 'function') { renderQoderIntlPanel(); return; }
   accts.forEach((a, i) => {

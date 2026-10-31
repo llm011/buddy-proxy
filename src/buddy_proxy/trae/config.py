@@ -288,16 +288,29 @@ MODEL_IDS: list[str] = [
 # 4001、chat_v3 出流（进覆盖表）。仍拒收：qwen3.7-plus(无连字符) / kimi-k2.8 /
 # 大写变体全 4001——名字以实测为准，勿照面板显示名抄。
 MODEL_CREDITS: dict[str, str] = {
-    "doubao-seed-evolving": "x0.08",
-    "doubao-seed-2.1-pro": "x0.08",
+    # 2026-11-01 用目录接口（get_detail_param 的 consumption_rate 当前值）重核
+    # 全表。Seed 两档的「限时 1 折」促销已于 **2026-10-15 23:59 到期**
+    # （activity_discount.limited.end_at=1792079940，今天已过），current 回到
+    # 原价 0.8——底表停在促销值 0.08 会让日志里的倍率标签和积分估算一起少算
+    # 十倍，故跟到 0.80。glm-5.3-flash 0.06→0.08、deepseek-v4.1-flash
+    # 0.08→0.06（基价 0.16→0.12，五折后 0.06）同为目录当前值。
+    "doubao-seed-evolving": "x0.80",
+    "doubao-seed-2.1-pro": "x0.80",
+    # turbo / seed-code / glm-5.3 上游按**会员档位**分桶（同一份目录，订阅会员
+    # 五折、走补贴的账号半价）：本机两个 CN 号实测 turbo 0.10/0.20、
+    # seed-code 0.03/0.06、glm-5.3 0.39/0.78。静态表只放得下一个值，维持
+    # 原先人工核过的补贴档，未按账号分叉——真要分叉得改成 per-account 表，
+    # 不值得为展示倍率动这个结构。
     "doubao-seed-2.1-turbo": "x0.20",
     "doubao-seed-code": "x0.06",
     "step-5-preview": "x0.48",
-    "glm-5.3-flash": "x0.06",
+    "glm-5.3-flash": "x0.08",
     "glm-5.3-flashx": "x0.31",
     "glm-5.3": "x0.39",
-    "deepseek-v4.1-flash": "x0.08",
+    "deepseek-v4.1-flash": "x0.06",
     "kimi-k3": "x1.83",
+    # deepseek-v4-pro（非 -Official）已不在目录里（config_switch=False 或
+    # is_invisible），保留旧值只为历史行/客户端点名时取倍率。
     "deepseek-v4-pro": "x0.72",
     "minimax-m3": "x0.26",
     "qwen3.8-max": "x1.50",
@@ -320,7 +333,12 @@ MODEL_CREDITS: dict[str, str] = {
     "minimax-m3.1-flash": "x0.09",
     "glm-5.2": "x0.78",
     "deepseek-v4-flash-official": "x0.20",
-    "deepseek-v4-pro-official": "x0.72",
+    # -Official 的 V4-Pro 是**闲时折扣**（activity_discount 的 off_peak 分支）：
+    # 每天 00:00-08:00 与 22:00-24:00 半价，0.72→0.36。表里放**折扣价**，与面板
+    # 展示口径一致（面板显示的就是目录报告的「当前实付」consumption_rate）。
+    # V4-Flash-Official 已不在本次目录里（config_switch/is_invisible 过滤掉了），
+    # 无从核对，沿用旧值 x0.20 不动。
+    "deepseek-v4-pro-official": "x0.36",
     # glm-5.3 面板 0.39（带「会员5折」徽章，原 0.40 小差）；deepseek-v4-flash
     # 0.10（「闲时折扣」）不进表——内部目录只有 deepseek-v4.1-flash
 }

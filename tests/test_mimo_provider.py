@@ -303,6 +303,22 @@ class TestMimoProvider:
         assert "mimo-auto" in ids
         assert all(m["owned_by"] == "mimo" for m in p.models())
 
+    def test_models_cover_third_party_aggregator(self):
+        """MiMo 是聚合面板（2026-11-01）：目录要平铺第三方模型，别只列自家两条。
+
+        依据是上游 ``GET /api/model/list`` 的 14 条目录剔掉 ASR/TTS/图片后的
+        9 条文本模型，与客户端「模型倍率」面板逐条吻合。模型名大小写敏感，
+        必须与目录原样一致（``qwen3.8-flash`` 而非 ``Qwen3.8-Flash``）。
+        """
+        ids = {m["id"] for m in MimoProvider().models()}
+        for mid in ("mimo-v2.6-pro", "mimo-v2.6-flash", "deepseek-v4-pro",
+                    "deepseek-v4.1-flash", "glm-5.3", "glm-5.3-flash",
+                    "kimi-k3", "qwen3.8-flash", "qwen3.8-max"):
+            assert mid in ids, mid
+        # ASR/TTS/图片模型不是 chat completions 能用的，不许混进目录
+        for mid in ("mimo-v2.5-asr", "mimo-v2.5-tts", "doubao-seedream-5.0-pro"):
+            assert mid not in ids, mid
+
     def test_ensure_auth_raises_without_credentials(self, state_dir, monkeypatch):
         monkeypatch.setattr(
             cred, "mimocode_auth_path", lambda: state_dir / "missing-auth.json"

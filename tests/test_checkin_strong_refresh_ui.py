@@ -61,6 +61,10 @@ globalThis.api = async (url, opts) => {
 };
 globalThis.toast = () => {};
 globalThis.esc = s => String(s);
+// renderDumatePanel 现在会调它渲染「剩 X / Y」合计行（2026-11-01 加），
+// quotaHeadSum 在 benefits_quota.js 里，本桩不引那份文件，给个空实现即可
+// ——本用例只关心加载器发了哪些请求，不关心卡片里画了什么。
+globalThis.quotaHeadSum = () => '';
 globalThis.BENEFITS = {providers: []};
 globalThis.__RENDERED = 0;
 globalThis.__QUIET = null;

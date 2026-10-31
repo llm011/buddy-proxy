@@ -156,6 +156,20 @@ function quotaSpent(it) {
   return Number.isFinite(n) && n <= 0;
 }
 
+// 展开/收起按钮。**必须**紧跟 .qbody 渲染（syncQuotaFold 靠
+// ``box.nextElementSibling`` 找它）——早先它排在 .qbody 后面、但前面又插了
+// 一块 .qspent「已用完 N 项」，于是 syncQuotaFold 把 .qspent 当成了按钮，
+// 按钮的 hidden 永远摘不掉：展开后既没有「收起」可点，也再没有「展开」
+// （用户 2026-11-01 报障：「全部积分包展开后收不回去」）。
+//
+// 展开后条目多到超视口时，`.qbody.open` 自己是滚动区，按钮被推到滚动区外，
+// 用户要滚到底才能看见——所以在视口底沿再浮一枚同样的「收起」（绝对定位，
+// 跟着 .pat-pkg 走）。浮钮与主钮走同一份 QUOTA_FOLD 状态。
+function quotaMoreButton(key, cls, attrs) {
+  return `<button class="${cls}" data-qfold="${esc(key)}" ${attrs}` +
+    ` onclick="quotaFoldToggle(this)" hidden></button>`;
+}
+
 // 一组额度条目 → HTML。key 是这组的稳定标识（通道 id / PAT #N / AG #N），
 // 用来记住展开状态；同 key 在两次渲染之间保持展开。
 function quotaItemsHtml(items, key) {
@@ -168,6 +182,8 @@ function quotaItemsHtml(items, key) {
   const act = [], spent = [];
   for (const it of shown) (quotaSpent(it) ? spent : act).push(it);
   const open = !!QUOTA_FOLD.open[key];
+  // 已用完区块放进 .qbody **里面**：它随展开态一起显示，且不会再横在
+  // .qbody 和按钮中间（那段历史正是上面那个 bug 的成因）
   const spentHtml = spent.length
     ? `<div class="qspent"${open ? '' : ' hidden'}>` +
       `<div class="qspent-head">已用完 ${spent.length} 项</div>` +
@@ -178,9 +194,11 @@ function quotaItemsHtml(items, key) {
     ? '<div class="empty" style="padding:10px 0">权益已全部用完</div>' : '';
   return `<div class="qbody${open ? ' open' : ''}" data-qfold="${esc(key)}">` +
       act.map(quotaItemHtml).join('') + empty + spentHtml + '</div>' +
-    `<button class="qmore" data-qfold="${esc(key)}" data-act="${act.length}" ` +
-      `data-spent="${spent.length}" data-total="${shown.length}" ` +
-      `onclick="quotaFoldToggle(this)" hidden></button>`;
+    quotaMoreButton(
+      key, 'qmore',
+      `data-act="${act.length}" data-spent="${spent.length}" data-total="${shown.length}" `,
+    ) +
+    quotaMoreButton(key, 'qmore qfold-float', '');
 }
 
 // 渲染后校准：按**实际高度**决定裁不裁、按钮露不露。
@@ -204,14 +222,34 @@ function syncQuotaFold() {
     const clipped = !open && box.scrollHeight > limit + 1;
     box.classList.toggle('open', open);
     box.classList.toggle('clipped', clipped);
-    const btn = box.nextElementSibling;
-    if (!btn || !btn.classList || !btn.classList.contains('qmore')) return;
+    // 按钮只认「紧跟着 .qbody 的 .qmore」（主钮），再取同 key 的浮钮——
+    // 不能拿 ``nextElementSibling`` 直接当按钮用：那处在别的通道里可能是
+    // 普通内容块，会把「找不到按钮」误判成「按钮已处理」。
+    const first = box.nextElementSibling;
+    const main = first && first.classList && first.classList.contains('qmore') ? first : null;
+    // 浮钮按兄弟扫，**不用** ``querySelector(`[data-qfold="${key}"]`)``：key 是
+    // 账号分组名（用户可自行 rename），带引号/空格时属性选择器语法非法，
+    // querySelector 会抛 SyntaxError，把整个 forEach 掀掉——一屏所有按钮
+    // 一起失联。兄弟扫描只做字符串相等比较，任何名字都安全。
+    let floatBtn = null;
+    const parent = box.parentElement;
+    if (parent && parent.children) {
+      for (const el of parent.children) {
+        if (el !== box && el.classList && el.classList.contains('qfold-float')
+            && el.dataset && el.dataset.qfold === box.dataset.qfold) { floatBtn = el; break; }
+      }
+    }
     // 展开后总是留个「收起」入口；收起时只有真被裁了、或底下还压着已用完的
     // 条目，才值得给按钮——否则是个点了没有任何变化的假按钮
-    btn.hidden = !open && !clipped && !spent;
-    btn.textContent = open ? '收起 ▴'
-      : (!Number(btn.dataset.act) ? `展开 ${btn.dataset.spent} 项已用完 ▾`
-        : `展开全部 ${btn.dataset.total} 项 ▾`);
+    const show = open || clipped || !!spent;
+    const label = open ? '收起 ▴'
+      : (!Number(main && main.dataset.act) ? `展开 ${main ? main.dataset.spent : 0} 项已用完 ▾`
+        : `展开全部 ${main.dataset.total} 项 ▾`);
+    for (const btn of [main, floatBtn]) {
+      if (!btn) continue;
+      btn.hidden = !show;
+      btn.textContent = label;
+    }
   });
 }
 

@@ -1,9 +1,11 @@
 """DuMate（百度搭子）provider 单测。
 
-锁定 2026-10-05 接入时的几个关键行为：
+锁定接入时的几个关键行为：
 
-1. 模型目录：id 小写、含 ``/`` 的自动路由档（``dm-auto-model/text.L0``），
-   同档只留最新款（glm-5 / qwen3.5 旧款被 kimi-k3 / qwen3.8-max 替换）。
+1. 模型目录：同档只留最新款；同一底座的别名只留实名一个条目——``text.L0`` /
+   ``model-text`` / ``model-mm`` / ``model-gui-use`` 经 ``x-dumate-gw-realmodel``
+   实测全路由到 ``deepseek-v4.1-flash-low-latency``，故只发布 ``deepseek-v4.1-flash``
+   （2026-11-01 用户要求）。
 2. 转发：openai 协议直通本地代理（URL 带 inapp key header），stream/非流式
    都原样回传；anthropic 协议 400 拒绝（DuMate 网关只认 OpenAI chat）。
 3. 额度：本地 ``/api/dumate/points/remaining`` 的布尔态翻译成 1/1 条目。
@@ -35,22 +37,28 @@ def _endpoint(port: int = 52414, key: str = "a" * 64) -> discovery.DumateEndpoin
 
 
 def test_models_catalog_latest_only():
-    """同档只留最新款：旧 glm-5 / qwen3.5 不上目录（2026-10-05 用户要求）。"""
+    """同档只留最新款、同底座别名只留实名（2026-11-01 用户要求）。"""
     p = DumateProvider()
     ids = [m["id"] for m in p.models()]
-    assert "dm-auto-model/text.L0" in ids
     assert "kimi-k3" in ids
     assert "qwen3.8-max" in ids
+    assert "deepseek-v4.1-flash" in ids
+    assert "deepseek-v4-pro" in ids
+    # 旧款 / 同底座别名都不上目录
     assert "glm-5" not in ids
     assert "qwen3.5-35b-a3b" not in ids
+    assert "dm-auto-model/text.L0" not in ids
+    assert "model-text" not in ids
+    assert "model-mm" not in ids
+    assert "model-gui-use" not in ids
 
 
-def test_models_id_keeps_slash_for_auto_router():
-    """自动路由档 id 含 ``/``，路由剥 ``dumate/`` 前缀后原样透传上游。"""
+def test_models_all_support_reasoning_and_tools():
+    """目录里每个模型都实测支持 reasoning 与 function calling。"""
     p = DumateProvider()
-    auto = next(m for m in p.models() if m["id"] == "dm-auto-model/text.L0")
-    assert auto["reasoning"] is True
-    assert auto["tool_call"] is True
+    for m in p.models():
+        assert m["reasoning"] is True, m["id"]
+        assert m["tool_call"] is True, m["id"]
 
 
 # --- 端点发现失败时的行为 ----------------------------------------------------

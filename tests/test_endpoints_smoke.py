@@ -153,9 +153,17 @@ def test_models_credits_and_name(client):
         ("deepseek-v4-flash", "f"): ("x0.17 credits", "Deepseek-V4-Flash"),
         ("deepseek-v4-pro", "f"): ("x0.51 credits", "Deepseek-V4-Pro"),
         ("kimi-k2.7", "f"): ("x0.57 credits", "Kimi-K2.7-Code"),
-        # Kimi-K3.1-Pro 两档倍率里的订阅优先档（1.56）；
-        # 0.97 的 -lite 档已移除——上游无此模型，转发必 11102
-        ("kimi-k3.1-pro", "moonshot"): ("x1.56 credits", "Kimi-K3.1-Pro"),
+        # Kimi-K3.1-Pro 普通档 0.97（面板第 4 行；脚标 x0.97 无徽章）。
+        # 面板第 3 行是订阅优先档 1.56（Kimi-K3.1-Pro-Hi.Lite）——PR #167 把
+        # 两档的倍率**装反了**（1.56 给了不带后缀的 id、0.97 给了 -lite），
+        # 2026-11-01 修正：可路由的裸 id 是 0.97 档，实测输出单价与 kimi-k3
+        # 之比 1.51 ≈ 1.62/0.97（若为 1.56 档该比值应是 1.04）。1.56 档的
+        # 上游 id 未找到（-hi.lite 等全部 11102），故不收录、不臆造 id。
+        ("kimi-k3.1-pro", "moonshot"): ("x0.97 credits", "Kimi-K3.1-Pro"),
+        # CodeBuddy 也支持 MiMo（用户 2026-11-01 指出此前一直漏收）。
+        # 上游名就是裸 mimo-v2.6-pro；xiaomi- 前缀 / MiMo-V2.6-Pro 原样名
+        # 都是 11102，实测只有裸小写能通。
+        ("mimo-v2.6-pro", "xiaomi"): ("x0.13 credits", "Xiaomi MiMo-V2.6-Pro"),
     }
     for key, (credit, name) in checks.items():
         entry = by_id.get(key)

@@ -284,8 +284,8 @@ def test_credit_multiplier_prefers_discovered_then_static(monkeypatch):
     assert trae_config.credit_multiplier("cn", "brand-new") == "x0.33"
     # 静态底表优先：人工核过的值不被运行时抄回值顶掉
     assert trae_config.credit_multiplier("cn", "glm-5.3") == "x0.39"
-    # 别名按映射到内部名取同一倍率
-    assert trae_config.credit_multiplier("cn", "deepseek-v4-pro-official") == "x0.72"
+    # 别名按映射到内部名取同一倍率（-Official 是闲时折扣价，见 MODEL_CREDITS）
+    assert trae_config.credit_multiplier("cn", "deepseek-v4-pro-official") == "x0.36"
     # 海外没有倍率概念
     assert trae_config.credit_multiplier("global", "kimi-k3") is None
 
@@ -296,6 +296,7 @@ def test_static_catalog_lists_new_models():
                       ("minimax-m3.1-flash", "x0.09"),
                       ("glm-5.2", "x0.78"),
                       ("deepseek-v4-flash-official", "x0.20"),
-                      ("deepseek-v4-pro-official", "x0.72")]:
+                      # 闲时折扣价：每天 00:00-08:00 / 22:00-24:00 五折（0.72→0.36）
+                      ("deepseek-v4-pro-official", "x0.36")]:
         assert mid in trae_config.MODEL_IDS, mid
         assert trae_config.credit_multiplier("cn", mid) == mult, mid

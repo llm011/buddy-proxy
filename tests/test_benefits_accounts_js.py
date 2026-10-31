@@ -474,6 +474,9 @@ def test_dumate_status_ready_triggers_rerender():
         + "globalThis.quotaItemHtml = it => '<div class=\"qitem\">' + esc(it.label) + '</div>';\n"
         + "globalThis.quotaItemsHtml = (items, key) =>\n"
         + "  '<div class=\"qbody\" data-qfold=\"' + esc(key) + '\">' + items.map(globalThis.quotaItemHtml).join('') + '</div>';\n"
+        # 合计行同理：只验证「模板把 quotaHeadSum 的输出放进去了」，求和口径
+        # 本身由 test_quota_headline_ui.py 覆盖
+        + "globalThis.quotaHeadSum = q => q && q.sum_items ? '<span>HEADSUM</span>' : 'NOSUM';\n"
         + "globalThis.api = async (path) => path.includes('/accounts')\n"
         + "  ? globalThis.__DM_ACCTS : globalThis.__DM_RESPONSE;\n"
         # 数渲染次数：段里的 renderDumatePanel 声明与函数体里的自调用一起
@@ -549,6 +552,9 @@ console.log(JSON.stringify({
   firstReady: firstHtml.includes('已就绪'),
   renderCount: RENDER_COUNT,
   readyNow: readyHtml.includes('已就绪'),
+  // 合计行：模板必须把 quotaHeadSum({items, sum_items:true}) 渲染出来
+  //（2026-11-01 报障「dumate 额度里没有展示总额」——模板压根没调它）
+  headSum: readyHtml.includes('HEADSUM'),
   stillDetecting: readyHtml.includes('检测中'),
   showsLogin: readyHtml.includes('已登录'),
   version: readyHtml.includes('v1.0.0'),
@@ -568,6 +574,7 @@ console.log(JSON.stringify({
     assert data["readyNow"] and not data["stillDetecting"], "重渲后应显示已就绪"
     assert data["showsLogin"], "已登录徽标要出来"
     assert data["version"], "版本号 v1.0.0 要出来"
+    assert data["headSum"], "账号卡要有「剩 X / Y」合计行（quotaHeadSum 没被调用）"
     assert data["cardName"], "账号卡标题=display_name（快照到位后）"
     # 今日消耗：真实流水合计数进副标题（fmtNum: 130.05 → '130'，≥100 取整）
     assert "今日消耗 130 分（43 次）" in data["insertedSub"], \

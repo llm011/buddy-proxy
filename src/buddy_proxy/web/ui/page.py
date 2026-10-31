@@ -34,6 +34,13 @@ _STATIC_FILES = {
 }
 
 
+# 二进制静态文件（图标）：一律原样 sendfile 语义回传 bytes，不做文本解码；
+# 浏览器标签页会以各种尺寸取它，被 UTF-8 解码再编码只会白白多一次拷贝。
+_STATIC_BYTES = {
+    "favicon.svg": "image/svg+xml",
+}
+
+
 def _read_static(name: str) -> str:
     try:
         return (_STATIC / name).read_text(encoding="utf-8")
@@ -51,6 +58,15 @@ async def ui_page():
 
 @app.get("/ui/{name}")
 async def ui_static(name: str):
+    btype = _STATIC_BYTES.get(name)
+    if btype is not None:
+        try:
+            blob = (_STATIC / name).read_bytes()
+        except OSError as exc:
+            raise HTTPException(
+                status_code=404, detail={"error": {"message": f"{name} 不存在"}}) from exc
+        # no-cache 同上：换图标后不用重启也能立即生效
+        return Response(content=blob, media_type=btype, headers={"Cache-Control": "no-cache"})
     ctype = _STATIC_FILES.get(name)
     if ctype is None:
         raise HTTPException(status_code=404, detail={"error": {"message": "not found"}})

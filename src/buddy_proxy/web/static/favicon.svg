@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Buddy Proxy">
+  <defs>
+    <linearGradient id="bg" x1="10" y1="4" x2="54" y2="60" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2f6bf0"/>
+      <stop offset=".55" stop-color="#4f8cff"/>
+      <stop offset="1" stop-color="#3ecf8e"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="32" y1="3" x2="32" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fff" stop-opacity=".28"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="1.4" stdDeviation="1.8" flood-color="#05101f" flood-opacity=".45"/>
+    </filter>
+  </defs>
+
+  <!-- 圆角底板：蓝→青绿的品牌渐变（站点 accent #4f8cff + ok #3ecf8e） -->
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#bg)"/>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#gloss)"/>
+  <rect x="2.9" y="2.9" width="58.2" height="58.2" rx="15.2" fill="none"
+        stroke="#fff" stroke-opacity=".2" stroke-width="1.8"/>
+
+  <!-- 双箭头 ↔：转发 / 双向路由。主体刻意做满（16px 图标下也认得出），
+       尖端加半线宽后离边 ≥5px 不糊边；两行间距 9.5px，缩到 16px 也不粘连 -->
+  <g filter="url(#soft)" fill="none" stroke="#fff" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M18.5 24.5h22" stroke-width="5.8"/>
+    <path d="M36.8 19 42 24.5 36.8 30" stroke-width="5.8"/>
+    <path d="M45.5 39.5h-22" stroke-width="5.8"/>
+    <path d="M27.2 34 22 39.5 27.2 45" stroke-width="5.8"/>
+  </g>
+</svg>

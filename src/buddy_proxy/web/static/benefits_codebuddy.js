@@ -260,8 +260,6 @@ function renderCodebuddyIntlPanel() {
 function fillCodebuddyIntlAccounts(accts) {
   // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
   if (!ACCT_NO_RERENDER && typeof renderCodebuddyIntlPanel === 'function') { renderCodebuddyIntlPanel(); return; }
-  // 非静默：整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；静默：只回填
-  if (!ACCT_NO_RERENDER && typeof renderCodebuddyIntlPanel === 'function') { renderCodebuddyIntlPanel(); return; }
   for (const a of accts) {
     const el = (accts.length === 1)
       ? document.querySelector('#codebuddyintl-panel .pat-pkg-name')

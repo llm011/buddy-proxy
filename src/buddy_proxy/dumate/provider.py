@@ -12,9 +12,10 @@
   ``_to_anthropic_stream`` / 非流式经 ``chat_completion_to_anthropic_message``，
   kimi/mimo 同款），Claude Code 等 /v1/messages 客户端可直接使用。
 
-模型：上游无 /v1/models 列表接口，模型名从 DuMate 客户端真实流量里抓包
-实测（见下方 ``_MODELS`` 的注释）。``dm-auto-model/text.L0`` 是搭子的智能路由
-档，``glm-5`` / ``qwen3.5-35b-a3b`` 是具体模型，``model-text`` 是内部工具模型。
+模型：上游至今没有任何可用的模型目录接口（``/v1/model/list-all`` 在个人版没注册，
+``/config/providers`` 只有静态两条），模型名只能逐个实测（见下方 ``_MODELS``
+的注释）。同一底座的别名合并成实名一个条目，用响应头
+``x-dumate-gw-realmodel`` 核对真实路由目标。
 
 额度：桌面端「积分」面板同口径走 bceConsole
 ``GET /api/dumate/points/quota_overview``（数字余额 + 积分包明细）；本地代理的
@@ -39,28 +40,28 @@ log = logging.getLogger(__name__)
 
 _TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
 
-# 上游实测可用的模型名（2026-10 抓包 DuMate 客户端真实流量确认）。
+# 上游实测可用的模型名（2026-11-01 对 DuMate 1.0.88 逐个试确认，非照抄 App 配置）。
 # id 一律小写，与全站 models_config.json 命名一致，便于 forward_chat 的
 # 「自动匹配 provider.models()」命中本通道，不至于让请求漏到 codebuddy 兜底。
-# - dm-auto-model/text.L0：搭子「自动」智能路由档（按请求自动选底层模型），
-#   是 App 默认对话模型；对应客户端配置里的 model-text / QianfanPersonalQuota。
-# - glm-5 / qwen3.5-35b-a3b：直连具体模型（抓包确认网关接受这些 model 字段）。
-# - model-artifact-validate：产物校验工具模型（DuMate opencode.json 内置）。
+# - kimi-k3 / qwen3.8-max / deepseek-v4.1-flash / deepseek-v4-pro：直连具体模型。
 #
-# 注意：id 里**故意保留** ``/``（如 dm-auto-model/text.L0）。BaseProvider
-# 约定 provider id 不含 ``/``，但**模型名**不受此限；客户端请求时用
-# ``dumate/dm-auto-model/text.L0`` 或让 model_order 解析，剥掉 ``dumate/``
-# 前缀后剩下的 ``dm-auto-model/text.L0`` 会原样透传给上游。
+# 同一底座的别名只保留实名一个条目（用户 2026-11-01：背后自己去对应就行）。
+# 判据是响应头 ``x-dumate-gw-realmodel``——它给出网关实际路由到的模型。
+# 2026-11-01 实测下面五个名字全是同一个底座：
+#   dm-auto-model/text.L0、model-text、model-mm、model-gui-use、deepseek-v4.1-flash
+#     → deepseek-v4.1-flash-low-latency
+# 所以它们不各占一条，只留 ``deepseek-v4.1-flash``；``text.L0`` 的「智能路由」
+# 只是 App 侧说法，网关记账与路由目标都一样，没必要当独立模型发布。
+# 其余：``glm-5`` → glm-5.2（已按用户要求不收）。
+#
+# 同日复测已失效/未开通：deepseek-v4.1、deepseek-v4-flash、glm-4.9/5.1/5.2/5.3、
+# kimi-k2.5/2.7、qwen3.5-235b-a22b、qwen3-max 均 404 invalid_model；ernie-* 全系 404。
+# 不要试图用 ``/v1/model/list-all`` 拉目录：那是 main-server 的 /v1 全局面，
+# 本机个人版根本没注册（本机任意 /v1 路径都 404 page not found），云端
+# ``/gateway/apis/v1/models`` 要的是百炼式 API Key（relay 在进程内注入，拿不到）。
+# opencode 的 ``/config/providers`` 只有 static 两条，拿它刷新会把表缩到 2 条。
+# 上游至今没有可用的模型目录接口，新模型只能实测。
 _MODELS: dict[str, dict[str, Any]] = {
-    "dm-auto-model/text.L0": {
-        "name": "百度搭子自动（智能路由）",
-        "desc": "DuMate 自动档：按请求智能路由底层模型，App 默认对话模型",
-        "reasoning": True,
-        "tool_call": True,
-    },
-    # 2026-10-05 实测确认可路由（抓包 + 逐个试）：deepseek-v4-flash 在网关模型
-    # 表里但 401（需内部授权，本账号未开通），deepseek-v4.1 / glm-5.3 / kimi-k2.7
-    # 等新款均 invalid_model——DuMate 当前模型池就是 GLM + Qwen + Kimi 这批。
     # 同档模型只保留最新款（用户 2026-10-05：有新模型旧模型就不配上）。
     "kimi-k3": {
         "name": "Kimi K3",
@@ -71,6 +72,19 @@ _MODELS: dict[str, dict[str, Any]] = {
     "qwen3.8-max": {
         "name": "Qwen3.8-Max",
         "desc": "通义千问 3.8 Max（DuMate 直连）",
+        "reasoning": True,
+        "tool_call": True,
+    },
+    "deepseek-v4.1-flash": {
+        "name": "DeepSeek V4.1 Flash",
+        "desc": "DeepSeek V4.1 Flash 低延迟档（DuMate 直连；App 的自动档 / model-text / "
+                "model-mm / model-gui-use 别名背后都是它，故只留这一个实名）",
+        "reasoning": True,
+        "tool_call": True,
+    },
+    "deepseek-v4-pro": {
+        "name": "DeepSeek V4 Pro",
+        "desc": "DeepSeek V4 Pro 0813（DuMate 直连，重推理档，比 Flash 慢且更贵）",
         "reasoning": True,
         "tool_call": True,
     },
@@ -164,8 +178,8 @@ class DumateProvider(BaseProvider):
         self._last_ep = ep
 
         stream = bool(body.get("stream", False))
-        # 剥掉下划线开头字段（内部保留键），模型名透传（上游接受 glm-5 /
-        # qwen3.5-35b-a3b / dm-auto-model/text.L0 等，见 _MODELS 注释）
+        # 剥掉下划线开头字段（内部保留键），模型名原样透传上游（可用实名见
+        # _MODELS；网关会自行把别名解析成真实模型）
         upstream_body = {k: v for k, v in body.items() if not k.startswith("_")}
         headers = {
             **ep.headers(),
@@ -294,7 +308,11 @@ class DumateProvider(BaseProvider):
                     "expire_ts": exp,
                     "unit": "points",
                 })
-            return {"items": items, "level": "百度搭子"}
+            # items 是并存的份额（订阅主池 + 各赠送包，同一积分量纲），合计即
+            # 账号当前真实总积分，所以显式声明 sum_items 让前端标题行相加——
+            # 不声明的话前端走「取第一条有数的」，一旦首条缺失/变成说明条，
+            # 标题行就整个消失（用户 2026-11-01 报障「没有展示总额」）。
+            return {"items": items, "level": "百度搭子", "sum_items": True}
 
         # 兜底：本地代理布尔态 → 百分制（保持原有「至少显示有/无」的行为）
         ep = discovery.discover()

@@ -52,6 +52,10 @@ function renderDumatePanel() {
   const delBtn = acctDeleteButton('dumate', acct, '清除本地累计签到缓存');
   // 单账号没有 ▲▼ 顺位（moveBtns 传空串），↻ + ✕ 两个。
   const rowBtns = acctRowButtons('dumate', '', delBtn);
+  // 合计行：订阅积分/订阅套餐/各积分包是并存的份额（后端 sum_items 声明可合计），
+  // 与 qoder/codebuddy 同款 chip，放在账号名下面。
+  const items = dm.quota.items || [];
+  const headSum = quotaHeadSum({items, sum_items: true});
   // 未就绪说明（未安装/未运行/检测中）：替换积分明细位置，整块 muted 提示。
   const notReadyHint = st && st.installed === false
     ? '未检测到 DuMate.app。请先安装并登录百度搭子（千帆桌面端）。'
@@ -75,7 +79,8 @@ function renderDumatePanel() {
           <span class="pat-pkg-name">${esc(acct ? (acct.display_name || acct.id) : '本机账号')}</span>
           ${acctSubHtml(acct, _dumate_sub_extra, 'data-dumate-sub')}
           ${ready
-            ? quotaItemsHtml(dm.quota.items || [], 'dumate')
+            ? `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
+              quotaItemsHtml(items, 'dumate')
             : `<div class="muted" style="font-size:11px;line-height:1.5;padding:8px 0">${esc(notReadyHint)}</div>`}
           ${rowBtns}
         </div>
