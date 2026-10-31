@@ -63,6 +63,15 @@ _MAIN_APP_CDP_WAIT_S = 30
 # ``DoubaoWork.app``，所以一条正则同时覆盖两者；pkill -f 是正则匹配。
 _APP_PROCESS_PATTERN = "DoubaoWork\\.app/Contents/"
 
+# **裸**独立 Helper（``--saman-from-chat=1``，无 UI）。App 自己在
+# ``--saman-from-chat=<主AppPID>`` 里带真实 pid，所以只认 ``=1`` 才能把
+# 「代理起的裸 Helper」和「App 自己的内嵌 Helper」区分开，绝不误杀后者。
+_BARE_HELPER_PATTERN = r"--saman-from-chat=1( |$)"
+
+# 豆包工作 profile 目录与 Chromium 单例锁。
+_PROFILE_DIR = pathlib.Path.home() / "Library/Application Support/DoubaoWork"
+_SINGLETON_FILES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+
 
 def _is_app_chat_url(url: str | None) -> bool:
     """是否 App 自己的聊天窗口（内部 WebUI 页）。
@@ -221,11 +230,20 @@ class CDPDoubaoClient:
         豆包工作 App，App 发现锁被一个无 UI 的 Helper 占着就起不来，表现就是
         「豆包工作打不开」。所以只有「App 身份启动也拿不到 CDP」时才用裸 Helper。
         """
-        # 1) 端口已有 CDP 直接复用（主 App 正在跑且开了调试端口）
+        # 1) 端口已有 CDP 直接复用（主 App 正在跑且开了调试端口）。
+        #    但**复用前**先确认这不是本进程遗留的裸 Helper —— 见
+        #    ``_reclaim_from_stale_bare_helper``。
         if await asyncio.to_thread(self._probe_cdp):
-            log.info("CDPDoubaoClient: reuse existing CDP on port %d", self.port)
-            await self._connect_chat()
-            return
+            await asyncio.to_thread(self._reclaim_from_stale_bare_helper)
+            if await asyncio.to_thread(self._probe_cdp):
+                log.info(
+                    "CDPDoubaoClient: reuse existing CDP on port %d", self.port
+                )
+                await self._connect_chat()
+                return
+            log.warning(
+                "CDPDoubaoClient: 清理裸 Helper 后调试口消失，改走 App 身份启动"
+            )
 
         # 2) 由 App 身份拉起（主 App 已在跑时 open -a 只激活，不杀进程）
         self._require_main_app_installed()
@@ -311,6 +329,154 @@ class CDPDoubaoClient:
             ).returncode == 0
         except OSError:
             return True
+
+    @staticmethod
+    def _bare_helper_pids() -> list[int]:
+        """当前在跑的**裸** Helper pid（``--saman-from-chat=1``，无 UI）。
+
+        App 自己的内嵌 Helper 带 ``--saman-from-chat=<主AppPID>``，不会命中，
+        所以这里只会捞到「代理自己起的、或历史遗留的裸 Helper」。
+        """
+        try:
+            r = subprocess.run(
+                # ``--`` 必须加：模式以 ``--`` 开头，否则 pgrep 会把它当选项，
+                # 直接 rc=2 退出（被误读成「没有裸 Helper」这个最危险的假阴性）。
+                ["pgrep", "-f", "--", _BARE_HELPER_PATTERN], capture_output=True
+            )
+        except OSError:
+            return []
+        if r.returncode != 0:
+            return []
+        pids = []
+        for line in (r.stdout or b"").decode("utf-8", "replace").split():
+            try:
+                pids.append(int(line))
+            except ValueError:
+                continue
+        return pids
+
+    def _reclaim_from_stale_bare_helper(self) -> None:
+        """端口上只有一个**裸 Helper** 时，把它清掉并释放单例锁。
+
+        为什么必须管：裸 Helper 与用户自己的 App 共用同 profile，它占着
+        ``SingletonLock``，用户点开豆包工作时 App 会因单例锁被无 UI 进程
+        持有而**闪退**——这正是「豆包工作一直打不开」。更糟的是它往往不是本
+        进程起的（proxy 早已重启），``self._proc`` 为空，``stop()`` 永远不会
+        收拾它，于是故障长期留在机器上。
+
+        判定很保守：只有「裸 Helper 在跑」且「主 App 没在跑」时才动手。主
+        App 在跑说明用户正在用，此时端口上的 CDP 属于 App，正常复用即可。
+        """
+        if self._main_app_running():
+            return
+        pids = self._bare_helper_pids()
+        if not pids:
+            return
+        log.warning(
+            "CDPDoubaoClient: 端口上的 CDP 属于裸 Helper %s（主 App 未运行），"
+            "它会占着单例锁导致用户打不开豆包工作 —— 先清理再交给 App 身份启动",
+            pids,
+        )
+        for pid in pids:
+            self._kill_process_tree(pid)
+        # 等进程真正退出，否则锁文件可能被它重建
+        for _ in range(20):
+            if not self._bare_helper_pids():
+                break
+            time.sleep(0.1)
+        self._clear_singleton_files()
+
+    @staticmethod
+    def _kill_process_tree(pid: int) -> None:
+        """杀掉 ``pid`` 及其所有后代。
+
+        裸 Helper 是 Chromium：主进程被杀后，renderer / network 子进程仍可能
+        继续持有 ``127.0.0.1:<port>`` 的 LISTEN，导致回收完 ``_probe_cdp()``
+        依然为 True，``start()`` 又去「复用」一个半死的 CDP。所以必须整棵树
+        一起收掉（先收子进程，避免它们被 init 收养后找不到 ppid 关系）。
+        """
+        # 先递归收集后代，再从最深的开始杀
+        order: list[int] = []
+
+        def _collect(parent: int) -> None:
+            try:
+                r = subprocess.run(
+                    ["pgrep", "-P", str(parent)], capture_output=True
+                )
+            except OSError:
+                return
+            if r.returncode != 0:
+                return
+            for tok in (r.stdout or b"").decode("utf-8", "replace").split():
+                try:
+                    child = int(tok)
+                except ValueError:
+                    continue
+                _collect(child)
+                order.append(child)
+
+        _collect(pid)
+        for target in order + [pid]:
+            try:
+                subprocess.run(["kill", "-9", str(target)], check=False)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _lock_owner_pid(path: pathlib.Path) -> int | None:
+        """解析 ``SingletonLock`` 指向的 pid（形如 ``<host>-<pid>``）。"""
+        try:
+            target = path.readlink().name
+        except OSError:
+            return None
+        tail = target.rsplit("-", 1)[-1]
+        try:
+            return int(tail)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _pid_alive(pid: int) -> bool:
+        """``kill -0`` 探活：进程存在（含僵尸）即可，不发送信号。
+
+        注意 ``kill -0`` 的 rc 不能直接当「存活」用：进程属于别的用户时
+        返回 1 且 stderr 是 ``Operation not permitted``——那是**权限**拒绝，
+        进程明明活着。只有 ``No such process`` 才算真死。把 EPERM 误判成
+        死亡，就会去删一个活着的 App 的锁（正是上一版的问题）。
+        """
+        try:
+            r = subprocess.run(["kill", "-0", str(pid)], capture_output=True)
+        except OSError:
+            return False
+        if r.returncode == 0:
+            return True
+        err = (r.stderr or b"").decode("utf-8", "replace").lower()
+        # ESRCH = 不存在；其余（EPERM 等）都说明进程还在
+        return "no such process" not in err
+
+    @classmethod
+    def _clear_singleton_files(cls) -> None:
+        """删掉**指向已死 pid** 的单例锁（这才是 App 起不来的直接原因）。
+
+        绝不无条件删：``SingletonSocket`` / ``SingletonCookie`` 是 App 活着时
+        正在用的 IPC 通道，误删会打断它。所以 ``SingletonLock`` 先读属主 pid，
+        只有那个 pid 不在了才清；socket/cookie 只在锁确实被清掉时才跟着清。
+        """
+        lock = _PROFILE_DIR / "SingletonLock"
+        owner = cls._lock_owner_pid(lock) if lock.is_symlink() else None
+        if owner is not None and cls._pid_alive(owner):
+            log.info(
+                "CDPDoubaoClient: 单例锁属主 pid=%s 仍存活，保持不动", owner
+            )
+            return
+        for name in _SINGLETON_FILES:
+            p = _PROFILE_DIR / name
+            try:
+                if p.is_symlink() or p.exists():
+                    p.unlink()
+                    log.info("CDPDoubaoClient: removed stale profile lock %s", name)
+            except OSError as e:  # noqa: BLE001 - 清不掉也不该中断启动
+                log.warning("CDPDoubaoClient: 清理 %s 失败（%s）", name, e)
 
     @staticmethod
     def _kill_app_processes() -> None:
