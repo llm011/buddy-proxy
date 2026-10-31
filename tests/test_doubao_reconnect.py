@@ -57,14 +57,18 @@ class _FakeClient:
     async def chat_completion(self, *_a, **_kw):
         self.calls += 1
         if self.calls <= self.fail_first:
+            # 真机上断线时 WS 层就把连接标记为不可用了（ws.close → _ready=False）
+            self.is_ready = False
             raise WSClosed("websocket send failed: [Errno 32] Broken pipe")
             yield  # pragma: no cover - 让它是异步生成器
         yield {"_event": "CHUNK_DELTA", "text": "ok"}
 
 
 def _provider(client: _FakeClient) -> DoubaoProvider:
+    """生产里 forward() 会先 _ensure_started；默认让 provider 视为「已连好」。"""
     p = DoubaoProvider()
     p._client = client
+    p._started = client.is_ready
     return p
 
 
@@ -147,6 +151,50 @@ def test_collect_retries_once_after_reconnect():
     msg = asyncio.run(p._collect("hi", 0, None, None))
     assert client.restarts == 1
     assert msg["content"] == "ok"
+
+
+def test_collect_drops_half_baked_conversation_id_on_retry():
+    """断线前后半截会话 id 不能沿用：重跑没拿回 id 就不带 conversation_id。"""
+    client = _FakeClient()
+    p = _provider(client)
+    calls = 0
+
+    async def _cid_then_die(*_a, **_kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            p._client.is_ready = False  # 断线：连接随即不可用
+            yield {"_cid": "half-baked"}
+            raise WSClosed("websocket closed during CHAT")
+        yield {"_event": "CHUNK_DELTA", "text": "ok"}
+
+    client.chat_completion = _cid_then_die  # type: ignore[assignment]
+    client.extract_conversation_id = (  # type: ignore[assignment]
+        lambda ev: ev.get("_cid"))
+
+    msg = asyncio.run(p._collect("hi", 0, None, None))
+    assert client.restarts == 1
+    assert msg["content"] == "ok"
+    assert "conversation_id" not in msg, msg
+
+
+def test_ensure_started_restarts_only_once():
+    """_ensure_started 已重启过就别在 _with_reconnect 里再叠一次。"""
+    client = _FakeClient()
+    client.is_ready = False
+    p = _provider(client)
+    p._started = True
+    client.restart = _count_and_ready(client)  # type: ignore[assignment]
+
+    asyncio.run(p._with_reconnect())
+    assert client.restarts == 1
+
+
+def _count_and_ready(client: _FakeClient):
+    async def _restart() -> None:
+        client.restarts += 1
+        client.is_ready = True
+    return _restart
 
 
 def test_restart_drops_dead_connection_before_reusing_port(

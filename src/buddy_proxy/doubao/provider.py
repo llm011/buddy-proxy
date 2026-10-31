@@ -173,53 +173,64 @@ class DoubaoProvider(BaseProvider):
         那时 ``_started=True`` 但 ``is_ready=False``，只认前者会把通道永久判成
         「未登录」。
         """
-        if self._started and self._client.is_ready:
+        if self._is_connected():
             return
         async with self._start_lock:
-            if self._started and self._client.is_ready:  # 等锁期间可能已被启动
+            if self._is_connected():  # 等锁期间可能已被启动
+                return
+            if self._started:
+                # 启动过一次但已失效：复用过的 CDP 会话/页面没了，重连
+                await self._reconnect()
                 return
             log.info("DoubaoProvider: starting CDP client")
             try:
-                if self._started:
-                    # 启动过一次但已不 ready：复用的 CDP 会话/页面已失效，重连
-                    await self._client.restart()
-                else:
-                    await self._client.start()
-                self._started = True
+                await self._client.start()
             except Exception as exc:
                 log.error("DoubaoProvider: client start failed: %s", exc)
                 raise HTTPException(
                     status_code=502,
                     detail=f"doubao client start failed: {exc}",
                 ) from exc
+            self._started = True
+
+    def _is_connected(self) -> bool:
+        return self._started and bool(self._client.is_ready)
 
     async def _reconnect(self) -> bool:
-        """CDP 断线后重建连接；成功返回 True。
+        """CDP 断线后重建连接；成功返回 True（并发请求只重连一次）。
 
         网关只在启动时连一次 CDP。豆包 App 刷新页面 / 被关掉再打开后，旧
-        WebSocket 与 target 全部失效，而 ``_started`` 仍是 True、``is_ready``
-        也还是 True（它只在 ``start()`` 里置位，连接断了没人复位）。于是每次
-        请求都撞在死连接上——用户看到的就是「一直报 CDP connection lost，
-        重开 App 也没用，只能重启网关」。
+        WebSocket 与 target 全部失效，而 ``is_ready`` 只在 ``start()`` 里置位，
+        连接断了没人复位。于是每次请求都撞在死连接上——用户看到的就是
+        「一直报 CDP connection lost，重开 App 也没用，只能重启网关」。
 
-        这里先让客户端把自己标记为不就绪并清掉旧 socket，再走一次 ``start()``
-        （端口上已有新 App 的调试口就复用，没有就由 App 身份拉起）。
+        ``restart()`` 会先 :meth:`_drop_connection`（关旧 socket、复位 ready）
+        再 ``start()``：端口上已有新 App 的调试口就复用，没有就由 App 身份拉起。
         """
         async with self._reconnect_lock:
+            if self._is_connected():
+                return True  # 排队期间别的请求已经重连好了
+            action = "restart" if self._started else "start"
+            log.info("DoubaoProvider: %s CDP client", action)
             try:
-                await self._client.restart()
-            except Exception as exc:  # noqa: BLE001 - 重连失败按「仍未连通」处理
-                log.error("DoubaoProvider: CDP reconnect failed: %s",
+                if self._started:
+                    await self._client.restart()
+                else:
+                    await self._client.start()
+            except Exception as exc:
+                log.error("DoubaoProvider: CDP %s failed: %s", action,
                           describe_exception(exc))
                 return False
             self._started = True
             return bool(self._client.is_ready)
 
     async def _with_reconnect(self) -> None:
-        """请求入口用：先确保已连接，未就绪则重连一次，仍不行才抛 401。"""
+        """请求入口用：先确保已连接，仍未就绪才抛 401。
+
+        重连只在这里做一次：``_ensure_started`` 内部已经把「启动过但失效」
+        的客户端 ``restart`` 过了，不再叠一次，免得白白关闭刚拉起来的 App。
+        """
         await self._ensure_started()
-        if not self._client.is_ready:
-            await self._reconnect()
         if not self._client.is_ready:
             raise HTTPException(
                 status_code=401,
@@ -526,6 +537,9 @@ class DoubaoProvider(BaseProvider):
                     log.warning("doubao: CDP 断线（%s），重连后重试一次", exc)
                     content_parts.clear()
                     thinking_parts.clear()
+                    # 新连接是新的会话上下文：断线前半截拿到的会话 id 别再沿用，
+                    # 否则续聊会挂到一个没跑完的会话上（重跑没拿回 id 就不带）。
+                    result_conversation_id = conversation_id
                     continue
                 # 转成**不可换档**的 409：客户端看到的是豆包这一条失败，网关与
                 # 其它渠道不受影响。
