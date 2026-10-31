@@ -148,7 +148,7 @@ buddy start
 | 现象 | 原因 | 恢复 |
 | --- | --- | --- |
 | 502「豆包主 App 正在运行但未开启 CDP 调试端口」 | 豆包先于代理启动（或你手动开过豆包） | **完全退出豆包（Cmd+Q）→ 再点一次测试/重发请求**，代理会自动以正确参数拉起它 |
-| 豆包 App 升级/重启后请求开始报错 | CDP 连接已失效（代理内存里还标记为已连接） | 同上：退出豆包再重试；或 `buddy restart` 重启代理 |
+| 豆包 App 升级/重启后请求开始报错 | CDP 连接已失效。旧版本会一直复用这条死连接，**重开 App 也没用，只能重启代理** | **本版本起自愈**：发现连接失效会先丢掉旧 socket 再重连；断线如果发生在**还没吐出任何内容之前**，会自动重连并重试一次，所以重开 App 就够了。只有重连也失败（App 确实不在了）才会报 409「CDP connection lost」，此时重新拉起豆包再重试即可；409 是刻意设为不可换档的，不会把模型打进冷却 |
 | 豆包工作 App 点不开 / 开了又退（代理已连过豆包） | 无界面的**裸 Helper**（`--saman-from-chat=1`）和 App 共用 `~/Library/Application Support/DoubaoWork`，抢走了 Chromium 单例锁（`SingletonLock -> <host>-<pid>`）；锁即使指向已死的 pid 也不会自愈，App 就一直起不来 | 本版本起代理会**自动收掉**：复用端口上的 CDP 前先确认它不是裸 Helper，并删除失效的 `SingletonLock`/`SingletonSocket`/`SingletonCookie`。手动恢复只需三步：`kill -9 <裸Helper的pid>` → `rm -f ~/Library/Application\ Support/DoubaoWork/Singleton{Lock,Socket,Cookie}` → `open -a DoubaoWork`。**不要**用 `pkill -f "DoubaoWork Browser"`——那会连带杀掉 App 自己的内嵌 Helper |
 | 401「doubao not logged in」 | 豆包内登录态失效 | 打开豆包 App 重新扫码登录 → 重试 |
 | 报「请先完成豆包扫码登录」 | 首次使用尚未登录 | 代理拉起豆包后在 App 里登录，等几十秒自动就绪 |

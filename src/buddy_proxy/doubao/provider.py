@@ -135,6 +135,8 @@ class DoubaoProvider(BaseProvider):
         self._started = False
         # 防止并发首请求双重启动（双开 Helper / 重复连接 CDP）
         self._start_lock = asyncio.Lock()
+        # 防止并发请求在断线后各自「重连 + 重试」（同一请求最多重试一次）
+        self._reconnect_lock = asyncio.Lock()
         # /api/agent/doubao 任务接口的默认会话（缺省续聊最近一次会话）
         self._agent_session: str | None = None
         # 最近一次签到时的服务端登录态：False=明确未登录，None=没探到/没探过
@@ -164,22 +166,76 @@ class DoubaoProvider(BaseProvider):
         return
 
     async def _ensure_started(self) -> None:
-        """异步确保 CDPDoubaoClient 已启动（惰性启动，加锁防并发双重启动）。"""
-        if self._started:
+        """异步确保 CDPDoubaoClient 已启动（惰性启动，加锁防并发双重启动）。
+
+        ``_started`` 只在**启动过程**成功过就置 True，之后不复位——所以还必须
+        看 ``client.is_ready``：认证/聊天页可以单独回滚（App 刷新、切换账号），
+        那时 ``_started=True`` 但 ``is_ready=False``，只认前者会把通道永久判成
+        「未登录」。
+        """
+        if self._is_connected():
             return
         async with self._start_lock:
-            if self._started:  # 双重检查：等锁期间可能已被并发请求启动
+            if self._is_connected():  # 等锁期间可能已被启动
+                return
+            if self._started:
+                # 启动过一次但已失效：复用过的 CDP 会话/页面没了，重连
+                await self._reconnect()
                 return
             log.info("DoubaoProvider: starting CDP client")
             try:
                 await self._client.start()
-                self._started = True
             except Exception as exc:
                 log.error("DoubaoProvider: client start failed: %s", exc)
                 raise HTTPException(
                     status_code=502,
                     detail=f"doubao client start failed: {exc}",
                 ) from exc
+            self._started = True
+
+    def _is_connected(self) -> bool:
+        return self._started and bool(self._client.is_ready)
+
+    async def _reconnect(self) -> bool:
+        """CDP 断线后重建连接；成功返回 True（并发请求只重连一次）。
+
+        网关只在启动时连一次 CDP。豆包 App 刷新页面 / 被关掉再打开后，旧
+        WebSocket 与 target 全部失效，而 ``is_ready`` 只在 ``start()`` 里置位，
+        连接断了没人复位。于是每次请求都撞在死连接上——用户看到的就是
+        「一直报 CDP connection lost，重开 App 也没用，只能重启网关」。
+
+        ``restart()`` 会先 :meth:`_drop_connection`（关旧 socket、复位 ready）
+        再 ``start()``：端口上已有新 App 的调试口就复用，没有就由 App 身份拉起。
+        """
+        async with self._reconnect_lock:
+            if self._is_connected():
+                return True  # 排队期间别的请求已经重连好了
+            action = "restart" if self._started else "start"
+            log.info("DoubaoProvider: %s CDP client", action)
+            try:
+                if self._started:
+                    await self._client.restart()
+                else:
+                    await self._client.start()
+            except Exception as exc:
+                log.error("DoubaoProvider: CDP %s failed: %s", action,
+                          describe_exception(exc))
+                return False
+            self._started = True
+            return bool(self._client.is_ready)
+
+    async def _with_reconnect(self) -> None:
+        """请求入口用：先确保已连接，仍未就绪才抛 401。
+
+        重连只在这里做一次：``_ensure_started`` 内部已经把「启动过但失效」
+        的客户端 ``restart`` 过了，不再叠一次，免得白白关闭刚拉起来的 App。
+        """
+        await self._ensure_started()
+        if not self._client.is_ready:
+            raise HTTPException(
+                status_code=401,
+                detail="doubao not logged in - 请先完成豆包扫码登录",
+            )
 
     async def forward(
         self,
@@ -187,13 +243,7 @@ class DoubaoProvider(BaseProvider):
         protocol: str,
         original: dict[str, Any] | None = None,
     ) -> StreamingResponse | JSONResponse:
-        await self._ensure_started()
-
-        if not self._client.is_ready:
-            raise HTTPException(
-                status_code=401,
-                detail="doubao not logged in - 请先完成豆包扫码登录",
-            )
+        await self._with_reconnect()
 
         requested_model = body.get("model", "doubao")
         if requested_model not in _DOUBAO_CHAT_MODELS:
@@ -227,7 +277,7 @@ class DoubaoProvider(BaseProvider):
                 (body.get("stream_options") or {}).get("include_usage"))
             gen = self._stream(prompt, use_deep_think, requested_model,
                                conversation_id, bot_id, include_usage,
-                               model_spec=model_spec)
+                               model_spec=model_spec, retry_on_closed=True)
             if protocol == "anthropic":
                 # Claude Code 等 /v1/messages 客户端：OpenAI chunk 流包一层
                 # 转回 anthropic 事件序列（trae/mimo/dumate 同款）。
@@ -300,8 +350,14 @@ class DoubaoProvider(BaseProvider):
         bot_id: str | None,
         include_usage: bool = False,
         model_spec: dict[str, Any] | None = None,
+        retry_on_closed: bool = False,
     ) -> AsyncIterator[str]:
-        """把豆包原始 SSE 事件转成 OpenAI chat.completion.chunk 流。"""
+        """把豆包原始 SSE 事件转成 OpenAI chat.completion.chunk 流。
+
+        ``retry_on_closed``：还没向客户端吐出任何内容时遇到 ``WSClosed``，
+        先重连 CDP 再重跑一次（豆包 App 刷新后旧连接必然失效，不重连的话
+        每次都要等用户重启网关）。已经吐过内容就只能如实报错，不能拼接。
+        """
         request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         thinking_count = 0
         in_thinking = False
@@ -324,80 +380,100 @@ class DoubaoProvider(BaseProvider):
             if isinstance(dc, dict):
                 yield from dc.get("content_block", [])
 
-        try:
-            async for event in self._client.chat_completion(
-                prompt,
-                use_deep_think=use_deep_think,
-                conversation_id=conversation_id or None,
-                bot_id=bot_id or None,
-                model_spec=model_spec,
-            ):
-                if event.get("error"):
-                    status = event.get("status", 0)
-                    # 上游错误 body 可能回显请求/账号信息，只记录状态码。
-                    log.error("doubao stream error status=%s", status)
-                    self._client.record_failure(status or 0)
-                    yield f"data: {json.dumps(_chunk({'content': f'[Error {status}]'}), ensure_ascii=False)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
-
-                event_type = event.get("_event", "")
-
-                if not result_conversation_id:
-                    cid = self._client.extract_conversation_id(event)
-                    if cid and cid != "0":
-                        result_conversation_id = cid
-
-                # 风控 / 会话过期错误
-                if event_type == "STREAM_ERROR" or event.get("error_code"):
-                    code = event.get("error_code", 0)
-                    msg = event.get("error_msg", "unknown error")
-                    self._client.record_failure(code)
-                    yield f"data: {json.dumps(_chunk({'content': f'[Error code={code}: {msg}]'}), ensure_ascii=False)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    return
-
-                # CHUNK_DELTA：紧凑 {"text": "..."}
-                if (
-                    event_type == "CHUNK_DELTA"
-                    and isinstance(event.get("text"), str)
-                    and event["text"]
+        emitted = False  # 是否已向客户端吐出内容（决定断线后能否安全重试）
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                async for event in self._client.chat_completion(
+                    prompt,
+                    use_deep_think=use_deep_think,
+                    conversation_id=conversation_id or None,
+                    bot_id=bot_id or None,
+                    model_spec=model_spec,
                 ):
-                    t = event["text"]
-                    if in_thinking:
-                        yield f"data: {json.dumps(_chunk({'reasoning_content': t}), ensure_ascii=False)}\n\n"
-                    else:
-                        yield f"data: {json.dumps(_chunk({'role': 'assistant', 'content': t}), ensure_ascii=False)}\n\n"
-                    continue
+                    emitted = True
+                    if event.get("error"):
+                        status = event.get("status", 0)
+                        # 上游错误 body 可能回显请求/账号信息，只记录状态码。
+                        log.error("doubao stream error status=%s", status)
+                        self._client.record_failure(status or 0)
+                        yield f"data: {json.dumps(_chunk({'content': f'[Error {status}]'}), ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
 
-                # content_block 数组（thinking 标记 / 正文）
-                for cb in _iter_blocks(event):
-                    bt = cb.get("block_type", 0)
-                    block_content = cb.get("content", {})
+                    event_type = event.get("_event", "")
 
-                    if bt == 10040:
-                        thinking_count += 1
-                        in_thinking = thinking_count == 1
+                    if not result_conversation_id:
+                        cid = self._client.extract_conversation_id(event)
+                        if cid and cid != "0":
+                            result_conversation_id = cid
+
+                    # 风控 / 会话过期错误
+                    if event_type == "STREAM_ERROR" or event.get("error_code"):
+                        code = event.get("error_code", 0)
+                        msg = event.get("error_msg", "unknown error")
+                        self._client.record_failure(code)
+                        yield f"data: {json.dumps(_chunk({'content': f'[Error code={code}: {msg}]'}), ensure_ascii=False)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+
+                    # CHUNK_DELTA：紧凑 {"text": "..."}
+                    if (
+                        event_type == "CHUNK_DELTA"
+                        and isinstance(event.get("text"), str)
+                        and event["text"]
+                    ):
+                        t = event["text"]
+                        if in_thinking:
+                            yield f"data: {json.dumps(_chunk({'reasoning_content': t}), ensure_ascii=False)}\n\n"
+                        else:
+                            yield f"data: {json.dumps(_chunk({'role': 'assistant', 'content': t}), ensure_ascii=False)}\n\n"
                         continue
 
-                    if bt == 10000:
-                        tb = block_content.get("text_block", {})
-                        if isinstance(tb, dict) and tb.get("text"):
-                            t = tb["text"]
-                            if in_thinking:
-                                yield f"data: {json.dumps(_chunk({'reasoning_content': t}), ensure_ascii=False)}\n\n"
-                            else:
-                                yield f"data: {json.dumps(_chunk({'role': 'assistant', 'content': t}), ensure_ascii=False)}\n\n"
+                    # content_block 数组（thinking 标记 / 正文）
+                    for cb in _iter_blocks(event):
+                        bt = cb.get("block_type", 0)
+                        block_content = cb.get("content", {})
 
-        except Exception as exc:
-            # describe_exception：异常自身 str() 为空时（httpcore 映射的
-            # httpx.ReadError 一类）仍能给出可读真因，日志与给客户端的文本都用它
-            detail = describe_exception(exc)
-            log.error("doubao stream error: %s", detail)
-            self._client.record_failure(0)
-            yield f"data: {json.dumps(_chunk({'content': f'[Error: {detail}]'}), ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
-            return
+                        if bt == 10040:
+                            thinking_count += 1
+                            in_thinking = thinking_count == 1
+                            continue
+
+                        if bt == 10000:
+                            tb = block_content.get("text_block", {})
+                            if isinstance(tb, dict) and tb.get("text"):
+                                t = tb["text"]
+                                if in_thinking:
+                                    yield f"data: {json.dumps(_chunk({'reasoning_content': t}), ensure_ascii=False)}\n\n"
+                                else:
+                                    yield f"data: {json.dumps(_chunk({'role': 'assistant', 'content': t}), ensure_ascii=False)}\n\n"
+
+            except WSClosed as exc:
+                # 豆包 App 刷新/重开：旧连接必然失效。先重连再重试一次，
+                # 而不是把「连接断了」原样甩给用户（那样只能重启网关才好）。
+                if retry_on_closed and not emitted and attempt == 1:
+                    log.warning("doubao stream: CDP 断线（%s），重连后重试一次", exc)
+                    if await self._reconnect():
+                        continue
+                detail = describe_exception(exc)
+                log.error("doubao stream error: %s", detail)
+                self._client.record_failure(0)
+                yield f"data: {json.dumps(_chunk({'content': f'[Error: {detail}]'}), ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+
+            except Exception as exc:
+                # describe_exception：异常自身 str() 为空时（httpcore 映射的
+                # httpx.ReadError 一类）仍能给出可读真因，日志与给客户端的文本都用它
+                detail = describe_exception(exc)
+                log.error("doubao stream error: %s", detail)
+                self._client.record_failure(0)
+                yield f"data: {json.dumps(_chunk({'content': f'[Error: {detail}]'}), ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            break
 
         self._client.record_success()
 
@@ -445,82 +521,43 @@ class DoubaoProvider(BaseProvider):
             if isinstance(dc, dict):
                 yield from dc.get("content_block", [])
 
-        try:
-            async for event in self._client.chat_completion(
-                prompt,
-                use_deep_think=use_deep_think,
-                conversation_id=conversation_id or None,
-                bot_id=bot_id or None,
-                model_spec=model_spec,
-            ):
-                if event.get("error"):
-                    self._client.record_failure(event.get("status") or 0)
-                    raise RuntimeError(
-                        f"API error {event.get('status')}: {event.get('body', '')[:200]}"
-                    )
-                if event.get("error_code"):
-                    code = event.get("error_code", 0)
-                    msg = event.get("error_msg", "")
-                    self._client.record_failure(code)
-                    raise RuntimeError(f"Error code={code}: {msg}")
-
-                if not result_conversation_id:
-                    cid = self._client.extract_conversation_id(event)
-                    if cid and cid != "0":
-                        result_conversation_id = cid
-
-                event_type = event.get("_event", "")
-
-                if (
-                    event_type == "CHUNK_DELTA"
-                    and isinstance(event.get("text"), str)
-                    and event["text"]
-                ):
-                    if in_thinking:
-                        thinking_parts.append(event["text"])
-                    else:
-                        content_parts.append(event["text"])
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                cid = await self._collect_once(
+                    prompt, use_deep_think, conversation_id, bot_id, model_spec,
+                    content_parts, thinking_parts,
+                )
+                if cid:
+                    result_conversation_id = cid
+            except WSClosed as exc:
+                # 非流式还没向客户端吐过任何字节，重连后重跑是安全的。
+                if attempt == 1 and await self._reconnect():
+                    log.warning("doubao: CDP 断线（%s），重连后重试一次", exc)
+                    content_parts.clear()
+                    thinking_parts.clear()
+                    # 新连接是新的会话上下文：断线前半截拿到的会话 id 别再沿用，
+                    # 否则续聊会挂到一个没跑完的会话上（重跑没拿回 id 就不带）。
+                    result_conversation_id = conversation_id
                     continue
-
-                for cb in _iter_blocks(event):
-                    bt = cb.get("block_type", 0)
-                    block_content = cb.get("content", {})
-
-                    if bt == 10040:
-                        thinking_count += 1
-                        in_thinking = thinking_count == 1
-                    elif bt == 10000:
-                        tb = block_content.get("text_block", {})
-                        if isinstance(tb, dict) and tb.get("text"):
-                            if in_thinking:
-                                thinking_parts.append(tb["text"])
-                            else:
-                                content_parts.append(tb["text"])
-
-        except WSClosed as exc:
-            # 2026-10-31：豆包 App 退出/刷新导致 CDP WebSocket 断开时，原先会
-            # 裸抛到这里再冒泡到 FastAPI，**直接杀死整个网关进程**（launchd
-            # KeepAlive=1 于是反复重启，正在等待上游的其它渠道请求——含 qoder
-            # ——被一起切断，表现为「渠道都测试不能」）。
-            # 转成**不可换档**的 409（见下），客户端看到的是豆包这一条失败，
-            # 网关与其它渠道不受影响。
-            #
-            # 为什么不是 502：`_RETRYABLE_STATUS` 含 502，`_forward_with_order`
-            # 会据此 `cooldown_mod.mark_failed(provider_id, model, status=502)`——
-            # 普通档冷却 5 分钟、窗口内三次升到 1 小时；且 ≥500 还会进机器级突发
-            # 窗口，跟另一通道凑两条就在同一模型上判「本机网络故障」。可 App 被关掉
-            # 不是模型坏了，用户重开 App 后模型仍在冷却里，反而像个新故障。409 不在
-            # 可换档集合内，换档逻辑原样上抛、不打标记（豆包没有同模型替代通道）。
-            self._client.record_failure(0)
-            log.error("doubao CDP connection lost: %s", exc)
-            raise HTTPException(
-                status_code=409,
-                detail="doubao CDP connection lost (App closed or reloaded); "
-                       "reopen Doubao desktop app and retry",
-            ) from exc
-
-        except RuntimeError:
-            raise
+                # 转成**不可换档**的 409：客户端看到的是豆包这一条失败，网关与
+                # 其它渠道不受影响。
+                #
+                # 为什么不是 502：`_RETRYABLE_STATUS` 含 502，`_forward_with_order`
+                # 会据此 `cooldown_mod.mark_failed(provider_id, model, status=502)`——
+                # 普通档冷却 5 分钟、窗口内三次升到 1 小时；且 ≥500 还会进机器级突发
+                # 窗口，跟另一通道凑两条就在同一模型上判「本机网络故障」。可 App 被关掉
+                # 不是模型坏了，用户重开 App 后模型仍在冷却里，反而像个新故障。409 不在
+                # 可换档集合内，换档逻辑原样上抛、不打标记（豆包没有同模型替代通道）。
+                self._client.record_failure(0)
+                log.error("doubao CDP connection lost: %s", exc)
+                raise HTTPException(
+                    status_code=409,
+                    detail="doubao CDP connection lost (App closed or reloaded); "
+                           "reopen Doubao desktop app and retry",
+                ) from exc
+            break
 
         self._client.record_success()
 
@@ -530,6 +567,86 @@ class DoubaoProvider(BaseProvider):
         if result_conversation_id:
             message["conversation_id"] = result_conversation_id
         return message
+
+    async def _collect_once(
+        self,
+        prompt: str,
+        use_deep_think: int,
+        conversation_id: str | None,
+        bot_id: str | None,
+        model_spec: dict[str, Any] | None,
+        content_parts: list[str],
+        thinking_parts: list[str],
+    ) -> str | None:
+        """跑一遍非流式聚合，把正文/思考片段追加到调用方给的列表里。
+
+        ``WSClosed`` 原样上抛，由 :meth:`_collect` 决定「重连重试」还是
+        转成渠道级 409（见那里的注释：为什么是 409 而不是 502）。
+        """
+        thinking_count = 0
+        in_thinking = False
+        result_cid = conversation_id or None
+
+        def _iter_blocks(data: dict[str, Any]):
+            for patch in data.get("patch_op", []):
+                pv = patch.get("patch_value", {})
+                yield from pv.get("content_block", [])
+            dc = data.get("content", {})
+            if isinstance(dc, dict):
+                yield from dc.get("content_block", [])
+
+        async for event in self._client.chat_completion(
+            prompt,
+            use_deep_think=use_deep_think,
+            conversation_id=conversation_id or None,
+            bot_id=bot_id or None,
+            model_spec=model_spec,
+        ):
+            if event.get("error"):
+                self._client.record_failure(event.get("status") or 0)
+                raise RuntimeError(
+                    f"API error {event.get('status')}: {event.get('body', '')[:200]}"
+                )
+            if event.get("error_code"):
+                code = event.get("error_code", 0)
+                msg = event.get("error_msg", "")
+                self._client.record_failure(code)
+                raise RuntimeError(f"Error code={code}: {msg}")
+
+            if not result_cid:
+                got = self._client.extract_conversation_id(event)
+                if got and got != "0":
+                    result_cid = got
+
+            event_type = event.get("_event", "")
+
+            if (
+                event_type == "CHUNK_DELTA"
+                and isinstance(event.get("text"), str)
+                and event["text"]
+            ):
+                if in_thinking:
+                    thinking_parts.append(event["text"])
+                else:
+                    content_parts.append(event["text"])
+                continue
+
+            for cb in _iter_blocks(event):
+                bt = cb.get("block_type", 0)
+                block_content = cb.get("content", {})
+
+                if bt == 10040:
+                    thinking_count += 1
+                    in_thinking = thinking_count == 1
+                elif bt == 10000:
+                    tb = block_content.get("text_block", {})
+                    if isinstance(tb, dict) and tb.get("text"):
+                        if in_thinking:
+                            thinking_parts.append(tb["text"])
+                        else:
+                            content_parts.append(tb["text"])
+
+        return result_cid
 
     # ------------------------------------------------------------------
     # 签到（/ui 自动打卡循环消费；同步实现，调用方经 asyncio.to_thread 包装）

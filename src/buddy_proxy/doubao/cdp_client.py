@@ -489,9 +489,7 @@ class CDPDoubaoClient:
             pass
 
     async def stop(self) -> None:
-        if self._ws:
-            self._ws.close()
-            self._ws = None
+        self._drop_connection()
         if self._proc:
             self._proc.terminate()
             try:
@@ -501,11 +499,30 @@ class CDPDoubaoClient:
             self._proc = None
         self._ready = False
 
+    def _drop_connection(self) -> None:
+        """丢掉当前 WebSocket 与会话态，但**不碰进程**。
+
+        豆包 App 刷新页面 / 被关掉再打开后，旧 ``_ws`` 指向的 target 已经消失；
+        而 ``is_ready`` 只在 ``start()`` 里置位，断线后没人复位，于是 ``start()``
+        看见端口上（新）有 CDP 就直接 ``_connect_chat()``——它以为已经就绪，
+        实际仍握着死连接，每个请求都 ``Broken pipe``。重连前必须先复位。
+        """
+        ws, self._ws = self._ws, None
+        if ws:
+            try:
+                ws.close()
+            except Exception:  # noqa: BLE001 - 关闭失败不影响重连
+                pass
+        self._ready = False
+        self._web_id = ""
+
     async def is_alive(self) -> bool:
         return self._ready and self._proc is not None and self._proc.poll() is None
 
     async def restart(self) -> None:
         await self.stop()
+        # 本进程自己起的 Helper 已经在 stop() 里收掉；主 App 身份起的
+        # （``_proc`` 为空，进程归 launchd 管）不动，start() 会复用它的调试口。
         await self.start()
 
     # ------------------------------------------------------------------
