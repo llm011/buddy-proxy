@@ -62,6 +62,15 @@ _MAIN_APP_CDP_WAIT_S = 30
 # ``DoubaoWork.app``，所以一条正则同时覆盖两者；pkill -f 是正则匹配。
 _APP_PROCESS_PATTERN = "DoubaoWork\\.app/Contents/"
 
+# **裸**独立 Helper（``--saman-from-chat=1``，无 UI）。App 自己在
+# ``--saman-from-chat=<主AppPID>`` 里带真实 pid，所以只认 ``=1`` 才能把
+# 「代理起的裸 Helper」和「App 自己的内嵌 Helper」区分开，绝不误杀后者。
+_BARE_HELPER_PATTERN = r"--saman-from-chat=1( |$)"
+
+# 豆包工作 profile 目录与 Chromium 单例锁。
+_PROFILE_DIR = pathlib.Path.home() / "Library/Application Support/DoubaoWork"
+_SINGLETON_FILES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+
 
 def _is_app_chat_url(url: str | None) -> bool:
     """是否 App 自己的聊天窗口（内部 WebUI 页）。
@@ -220,11 +229,20 @@ class CDPDoubaoClient:
         豆包工作 App，App 发现锁被一个无 UI 的 Helper 占着就起不来，表现就是
         「豆包工作打不开」。所以只有「App 身份启动也拿不到 CDP」时才用裸 Helper。
         """
-        # 1) 端口已有 CDP 直接复用（主 App 正在跑且开了调试端口）
+        # 1) 端口已有 CDP 直接复用（主 App 正在跑且开了调试端口）。
+        #    但**复用前**先确认这不是本进程遗留的裸 Helper —— 见
+        #    ``_reclaim_from_stale_bare_helper``。
         if await asyncio.to_thread(self._probe_cdp):
-            log.info("CDPDoubaoClient: reuse existing CDP on port %d", self.port)
-            await self._connect_chat()
-            return
+            await asyncio.to_thread(self._reclaim_from_stale_bare_helper)
+            if await asyncio.to_thread(self._probe_cdp):
+                log.info(
+                    "CDPDoubaoClient: reuse existing CDP on port %d", self.port
+                )
+                await self._connect_chat()
+                return
+            log.warning(
+                "CDPDoubaoClient: 清理裸 Helper 后调试口消失，改走 App 身份启动"
+            )
 
         # 2) 由 App 身份拉起（主 App 已在跑时 open -a 只激活，不杀进程）
         self._require_main_app_installed()
@@ -310,6 +328,75 @@ class CDPDoubaoClient:
             ).returncode == 0
         except OSError:
             return True
+
+    @staticmethod
+    def _bare_helper_pids() -> list[int]:
+        """当前在跑的**裸** Helper pid（``--saman-from-chat=1``，无 UI）。
+
+        App 自己的内嵌 Helper 带 ``--saman-from-chat=<主AppPID>``，不会命中，
+        所以这里只会捞到「代理自己起的、或历史遗留的裸 Helper」。
+        """
+        try:
+            r = subprocess.run(
+                ["pgrep", "-f", _BARE_HELPER_PATTERN], capture_output=True
+            )
+        except OSError:
+            return []
+        if r.returncode != 0:
+            return []
+        pids = []
+        for line in (r.stdout or b"").decode("utf-8", "replace").split():
+            try:
+                pids.append(int(line))
+            except ValueError:
+                continue
+        return pids
+
+    def _reclaim_from_stale_bare_helper(self) -> None:
+        """端口上只有一个**裸 Helper** 时，把它清掉并释放单例锁。
+
+        为什么必须管：裸 Helper 与用户自己的 App 共用同 profile，它占着
+        ``SingletonLock``，用户点开豆包工作时 App 会因单例锁被无 UI 进程
+        持有而**闪退**——这正是「豆包工作一直打不开」。更糟的是它往往不是本
+        进程起的（proxy 早已重启），``self._proc`` 为空，``stop()`` 永远不会
+        收拾它，于是故障长期留在机器上。
+
+        判定很保守：只有「裸 Helper 在跑」且「主 App 没在跑」时才动手。主
+        App 在跑说明用户正在用，此时端口上的 CDP 属于 App，正常复用即可。
+        """
+        if self._main_app_running():
+            return
+        pids = self._bare_helper_pids()
+        if not pids:
+            return
+        log.warning(
+            "CDPDoubaoClient: 端口上的 CDP 属于裸 Helper %s（主 App 未运行），"
+            "它会占着单例锁导致用户打不开豆包工作 —— 先清理再交给 App 身份启动",
+            pids,
+        )
+        for pid in pids:
+            try:
+                subprocess.run(["kill", "-9", str(pid)], check=False)
+            except OSError:
+                pass
+        # 等进程真正退出，否则锁文件可能被它重建
+        for _ in range(20):
+            if not self._bare_helper_pids():
+                break
+            time.sleep(0.1)
+        self._clear_singleton_files()
+
+    @staticmethod
+    def _clear_singleton_files() -> None:
+        """删掉指向已死 pid 的单例锁（这是 App 起不来的直接原因）。"""
+        for name in _SINGLETON_FILES:
+            p = _PROFILE_DIR / name
+            try:
+                if p.is_symlink() or p.exists():
+                    p.unlink()
+                    log.info("CDPDoubaoClient: removed stale profile lock %s", name)
+            except OSError as e:  # noqa: BLE001 - 清不掉也不该中断启动
+                log.warning("CDPDoubaoClient: 清理 %s 失败（%s）", name, e)
 
     @staticmethod
     def _kill_app_processes() -> None:

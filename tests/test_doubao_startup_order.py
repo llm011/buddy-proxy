@@ -95,9 +95,10 @@ class _Harness:
 
 
 def test_reuses_existing_cdp_without_launching(monkeypatch: pytest.MonkeyPatch):
+    """端口已有 CDP：先探一次有没有遗留裸 Helper（pgrep），再直接复用。"""
     h = _Harness(monkeypatch, cdp_after_open=False, cdp_already_up=True)
     h.run_start()
-    assert h.calls == ["connect"]
+    assert h.calls == ["pgrep", "connect"]
     assert h.popen_cmds == []
 
 
@@ -159,3 +160,81 @@ def test_cleanup_pattern_only_matches_doubaowork_bundle(monkeypatch: pytest.Monk
     assert pat.search(helper)
     assert pat.search(main_app)
     assert not pat.search(other)
+
+
+# ----------------------------------------------------------------------
+# 回归：proxy 重启后遗留的**裸 Helper** 占着单例锁
+# ----------------------------------------------------------------------
+# 现场（2026-10-31）：昨天那次裸 Helper 起在 proxy **之前/之外**，proxy 重启
+# 后 ``self._proc`` 为空、``stop()`` 永远收不到它。它继续占着 9223 和
+# SingletonLock，于是「复用现有 CDP」直接成功，但用户点开豆包工作仍然闪退。
+# 契约：复用一个**裸 Helper** 的 CDP 之前，必须先收掉它并释放单例锁。
+
+
+def _reclaim_harness(monkeypatch, *, bare: bool, app_running: bool):
+    client = cdp_client.CDPDoubaoClient(port=19223, helper_bin="/fake/Helper")
+    killed: list[str] = []
+    cleared: list[str] = []
+
+    def fake_run(cmd, *a, **kw):
+        if cmd[0] == "pgrep" and cmd[1] == "-f":
+            if cmd[2] == cdp_client._BARE_HELPER_PATTERN:
+                out = b"7438\n" if bare else b""
+                return subprocess.CompletedProcess(cmd, 0 if bare else 1, out, b"")
+            return subprocess.CompletedProcess(cmd, 0 if app_running else 1, b"", b"")
+        if cmd[0] == "kill":
+            killed.append(cmd[2])
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(cdp_client.subprocess, "run", fake_run)
+    monkeypatch.setattr(cdp_client.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(client, "_main_app_running", lambda: app_running)
+    monkeypatch.setattr(
+        client, "_clear_singleton_files", lambda: cleared.append("cleared")
+    )
+    return client, killed, cleared
+
+
+def test_stale_bare_helper_is_reclaimed_before_reuse(monkeypatch):
+    """主 App 没在跑、端口被遗留裸 Helper 占着 → 先杀它再释放锁。"""
+    client, killed, cleared = _reclaim_harness(
+        monkeypatch, bare=True, app_running=False
+    )
+    client._reclaim_from_stale_bare_helper()
+    assert killed == ["7438"]
+    assert cleared == ["cleared"]
+
+
+def test_running_main_app_is_never_stripped(monkeypatch):
+    """主 App 在跑（用户正在用）→ 端口属于 App，绝不清理。"""
+    client, killed, cleared = _reclaim_harness(
+        monkeypatch, bare=True, app_running=True
+    )
+    client._reclaim_from_stale_bare_helper()
+    assert killed == []
+    assert cleared == []
+
+
+def test_no_bare_helper_is_a_noop(monkeypatch):
+    """端口上是 App 自己的 CDP（无裸 Helper）→ 什么都不做。"""
+    client, killed, cleared = _reclaim_harness(
+        monkeypatch, bare=False, app_running=False
+    )
+    client._reclaim_from_stale_bare_helper()
+    assert killed == []
+    assert cleared == []
+
+
+def test_bare_helper_pattern_excludes_app_owned_helpers():
+    """只认 ``--saman-from-chat=1``：App 自己的 ``=<主AppPID>`` Helper 不能命中。"""
+    import re
+
+    pat = re.compile(cdp_client._BARE_HELPER_PATTERN)
+    bare = "/Applications/DoubaoWork.app/Contents/MacOS/DoubaoWork Browser --saman-from-chat=1 --no-first-run"
+    app_child = ("/Applications/DoubaoWork.app/Contents/MacOS/DoubaoWork Browser "
+                 "--remote-debugging-port=9223 --saman-from-chat=17990")
+    app_child_big = "... --saman-from-chat=18007"
+    assert pat.search(bare)
+    assert not pat.search(app_child)
+    assert not pat.search(app_child_big)
