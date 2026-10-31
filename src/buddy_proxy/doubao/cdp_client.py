@@ -478,13 +478,74 @@ class CDPDoubaoClient:
     # ------------------------------------------------------------------
 
     async def wait_for_login(self, timeout: int = 120) -> bool:
-        """独立 Helper 从磁盘自动加载登录态，通常无需扫码。"""
+        """检查服务端登录态；``timeout`` 只在未就绪时用于启动等待。
+
+        **必须问服务端，不能看 ``localStorage.flow_web_has_login``**：那是前端
+        缓存，服务端会话过期后它仍是 ``true``，于是签到面板一直「状态未知」、
+        调用方以为已登录。问法是对 ``/api/chat/completion/chat`` 空 POST 看
+        401（与 ``doubao/checkin.py`` 的 ``login_state`` 同一判据）。
+
+        只在明确「非 401 且拿到状态码」时才 True；探针本身没打通（求值失败 /
+        状态码 0）按未登录处理——宁可让调用方重试，也不把「探不到」冒充「已登录」。
+        """
         if not self._ready:
             await self.start()
-        # 检查登录态
-        expr = "localStorage.getItem('flow_web_has_login')"
-        r = await asyncio.to_thread(self._evaluate, expr)
-        return r == "true"
+        url = f"https://www.doubao.com/api/chat/completion/chat?" + "&".join(
+            f"{k}={v}" for k, v in sorted(self._build_query_params().items())
+        )
+        js = f"""
+        (async () => {{
+          try {{
+            const r = await fetch({url!r}, {{
+              method: 'POST', credentials: 'include',
+              headers: {{'Content-Type': 'application/json'}}, body: '{{}}',
+            }});
+            return r.status;
+          }} catch (e) {{ return 0; }}
+        }})()
+        """
+        status = await asyncio.to_thread(self._evaluate, js, 20.0)
+        if status == 401:
+            log.warning("CDPDoubaoClient: 豆包服务端登录态无效（401），需要重新扫码登录")
+            return False
+        if not isinstance(status, int) or status == 0:
+            log.warning("CDPDoubaoClient: 豆包登录态探针未打通，按未登录处理")
+            return False
+        return True
+
+    def login_state_sync(self, timeout: float = 15.0) -> bool | None:
+        """同步版 :meth:`wait_for_login`：``True`` 已登录 / ``False`` 明确未登录 /
+        ``None`` 没探到（求值失败或页面回不了状态码）。
+
+        签到在 ``asyncio.to_thread`` 的同步路径里跑，不能再套一层 ``asyncio.run``
+        等登录；这里直接求值。
+        """
+        if not self._ready:
+            return None
+        url = f"https://www.doubao.com/api/chat/completion/chat?" + "&".join(
+            f"{k}={v}" for k, v in sorted(self._build_query_params().items())
+        )
+        js = f"""
+        (async () => {{
+          try {{
+            const r = await fetch({url!r}, {{
+              method: 'POST', credentials: 'include',
+              headers: {{'Content-Type': 'application/json'}}, body: '{{}}',
+            }});
+            return r.status;
+          }} catch (e) {{ return 0; }}
+        }})()
+        """
+        try:
+            status = self._evaluate(js, timeout)
+        except Exception:  # noqa: BLE001 - 探针失败按「没探到」处理
+            return None
+        if status == 401:
+            log.warning("CDPDoubaoClient: 豆包服务端登录态无效（401），需要重新扫码登录")
+            return False
+        if not isinstance(status, int) or status == 0:
+            return None
+        return True
 
     # ------------------------------------------------------------------
     # 核心：chat_completion（对齐 BrowserClient 接口）

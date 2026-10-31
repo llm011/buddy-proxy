@@ -102,6 +102,13 @@ def test_status_rejects_business_error_code():
     assert doubao_checkin.fetch_checkin_status(client) == (None, "")
 
 
+def test_status_stops_when_login_probe_unreachable():
+    """探针本身没打通（HTTP 0）不等于已登录：直接收手，别挨个碰候选端点。"""
+    client = FakeClient({"POST /api/chat/completion/chat": (0, "")})
+    assert doubao_checkin.fetch_checkin_status(client) == (None, "")
+    assert client.calls == ["/api/chat/completion/chat"]
+
+
 def test_claim_only_after_status_hit():
     payload = {"code": 0, "data": {"signed": False}}
     client = FakeClient({

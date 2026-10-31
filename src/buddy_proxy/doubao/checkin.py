@@ -8,31 +8,36 @@
 因为在种子页的 JS 环境里 ``fetch``，签名由页面自己注入——签到走同一条路：
 先确保 CDP 会话就绪（复用登录态），再由本模块在页面里发 fetch。
 
-接口发现状态（重要，别把「没验过」当「验过」）
---------------------------------------------
-2026-10-31 在本机实测：
+请求形状（2026-10-31 本机实测，别再踩这三个坑）
+-----------------------------------------------
+1. **必须用绝对 URL** ``https://www.doubao.com/...``。种子页是
+   ``chrome://doubaowork-chat/chat``，相对路径的 origin 就是这个 chrome://
+   地址，``fetch("/api/...")`` 落到 NotFound，``fetch("/")`` 还会返回 200 +
+   HTML（任何「把相对路径当接口」的写法都会把 SPA 首页当成功响应）。
+2. **必须带对话通道同款查询参数**（``aid``/``device_platform``/``web_id``…，
+   见 ``CDPDoubaoClient._build_query_params``）。只带 cookie 不带参数，接口
+   一律回空体 401。
+3. 登录态以服务端为准：``/api/chat/completion/chat`` 空 POST 回 **401 = 未登录**，
+   回业务错误码才是已登录。**不能**拿 ``localStorage.flow_web_has_login``
+   当判据——它是前端缓存，服务端会话过期后它仍然是 ``true``（本机就卡在
+   这里：面板一直「状态未知」，实际是 App 里根本没登录）。
 
-- 豆包工作 App 的 CDP 端口在线，种子页可连，但**该机器的豆包登录态已过期**
-  （``/alice/user/config/pull`` 回 ``710012001 登录已过期``），页面侧接口
-  用匿名身份访问全部落空（``/api/...`` 一律空体 401，``/alice/...`` 404），
-  拿不到真实签到接口的响应形状。
-- 因此下面的路径/字段来自**豆包 Web 端活动模块的结构**（``/biz/...``、
-  ``/alice/...`` 走 ``www.doubao.com``，匿名可访问的端点如
-  ``/alice/basic/launch`` 回 ``{"code":0,...}``），属于**候选口径**。
+接口发现策略（「不猜」的落地方式）
+---------------------------------
+签到接口路径没有公开文档，且 App 版本间会变。这里的做法是：
 
-防护措施（保证「猜错」时界面是「状态未知」而不是假的「未签到」）：
+- :func:`discover_paths`：已登录的页面里抓取 ``/static/js/`` 下的 JS 资源，
+  正则扫出 ``/api|/alice|/biz`` 开头的路径字面量，只为**记录**（info 日志），
+  不据此发请求——扫出来的多半是别的模块的路径。
+- ``_CANDIDATES``：真实可验证的探测端点，按顺序 GET；只有「200 + ``code==0``
+  + 形状能认出签到状态」的才算命中。
+- 全部落空 → 返回 ``None``，provider 层转 ``query_failed``，界面显示
+  「状态未知」，绝不画出可点的「立即打卡」。
+- 登录态无效 → 直接返回 ``None`` 并记 WARNING（「请在豆包 App 里重新扫码
+  登录」），不再拿一堆 401 的候选端点去碰运气。
 
-1. ``_CANDIDATES`` 按顺序试；只认 HTTP 200 且 body 是 ``{"code": 0, ...}``
-   的响应——豆包的业务错误（401 / 404 页面 / ``login invalid``）一律不算
-   「查到了」。
-2. 所有候选都没拿到可解析状态 → 返回 ``None``，provider 层转成
-   ``query_failed`` 失败结构，界面显示「状态未知」，不会画出可点的「立即打卡」。
-3. 账号确认后，把**实际生效的查询端点**写进日志（info），上游换接口时能
-   从日志里直接看到该挪哪条。
-
-登录态 / 接口一确认可用，把 ``_CANDIDATES`` 里命中那条挪到第一位并补上
-字段注释即可，不需要动别处（``doubao/provider.py`` 的 ``checkin_status`` /
-``checkin_claim`` 只调本模块）。
+上游接口一确认，把命中那条挪到 ``_CANDIDATES`` 第一位并补字段注释即可；
+``doubao/provider.py`` 的 ``checkin_status`` / ``checkin_claim`` 只调本模块。
 """
 
 from __future__ import annotations
@@ -46,11 +51,13 @@ from ..core.checkin import SOURCE_INFERRED, next_daily_reset
 
 log = logging.getLogger(__name__)
 
-#: 查询打卡状态：依次尝试的路径（相对种子页 origin）。
+#: 接口统一走 www.doubao.com（种子页 chrome:// 的 origin 不是这个域名）。
+_ORIGIN = "https://www.doubao.com"
+
+#: 查询打卡状态：依次尝试的路径（相对 :data:`_ORIGIN`，调用时补查询参数）。
 #:
-#: 每一项形如 ``(path, 解析函数名)``；解析函数把上游 body 归一成状态 dict。
-#: 目前三家的响应形状都按「活动中心」常见结构兜底（``data`` 里带
-#: ``checked_in``/``signed``/``status``/签到记录列表之一），见 :func:`_parse_status`。
+#: 认得的响应形状见 :func:`_parse_status`（``data``/``result`` 里带
+#: ``checked_in``/``signed``/``status``/日期列表之一）。
 _CANDIDATES: tuple[str, ...] = (
     "/api/activity/check_in/status",
     "/api/activity/checkin/info",
@@ -66,9 +73,17 @@ _CLAIM_SUFFIX = {
     "/api/activity/sign/info": "/api/activity/sign/claim",
 }
 
+#: 登录态探测：空 POST 回 401 即「未登录」。已在对话通道上实测多时，可靠。
+_LOGIN_PROBE = "/api/chat/completion/chat"
+
+#: 接口线索扫描：只记日志，不据此发请求。各页面资源前缀。
+_DISCOVERY_PREFIXES = ("/static/js/", "static/js/")
+_PATH_RE = re.compile(r"[\"'](/(?:api|alice|biz)/[A-Za-z0-9_/\-]{2,80})[\"']")
+_DISCOVERY_KEYWORDS = ("check", "sign", "activity", "credit", "reward", "task", "bonus")
+
 #: 页面里发请求的统一包装。返回 ``{"http": int|0, "body": str, "error": str}``。
-#: ``fetch`` 用相对路径，自然带上 origin cookie；页面自己的 fetch 包装会注入
-#: ``a_bogus`` 等签名头（与对话通道同一条路）。
+#: 绝对 URL + ``credentials: include``：cookie 随请求带出，``bdms`` 在页面
+#: 环境里自动算签名头（与对话通道同一条路）。
 _FETCH_JS = """
 (async () => {{
   try {{
@@ -92,6 +107,22 @@ def _js_path(path: str) -> str:
     return json.dumps(path)
 
 
+def _query_string(client: Any) -> str:
+    """对话通道同款查询参数；客户端没提供就退回最小集。"""
+    builder = getattr(client, "_build_query_params", None)
+    try:
+        params = builder() if callable(builder) else {}
+    except Exception:  # noqa: BLE001 - 探测不该因为取参数失败而炸
+        params = {}
+    if not isinstance(params, dict) or not params:
+        params = {"aid": "1044603", "device_platform": "web"}
+    return "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+
+
+def _url(client: Any, path: str) -> str:
+    return f"{_ORIGIN}{path}?{_query_string(client)}"
+
+
 def _eval(client: Any, expr: str, timeout: float) -> Any:
     """在 CDP 页面里求值；客户端未就绪 / 抛错返回 ``None``。"""
     try:
@@ -108,7 +139,7 @@ def _request(client: Any, path: str, *, method: str = "GET",
     ``http_status`` 为 0 表示网络层失败（页面里抛异常 / 评估超时）。
     """
     expr = _FETCH_JS.format(
-        path=_js_path(path),
+        path=_js_path(_url(client, path)),
         method=json.dumps(method),
         body=("body: " + json.dumps(json.dumps(body or {}))) if method != "GET" else "",
     )
@@ -139,6 +170,57 @@ def _is_business_ok(status: int, data: Any) -> bool:
         return int(code) == 0
     except (TypeError, ValueError):
         return False
+
+
+def login_state(client: Any, timeout: float = 15.0) -> bool | None:
+    """服务端登录态三态：``True`` 已登录 / ``False`` 明确未登录 / ``None`` 没探到。
+
+    打 ``/api/chat/completion/chat`` 空 POST：401 = 未登录；回了业务错误码
+    （如「参数缺失」）说明会话本身是好的。探测本身失败（HTTP 0）返回 ``None``，
+    **不能**折成「已登录」——那会把「探针都没打通」显示成「已登录但接口没偏
+    认出」，用户就被指向错误的方向。
+    """
+    status, _data = _request(client, _LOGIN_PROBE, method="POST", body={}, timeout=timeout)
+    if status == 0:
+        return None
+    return status != 401
+
+
+def discover_paths(client: Any, timeout: float = 20.0) -> list[str]:
+    """从页面已加载的 JS 资源里扫出签到/活动相关的接口路径线索（仅供日志）。"""
+    expr = r"""
+    (async () => {
+      const pats = %s;
+      const files = new Set();
+      for (const s of document.scripts) {
+        if (!s.src) continue;
+        const u = new URL(s.src, location.href);
+        const p = u.pathname + u.search;
+        if (pats.some(x => p.startsWith(x))) files.add(u.href);
+      }
+      const out = new Set();
+      const pat = /["'](\/(?:api|alice|biz)\/[A-Za-z0-9_\/-]{2,80})["']/g;
+      // 并发拉取 + 每个文件只留前 2MB：串行 await 大文件会把页面卡住，
+      // 顺带拖慢同一页上的对话通道。每个文件用独立的 regExp，避免共享
+      // lastIndex 在并发时互相干扰。
+      const scan = async (f) => {
+        try {
+          const r = await fetch(f);
+          const t = (await r.text()).slice(0, 2000000);
+          const re = new RegExp(pat.source, "g");
+          let m;
+          while ((m = re.exec(t))) out.add(m[1]);
+        } catch (e) {}
+      };
+      await Promise.all(Array.from(files).slice(0, 40).map(scan));
+      return Array.from(out);
+    })()
+    """ % json.dumps(list(_DISCOVERY_PREFIXES))
+    raw = _eval(client, expr, timeout)
+    if not isinstance(raw, list):
+        return []
+    hits = [p for p in raw if isinstance(p, str)]
+    return [p for p in hits if any(k in p for k in _DISCOVERY_KEYWORDS)]
 
 
 def _as_bool(value: Any) -> bool | None:
@@ -253,11 +335,23 @@ def _streak(days: list[str]) -> int:
 def fetch_checkin_status(client: Any, timeout: float = 20.0) -> tuple[dict[str, Any] | None, str]:
     """查询打卡状态；返回 ``(状态 dict 或 None, 命中的查询端点或 "")``。
 
-    ``client`` 是已登录就绪的 ``CDPDoubaoClient``（由 provider 负责启动）。
-    候选端点全都没拿到可解析状态时返回 ``(None, "")``——**不猜**「未签到」。
+    ``client`` 是已就绪的 ``CDPDoubaoClient``（由 provider 负责启动）。
+    先探服务端登录态：明确未登录 / 探针没打通都直接返回 ``(None, "")`` 并记
+    WARNING（界面显示「状态未知」，明确 401 时提示重新登录）；只有确认已登录
+    才按候选端点查，全落空同样不猜「未签到」。
     业务成功但形状不认识的响应记一条 info（带响应前 300 字），上游换接口时
     从这里改 ``_parse_status`` 或 ``_CANDIDATES``。
     """
+    logged_in = login_state(client, timeout=timeout)
+    if logged_in is not True:
+        if logged_in is False:
+            log.warning(
+                "doubao checkin: 豆包工作 App 登录态无效（服务端 401），"
+                "请在豆包 App 里重新扫码登录后再试")
+        else:
+            log.warning("doubao checkin: 豆包登录态探针未打通，本轮不查候选端点")
+        return None, ""
+
     for path in _ordered_candidates():
         status, data = _request(client, path, timeout=timeout)
         if not _is_business_ok(status, data):
@@ -270,6 +364,14 @@ def fetch_checkin_status(client: Any, timeout: float = 20.0) -> tuple[dict[str, 
         log.info("doubao checkin status served by %s", path)
         _HIT_PATH["path"] = path
         return parsed, path
+
+    # 候选全落空：扫一遍页面 JS 里的活动接口线索，给下一次上线留证据。
+    hints = discover_paths(client, timeout=timeout)
+    if hints:
+        log.info("doubao checkin: no candidate matched; JS path hints: %s",
+                 ", ".join(hints[:20]))
+    else:
+        log.info("doubao checkin: no candidate matched; no JS path hints found")
     return None, ""
 
 
