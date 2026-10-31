@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
 from ..core.errors import describe_exception
+from .ws import WSClosed
 
 log = logging.getLogger(__name__)
 
@@ -495,6 +496,20 @@ class DoubaoProvider(BaseProvider):
                                 thinking_parts.append(tb["text"])
                             else:
                                 content_parts.append(tb["text"])
+
+        except WSClosed as exc:
+            # 2026-10-31：豆包 App 退出/刷新导致 CDP WebSocket 断开时，原先会
+            # 裸抛到这里再冒泡到 FastAPI，**直接杀死整个网关进程**（launchd
+            # KeepAlive=1 于是反复重启，正在等待上游的其它渠道请求——含 qoder
+            # ——被一起切断，表现为「渠道都测试不能」）。
+            # 转成渠道级 502：客户端看到的是豆包这一条失败，网关与其它渠道不受影响。
+            self._client.record_failure(0)
+            log.error("doubao CDP connection lost: %s", exc)
+            raise HTTPException(
+                status_code=502,
+                detail="doubao CDP connection lost (App closed or reloaded); "
+                       "reopen Doubao desktop app and retry",
+            ) from exc
 
         except RuntimeError:
             raise

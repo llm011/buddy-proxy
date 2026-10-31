@@ -48,17 +48,6 @@
       "tags": ["badge:订阅优先:#F59E0B"]
     },
     {
-      "id": "kimi-k3.1-pro-lite",
-      "name": "Kimi-K3.1-Pro (Lite)",
-      "vendor": "moonshot",
-      "max_input": 256000,
-      "max_output": 32000,
-      "tool_call": true,
-      "images": false,
-      "credits": "x0.97 credits",
-      "desc": "Kimi K3.1 Pro, lower-credit tier"
-    },
-    {
       "id": "hy4-preview",
       "name": "Hy4 preview",
       "vendor": "tencent",
