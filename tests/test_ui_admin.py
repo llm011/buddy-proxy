@@ -193,6 +193,9 @@ def test_ui_page_served(env):
 def test_ui_static_files_served(env):
     """拆分后的静态 JS/CSS 都走白名单路由，且 no-cache。"""
     for name, ctype in (("app.js", "text/javascript"), ("benefits.js", "text/javascript"),
+                        ("benefits_quota.js", "text/javascript"),
+                        ("benefits_nav.js", "text/javascript"),
+                        ("benefits_dumate.js", "text/javascript"),
                         ("charts.js", "text/javascript"), ("style.css", "text/css")):
         r = env.client.get(f"/ui/{name}")
         assert r.status_code == 200, name

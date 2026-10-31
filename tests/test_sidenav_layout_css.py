@@ -24,7 +24,7 @@ import pathlib
 import re
 
 STYLE_CSS = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static/style.css"
-BENEFITS_JS = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static/benefits.js"
+BENEFITS_JS = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static/benefits_nav.js"
 
 
 def _css() -> str:

@@ -25,7 +25,7 @@ import pytest
 _STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/static"
 BENEFITS_JS = _STATIC / "benefits_panels.js"
 HELPERS_JS = _STATIC / "benefits_accounts.js"   # 公共件（acctSubHtml/acctMoveButtons/…）
-BENEFITS_CORE = _STATIC / "benefits.js"         # quotaHeadSum 定义在这
+BENEFITS_CORE = _STATIC / "benefits_quota.js"   # quotaHeadSum 定义在这
 APP_JS = _STATIC / "app.js"                     # fmtNum
 SEG_TRAE = re.compile(r"// ---- TRAE WORK 面板.*$", re.S)
 SEG_HEAD_SUM = re.compile(r"function quotaHeadSum\(q\) \{.*?\n\}", re.S)
@@ -43,7 +43,7 @@ globalThis.esc = s => String(s)
 globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) +
   (it.expire_ts ? ' · 到期' : '') + '</div>';   // 与真实现同款：带 expire_ts 拼到期
 globalThis.quotaItemsHtml = (items, key) => {
-  const shown = (items || []).filter(it => !it.head_only);   // 与 benefits.js 真实现同款
+  const shown = (items || []).filter(it => !it.head_only);   // 与 benefits_quota.js 真实现同款
   return '<div class="qbody" data-qfold="' + esc(key) + '">' +
     shown.map(globalThis.quotaItemHtml).join('') + '</div>';
 };

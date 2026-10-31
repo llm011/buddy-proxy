@@ -25,6 +25,9 @@ _STATIC_FILES = {
     "benefits_accounts.js": "text/javascript; charset=utf-8",
     "benefits_checkin.js": "text/javascript; charset=utf-8",
     "benefits_panels.js": "text/javascript; charset=utf-8",
+    "benefits_quota.js": "text/javascript; charset=utf-8",
+    "benefits_nav.js": "text/javascript; charset=utf-8",
+    "benefits_dumate.js": "text/javascript; charset=utf-8",
     "charts.js": "text/javascript; charset=utf-8",
 }
 

@@ -70,13 +70,18 @@ src/buddy_proxy/
   published `trae-cli` entrypoint and trae façade (not a shim to remove).
 - **`web/ui/`** provides localhost-only administration endpoints (split by
   responsibility: channels, models, settings, queries, page) and the bundled
-  UI under `web/static/` (an `index.html` skeleton plus `style.css` and six
-  JS files, served from `/ui/{name}`). `benefits.js` (calendar + quota fold +
-  channel-specific panels) was split by responsibility once it passed 700
-  lines: `benefits_accounts.js` holds the shared multi-account card helpers
+  UI under `web/static/` (an `index.html` skeleton plus `style.css` and nine
+  JS files, served from `/ui/{name}`). The benefits UI is split by
+  responsibility: `benefits.js` holds the calendar, expiry alerts and shared
+  rendering; `benefits_accounts.js` holds the shared multi-account card helpers
   (delete-confirm modal / move / delete / snapshot backfill) that new
   multi-account channels reuse, `benefits_checkin.js` the checkin rows + Kimi
-  panel, `benefits_panels.js` the Trae PAT / Antigravity / Qoder panels.
+  panel, and `benefits_panels.js` the Trae PAT / Antigravity / Qoder panels.
+  `benefits_quota.js`, `benefits_nav.js` and `benefits_dumate.js` respectively
+  hold quota rendering/folding, side navigation, and the DuMate panel plus the
+  account-loader registry. Classic scripts share top-level bindings, so the
+  script order in `index.html` keeps these dependencies ahead of `benefits.js`;
+  `app.js` starts rendering only after all of them have loaded.
   The panel mount order in `index.html` is also the visible quota-card order:
   regional twins stay adjacent (CN then Global), Kimi sits between Trae and
   Qoder, and the operational Trae PAT card is intentionally last. Dedicated
