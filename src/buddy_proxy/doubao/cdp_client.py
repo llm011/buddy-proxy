@@ -52,6 +52,16 @@ HELPER_BIN = (
 DEFAULT_BOT_ID = "7338286299411103781"
 DEFAULT_PORT = 9223
 
+# 主 App 主可执行文件（open -a 拉起的那个「豆包工作」进程）
+APP_BIN_PATTERN = "DoubaoWork.app/Contents/MacOS/DoubaoWork"
+
+# 一次 App 身份启动里，等调试端口起来的秒数（App 冷启动要拉起内嵌 Chromium）
+_MAIN_APP_CDP_WAIT_S = 30
+
+# 「App 身份」进程：主 App + 它内嵌的 Helper。Helper 本身路径里也含
+# ``DoubaoWork.app``，所以一条正则同时覆盖两者；pkill -f 是正则匹配。
+_APP_PROCESS_PATTERN = "DoubaoWork\\.app/Contents/"
+
 
 def _is_app_chat_url(url: str | None) -> bool:
     """是否 App 自己的聊天窗口（内部 WebUI 页）。
