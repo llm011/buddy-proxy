@@ -256,7 +256,8 @@ def main():
                              "~/.buddy-proxy/deepseek_api_key）。"
                              "注意 /v1/tools/search 与 /v1/tools/fetch 不归本开关管——"
                              "它们只认同一把 key，网关一启动就在（见 README「API 端点」）。"
-                             "裸名与本地静态表撞车时让位，用 deepseek/<模型> 显式点名走官方计费")
+                             "裸名与已有目录撞车时仍归原本那条通道（不会改道到付费官方），"
+                             "显式走官方用 deepseek/<模型>")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
                              "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")

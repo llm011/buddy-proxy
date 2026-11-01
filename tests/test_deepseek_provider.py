@@ -420,3 +420,59 @@ def test_fallback_and_refreshed_catalog_agree_on_metadata():
     for mid in fallback:
         for field in ("images", "input_modalities", "context_window", "tool_call"):
             assert fallback[mid][field] == refreshed[mid][field], (mid, field)
+
+
+def test_colliding_bare_name_never_reaches_the_paid_channel():
+    """撞车裸名绝不能改道到**付费的**官方 API。
+
+    这是加 ``--deepseek`` 最容易造成的意外：用户原本的 ``deepseek-v4-pro``
+    请求突然开始按 token 花官方余额，而他从没点名要官方。route_priority=50
+    让本通道在裸名撞车时退让，于是归属取决于**谁已经在声明这个名字**——
+    可能是 CodeBuddy 静态表，也可能是另一个不设 route_priority 的通道
+    （实测开着 --mimo 时归 mimo）。只要不是 deepseek 官方就对了。
+    """
+    from types import SimpleNamespace
+    from unittest import mock
+    from buddy_proxy.core import state as st
+    from buddy_proxy.codebuddy_provider.forward import _resolve_auto
+
+    ds = DeepSeekProvider(api_key="k", base_url="https://api.deepseek.test")
+    # 一个声明了同名模型、且**没有** route_priority 属性的通道（mimo 现状）。
+    # 刻意不写 route_priority=None：那会让 hasattr() 为真、进而在
+    # ``p.route_priority < 100`` 处 TypeError 被吞掉，与真实 mimo 行为不符。
+    class _OtherChannel:
+        id = "mimo"
+
+        @staticmethod
+        def accepts_model(m, aliases=True):
+            return m == "deepseek-v4-pro"
+
+    other = _OtherChannel()
+    fake = SimpleNamespace(providers={"deepseek": ds, "mimo": other},
+                           default_provider="codebuddy", disabled_models=set(),
+                           model_schedules={}, hidden_models=set(), disabled_providers=set(),
+                           metrics=None, write_log=mock.MagicMock(), logger=mock.MagicMock(),
+                           json_logger=mock.MagicMock(), runtime_info={})
+    st.proxy_state = fake
+
+    owner = _resolve_auto(fake, "deepseek-v4-pro")
+    assert owner is not ds, "撞车裸名被改道到付费官方了——用户会莫名开始花余额"
+    assert owner.id == "mimo", "撞车裸名应仍归已声明它的那家通道"
+    # 不撞车的名字照常自动路由到官方
+    assert _resolve_auto(fake, "deepseek-flash") is ds
+
+
+def test_route_doc_claims_match_actual_routing():
+    """文档里关于撞车归属的说法必须与真实路由一致。
+
+    早先 README / docstring 写的是「让位给**兜底通道**」，实测并不成立
+    （开着 --mimo 时归 mimo，压根不经兜底通道）。这条把结论钉在源码文本上，
+    免得下次改路由时文档又悄悄飘走。
+    """
+    import pathlib
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    # 这两处是最容易被读到、也最容易被抄的说明
+    for rel in ("src/buddy_proxy/providers/deepseek.py", "README_zh.md", "README.md"):
+        text = (repo / rel).read_text(encoding="utf-8")
+        assert "让给兜底通道" not in text, f"{rel} 仍在说「让给兜底通道」"
+        assert "yield to the fallback" not in text, f"{rel} 仍在说 yield to the fallback"

@@ -471,7 +471,7 @@ buddy login deepseek      # 打印去哪领 key、怎么配、怎么验证
 | 额度 | 账户**余额**，查 `GET /user/balance`（预付费钱包，不是订阅套餐）。只报 `remaining`、**不填 `total`**——官方没有总量分母，编一个出来界面会显示假的「已用 N%」水位。管理页以通用额度卡展示 |
 | 计费 | 按 token 从预付费余额扣。**没有积分倍率概念**，所以请求日志的 Credit 列刻意显示 `—`，不编估算值 |
 
-**裸名不抢既有流量。** `deepseek-v4-pro` 在本地 CodeBuddy 目录里也有，而官方 API 是**要花钱**的，所以加 `--deepseek` 绝不能把本来走别处的请求静默改道。本通道声明 `route_priority = 50`（低于 CodeBuddy 的 100），撞车的裸名仍解析到兜底通道；要显式走官方就写 `deepseek/deepseek-v4-pro`。`deepseek-flash` 不撞车，自动路由。
+**裸名不抢既有流量。** `deepseek-v4-pro` 在本地 CodeBuddy 目录里也有，而官方 API 是**要花钱**的，所以加 `--deepseek` 绝不能把本来走别处的请求静默改道。本通道声明 `route_priority = 50`（低于 CodeBuddy 的 100），撞车的裸名**仍走它原本走的那条**——即已经在声明这个名字的那家通道，绝不会改道到付费官方。通常是 CodeBuddy 静态表，但**不一定**：开着 `--mimo` 时裸名 `deepseek-v4-pro` 实际归 `mimo`，因为那个通道也声明了它、且没设 `route_priority`（2026-11-01 实测）。要显式走官方就写 `deepseek/deepseek-v4-pro`。`deepseek-flash` 不撞车，自动路由。
 
 ### 12. 联网检索 / 抓取（`web/tools_api.py`，固定走 DeepSeek 官方）
 
@@ -909,7 +909,7 @@ providers:
                           DEEPSEEK_API_KEY / ~/.buddy-proxy/deepseek_api_key）。注意
                           /v1/tools/search 与 /v1/tools/fetch **不受本开关控制**——它们只要
                           同一把 key，网关一启动就在（见「API 端点」）。裸名与本地目录撞车
-                          时让位，要显式走官方用 deepseek/<模型>
+                          时仍归原本那条（不会走付费官方），显式走官方用 deepseek/<模型>
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --dumate                  启用百度搭子 provider（DuMate 本地代理，需 App 在运行）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
