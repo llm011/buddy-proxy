@@ -349,6 +349,8 @@ buddy login deepseek      # prints where to mint the key and how to configure it
 
 Credentials: `DEEPSEEK_API_KEY` or `~/.buddy-proxy/deepseek_api_key` (first line, bare value or `name=value`, mode 0600). `DEEPSEEK_BASE_URL` overrides the base for a self-hosted gateway. Enable with `--deepseek` (or `DEEPSEEK_ENABLED=1`).
 
+This flag controls the **chat channel only**. The two tool endpoints below share the same key but are registered unconditionally — with a key configured they answer even when `--deepseek` is off, which is why `/health` reports them separately under `tools` rather than under `providers`.
+
 | Aspect | Behavior |
 | --- | --- |
 | Protocols | **All three upstream-native** — `openai` → `/v1/chat/completions`, `responses` → `/v1/responses`, `anthropic` → `/anthropic/v1/messages`. Pure passthrough, zero local conversion (unlike Ark, which needs a fallback chain and back-translation) |
@@ -809,9 +811,11 @@ providers:
                           ARK_API_KEY / ~/.buddy-proxy/ark_api_key)
 --deepseek                enable the DeepSeek official provider (native OpenAI/Responses/
                           Anthropic passthrough, live model catalog and account balance; key
-                          from DEEPSEEK_API_KEY / ~/.buddy-proxy/deepseek_api_key). Also
-                          enables /v1/tools/search and /v1/tools/fetch. Colliding bare names
-                          yield to the fallback channel — use deepseek/<model> to pin it
+                          from DEEPSEEK_API_KEY / ~/.buddy-proxy/deepseek_api_key). Note
+                          /v1/tools/search and /v1/tools/fetch are NOT gated by this flag —
+                          they need only the same key and are live whenever the gateway is
+                          (see "API endpoints"). Colliding bare names yield to the fallback
+                          channel — use deepseek/<model> to pin it
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
 --qoder                   enable the Qoder provider (COSY-signed, Qwen3.8/GLM/Kimi)

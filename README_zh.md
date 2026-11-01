@@ -446,6 +446,8 @@ buddy login deepseek      # 打印去哪领 key、怎么配、怎么验证
 `name=value`，0600）；`DEEPSEEK_BASE_URL` 可整体改基址（自建反代/网关）。
 启动加 `--deepseek`（或 `DEEPSEEK_ENABLED=1`）。
 
+本开关只管**对话通道**。下面两个工具端点共用同一把 key，但注册是无条件的——配好 key 后即使 `--deepseek` 没开它们也照常可用。这也是 `/health` 把它们放在 `tools` 字段、而不是混进 `providers` 的原因。
+
 | 方面 | 行为 |
 | --- | --- |
 | 协议 | **三协议上游原生支持**，全部直通零转换：`openai` → `/v1/chat/completions`，`responses` → `/v1/responses`，`anthropic` → `/anthropic/v1/messages`（注意 anthropic 挂在 `/anthropic` 前缀下）。因此不需要 ark 那套「Responses 优先 + 降级 chat + 再翻回 anthropic」的复杂度 |
@@ -875,9 +877,10 @@ providers:
                           ~/.buddy-proxy/ark_api_key）
 --deepseek                启用 DeepSeek 官方 provider（OpenAI / Responses / Anthropic
                           三协议原生直通，带实时模型目录与账户余额；key 取
-                          DEEPSEEK_API_KEY / ~/.buddy-proxy/deepseek_api_key），同时启用
-                          /v1/tools/search 与 /v1/tools/fetch。裸名与本地目录撞车时让位，
-                          要显式走官方用 deepseek/<模型>
+                          DEEPSEEK_API_KEY / ~/.buddy-proxy/deepseek_api_key）。注意
+                          /v1/tools/search 与 /v1/tools/fetch **不受本开关控制**——它们只要
+                          同一把 key，网关一启动就在（见「API 端点」）。裸名与本地目录撞车
+                          时让位，要显式走官方用 deepseek/<模型>
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --dumate                  启用百度搭子 provider（DuMate 本地代理，需 App 在运行）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）

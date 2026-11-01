@@ -61,9 +61,38 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 #: 只放官方 ``/models`` 真实返回的 id（2026-11-01 实测）——上游**不再接受**
 #: ``deepseek-v4.1-flash``（400：supported names are deepseek-flash,
 #: deepseek-v4-pro），所以目录里不能出现它，否则用户选中一个必然 400 的名字。
-DEFAULT_MODELS: dict[str, str] = {
-    "deepseek-flash": "DeepSeek-V4.1-Flash (thinking, 1M ctx, vision)",
-    "deepseek-v4-pro": "DeepSeek-V4-Pro (thinking, 1M ctx)",
+#:
+#: **能力字段必须与线上目录一致，不能只留 id**：``refresh_models()`` 只在
+#: 用户点「↻ 重新拉取」或主动调用时才跑，而 ``/v1/models`` 的图片能力判断
+#: 直接读这些字段（``images`` / ``input_modalities``）。只写 id 的话，
+#: ``deepseek-flash`` 在首次刷新前会被报成**纯文本**，客户端据此把用户发的
+#: 图片整张剥掉——而它其实原生支持读图。这正是 model_list 注释里反复提到的
+#: 「漏传能力字段让客户端自行按模型名猜」那个坑。
+DEFAULT_MODELS: dict[str, dict[str, Any]] = {
+    "deepseek-flash": {
+        "name": "DeepSeek-V4.1-Flash",
+        "description": "DeepSeek-V4.1-Flash (thinking, 1M ctx, vision)",
+        "images": True,
+        "input_modalities": ["text", "image"],
+        "context_window": 1048576,
+        "max_input": 1048576,
+        "max_output": 393216,
+        "tool_call": True,
+        "reasoning": True,
+        "reasoning_levels": ["low", "high", "max"],
+    },
+    "deepseek-v4-pro": {
+        "name": "DeepSeek-V4-Pro",
+        "description": "DeepSeek-V4-Pro (thinking, 1M ctx)",
+        "images": False,
+        "input_modalities": ["text"],
+        "context_window": 1048576,
+        "max_input": 1048576,
+        "max_output": 393216,
+        "tool_call": True,
+        "reasoning": True,
+        "reasoning_levels": ["low", "high", "max"],
+    },
 }
 
 #: 客户端可能照旧文档/别家目录写的名字 → 官方当前真名。
@@ -157,16 +186,17 @@ class DeepSeekProvider(BaseProvider):
         self._base = (base_url or resolve_base_url()).rstrip("/")
         self._client: httpx.AsyncClient | None = None
         # 目录从静态兜底表起步；refresh_models() 拉到官方元数据后就地替换。
+        # 兜底条目带完整能力字段（见 DEFAULT_MODELS 注释）：只在首次刷新前
+        # 生效，但那段时间 /v1/models 已经要报对图片能力了。
         self._models: list[dict[str, Any]] = [
             {
                 "id": mid,
                 "object": "model",
                 "created": 0,
                 "owned_by": self.id,
-                "name": desc,
-                "description": desc,
+                **spec,
             }
-            for mid, desc in DEFAULT_MODELS.items()
+            for mid, spec in DEFAULT_MODELS.items()
         ]
 
     # ---- BaseProvider 接口 ----

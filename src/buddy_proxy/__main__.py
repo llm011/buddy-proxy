@@ -253,7 +253,9 @@ def main():
     parser.add_argument("--deepseek", action="store_true", default=os.getenv("DEEPSEEK_ENABLED", "") == "1",
                         help="启用 DeepSeek 官方 API provider（openai/responses/anthropic 三协议原生直通，"
                              "带模型目录刷新与账户余额；凭据取 DEEPSEEK_API_KEY / "
-                             "~/.buddy-proxy/deepseek_api_key；同时启用 /v1/tools/search 与 /v1/tools/fetch）。"
+                             "~/.buddy-proxy/deepseek_api_key）。"
+                             "注意 /v1/tools/search 与 /v1/tools/fetch 不归本开关管——"
+                             "它们只认同一把 key，网关一启动就在（见 README「API 端点」）。"
                              "裸名与本地静态表撞车时让位，用 deepseek/<模型> 显式点名走官方计费")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
@@ -495,7 +497,7 @@ def main():
         logger.info("DeepSeek provider enabled (%s, models=%s)",
                     health.get("base_url"), ",".join(health.get("models") or []))
         print(f"[DeepSeek] Enabled (官方 API, {len(health.get('models') or [])} 个模型; "
-              f"/v1/tools/search + /v1/tools/fetch 亦已启用)")
+              f"余额可查)")
     else:
         print("[DeepSeek] Disabled (pass --deepseek or DEEPSEEK_ENABLED=1 to enable)")
 

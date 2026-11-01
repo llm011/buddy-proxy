@@ -383,3 +383,40 @@ def test_credit_estimation_returns_none_for_deepseek():
     """
     from buddy_proxy.core.credit_estimate import estimate_credit
     assert estimate_credit("deepseek", "deepseek-flash", 1000, 500) is None
+
+def test_fallback_catalog_carries_capability_metadata():
+    """兜底目录必须在**首次刷新之前**就报对图片能力。
+
+    这是前端能力判断的数据源：``deepseek-flash`` 原生支持读图，若兜底条目
+    只有 id/name，``/v1/models`` 会把它报成纯文本，客户端据此把用户发的
+    图片整张剥掉（model_list 注释里写过这个坑的多次教训）。refresh_models()
+    不是每次启动都会跑，所以兜底表本身就得带全字段。
+    """
+    p = DeepSeekProvider(api_key="k", base_url="https://api.deepseek.test")
+    by_id = {m["id"]: m for m in p.models()}
+    assert by_id["deepseek-flash"]["images"] is True
+    assert by_id["deepseek-flash"]["input_modalities"] == ["text", "image"]
+    assert by_id["deepseek-v4-pro"]["images"] is False
+    assert by_id["deepseek-v4-pro"]["input_modalities"] == ["text"]
+    for mid in by_id:
+        assert by_id[mid]["context_window"] == 1048576
+        assert by_id[mid]["tool_call"] is True
+
+
+def test_fallback_and_refreshed_catalog_agree_on_metadata():
+    """兜底表与线上刷新结果不能对同一个模型给出不同的能力画像。
+
+    两边不一致时，用户会看到「重启后 /v1/models 变了」这种无从解释的漂移。
+    """
+    p = DeepSeekProvider(api_key="k", base_url="https://api.deepseek.test")
+    fallback = {m["id"]: m for m in p.models()}
+
+    async def run():
+        q = _provider(lambda r: httpx.Response(200, json=_MODELS_PAYLOAD))
+        return {m["id"]: m for m in await q.refresh_models()}
+
+    refreshed = asyncio.run(run())
+    assert set(fallback) == set(refreshed)
+    for mid in fallback:
+        for field in ("images", "input_modalities", "context_window", "tool_call"):
+            assert fallback[mid][field] == refreshed[mid][field], (mid, field)

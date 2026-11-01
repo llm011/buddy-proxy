@@ -242,3 +242,62 @@ def test_health_exposes_tools_status(client):
     body = client.get("/health").json()
     assert body["tools"]["configured"] is True
     assert body["tools"]["base_url"] == "https://api.deepseek.test"
+
+def test_search_diagnostic_fields_survive_safe_log_redaction(client, monkeypatch):
+    """诊断字段不能被日志红线当正文哈希掉。
+
+    ``safe_log_fields`` 把键名含 ``content`` / ``body`` / ``message`` / ``token``
+    的值一律替换成 ``*_bytes`` / ``*_sha256``。布尔值一旦被换掉，日志里只剩两个
+    无意义的哈希，可观测性静默消失（``auth_present`` 当年就这么踩过）。所以钉住：
+    诊断字段经红线过滤后必须原值存活。
+    """
+    from buddy_proxy.core.state import safe_log_fields
+
+    fields = tools_api._search_diag_fields({"query": "hello", "count": 5,
+                                            "need_content": True})
+    assert fields["chars"] == 5
+    assert fields["want_page_text"] is True
+    assert fields["results"] == 5
+    for name, value in fields.items():
+        safe = safe_log_fields({name: value})
+        assert safe == {name: value}, f"诊断字段 {name} 被日志红线改写了: {safe}"
+
+
+def test_search_diagnostic_never_logs_query_text(client, monkeypatch):
+    """诊断字段里不能出现 query 原文（用户输入按日志红线不进日志）。"""
+    fields = tools_api._search_diag_fields({"query": "SUPER-SECRET-QUERY", "count": 3})
+    assert "SUPER-SECRET-QUERY" not in repr(fields)
+    assert fields["chars"] == len("SUPER-SECRET-QUERY")
+
+
+def test_tools_available_without_the_chat_provider(client, monkeypatch):
+    """工具端点只认 key，不认 ``--deepseek`` 开关。
+
+    它们是**无条件注册**的（模块级 ``@app.post``），凭据来自 DEEPSEEK_API_KEY /
+    key 文件，与 ``state.providers`` 里有没有 deepseek 通道无关。文档/启动提示
+    一度写成「加 --deepseek 就同时启用」，与真实行为相反——用户关掉通道后会以为
+    搜索也没了。这条钉住真实语义：没注册 provider 时端点照样能用。
+    """
+    _install_client(monkeypatch, lambda: httpx.Response(
+        200, json={"results": [{"title": "t", "url": "u"}]}))
+    # client fixture 的 fake state 本来就没有 deepseek provider
+    assert "deepseek" not in (st.proxy_state.providers or {})
+    r = client.post("/v1/tools/search", json={"query": "x"})
+    assert r.status_code == 200
+    assert client.post("/v1/tools/fetch",
+                       json={"url": "https://example.com"}).status_code == 200
+
+
+def test_tools_routes_registered_unconditionally():
+    """路由在**模块 import 时**就注册，不受任何 CLI 开关约束。
+
+    与上面那条互补：那条验运行期行为，这条防止有人日后把注册挪进
+    ``if args.deepseek`` 分支里（那就与文档承诺的「共用 key 即可用」不一致了）。
+    """
+    import pathlib
+    src = pathlib.Path(tools_api.__file__).read_text(encoding="utf-8")
+    # 两个 @app.post 必须都在模块顶层（缩进 0），不能在函数/条件分支内
+    for line in src.splitlines():
+        if line.startswith("@app.post("):
+            assert "/v1/tools/" in line
+    assert src.count("@app.post(") == 2

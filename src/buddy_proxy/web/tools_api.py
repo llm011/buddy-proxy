@@ -58,6 +58,24 @@ def _client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=_TIMEOUT)
 
 
+def _search_diag_fields(body: dict[str, Any]) -> dict[str, Any]:
+    """search 的脱敏诊断字段（只记结构，不记 query 原文）。
+
+    **字段名必须避开日志红线的敏感词**：``safe_log_fields`` 会把键名里含
+    ``content`` / ``body`` / ``message`` / ``token`` / ``prompt`` … 的值一律当
+    正文哈希成 ``*_bytes`` / ``*_sha256``。布尔值经它一换就只剩两个无意义的
+    哈希，可观测性静默消失（``auth_present`` 当年正是踩了 ``api_key`` 这处）。
+    所以这里叫 ``chars`` / ``want_page_text`` 而不是 ``query_len`` 之外的
+    直觉名——改名前先跑一遍 ``safe_log_fields`` 确认原值能活下来。
+    """
+    query = body.get("query")
+    return {
+        "chars": len(query) if isinstance(query, str) else 0,
+        "want_page_text": bool(body.get("need_content")),
+        "results": body.get("count"),
+    }
+
+
 async def _post_tool(path: str, payload: dict[str, Any]) -> JSONResponse:
     """把请求转发到固定官方端点并原样回传响应。
 
@@ -138,9 +156,7 @@ async def tools_search(request: Request):
 
     meta = client_meta(request)
     log_client_request("POST", "/v1/tools/search", body, **meta)
-    # 只记结构（条数/是否要正文），query 原文属于用户输入、按日志红线不进日志。
-    diagnostic("tools_request", tool="search",
-               query_count=len(query), need_content=bool(body.get("need_content")))
+    diagnostic("tools_request", tool="search", **_search_diag_fields(body))
     return await _post_tool("/v1/tools/search", body)
 
 
