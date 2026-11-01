@@ -245,15 +245,7 @@
      拉到与右栏等高，底部留出一大块空白。top 让各卡按自身内容高 */
   .grid2.top { align-items: start; }
   @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
-  /* position: relative 是给 qfold-float（绝对定位的视口浮钮）用的：主额度
-     列表（benefits.js 的 #quota-list）拿它当卡壳，而各专属面板用的是
-     .pat-pkg（自带 relative + overflow:hidden）。少了这句，浮钮的包含块退化
-     成初始包含块（视口），left/right:12px 就铺成一条横跨整页的通栏按钮，压在
-     别的内容上（用户 2026-11-01 截图）。带 .ag-move 的账号卡若也用本类，其
-     定位基准由近到远是 .pat-pkg → 本卡，两者都 relative，取更近的 .pat-pkg，
-     观感不变。 */
-  .chart-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
-                position: relative; }
+  .chart-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
   .legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
   .legend-item { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
                  padding: 3px 11px 3px 8px; border-radius: 999px; border: 1px solid var(--line);
@@ -481,24 +473,6 @@
            color: var(--muted); }
   .qmore:hover { color: var(--text); border-color: var(--accent); }
   .qmore[hidden] { display: none; }
-  /* 视口底沿的浮层「收起」：展开态 .qbody 自己是滚动区，底下的主按钮被推
-     到滚动区外，用户得一路滚到底才能点回去。浮钮跟着 .pat-pkg（position:
-     relative）定位，条目多到超视口时叠在最后一行上——只给底色和描边，
-     不与条目抢注意力。 */
-  .qfold-float { position: absolute; left: 12px; right: 12px; bottom: 10px;
-                 z-index: 2; background: var(--card2);
-                 box-shadow: 0 -8px 14px -6px var(--card2); }
-  /* 浮钮落进装它的块（.pat-pkg）的底部留白里，别正好叠在最后一条进度条上——
-     留一截让「已用完」那块的尾巴还能被点到。`:has` 不支持时整条规则被丢弃，
-     只表现为少 40px 留白，布局不会坏。 */
-  .pat-pkg:has(.qfold-float:not([hidden])) { padding-bottom: 40px; }
-  /* 主额度列表的卡壳是 .chart-card（不是 .pat-pkg），浮钮一样需要底部留白；
-     少了它，浮钮会正好压在最后一条进度条上（回归：早期浮钮在 .chart-card 里
-     没有定位祖先、直接铺成整页宽，见上面 .chart-card 的 position）。
-     用直接子选择 ``>`` 限定：主列表的浮钮是 .chart-card 的直接子元素；专属
-     面板的浮钮在更内层的 .pat-pkg 里，已由上一条 .pat-pkg:has 负责，不该再给
-     面板卡叠一层 40px 空白。 */
-  .chart-card:has(> .qfold-float:not([hidden])) { padding-bottom: 40px; }
   .qbar > div { height: 100%; border-radius: 4px; }
   /* TRAE PAT 面板：账号额度卡两栏；token 状态并入各自标题；模型负载另起两栏。 */
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -517,12 +491,8 @@
   /* 账号块 = 卡中卡：背景亮一档 + 描边 + 圆角。原先只有一条 rgba(.4) 的
      底线，两栏并排时两个账号的额度内容直接糊成一片（用户截图：分隔看不
      出来）。trae PAT / antigravity / kimi 三个面板共用这个类，一起变样。 */
-  /* overflow: hidden 是给 qfold-float（绝对定位的视口浮钮）用的：浮钮
-     left/right 是 12px，只保证不越出 .pat-pkg 的**内容盒**，越不过 padding
-     盒——内容盒右缘到 .pat-pkg 右缘还差 12px padding，而 .pat-pkg 外面是
-     .pat-quota-grid 的 22px 列间距，按钮背景没有裁剪就会伸进列间空白，
-     看着像「一条通栏按钮压到隔壁列」。裁剪顺带把圆角外的背景也切干净。
-     （card2 是纯色，切掉不影响观感；浮钮自带 bottom:10px，不会挨到裁剪线。） */
+  /* 账号块 = 卡中卡：背景亮一档 + 描边 + 圆角。overflow:hidden 把圆角外的背景
+     切干净，也让卡内超长内容不外溢。 */
   .pat-pkg { position: relative; overflow: hidden; padding: 10px 12px 12px;
              background: var(--card2); border: 1px solid var(--line);
              border-radius: 8px; }
