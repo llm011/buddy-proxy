@@ -422,7 +422,7 @@ def test_fallback_and_refreshed_catalog_agree_on_metadata():
             assert fallback[mid][field] == refreshed[mid][field], (mid, field)
 
 
-def test_colliding_bare_name_never_reaches_the_paid_channel():
+def test_colliding_bare_name_never_reaches_the_paid_channel(monkeypatch):
     """撞车裸名绝不能改道到**付费的**官方 API。
 
     这是加 ``--deepseek`` 最容易造成的意外：用户原本的 ``deepseek-v4-pro``
@@ -453,7 +453,9 @@ def test_colliding_bare_name_never_reaches_the_paid_channel():
                            model_schedules={}, hidden_models=set(), disabled_providers=set(),
                            metrics=None, write_log=mock.MagicMock(), logger=mock.MagicMock(),
                            json_logger=mock.MagicMock(), runtime_info={})
-    st.proxy_state = fake
+    # monkeypatch 而非裸赋值：test_ui_admin / test_model_routing 同款，测完
+    # 自动还原，免得这个假 state 泄给同会话里后跑的用例。
+    monkeypatch.setattr(st, "proxy_state", fake)
 
     owner = _resolve_auto(fake, "deepseek-v4-pro")
     assert owner is not ds, "撞车裸名被改道到付费官方了——用户会莫名开始花余额"
