@@ -31,7 +31,7 @@ BENEFITS_CORE_JS = STATIC / "benefits.js"
 PANELS_JS = [STATIC / name for name in (
     "benefits_panels.js", "benefits_antigravity.js", "benefits_qoder.js",
     "benefits_trae.js", "benefits_codebuddy.js", "benefits_kimi.js",
-    "benefits_codex.js",
+    "benefits_codex.js", "benefits_dumate.js",
 )]
 # DuMate 面板（benefits_dumate.js）单列：它有一条独一份的 status 驱动自重建，
 # 额度明细也走 quotaItemsHtml，一并进接线检查。
@@ -41,8 +41,9 @@ pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"
 )
 
-_FNS = ("quotaSpent", "quotaMoreButton", "quotaItemsHtml", "syncQuotaFold",
-        "quotaFoldToggle", "quotaItemHtml")
+_FNS = ("quotaSpent", "quotaRemaining", "quotaMoreButton", "quotaItemsHtml", "syncQuotaFold",
+        "quotaFoldToggle", "quotaItemHtml", "quotaProviderExhausted", "quotaProviderFold",
+        "quotaProviderToggle")
 
 
 def _extract_fn(text: str, name: str) -> str:
@@ -97,6 +98,7 @@ globalThis.mkBox = (key, scrollHeight, spentCount, actCount) => {
 
 globalThis.document = {
   querySelectorAll: sel => sel === '.qbody[data-qfold]' ? globalThis.__boxes : [],
+  getElementById: id => globalThis.__providerBodies && globalThis.__providerBodies[id] || null,
 };
 globalThis.getComputedStyle = () => ({getPropertyValue: () => '208px'});
 """
@@ -112,6 +114,7 @@ def _run(body: str) -> str:
     text = BENEFITS_JS.read_text(encoding="utf-8")
     src = "".join(_extract_fn(text, n) for n in _FNS)
     src += _extract_const(text, "QUOTA_FOLD")
+    src += _extract_const(text, "PROVIDER_QUOTA_FOLD")
     proc = subprocess.run(
         ["node", "-e", _STUB + _DOM_STUB + src + "\n" + body],
         capture_output=True, text=True, timeout=30,
@@ -567,3 +570,95 @@ console.log(JSON.stringify([
 ]));
 """)
     assert _last(out) == [False, True]
+
+
+# ---------------------------------------------------------------------------
+# provider 级默认折叠：未知不等于 0；两层折叠状态不能串
+# ---------------------------------------------------------------------------
+
+def test_provider_exhaustion_requires_every_item_to_be_measured_zero():
+    out = _run("""
+console.log(JSON.stringify([
+  quotaProviderExhausted([]),
+  quotaProviderExhausted([{remaining: 0}, {remaining: '0'}]),
+  quotaProviderExhausted([{remaining: 0}, {used: 100, total: 100}]),
+  quotaProviderExhausted([{remaining: 0}, {remaining: 1}]),
+  quotaProviderExhausted([{remaining: 0}, {remaining: null}]),
+  quotaProviderExhausted([{unit: 'percent', percent: 100}]),
+  quotaProviderExhausted([{unit: 'percent', percent: 99}]),
+  quotaProviderExhausted([{head_only: true, remaining: 0}]),
+]));
+""")
+    assert _last(out) == [False, True, True, False, False, True, False, True], out
+
+
+def test_provider_exhaustion_rejects_notices_free_and_reset_credit():
+    out = _run("""
+console.log(JSON.stringify([
+  quotaProviderExhausted([{remaining: '余额未知'}]),
+  quotaProviderExhausted([{remaining: 0, query_failed: true}]),
+  quotaProviderExhausted([{remaining: 0, unreachable: true}]),
+  quotaProviderExhausted([{remaining: 0, query_empty: true}]),
+  quotaProviderExhausted([{remaining: 0, reset_pending: true}]),
+  quotaProviderExhausted([{remaining: 0, unit: 'reset_credit'}]),
+  quotaProviderExhausted([{remaining: 0, used: null, total: null}]),
+]));
+""")
+    assert _last(out) == [False] * 7, out
+
+
+def test_provider_fold_defaults_manual_override_and_recovery():
+    out = _run("""
+const body = {hidden: false};
+const btn = {dataset: {providerFold: 'trae'},
+  getAttribute: n => n === 'aria-expanded' ? 'false' : 'provider-quota-trae',
+  setAttribute() {}, title: '', textContent: ''};
+const first = quotaProviderFold([{remaining: 0}], 'trae');
+const initiallyHidden = first.bodyStart.includes(' hidden');
+const initiallyBadge = first.badge.includes('无剩余额度');
+quotaProviderToggle(btn);
+const manuallyOpen = quotaProviderFold([{remaining: 0}], 'trae').bodyStart;
+const replenished = quotaProviderFold([{remaining: 10}], 'trae');
+const restored = quotaProviderFold([{remaining: 0}], 'trae').bodyStart;
+console.log(JSON.stringify({initiallyHidden, initiallyBadge, manuallyOpen,
+  replenished, restored, toggleGone: replenished.toggle === ''}));
+""")
+    r = _last(out)
+    assert r["initiallyHidden"] is True and r["initiallyBadge"] is True
+    assert " hidden" not in r["manuallyOpen"] and " hidden" not in r["restored"]
+    assert " hidden" not in r["replenished"]["bodyStart"] and r["toggleGone"] is True
+
+
+def test_provider_fold_markup_uses_stable_escaped_id_not_item_fold():
+    out = _run("""
+const f = quotaProviderFold([{remaining: 0}], 'traeintl');
+console.log(JSON.stringify({html: f.toggle + f.bodyStart + f.bodyEnd,
+  itemStateIndependent: Object.keys(QUOTA_FOLD.open).length === 0}));
+""")
+    r = _last(out)
+    assert 'aria-controls="provider-quota-traeintl"' in r["html"]
+    assert 'id="provider-quota-traeintl"' in r["html"]
+    assert "data-qfold" not in r["html"] and "qbody" not in r["html"]
+    assert r["itemStateIndependent"] is True
+
+
+def test_every_provider_panel_uses_outer_fold_helper():
+    core = BENEFITS_CORE_JS.read_text(encoding="utf-8")
+    assert "quotaProviderFold(q.items || [], p.id)" in core
+    panels = "".join(p.read_text(encoding="utf-8") for p in PANELS_JS)
+    expected = {"traepat", "antigravity", "qoder", "qoderintl", "trae", "traeintl",
+                "codebuddy", "codebuddyintl", "kimi", "codex", "dumate"}
+    calls = set(re.findall(r"quotaProviderFold\([^;]+?, '(\w+)'\)", panels))
+    assert calls == expected, f"专属通道外层折叠接线不全: {calls}"
+
+
+def test_log_refresh_lives_inside_log_page_not_topbar():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    topbar = html[html.index('<div class="topbar">'):html.index('</div>\n\n<!-- 设置文件')]
+    log = html[html.index('<section class="page" id="page-log">'):html.index('<section class="page" id="page-models">')]
+    assert "global-refresh" not in topbar
+    assert log.count('id="global-refresh"') == 1
+    assert 'onclick="loadAll(true)"' in log
+    app = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert "右上角" not in app
+    assert "请求日志" in app and "↻ 刷新" in app

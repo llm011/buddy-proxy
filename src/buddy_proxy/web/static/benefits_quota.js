@@ -161,12 +161,70 @@ const QUOTA_FOLD = { open: {} };
 // reset_pending 的「用量待确认」都是**未知**，不是「没花」——按用完收起来，
 // 正好会把最该看见的那条藏掉。
 function quotaSpent(it) {
+  const r = quotaRemaining(it);
+  return r != null && r <= 0;
+}
+
+// 数值余量的唯一判读口径：null / 说明文字 / 空串都不是 0；百分比窗口可由
+// 100-percent 推出。非法 total/used 也不允许经 Number(null) 伪装成有数据。
+function quotaRemaining(it) {
+  const numeric = v => v != null && v !== '' && typeof v !== 'boolean' && Number.isFinite(Number(v));
   let r = it.remaining;
-  // 与 quotaItemHtml 同一条回填规则：只见 total/used 时也能算出余量
-  if (r == null && it.used != null && it.total != null) r = Number(it.total) - Number(it.used);
-  if (r == null || r === '' || typeof r === 'boolean') return false;
-  const n = Number(r);
-  return Number.isFinite(n) && n <= 0;
+  if (('used' in it && !numeric(it.used)) || ('total' in it && !numeric(it.total))) return null;
+  if (r == null && numeric(it.used) && numeric(it.total)) r = Number(it.total) - Number(it.used);
+  if (r == null && it.unit === 'percent' && it.percent != null
+      && Number.isFinite(Number(it.percent))) r = 100 - Number(it.percent);
+  if (r == null || r === '' || typeof r === 'boolean' || !Number.isFinite(Number(r))) return null;
+  return Number(r);
+}
+
+// ---- provider 级折叠：只收明确全部耗尽的通道 ----
+// 与条目层 QUOTA_FOLD 完全独立。任何未知/错误/说明条都阻止折叠；空数组和
+// Free 的 query_empty 也不是「额度为 0」。重置券不代表有可用的订阅额度。
+const PROVIDER_QUOTA_FOLD = { open: {} };
+
+function quotaProviderExhausted(items) {
+  if (!items || !items.length) return false;
+  let measured = false;
+  for (const it of items) {
+    if (it.unit === 'reset_credit' || it.reset_credit === true) continue;
+    if (it.query_failed || it.unreachable || it.query_empty || it.reset_pending) return false;
+    const remaining = quotaRemaining(it);
+    if (remaining == null) return false;
+    measured = true;
+    if (remaining > 0) return false;
+  }
+  return measured;
+}
+
+// 普通卡和专属卡共用的外层折叠。有余额时永远展开，不让旧的「手动收起」
+// 覆盖值把新到账的额度藏住；只有耗尽卡才显示开关并记住用户选择。
+function quotaProviderFold(items, key) {
+  const exhausted = quotaProviderExhausted(items);
+  const overridden = Object.prototype.hasOwnProperty.call(PROVIDER_QUOTA_FOLD.open, key);
+  const open = !exhausted || (overridden ? PROVIDER_QUOTA_FOLD.open[key] : false);
+  const id = 'provider-quota-' + key.replace(/[^A-Za-z0-9_-]/g, (m, i) =>
+    '-' + key.charCodeAt(i).toString(16) + '-');
+  return {
+    exhausted,
+    badge: exhausted ? '<span class="tag bad">无剩余额度</span>' : '',
+    toggle: exhausted ? `<button class="ghost provider-quota-toggle" data-provider-fold="${esc(key)}" ` +
+      `aria-expanded="${open}" aria-controls="${esc(id)}" title="${open ? '收起' : '展开'}额度明细" ` +
+      `onclick="quotaProviderToggle(this)">${open ? '收起额度 ▴' : '展开额度 ▾'}</button>` : '',
+    bodyStart: `<div class="provider-quota-body" id="${esc(id)}"${open ? '' : ' hidden'}>`,
+    bodyEnd: '</div>',
+  };
+}
+
+function quotaProviderToggle(btn) {
+  const key = btn.dataset.providerFold;
+  PROVIDER_QUOTA_FOLD.open[key] = btn.getAttribute('aria-expanded') !== 'true';
+  const body = document.getElementById(btn.getAttribute('aria-controls'));
+  const open = PROVIDER_QUOTA_FOLD.open[key];
+  if (body) body.hidden = !open;
+  btn.setAttribute('aria-expanded', String(open));
+  btn.title = (open ? '收起' : '展开') + '额度明细';
+  btn.textContent = open ? '收起额度 ▴' : '展开额度 ▾';
 }
 
 // 展开/收起按钮。**必须**紧跟 .qbody 渲染（syncQuotaFold 靠

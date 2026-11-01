@@ -48,6 +48,17 @@
       "desc": "Kimi K3.1 Pro"
     },
     {
+      "id": "kimi-k3.1-pro-highspeed",
+      "name": "Kimi-K3.1-Pro-Highspeed",
+      "vendor": "moonshot",
+      "max_input": 256000,
+      "max_output": 32000,
+      "tool_call": true,
+      "images": false,
+      "credits": "x1.56 credits",
+      "desc": "Kimi K3.1 Pro Highspeed（2026-11-02 CodeBuddy 真实请求 HTTP 200）"
+    },
+    {
       "id": "mimo-v2.6-pro",
       "name": "Xiaomi MiMo-V2.6-Pro",
       "vendor": "xiaomi",

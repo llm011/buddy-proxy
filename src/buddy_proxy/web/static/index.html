@@ -17,7 +17,6 @@
       <span class="pill"><span class="dot" id="status-dot"></span><span id="status-text">加载中…</span></span>
       <span class="sub" id="listen-hint"></span>
       <span class="spacer"></span>
-      <button class="ghost" onclick="loadAll(true)">↻ 刷新</button>
     </header>
     <nav class="tabs">
       <button class="tab active" data-tab="overview">📊 总览</button>
@@ -88,7 +87,7 @@
         <div class="mix-legend" id="mix-legend"></div>
       </div>
     </div>
-    <h2>最近请求 <span class="sub" id="recent-sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2>
+    <div class="sec-head"><h2>最近请求 <span class="sub" id="recent-sub">最多 200 条（进程内滚动），分页展示；TTFT 为首 token 延迟（流式）</span></h2><span class="spacer"></span><button class="ghost" id="global-refresh" onclick="loadAll(true)">↻ 刷新</button></div>
     <div class="log-filters" id="log-filters"></div>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>

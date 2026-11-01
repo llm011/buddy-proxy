@@ -47,6 +47,7 @@ globalThis.quotaItemsHtml = (items, key) => {
   return '<div class="qbody" data-qfold="' + esc(key) + '">' +
     shown.map(globalThis.quotaItemHtml).join('') + '</div>';
 };
+globalThis.quotaProviderFold = () => ({badge: '', toggle: '', bodyStart: '', bodyEnd: ''});
 globalThis.BENEFITS = {};
 globalThis.__SYNC_CALLS = 0;
 globalThis.syncQuotaFold = () => { globalThis.__SYNC_CALLS++; };

@@ -65,6 +65,7 @@ globalThis.esc = s => String(s);
 // quotaHeadSum 在 benefits_quota.js 里，本桩不引那份文件，给个空实现即可
 // ——本用例只关心加载器发了哪些请求，不关心卡片里画了什么。
 globalThis.quotaHeadSum = () => '';
+globalThis.quotaProviderFold = () => ({badge: '', toggle: '', bodyStart: '', bodyEnd: ''});
 globalThis.BENEFITS = {providers: []};
 globalThis.__RENDERED = 0;
 globalThis.__QUIET = null;

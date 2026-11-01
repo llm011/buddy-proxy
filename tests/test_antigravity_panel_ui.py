@@ -66,6 +66,7 @@ globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) + '</div>
 globalThis.quotaItemsHtml = (items, key) =>
   '<div class="qbody" data-qfold="' + esc(key) + '">' +
   items.map(globalThis.quotaItemHtml).join('') + '</div>';
+globalThis.quotaProviderFold = () => ({badge: '', toggle: '', bodyStart: '', bodyEnd: ''});
 globalThis.BENEFITS = {};
 // syncQuotaFold 定义在折叠区块（不在本测试切片里），打桩成计数器：
 // 面板每次改完高度都该校准一次折叠，漏调就是「整块没裁、按钮不露」

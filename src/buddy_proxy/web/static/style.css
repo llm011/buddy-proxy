@@ -491,6 +491,23 @@
     .br-next { grid-area: 2 / 2; }
     /* 单列回退时按钮行贴右对齐还靠 .br-act 自身 justify-content，不动 */
   }
+  .benefit-row .ck-detail-toggle { padding: 3px 8px; font-size: 11.5px; }
+  .ck-account-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+                     gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); }
+  .ck-account-grid[hidden], .provider-quota-body[hidden] { display: none; }
+  .ck-account-card { min-width: 0; padding: 9px 11px; border: 1px solid var(--line);
+                     border-radius: 8px; background: var(--bg); }
+  .ck-account-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .ck-account-head strong { min-width: 0; overflow-wrap: anywhere; font-size: 12px; }
+  .ck-account-head .br-state { margin-left: auto; }
+  .ck-account-card.ok .br-state { color: var(--ok); }
+  .ck-account-card.pending .br-state { color: var(--accent); }
+  .ck-account-card.bad .br-state { color: var(--err); }
+  .ck-account-message { margin-top: 6px; color: var(--muted); font-size: 11.5px;
+                        line-height: 1.5; overflow-wrap: anywhere; }
+  @container (max-width: 640px) {
+    .ck-account-grid { grid-template-columns: minmax(0, 1fr); }
+  }
   .grow { flex: 1; }
   .qitem { margin: 9px 0; }
   .qitem .qhead { display: flex; justify-content: space-between; gap: 8px; font-size: 12px;
