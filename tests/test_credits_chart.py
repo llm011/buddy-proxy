@@ -227,3 +227,41 @@ console.log(JSON.stringify({bars, daily, dailyHtml: element('chart-credits-daily
     assert data["daily"] == [{"date": "2026-10-01", "total": 120.5},
                              {"date": "2026-10-02", "total": 80.0}]
     assert "120.50" in data["dailyHtml"] and "80.00" in data["dailyHtml"]
+
+
+def test_dumate_scope_note_appears_in_both_tooltips():
+    """dumate 是账号级口径（含直接在 App 里的用量）——两张图的 tooltip 都要点明，
+    否则用户会把 27000+ 误读成「本代理转发了这么多」。"""
+    data = _run_chart("""
+STATS = {model_daily: [
+  {date: '2026-10-01', provider: 'dumate', model: '', count: 0, credit_sum: 100, credit_est_sum: 0},
+]};
+renderCreditsBars();
+renderCreditsDaily();
+listeners.get('chart-credits-providers:mousemove')({target: {closest: () => ({
+  dataset: {ci: '0'}, getBoundingClientRect: () => ({}),
+})}});
+const providerTip = TOOLTIP;
+listeners.get('chart-credits-daily:mousemove')({target: {closest: () => ({
+  dataset: {i: '0'}, getBoundingClientRect: () => ({}),
+})}});
+const dailyTip = TOOLTIP;
+console.log(JSON.stringify({providerTip, dailyTip}));
+""")
+    assert "账号级口径" in data["providerTip"] and "App" in data["providerTip"]
+    assert "账号级口径" in data["dailyTip"]
+
+
+def test_non_dumate_tooltip_has_no_dumate_note():
+    """别的通道不该背上 dumate 的口径说明。"""
+    data = _run_chart("""
+STATS = {model_daily: [
+  {date: '2026-10-01', provider: 'qoder', model: 'a', credit_sum: 5, credit_est_sum: 0},
+]};
+renderCreditsBars();
+listeners.get('chart-credits-providers:mousemove')({target: {closest: () => ({
+  dataset: {ci: '0'}, getBoundingClientRect: () => ({}),
+})}});
+console.log(JSON.stringify({tip: TOOLTIP}));
+""")
+    assert "账号级口径" not in data["tip"]
