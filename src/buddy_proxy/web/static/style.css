@@ -494,8 +494,11 @@
   .pat-pkg:has(.qfold-float:not([hidden])) { padding-bottom: 40px; }
   /* 主额度列表的卡壳是 .chart-card（不是 .pat-pkg），浮钮一样需要底部留白；
      少了它，浮钮会正好压在最后一条进度条上（回归：早期浮钮在 .chart-card 里
-     没有定位祖先、直接铺成整页宽，见上面 .chart-card 的 position）。 */
-  .chart-card:has(.qfold-float:not([hidden])) { padding-bottom: 40px; }
+     没有定位祖先、直接铺成整页宽，见上面 .chart-card 的 position）。
+     用直接子选择 ``>`` 限定：主列表的浮钮是 .chart-card 的直接子元素；专属
+     面板的浮钮在更内层的 .pat-pkg 里，已由上一条 .pat-pkg:has 负责，不该再给
+     面板卡叠一层 40px 空白。 */
+  .chart-card:has(> .qfold-float:not([hidden])) { padding-bottom: 40px; }
   .qbar > div { height: 100%; border-radius: 4px; }
   /* TRAE PAT 面板：账号额度卡两栏；token 状态并入各自标题；模型负载另起两栏。 */
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
