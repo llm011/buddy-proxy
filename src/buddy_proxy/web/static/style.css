@@ -365,7 +365,7 @@
   .benefit-row { display: grid; align-items: center; gap: 10px 14px;
                  grid-template-columns: auto minmax(0, 1fr) auto auto; }
   .ck-pkg { padding: 10px 14px; }
-  /* 多账号逐账号明细：压成**同行**小胶囊（状态点 + 名字，整颗按状态上色）。
+  /* 多账号逐账号明细：压成**同行**小胶囊（状态字形 + 名字，整颗按状态上色）。
      另起一行会让带明细的卡高出不带的一截，两列并排时被拉到同高、空出一大片；
      状态文案与失败原因都进 title（`.ck-pill` 的悬停提示），卡面只留名字。
      名字过长时省略号收窄（上限 230px），把整行让给右边的按钮。 */
@@ -373,8 +373,19 @@
   .ck-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
              padding: 1px 9px; border-radius: 999px; background: var(--bg);
              border: 1px solid var(--line); color: var(--muted); max-width: 230px; }
-  .ck-pill::before { content: ''; width: 5px; height: 5px; border-radius: 50%;
-                     background: currentColor; opacity: .85; flex: none; }
+  /* 状态不能只有颜色：胶囊头一个字形成「状态字形」（✓ 已签到 / ＋ 可领 /
+     ✕ 失败·查询失败 / · 无活动），配色照旧。原来只有一颗纯色圆点，色盲、
+     黑白截图、放大看都读不出「哪个号没签上」——而这正是这张卡的全部意义
+     （2026-11-01 反馈）。读屏那一路再由 .sr-only 的文字状态兜底。 */
+  .ck-pill::before { content: '·'; flex: none; font-size: 12px; line-height: 1;
+                     opacity: .9; }
+  .ck-pill.ok::before { content: '✓'; }
+  .ck-pill.pending::before { content: '＋'; }
+  .ck-pill.bad::before { content: '✕'; }
+  /* 只给读屏用的文字：视觉上收成 1px 不占位，但能被读出来（状态字形解决的是
+     「看得见但分不清颜色」，听的人要的是真文字） */
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+             overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
   .ck-pill-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ck-pill.ok { color: var(--ok); border-color: rgba(62,207,142,.35);
@@ -390,13 +401,20 @@
                                  border-color: transparent; background: transparent;
                                  opacity: .55; }
   .benefit-row .ck-pill button:hover { opacity: 1; }
-  .br-id { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  /* 四列显式点名归属。只靠自动排布的话，某个通道算不出下次时间时
+     `nextTimeHtml()` 不渲染 `.br-next`，`.br-act` 会顺势补进第三轨（那个
+     minmax(0,1fr)），右边缘比别的行少一个 gap——2026-11-01 用最小页面加载
+     本文件实测：有下次时间的行按钮右边缘 1068、没有的 1054，正好差 14px。
+     钉死轨道后有没有下次时间，按钮都在第 4 轨，跨行右边缘一条线。
+     ⚠ 窄卡分支（下面 @container 640px）用 grid-area 简写覆盖这四条，它写在
+     后面、特异性相同，所以折行布局不受影响。 */
+  .br-id { grid-column: 1; display: flex; align-items: center; gap: 9px; min-width: 0; }
   /* 通道色块：用 pcolor() 上色，与日历 tooltip / 图表里的同通道颜色一致 */
   .br-dot { flex: none; width: 9px; height: 9px; border-radius: 3px; }
   .br-name { font-weight: 600; font-size: 13px; letter-spacing: .2px;
              font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .br-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-  .br-act { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .br-meta { grid-column: 2; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .br-act { grid-column: 4; display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
   .benefit-row button { padding: 5px 15px; font-size: 12.5px; white-space: nowrap; }
   /* 签到态徽标：比 .tag 更醒目一点，带状态点 */
   .br-state { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
@@ -416,7 +434,7 @@
              background: rgba(255,255,255,.035); color: var(--muted);
              border: 1px solid var(--line); white-space: nowrap; }
   /* 「下次时间」：招牌信息，给它一块独立的底 */
-  .br-next { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+  .br-next { grid-column: 3; display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
              padding: 3px 11px; border-radius: 999px; white-space: nowrap;
              background: var(--card2); border: 1px solid var(--line); color: var(--text); }
   .br-next .lbl { color: var(--muted); font-size: 11px; }

@@ -232,7 +232,8 @@ function renderBenefits(opts) {
     // 说不清「哪个号没签上」，所以逐号都要露出名字——但**同行**压成小胶囊，不再
     // 另起一行。另起一行会让带明细的卡比不带的高出一截，原先两列并排时同行的两张
     // 卡被拉到同高、内容少的那张空一大块（2026-11-01 实测 doubao 空 88px、dumate
-    // 60px、qoder 42px，卡本身才 129px 高）。状态文案进胶囊颜色 + title，长句子
+    // 60px、qoder 42px，卡本身才 129px 高）。状态由胶囊配色 + 状态字形（CSS
+    // 的 .ck-pill::before：✓ 已签到 / ＋ 可领 / ✕ 失败）双重表达，长句子
     // （如「有活动，但当前没有可领取的签到奖励」）不铺在卡面上。
     const acctsHtml = (c.accounts || []).map(a => {
       // 颜色分支与下面的文案分支同序——这是原来 br-state 的类映射原样搬过来的，
@@ -247,9 +248,14 @@ function renderBenefits(opts) {
         : a.inactive ? '无活动'
         : a.ok === false ? '失败'
         : a.claimable ? '可领' : '已签到';
-      const tip = [label, a.error || a.message].filter(Boolean).join(' · ');
+      const name = a.name || ('#' + a.index);
+      // 名字也进 title：胶囊里名字超 230px 会被省略号收掉，不带上名字就再没有
+      // 地方能看全（2026-11-01 反馈）。状态文字另外用 .sr-only 交给读屏——
+      // 字形解决「看得见但分不清颜色」，听的人只能靠这句。
+      const tip = [name, label, a.error || a.message].filter(Boolean).join(' · ');
       return `<span class="ck-pill${cls ? ' ' + cls : ''}" title="${esc(tip)}">` +
-        `<span class="ck-pill-name">${esc(a.name || ('#' + a.index))}</span>` +
+        `<span class="sr-only">${esc(label)}</span>` +
+        `<span class="ck-pill-name">${esc(name)}</span>` +
         `${a.id ? acctRenameButton(p.id, a) : ''}</span>`;
     }).join('');
     // 照 antigravity 面板的卡中卡（pat-pkg）包一层：每通道一张子卡，横向分隔一眼
