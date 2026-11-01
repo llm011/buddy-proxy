@@ -245,7 +245,15 @@
      拉到与右栏等高，底部留出一大块空白。top 让各卡按自身内容高 */
   .grid2.top { align-items: start; }
   @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
-  .chart-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+  /* position: relative 是给 qfold-float（绝对定位的视口浮钮）用的：主额度
+     列表（benefits.js 的 #quota-list）拿它当卡壳，而各专属面板用的是
+     .pat-pkg（自带 relative + overflow:hidden）。少了这句，浮钮的包含块退化
+     成初始包含块（视口），left/right:12px 就铺成一条横跨整页的通栏按钮，压在
+     别的内容上（用户 2026-11-01 截图）。带 .ag-move 的账号卡若也用本类，其
+     定位基准由近到远是 .pat-pkg → 本卡，两者都 relative，取更近的 .pat-pkg，
+     观感不变。 */
+  .chart-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
+                position: relative; }
   .legend { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; font-size: 12px; color: var(--muted); }
   .legend-item { display: inline-flex; align-items: center; gap: 6px; cursor: pointer;
                  padding: 3px 11px 3px 8px; border-radius: 999px; border: 1px solid var(--line);
@@ -484,6 +492,10 @@
      留一截让「已用完」那块的尾巴还能被点到。`:has` 不支持时整条规则被丢弃，
      只表现为少 40px 留白，布局不会坏。 */
   .pat-pkg:has(.qfold-float:not([hidden])) { padding-bottom: 40px; }
+  /* 主额度列表的卡壳是 .chart-card（不是 .pat-pkg），浮钮一样需要底部留白；
+     少了它，浮钮会正好压在最后一条进度条上（回归：早期浮钮在 .chart-card 里
+     没有定位祖先、直接铺成整页宽，见上面 .chart-card 的 position）。 */
+  .chart-card:has(.qfold-float:not([hidden])) { padding-bottom: 40px; }
   .qbar > div { height: 100%; border-radius: 4px; }
   /* TRAE PAT 面板：账号额度卡两栏；token 状态并入各自标题；模型负载另起两栏。 */
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
