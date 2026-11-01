@@ -180,6 +180,20 @@ def describe_state() -> dict[str, Any]:
             "inapp_key_hint": f"{ep.inapp_key[:6]}…(len{len(ep.inapp_key)})",
         }
     installed = is_app_installed()
+    # 装了 App 但没在跑：若本机具备独立拉起条件（App 包内二进制齐全 + 已登录），
+    # 首次转发会自动 spawn 一个独立 dumate-main-server，**无需**用户手动开桌面端。
+    # 提示必须如实反映这一点，否则面板让用户「先打开 App」，而实际请求根本不用开
+    # （用户 2026-11-01：不该必须开着桌面端）。
+    if installed:
+        from . import standalone
+
+        if (standalone.is_enabled() and standalone.standalone_supported()
+                and standalone.read_login_context().get("user_id")):
+            hint = "已安装 DuMate.app，当前未运行——首次转发时代理会自动拉起独立实例，无需手动打开。"
+        else:
+            hint = "已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。"
+    else:
+        hint = "未检测到 DuMate.app。请先安装并登录百度搭子（千帆桌面端）。"
     return {
         "ready": False,
         "installed": installed,
@@ -188,9 +202,5 @@ def describe_state() -> dict[str, Any]:
         "pid": None,
         "app_version": "",
         "inapp_key_hint": "",
-        "hint": (
-            "已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。"
-            if installed else
-            "未检测到 DuMate.app。请先安装并登录百度搭子（千帆桌面端）。"
-        ),
+        "hint": hint,
     }

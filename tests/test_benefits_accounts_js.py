@@ -475,8 +475,11 @@ def test_dumate_status_ready_triggers_rerender():
         + "globalThis.quotaItemsHtml = (items, key) =>\n"
         + "  '<div class=\"qbody\" data-qfold=\"' + esc(key) + '\">' + items.map(globalThis.quotaItemHtml).join('') + '</div>';\n"
         # 合计行同理：只验证「模板把 quotaHeadSum 的输出放进去了」，求和口径
-        # 本身由 test_quota_headline_ui.py 覆盖
-        + "globalThis.quotaHeadSum = q => q && q.sum_items ? '<span>HEADSUM</span>' : 'NOSUM';\n"
+        # 本身由 test_quota_headline_ui.py / test_dumate_quota_headline.py 覆盖。
+        # 桩只看「有没有传到 items」就发 HEADSUM——面板**不再**传 sum_items
+        # （汇总行 head_only，传 sum_items 反而翻倍，见 provider.quota），桩若还
+        # 卡在 sum_items 上就变成钉住旧 bug。
+        + "globalThis.quotaHeadSum = q => q && q.items ? '<span>HEADSUM</span>' : 'NOSUM';\n"
         + "globalThis.api = async (path) => path.includes('/accounts')\n"
         + "  ? globalThis.__DM_ACCTS : globalThis.__DM_RESPONSE;\n"
         # 数渲染次数：段里的 renderDumatePanel 声明与函数体里的自调用一起
@@ -552,7 +555,7 @@ console.log(JSON.stringify({
   firstReady: firstHtml.includes('已就绪'),
   renderCount: RENDER_COUNT,
   readyNow: readyHtml.includes('已就绪'),
-  // 合计行：模板必须把 quotaHeadSum({items, sum_items:true}) 渲染出来
+  // 合计行：模板必须把 quotaHeadSum({items}) 的输出渲染出来
   //（2026-11-01 报障「dumate 额度里没有展示总额」——模板压根没调它）
   headSum: readyHtml.includes('HEADSUM'),
   stillDetecting: readyHtml.includes('检测中'),

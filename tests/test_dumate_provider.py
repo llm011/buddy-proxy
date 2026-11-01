@@ -65,27 +65,124 @@ def test_models_all_support_reasoning_and_tools():
 
 
 def test_ensure_auth_401_when_app_not_running():
+    """App 未运行 **且本机无从拉起**（未装/未登录）→ 401。
+
+    2026-11-01 起，只要本机装了 App 且已登录，ensure_auth 会放行（把真正的
+    拉起交给 async 的 forward），所以这里显式把独立运行能力 mock 掉。
+    """
+    from buddy_proxy.dumate import standalone
+
     p = DumateProvider()
     with mock.patch.object(discovery, "discover", return_value=None), \
-         mock.patch.object(discovery, "is_app_installed", return_value=True):
+         mock.patch.object(discovery, "is_app_installed", return_value=True), \
+         mock.patch.object(standalone, "standalone_supported", return_value=False):
         with pytest.raises(HTTPException) as ei:
             p.ensure_auth()
     assert ei.value.status_code == 401
 
 
+def test_ensure_auth_passes_through_when_standalone_capable():
+    """App 未运行但本机可独立拉起（装了 + 已登录）→ ensure_auth 放行不抛。
+
+    不能在同步 ensure_auth 里阻塞 spawn，所以这里只放行；真正失败由 forward 报。
+    """
+    from buddy_proxy.dumate import standalone
+
+    p = DumateProvider()
+    with mock.patch.object(discovery, "discover", return_value=None), \
+         mock.patch.object(standalone, "standalone_supported", return_value=True), \
+         mock.patch.object(standalone, "read_login_context",
+                           return_value={"login_mode": "bce", "user_id": "u", "account_id": "a"}):
+        p.ensure_auth()  # 不抛即通过
+
+
 def test_forward_503_when_app_not_running():
+    """App 未运行且本机无从拉起 → 503（mock 掉独立运行能力，不真起进程）。"""
     import asyncio
+
+    from buddy_proxy.dumate import standalone
 
     async def _run():
         p = DumateProvider()
         body = {"model": "kimi-k3", "messages": [{"role": "user", "content": "hi"}]}
         with mock.patch.object(discovery, "discover", return_value=None), \
-             mock.patch.object(discovery, "is_app_installed", return_value=False):
+             mock.patch.object(discovery, "is_app_installed", return_value=False), \
+             mock.patch.object(standalone, "standalone_supported", return_value=False):
             with pytest.raises(HTTPException) as ei:
                 await p.forward(body, "openai")
         return ei.value.status_code
 
     assert asyncio.run(_run()) == 503
+
+
+def test_forward_spawns_standalone_when_app_closed():
+    """**核心修复**：App 关掉时 forward 自己拉起独立实例并成功转发。
+
+    全程 mock：``ensure_running`` 假装拉起成功，随后 discover 返回端点。断言
+    真的走了 spawn 分支、并按端点转发（用假 client，不发真网络）。
+    """
+    import asyncio
+
+    from buddy_proxy.dumate import standalone
+    from buddy_proxy.dumate.provider import DumateProvider
+
+    async def _run():
+        p = DumateProvider()
+        ep = _endpoint()
+        seen = {"n": 0}
+
+        def _fake_discover():
+            seen["n"] += 1
+            return None if seen["n"] == 1 else ep  # 首次 None → 触发 spawn；之后给端点
+
+        sent = {}
+
+        class _FakeResp:
+            status_code = 200
+            def json(self): return {"id": "x", "choices": [{"message": {"content": "好"}}]}
+
+        async def _fake_post(url, json=None, headers=None):
+            sent["url"] = url
+            sent["headers"] = headers
+            return _FakeResp()
+
+        with mock.patch.object(discovery, "discover", side_effect=_fake_discover), \
+             mock.patch.object(standalone, "is_enabled", return_value=True), \
+             mock.patch.object(standalone, "standalone_supported", return_value=True), \
+             mock.patch.object(standalone, "ensure_running",
+                               return_value={"ok": True, "port": ep.port, "pid": 42}) as er, \
+             mock.patch.object(p, "_get_client") as gc:
+            gc.return_value.post = _fake_post
+            resp = await p.forward({"model": "kimi-k3",
+                                    "messages": [{"role": "user", "content": "hi"}]}, "openai")
+        return sent, resp, er
+
+    sent, resp, er = asyncio.run(_run())
+    er.assert_called_once()
+    assert resp.status_code == 200
+    assert sent["url"] == _endpoint().chat_url()
+
+
+def test_forward_reports_spawn_failure_with_reason():
+    """拉起失败（未登录等）→ 503 且文案带上真实原因，不静默成「未运行」。"""
+    import asyncio
+
+    from buddy_proxy.dumate import standalone
+
+    async def _run():
+        p = DumateProvider()
+        with mock.patch.object(discovery, "discover", return_value=None), \
+             mock.patch.object(standalone, "is_enabled", return_value=True), \
+             mock.patch.object(standalone, "standalone_supported", return_value=True), \
+             mock.patch.object(standalone, "ensure_running",
+                               return_value={"ok": False, "reason": "本机无 DuMate 登录态"}):
+            with pytest.raises(HTTPException) as ei:
+                await p.forward({"model": "kimi-k3", "messages": []}, "openai")
+        return ei.value
+
+    exc = asyncio.run(_run())
+    assert exc.status_code == 503
+    assert "本机无 DuMate 登录态" in exc.detail["error"]["message"]
 
 
 # --- anthropic 协议拒绝 ----------------------------------------------------
@@ -419,6 +516,12 @@ def test_quota_subscription_pool_labeled_and_counted():
     head = q["items"][0]
     assert head["label"] == "订阅积分"
     assert head["total"] == 26000.0
+    # 汇总行必须标 head_only：它本身就是各包合计，不能进明细列表
+    assert head["head_only"] is True
+    # **同时不能声明 sum_items**——否则前端（与 benefits.py 低额度横幅）会把
+    # 汇总行和它下面的每个包一起相加，标题翻倍（2026-11-01 报障：界面 33,037
+    # vs 线上 16,286）。
+    assert q.get("sum_items") in (None, False)
     # 明细 = 总结行的拆分：subscription 主池 + 两个赠送包
     pkgs = q["items"][1:]
     assert len(pkgs) == 3
@@ -427,6 +530,49 @@ def test_quota_subscription_pool_labeled_and_counted():
     assert pkgs[1]["label"].startswith("积分包")
     # 各池 total 合计 == 总结行 total（口径一致）
     assert sum(x["total"] for x in pkgs) == head["total"]
+
+
+def test_quota_headline_not_doubled():
+    """**核心回归**：标题行等于账号真实剩余，不是汇总行+各包的翻倍。
+
+    用户 2026-11-01 报障：线上可用 16,286，界面却显示 33,037（差一倍）。根因是
+    provider 返回的 items 里「订阅积分」汇总行 = 各包合计，同时又声明了
+    ``sum_items``，前端把两者一起相加。修法：汇总行标 ``head_only``、去掉
+    ``sum_items``，前端标题行走「取第一条有数的」正好取到汇总行。
+    """
+    from buddy_proxy.dumate import checkin as dumate_checkin
+
+    p = DumateProvider()
+    q_overview = {
+        "total_points": 45500.0, "used_points": 29397.57, "remaining_points": 16102.43,
+        "is_subscribed": True, "packages": [
+            {"package_id": "s", "used_points": 25000.0, "total_points": 25000.0,
+             "start_ts": 1, "expire_ts": 2, "source": "purchase",
+             "package_type": "plan_pro", "status": "used"},
+            {"package_id": "g1", "used_points": 0.0, "total_points": 2000.0,
+             "start_ts": 1, "expire_ts": 2, "source": "invite_bonus",
+             "package_type": "grant_point", "status": "active"},
+            {"package_id": "g2", "used_points": 4397.57, "total_points": 18500.0,
+             "start_ts": 1, "expire_ts": 2, "source": "login_bonus",
+             "package_type": "grant_point", "status": "active"},
+        ],
+        "throttled": False,
+    }
+    with mock.patch.object(dumate_checkin, "fetch_quota_overview", return_value=q_overview):
+        q = p.quota()
+
+    items = q["items"]
+    # 模拟前端 quotaHeadSum 非 sum_items 分支：取第一条有数的（=汇总行）
+    assert q.get("sum_items") in (None, False), "声明 sum_items 会触发前端相加翻倍"
+    head = items[0]
+    assert head["head_only"] is True
+    assert head["remaining"] == 16102.43  # == 线上真实可用
+    # 若错误地走 sum_items 相加，会是汇总行 + 各包 ≈ 双倍——这里断言没走那条路
+    double = head["remaining"] + sum(x["remaining"] for x in items[1:])
+    assert double > head["remaining"] * 1.9, "构造场景确实会造成翻倍（确保测试有意义）"
+    # 明细列表（quotaItemsHtml 跳过 head_only）只出各包，不含汇总行
+    assert all(not it.get("head_only") for it in items[1:])
+    assert sum(x["total"] for x in items[1:]) == head["total"]
 
 
 def test_quota_falls_back_to_boolean_when_overview_fails():
