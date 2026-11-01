@@ -48,6 +48,17 @@ class _WS:
             data += self._s.recv(4096)
         self._id = 0
         self._timeout = timeout
+        #: 连接一旦出现不可恢复的 socket 错误（BrokenPipe / RST / EOF）即置 False。
+        #: 死连接没有别的可观测标志——豆包 App 回收渲染进程后，服务端既不回
+        #: close 帧也不 FIN，``is_ready`` 这类一次性布尔会一直停在 True，于是
+        #: 上层 ``_reconnect`` 误判「已连好」直接短路，永远撞在死 socket 上。
+        #: 有了这个标志，上层的活体判断才拿得到真实状态。
+        self._alive = True
+
+    @property
+    def alive(self) -> bool:
+        """连接是否仍然可用（False = 已确诊断开，必须重建）。"""
+        return self._alive
 
     def send(self, payload: bytes | str, opcode: int = 0x1) -> None:
         if isinstance(payload, str):
@@ -70,6 +81,7 @@ class _WS:
         except OSError as e:
             # 对端已关闭（豆包 App 退出/刷新）：BrokenPipeError 是 OSError 子类。
             # 必须转成 WSClosed 而不是裸抛，否则会一路冒泡杀掉网关进程。
+            self._alive = False
             raise WSClosed(f"websocket send failed: {e}") from e
 
     def _read_exact(self, n: int) -> bytes:
@@ -114,14 +126,22 @@ class _WS:
                     m = json.loads(payload)
                     if m.get("id") == self._id:
                         return m
+        except socket.timeout as e:
+            # 读超时：可能是连接已死，也可能只是页面这一帧慢（签到页加载、
+            # awaitPromise 的长任务）。不足以判死——保持 ``_alive=True``，让
+            # 调用方按「本轮没结果」处理，别把一条好连接误判成断开去重连。
+            raise WSClosed(
+                f"websocket {method} timed out after {timeout}s") from e
         except OSError as e:
-            # 读侧同样可能失效：超时(socket.timeout 是 OSError 子类)、
-            # ConnectionReset 等。统一成 WSClosed，交给上层重连。
+            # ConnectionReset / BrokenPipe 等：连接确诊断开，标记不可用。
+            self._alive = False
             raise WSClosed(f"websocket {method} failed: {e}") from e
         except EOFError as e:
+            self._alive = False
             raise WSClosed(f"websocket closed during {method}") from e
 
     def close(self) -> None:
+        self._alive = False
         try:
             self._s.close()
         except Exception:
