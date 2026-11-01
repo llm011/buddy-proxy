@@ -5,6 +5,13 @@
 //   models             模型页，首次进入时拉
 //   logs               请求日志页，仅在日志页可见时拉
 // 每个 loader 并发去重（同键进行中的 Promise 复用），避免重复请求。
+//
+// 五个数据集全局：必须在加载期就存在（=null），不能只在赋值时才诞生。
+// 非严格模式下「赋值」会自动建全局属性，但在首次赋值之前**读取**未声明的
+// 标识符仍会抛 ReferenceError——render() 里 `if (MODELS)` / `if (ORDER)` 就是
+// 这种读取，首屏（ORDER 尚未加载）会因此整段抛错、被 loadData 的 catch 吞成
+// toast，五个页签全空。@180 拆分 app.js 时这行声明被漏掉了。
+let OVERVIEW = null, MODELS = null, STATS = null, BENEFITS = null, ORDER = null;
 const LOADED = { overview: false, benefits: false, stats: false, models: false, order: false };
 const INFLIGHT = {};
 // 每次 force 递增：标记出「force 之前发起」的请求。它们的响应可能早于本地写操作，

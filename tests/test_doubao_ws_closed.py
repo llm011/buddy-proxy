@@ -46,12 +46,46 @@ def test_ws_send_wraps_broken_pipe():
         w.send("ping")
 
 
+def test_ws_send_marks_connection_not_alive():
+    # 发送失败即确诊断开：``alive`` 必须转 False，上层活体判断才有依据。
+    w = _WS.__new__(_WS)
+    w._s = _DeadSocket()
+    with pytest.raises(WSClosed):
+        w.send("ping")
+    assert w.alive is False
+
+
 def test_ws_cmd_wraps_socket_errors():
     w = _WS.__new__(_WS)
     w._s = _DeadSocket()
     w._id = 1
     with pytest.raises(WSClosed):
         w.cmd("Runtime.evaluate", {"expression": "1"})
+    assert w.alive is False
+
+
+class _SilentSocket:
+    """发送正常、读取永远超时的替身：模拟「连接还在，只是这帧慢」。"""
+
+    def settimeout(self, _t):
+        pass
+
+    def sendall(self, _frame):
+        pass
+
+    def recv(self, _n):
+        raise socket.timeout("timed out")
+
+
+def test_ws_cmd_timeout_keeps_connection_alive():
+    # 读超时不算断线：页面慢不等于 socket 死，不能因此触发无谓重连。
+    w = _WS.__new__(_WS)
+    w._s = _SilentSocket()
+    w._id = 1
+    w._alive = True  # __new__ 绕过 __init__，手动补上初始态
+    with pytest.raises(WSClosed):
+        w.cmd("Runtime.evaluate", {"expression": "1"}, timeout=0.01)
+    assert w.alive is True
 
 
 def test_ws_closed_is_runtime_error():

@@ -40,7 +40,7 @@ from typing import Any, AsyncGenerator, Optional
 
 from .checkin import login_state_from_probe
 from .payloads import _build_agent_payload, _build_classic_payload
-from .ws import _WS
+from .ws import WSClosed, _WS
 
 log = logging.getLogger(__name__)
 
@@ -142,7 +142,15 @@ class CDPDoubaoClient:
 
     @property
     def is_ready(self) -> bool:
-        return self._ready
+        """就绪 = 已连接 **且** 底层 WebSocket 仍然存活。
+
+        ``_ready`` 只在 ``start()`` 成功时置 True，断线后没人复位；豆包 App
+        回收渲染进程时服务端既不回 close 帧也不 FIN，光看 ``_ready`` 会一直
+        停在 True，于是 ``DoubaoProvider._reconnect`` 误判「已连好」直接短路，
+        每个请求都撞在死 socket 上报 ``WSClosed``。这里把 ``_ws.alive`` 一并
+        纳入判断，死连接才会被识别、进而触发重连自愈。
+        """
+        return self._ready and (self._ws is None or self._ws.alive)
 
     @property
     def consecutive_failures(self) -> int:
@@ -562,11 +570,22 @@ class CDPDoubaoClient:
         if not self._ws:
             raise RuntimeError("CDP not connected")
         with self._ws_lock:
-            r = self._ws.cmd(
-                "Runtime.evaluate",
-                {"expression": expr, "returnByValue": True, "awaitPromise": await_promise},
-                timeout=timeout,
-            )
+            try:
+                r = self._ws.cmd(
+                    "Runtime.evaluate",
+                    {"expression": expr, "returnByValue": True,
+                     "awaitPromise": await_promise},
+                    timeout=timeout,
+                )
+            except WSClosed:
+                # 命令撞上死连接：``_ws.alive`` 已在 WS 层置 False，这里再复位
+                # ``_ready``，让**直接读 _ready 的路径**（login_state_sync /
+                # chat_completion 的就绪判断）也拿到真实状态。只有**确诊断开**
+                # 才复位；单纯的读超时（页面这一帧慢）不算断线，保持 ``_ready``
+                # 以免无谓重连——那正是 ``_WS`` 把 timeout 与 fatal 分开的原因。
+                if self._ws is None or not self._ws.alive:
+                    self._ready = False
+                raise
         result = r.get("result", {})
         if "exceptionDetails" in result:
             desc = (

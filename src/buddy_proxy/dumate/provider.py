@@ -63,6 +63,8 @@ _TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
 # 上游至今没有可用的模型目录接口，新模型只能实测。
 _MODELS: dict[str, dict[str, Any]] = {
     # 同档模型只保留最新款（用户 2026-10-05：有新模型旧模型就不配上）。
+    # 展示名（description）在管理页「名称」列整列显示，长句会折行；别名等
+    # 细节留在本模块注释里，这里只给一行短文案。
     "kimi-k3": {
         "name": "Kimi K3",
         "desc": "Moonshot Kimi K3（DuMate 直连）",
@@ -77,14 +79,13 @@ _MODELS: dict[str, dict[str, Any]] = {
     },
     "deepseek-v4.1-flash": {
         "name": "DeepSeek V4.1 Flash",
-        "desc": "DeepSeek V4.1 Flash 低延迟档（DuMate 直连；App 的自动档 / model-text / "
-                "model-mm / model-gui-use 别名背后都是它，故只留这一个实名）",
+        "desc": "DeepSeek V4.1 Flash 低延迟档（DuMate 直连）",
         "reasoning": True,
         "tool_call": True,
     },
     "deepseek-v4-pro": {
         "name": "DeepSeek V4 Pro",
-        "desc": "DeepSeek V4 Pro 0813（DuMate 直连，重推理档，比 Flash 慢且更贵）",
+        "desc": "DeepSeek V4 Pro 重推理档（DuMate 直连）",
         "reasoning": True,
         "tool_call": True,
     },

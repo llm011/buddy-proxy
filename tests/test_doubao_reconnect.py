@@ -36,6 +36,7 @@ class _FakeClient:
         self.restarts = 0
         self.fail_first = 0          # 前 N 次 chat_completion 抛 WSClosed
         self.calls = 0
+        self.consecutive_failures = 0  # _with_reconnect 的 401/409 判据读它
 
     async def start(self) -> None:
         self.starts += 1
@@ -251,3 +252,160 @@ def test_collect_still_409_when_reconnect_fails():
     assert ei.value.status_code == 409
     assert client.restarts == 1, "只重连一次，别在请求里死循环"
     assert 409 not in _RETRYABLE_STATUS
+
+
+# ----------------------------------------------------------------------
+# 真客户端（CDPDoubaoClient）：死连接的活体判断与复位，
+# 这是 2026-11-01 现场「App 还在、CDP 口还通、但聊天/签到全 WSClosed
+# 且重启网关前不自愈」的直接缺口。
+# ----------------------------------------------------------------------
+def test_real_is_ready_tracks_ws_alive():
+    """_ready=True 但底层 socket 已死时，is_ready 必须是 False。
+
+    否则 ``_ensure_started``/``_reconnect`` 会把死连接当成「已连好」直接短路。
+    """
+    from buddy_proxy.doubao.cdp_client import CDPDoubaoClient
+    from buddy_proxy.doubao.ws import _WS
+
+    client = CDPDoubaoClient(port=19223, helper_bin="/fake/Helper")
+    client._ready = True
+
+    live = _WS.__new__(_WS)
+    live._alive = True
+    client._ws = live
+    assert client.is_ready is True
+
+    live._alive = False  # 断线：WS 层置灰
+    assert client.is_ready is False, "死连接不能再被当成 ready"
+
+
+def test_real_evaluate_resets_ready_on_ws_closed():
+    """命令撞上死连接：``_evaluate`` 必须复位 ``_ready`` 让上层能重连。"""
+    import threading
+
+    from buddy_proxy.doubao.cdp_client import CDPDoubaoClient
+    from buddy_proxy.doubao.ws import WSClosed, _WS
+
+    client = CDPDoubaoClient(port=19223, helper_bin="/fake/Helper")
+    client._ready = True
+
+    class _Boom:
+        alive = False  # 死连接：命令抛 WSClosed 时 _alive 已置 False
+
+        def cmd(self, *_a, **_kw):
+            raise WSClosed("websocket send failed: [Errno 32] Broken pipe")
+
+    client._ws = _Boom()  # type: ignore[assignment]
+    client._ws_lock = threading.Lock()
+
+    with pytest.raises(WSClosed):
+        client._evaluate("location.href")
+    assert client._ready is False, "死连接上失败后 _ready 必须复位"
+
+    # 复位后 is_ready 也随之为 False（即便换回一条不会抛的 ws，_ready 已清）
+    assert client.is_ready is False
+
+
+def test_real_reconnect_restarts_after_self_invalidation(monkeypatch):
+    """自失效后 ``_reconnect`` 不能再短路，必须真的 restart 一次。"""
+    from buddy_proxy.doubao.provider import DoubaoProvider
+    from buddy_proxy.doubao.cdp_client import CDPDoubaoClient
+    from buddy_proxy.doubao.ws import _WS
+
+    client = CDPDoubaoClient(port=19223, helper_bin="/fake/Helper")
+    client._ready = True
+    dead = _WS.__new__(_WS)
+    dead._alive = False
+    client._ws = dead
+
+    provider = DoubaoProvider()
+    provider._client = client
+    provider._started = True
+
+    calls = {"n": 0}
+
+    async def _restart():
+        calls["n"] += 1
+        alive = _WS.__new__(_WS)
+        alive._alive = True
+        client._ws = alive
+        client._ready = True
+
+    monkeypatch.setattr(client, "restart", _restart)
+    assert asyncio.run(provider._reconnect()) is True
+    assert calls["n"] == 1, "死连接必须触发一次 restart，而不是短路返回"
+
+
+def test_real_evaluate_keeps_ready_on_timeout_ws_closed():
+    """读超时（alive 仍 True）不算断线：不能复位 _ready 去触发无谓重连。"""
+    import threading
+
+    from buddy_proxy.doubao.cdp_client import CDPDoubaoClient
+    from buddy_proxy.doubao.ws import WSClosed
+
+    client = CDPDoubaoClient(port=19223, helper_bin="/fake/Helper")
+    client._ready = True
+
+    class _Slow:
+        alive = True  # 只是这一帧慢，连接还活着
+
+        def cmd(self, *_a, **_kw):
+            raise WSClosed("websocket Runtime.evaluate timed out after 0.01s")
+
+    client._ws = _Slow()  # type: ignore[assignment]
+    client._ws_lock = threading.Lock()
+
+    with pytest.raises(WSClosed):
+        client._evaluate("location.href")
+    assert client._ready is True, "读超时不该把好连接判死"
+    assert client.is_ready is True
+
+
+# ----------------------------------------------------------------------
+# 401 vs 409：曾经连上、重连又失败 = 409「连接丢失」（不可换档），
+# 只有从未连上才是 401「未登录」。否则 App 关了会被误报成「请扫码登录」。
+# ----------------------------------------------------------------------
+def _dead_fake() -> _FakeClient:
+    """连接已失效、重连也拉不回来的客户端（模拟 App 关了）。"""
+    c = _FakeClient()
+    c.is_ready = False
+
+    async def _restart_fail() -> None:
+        c.restarts += 1
+        c.is_ready = False
+
+    c.restart = _restart_fail  # type: ignore[assignment]
+    return c
+
+
+def test_with_reconnect_reports_409_when_reconnect_fails():
+    from fastapi import HTTPException
+    from buddy_proxy.codebuddy_provider.forward import _RETRYABLE_STATUS
+
+    client = _dead_fake()
+    p = _provider(client)
+    p._started = True   # 曾经连上 → App 关了，应报 409 而非 401
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(p._with_reconnect())
+    assert ei.value.status_code == 409, "App 关了不能报成「未登录」"
+    assert 409 not in _RETRYABLE_STATUS
+
+
+def test_with_reconnect_reports_401_when_never_connected():
+    from fastapi import HTTPException
+
+    client = _FakeClient()
+    client.is_ready = False
+
+    async def _start_fail() -> None:
+        client.starts += 1
+        client.is_ready = False
+
+    client.start = _start_fail  # type: ignore[assignment]
+    p = _provider(client)
+    p._started = False       # 从未连上 → 401
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(p._with_reconnect())
+    assert ei.value.status_code == 401
