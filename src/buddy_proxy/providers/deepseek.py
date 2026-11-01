@@ -26,7 +26,8 @@
 **模型名不与本地静态表抢名分**：官方 id 是 ``deepseek-flash`` /
 ``deepseek-v4-pro``，其中 ``deepseek-v4-pro`` 与 CodeBuddy 静态表里的同名条目
 撞车。本通道声明 ``route_priority = 50``（低于 CodeBuddy 的 100），于是撞车的
-裸名**让给兜底通道**，要显式走官方就写 ``deepseek/deepseek-v4-pro``——与 ark
+撞车裸名**仍归原本声明它的那家**（通常是 CodeBuddy 静态表，开着 ``--mimo`` 时是
+mimo），不会改道到付费官方；要显式走官方就写 ``deepseek/deepseek-v4-pro``——与 ark
 通道同一套约定。原因是安全：加个 ``--deepseek`` 就把既有 ``deepseek-v4-pro``
 流量静默改道到**计费的官方 API**上，属于会花钱的意外，必须由用户显式点名。
 
@@ -178,7 +179,7 @@ class DeepSeekProvider(BaseProvider):
     id = "deepseek"
     name = "DeepSeek 官方 API"
 
-    #: 低于 CodeBuddy 的 100：裸名撞车时让位（见模块 docstring）。
+    #: 低于 CodeBuddy 的 100：裸名撞车时让位给已声明该名字的通道（见模块 docstring）。
     route_priority = 50
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None):

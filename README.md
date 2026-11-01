@@ -359,7 +359,7 @@ This flag controls the **chat channel only**. The two tool endpoints below share
 | Quota | Account **balance** from `GET /user/balance` (a prepaid wallet, not a subscription plan). Reported as `remaining` with **no `total`** — there is no denominator, and inventing one would render a fake "used N%" water level. Shown as a generic quota card in the admin UI |
 | Billing | Charged against the prepaid balance by token. There is **no credit-multiplier concept**, so the request log's Credit column deliberately shows `—` rather than an invented estimate |
 
-**Bare names do not hijack existing traffic.** `deepseek-v4-pro` also exists in the local CodeBuddy catalog, and the official API is **paid** — so adding `--deepseek` must not silently reroute requests that were already going elsewhere. The channel declares `route_priority = 50`, below CodeBuddy's 100, so a colliding bare name still resolves to the fallback channel; write `deepseek/deepseek-v4-pro` to pin the official API explicitly. `deepseek-flash` does not collide and routes automatically.
+**Bare names do not hijack existing traffic.** `deepseek-v4-pro` also exists in the local CodeBuddy catalog, and the official API is **paid** — so adding `--deepseek` must not silently reroute requests that were already going elsewhere. The channel declares `route_priority = 50`, below CodeBuddy's 100, so a colliding bare name **keeps going exactly where it already went** — whichever enabled channel declares that name, never the paid official API. That is usually the CodeBuddy static table, but not always: with `--mimo` enabled, bare `deepseek-v4-pro` resolves to `mimo`, because that channel declares the name and sets no `route_priority` (verified 2026-11-01). Write `deepseek/deepseek-v4-pro` to pin the official API explicitly. `deepseek-flash` collides with nothing and routes automatically.
 
 ### Ark provider interface (`providers/ark.py`)
 
@@ -814,8 +814,9 @@ providers:
                           from DEEPSEEK_API_KEY / ~/.buddy-proxy/deepseek_api_key). Note
                           /v1/tools/search and /v1/tools/fetch are NOT gated by this flag —
                           they need only the same key and are live whenever the gateway is
-                          (see "API endpoints"). Colliding bare names yield to the fallback
-                          channel — use deepseek/<model> to pin it
+                          (see "API endpoints"). Colliding bare names stay with the channel
+                          already declaring them (never the paid API) — use
+                          deepseek/<model> to pin the official one
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
 --qoder                   enable the Qoder provider (COSY-signed, Qwen3.8/GLM/Kimi)
