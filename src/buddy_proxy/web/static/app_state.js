@@ -109,6 +109,10 @@ function syncUrlFromState() {
   history.replaceState(null, '', url.pathname + url.search + url.hash);
 }
 
+// 筛选区折叠状态（默认收起超过一行的部分）。存模块变量而非 DOM：整页每 30s
+// 重建 innerHTML + 每次点按钮都重渲本函数，挂 DOM 上的状态会被冲掉。
+let LOG_FILTERS_OPEN = false;
+
 function renderLogFilters() {
   const el = document.getElementById('log-filters');
   if (!el) return;
@@ -120,11 +124,43 @@ function renderLogFilters() {
   // 三组各占一行（.lf-row）：组名徽章 + 该组按钮；空组整行不渲染
   const row = (label, buttons) =>
     buttons.length ? `<div class="lf-row"><span class="lf-label">${label}</span>${buttons.join('')}</div>` : '';
+  // 内容放进 .lf-main，外面包一层 .lf-clip（限高）与展开按钮。折叠与否由
+  // syncLogFilterFold 按**实际高度**判定——模型多寡决定要不要按钮，不能按
+  // 条数硬算（窄屏 / 长模型名都会让同一批按钮高低不同）。
   el.innerHTML =
-    row('通道', provs.map(p => btn('provider', p,
-      `<i class="lf-dot" style="background:${pcolor(p)}"></i>${esc(p)}`))) +
-    row('模型', models.map(m => btn('model', m, esc(m)))) +
-    row('客户端', clients.map(c => btn('client', c, esc(c))));
+    `<div class="lf-clip${LOG_FILTERS_OPEN ? ' open' : ''}" data-lffold="log">` +
+      `<div class="lf-main">` +
+        row('通道', provs.map(p => btn('provider', p,
+          `<i class="lf-dot" style="background:${pcolor(p)}"></i>${esc(p)}`))) +
+        row('模型', models.map(m => btn('model', m, esc(m)))) +
+        row('客户端', clients.map(c => btn('client', c, esc(c)))) +
+      `</div>` +
+    `</div>` +
+    `<button type="button" class="lf-more" data-lffold="log" onclick="toggleLogFilterFold()" hidden></button>`;
+  syncLogFilterFold();
+}
+
+// 按实际高度决定裁不裁、按钮露不露。上限来自 CSS 变量 --lffold-max（一行高），
+// 两边共用一个数——改了 CSS 忘了 JS 就会出现「已经裁了但按钮不出现」的死角。
+function syncLogFilterFold() {
+  const box = document.querySelector('.lf-clip[data-lffold="log"]');
+  if (!box) return;
+  const open = LOG_FILTERS_OPEN;
+  const limit = parseFloat(getComputedStyle(box).getPropertyValue('--lffold-max')) || 34;
+  const clipped = !open && box.scrollHeight > limit + 1;
+  box.classList.toggle('open', open);
+  box.classList.toggle('clipped', clipped);
+  const btn = document.querySelector('.lf-more[data-lffold="log"]');
+  if (btn) {
+    const show = open || clipped;
+    btn.hidden = !show;
+    btn.textContent = open ? '收起 ▴' : '更多筛选 ▾';
+  }
+}
+
+function toggleLogFilterFold() {
+  LOG_FILTERS_OPEN = !LOG_FILTERS_OPEN;
+  syncLogFilterFold();
 }
 document.getElementById('log-filters').addEventListener('click', ev => {
   const b = ev.target.closest('.rb-btn'); if (!b) return;

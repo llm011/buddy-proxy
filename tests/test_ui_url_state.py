@@ -44,7 +44,19 @@ function element(id) {{
   }});
   return elements.get(id);
 }}
-globalThis.document = {{ getElementById: element }};
+globalThis.document = {{
+  getElementById: element,
+  // renderLogFilters 末尾的 syncLogFilterFold 要用 querySelector 找 .lf-clip /
+  // .lf-more。这里给个带 scrollHeight/classList 的桩，模拟「内容不超过一行」
+  // ——本文件的用例只关心 URL 状态，折叠行为由 test_log_filter_fold.py 覆盖。
+  querySelector(sel) {{
+    return {{
+      scrollHeight: 0, classList: {{ toggle() {{}}, contains() {{ return false; }} }},
+      hidden: false, textContent: '',
+    }};
+  }},
+}};
+globalThis.getComputedStyle = () => ({{ getPropertyValue: () => '22px' }});
 globalThis.localStorage = {{ setItem() {{}}, getItem() {{ return null; }} }};
 globalThis.STATS = null;
 globalThis.RECENT_PAGE = 1;

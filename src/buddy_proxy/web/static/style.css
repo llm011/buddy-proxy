@@ -55,6 +55,27 @@
   /* 请求日志快速筛选（通道/模型/客户端，复用 .rb-btn 按钮态）。
      三组各占一行：组间靠纵向间距分行，组名做成小徽章与按钮区分 */
   .log-filters { display: flex; flex-direction: column; gap: 7px; margin: 2px 0 10px; }
+  /* 折叠：默认只露一行（--lffold-max ≈ 一行按钮高），溢出裁掉并在底下给
+     「更多筛选 ▾」；点开铺满自然高度。用高度裁剪而非「超出 N 个就藏」——
+     同一批按钮在窄屏/长模型名下高度不同，按条数裁会裁错。 */
+  /* 单行高 23.8px：一行里最高的不是按钮（.rb-btn 实测 22px = 3+3 padding +
+     1+1 边框 + ~14px 内容），而是组名胶囊 .lf-label——11.5px 字 × 1.55 行高
+     ≈ 17.8 + 2×2 padding + 1×2 边框 = 23.8，略高于按钮，才决定这一行的高度。
+     按按钮的 22px 裁会把第一行切掉 ~2px（被底部渐隐盖着不易察觉，差额再大就
+     露出半截字）。--lffold-max 是唯一数字来源，JS 读它判是否裁。 */
+  .lf-clip { --lffold-max: 24px; max-height: var(--lffold-max); overflow: hidden;
+             position: relative; transition: max-height .15s; }
+  .lf-clip.open { max-height: none; }
+  /* 收起且被裁时，底部渐隐暗示「下面还有」。用 mask-image 而不是叠一层
+     带背景色的渐变块：筛选区直接坐在页面背景 --bg 上、没有卡片包裹，
+     叠 --card 色会显出一条比周围亮的横带（额度折叠同款用 mask，此处跟齐）。 */
+  .lf-clip.clipped { mask-image: linear-gradient(180deg, #000 72%, transparent);
+                     -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent); }
+  .lf-main { display: flex; flex-direction: column; gap: 7px; }
+  .lf-more { align-self: flex-start; background: transparent; border: 1px solid var(--line);
+             color: var(--muted); border-radius: 999px; padding: 2px 12px; font-size: 11.5px;
+             cursor: pointer; margin-top: 2px; }
+  .lf-more:hover { color: var(--text); background: var(--card2); border-color: var(--muted); }
   .lf-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
   .log-filters .lf-label { font-size: 11.5px; color: var(--muted); background: var(--card2);
     border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; flex: none; }
@@ -587,6 +608,14 @@
   .mix-card[hidden] { display: none; }
   .mix-head { display: flex; align-items: baseline; gap: 9px; flex-wrap: wrap;
               margin-bottom: 10px; }
+  /* 折叠：默认收起主体，只留头部（标题/副标题/箭头）。箭头在标题前，
+     用按钮本身承载点击（☰ 太大、纯文本不可聚焦，按钮可键盘操作）。 */
+  .mix-card.collapsed .mix-body { display: none; }
+  .mix-card.collapsed .mix-head { margin-bottom: 0; }
+  .mix-toggle { background: transparent; border: none; color: var(--muted);
+                font-size: 12px; line-height: 1; padding: 2px 4px; cursor: pointer;
+                border-radius: 4px; flex: none; }
+  .mix-toggle:hover { color: var(--text); background: var(--card2); }
   .mix-title { font-weight: 600; font-size: 13px; }
   .mix-sub { color: var(--muted); font-size: 12px; }
   .mix-body { display: grid; grid-template-columns: 216px minmax(0, 1fr);

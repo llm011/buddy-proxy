@@ -72,12 +72,18 @@
     <!-- 头部概览：左侧饼图（各模型使用占比），右侧图例即明细表。
          数据来自 /ui/api/model-mix（内存计数表，不扫磁盘）；扇区与图例行
          双向 hover 联动，点图例行 = 只看该模型，点扇区 = 只留那一块。 -->
-    <div class="mix-card" id="log-mix">
+    <!-- 默认折叠：头部（标题+副标题+展开按钮）常显，主体（圆环+图例）收起。
+         折叠状态存 MIX_FOLD 而不是 DOM——整页每 30s 重建 innerHTML，状态挂
+         DOM 上会被下一轮刷掉（用户刚展开，30 秒后自己收回去）。 -->
+    <div class="mix-card collapsed" id="log-mix">
       <div class="mix-head">
+        <button type="button" class="mix-toggle" id="mix-toggle"
+                aria-expanded="false" aria-controls="mix-body"
+                onclick="toggleMixFold()" title="展开/收起占比图">▸</button>
         <span class="mix-title">各模型使用占比</span>
         <span class="mix-sub" id="mix-sub">加载中…</span>
       </div>
-      <div class="mix-body">
+      <div class="mix-body" id="mix-body">
         <div class="mix-donut" id="mix-donut"><div class="empty">加载中…</div></div>
         <div class="mix-legend" id="mix-legend"></div>
       </div>
