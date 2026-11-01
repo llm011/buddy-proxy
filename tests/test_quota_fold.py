@@ -523,3 +523,47 @@ def test_dumate_self_rerender_recalibrates_fold():
     after = body[call:call + 800]
     assert "syncQuotaFold()" in after, \
         "DuMate status 驱动重渲后没补 syncQuotaFold——重渲出的 .qbody 不会裁切、按钮不露"
+
+
+# ---------------------------------------------------------------------------
+# unit=currency：预付费余额（DeepSeek 官方）
+# ---------------------------------------------------------------------------
+
+def test_currency_balance_renders_as_amount_not_water_level():
+    """预付费余额要显示成「多少钱可用」，不能套「剩 X · 已用未知」。
+
+    DeepSeek 官方是按 token 从**钱包**扣费的，/user/balance 只回「还能花多少
+    钱」——没有总量分母。掉进通用分支会渲染成「剩 34.92 · 已用未知」，读起来
+    像少了一个分母；用户会以为额度统计坏了。单独一条分支明确写「可用」。
+    """
+    out = _run("""
+console.log(JSON.stringify(quotaItemHtml(
+  {label: '账户余额 (CNY)', remaining: 34.92, unit: 'currency'})));
+""")
+    html = _last(out)
+    assert "34.92" in html, html
+    assert "可用" in html, f"余额没渲染成「可用」: {html}"
+    assert "已用未知" not in html, f"余额不该套用量未知文案: {html}"
+    assert "qbar" not in html, "没有分母就不该画水位进度条"
+
+
+def test_currency_without_amount_falls_back_to_notice_text():
+    """上游没给数字时走说明条（字符串 remaining），不能当 0 渲染。"""
+    out = _run("""
+console.log(JSON.stringify(quotaItemHtml(
+  {label: '账户余额 (USD)', remaining: '余额未知（USD）', unit: 'currency'})));
+""")
+    html = _last(out)
+    assert "余额未知（USD）" in html, html
+    assert "可用" not in html, f"说明条不该被当成数字渲染: {html}"
+
+
+def test_currency_balance_is_not_treated_as_spent():
+    """余额是活动条目，不能被折叠进「已用完」——0.00 余额才是用完。"""
+    out = _run("""
+console.log(JSON.stringify([
+  quotaSpent({remaining: 34.92, unit: 'currency'}),
+  quotaSpent({remaining: 0, unit: 'currency'}),
+]));
+""")
+    assert _last(out) == [False, True]

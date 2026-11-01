@@ -8,9 +8,10 @@
 
 ## Features
 
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **GLM official** (BigModel Coding Plan key — same upstream as ZCode, independent credentials), **Volcengine Ark** (models/endpoints from a local `ark.json`, never in code; Responses first with automatic chat fallback; all three protocols, including Claude Code over `/v1/messages`), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **GLM official** (BigModel Coding Plan key — same upstream as ZCode, independent credentials), **Volcengine Ark** (models/endpoints from a local `ark.json`, never in code; Responses first with automatic chat fallback; all three protocols, including Claude Code over `/v1/messages`), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state), plus **DeepSeek official** (the platform's own API — native OpenAI / Responses / Anthropic passthrough, live model catalog and account balance); all listed by `/v1/models` and routed by model name
 - **Multi-account failover** — most subscription channels (codebuddy / trae / qoder / kimi / codex / antigravity…) support multiple accounts: rotated in login order as primary/backup; account-level errors (401 expired credentials / 429 quota exhausted) cool the current account down and switch to the next automatically. Per-account quota, check-in, rename / reorder / delete are all managed in the admin UI
 - **Protocol conversion** — `/v1/chat/completions` (OpenAI), `/v1/responses` (Codex CLI), `/v1/messages` (Anthropic / Claude Code)
+- **Web search & fetch tools** — `POST /v1/tools/search` (ranked web results) and `POST /v1/tools/fetch` (page → Markdown). These are **DeepSeek-only private endpoints** (no OpenAI/Anthropic equivalent, and no other channel implements them), so both are pinned to `https://api.deepseek.com/v1/tools/*` and reuse the same key as the DeepSeek channel. Billed per successful request ($0.75 / 1000), not per token — hence deliberately **not cached**
 - **Admin UI** — built-in web console at `/ui`: browse models grouped by provider, one-click "set as default model", one-click test per model (sends a "hi"), a per-model copy button that puts the **provider-prefixed** name (`trae/gpt-6`, `ark/ds-flash`) on the clipboard — the exact string a client's `model` field takes — and per-model request stats with charts. Providers backed by a reliable upstream catalog (Qoder / QoderIntl / Kimi / Antigravity) can refresh their model list in place. Any model can be hidden from catalogs and selectors without disabling direct requests, then restored from the “Hidden” manager; disabling remains the separate hard-rejection control. Loads lazily per tab, so the first paint never waits on the slowest endpoint (the request log)
 - **Model list** — `/v1/models` returns an OpenAI-compatible model list plus rich per-model metadata (context window, credits, input modalities / image support); locally hidden models are omitted consistently from this endpoint, the admin catalog, and model-order candidates
 - **Desensitization** (`--desensitize`) — inserts zero-width spaces into compliance terms inside system messages to avoid backend false-blocking by keyword review
@@ -337,6 +338,28 @@ buddy start
 `GlmProvider` subclasses `ZcodeProvider` — passthrough forwarding, SSE pumping, the model table and the quota endpoint are all inherited. The only difference is the credential chain: `GLM_API_KEY` or `~/.buddy-proxy/glm_api_key`, and **never** `~/.zcode` — the two channels' keys belong to independently purchased plans, and cross-reading them would bill one plan for the other's usage (and mix up the quota cards). Registered *after* zcode, so a bare `glm-*` request still lands on zcode when both are enabled; use the explicit `glm/<model>` prefix to pin the official key.
 
 `buddy login glm` reports state and prints the key setup steps, same style as zcode (no automatable browser login — the key is minted by hand in the Zhipu console). Plan access measured 2026-10-06 (lite): `glm-5.3` / `glm-5.3-flash` / `glm-5-turbo` work; `glm-5.3-flashx` is refused with `1311 套餐暂未开放` until the plan is upgraded — the model stays in the table as a reserve, no code change needed when it unlocks.
+
+### DeepSeek official provider (optional)
+
+Straight to the DeepSeek platform's own API (`https://api.deepseek.com`) — no IDE login state or third-party plan in the middle:
+
+```bash
+buddy login deepseek      # prints where to mint the key and how to configure it
+```
+
+Credentials: `DEEPSEEK_API_KEY` or `~/.buddy-proxy/deepseek_api_key` (first line, bare value or `name=value`, mode 0600). `DEEPSEEK_BASE_URL` overrides the base for a self-hosted gateway. Enable with `--deepseek` (or `DEEPSEEK_ENABLED=1`).
+
+This flag controls the **chat channel only**. The two tool endpoints below share the same key but are registered unconditionally — with a key configured they answer even when `--deepseek` is off, which is why `/health` reports them separately under `tools` rather than under `providers`.
+
+| Aspect | Behavior |
+| --- | --- |
+| Protocols | **All three upstream-native** — `openai` → `/v1/chat/completions`, `responses` → `/v1/responses`, `anthropic` → `/anthropic/v1/messages`. Pure passthrough, zero local conversion (unlike Ark, which needs a fallback chain and back-translation) |
+| Models | `deepseek-flash` and `deepseek-v4-pro` (1M context, `deepseek-flash` also takes images). The catalog is refreshed from the official `GET /models`, which returns capability metadata — context window, output limit, input modalities, effort levels — so `/v1/models` reports the real image support instead of guessing |
+| Model names | The official API accepts **only** `deepseek-flash` / `deepseek-v4-pro`. Legacy or CodeBuddy-catalog spellings (`deepseek-v4.1-flash`, `deepseek-v4-flash`, `deepseek-chat`) are **aliased locally** — the upstream answers those with `400`, not a silent normalization, so the proxy absorbs the mismatch rather than handing you a confusing 400 |
+| Quota | Account **balance** from `GET /user/balance` (a prepaid wallet, not a subscription plan). Reported as `remaining` with **no `total`** — there is no denominator, and inventing one would render a fake "used N%" water level. Shown as a generic quota card in the admin UI |
+| Billing | Charged against the prepaid balance by token. There is **no credit-multiplier concept**, so the request log's Credit column deliberately shows `—` rather than an invented estimate |
+
+**Bare names do not hijack existing traffic.** `deepseek-v4-pro` also exists in the local CodeBuddy catalog, and the official API is **paid** — so adding `--deepseek` must not silently reroute requests that were already going elsewhere. The channel declares `route_priority = 50`, below CodeBuddy's 100, so a colliding bare name still resolves to the fallback channel; write `deepseek/deepseek-v4-pro` to pin the official API explicitly. `deepseek-flash` does not collide and routes automatically.
 
 ### Ark provider interface (`providers/ark.py`)
 
@@ -786,6 +809,13 @@ providers:
 --ark                     enable the Volcengine Ark provider (Responses first, automatic
                           chat fallback; model table from ~/.buddy-proxy/ark.json, key from
                           ARK_API_KEY / ~/.buddy-proxy/ark_api_key)
+--deepseek                enable the DeepSeek official provider (native OpenAI/Responses/
+                          Anthropic passthrough, live model catalog and account balance; key
+                          from DEEPSEEK_API_KEY / ~/.buddy-proxy/deepseek_api_key). Note
+                          /v1/tools/search and /v1/tools/fetch are NOT gated by this flag —
+                          they need only the same key and are live whenever the gateway is
+                          (see "API endpoints"). Colliding bare names yield to the fallback
+                          channel — use deepseek/<model> to pin it
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
 --qoder                   enable the Qoder provider (COSY-signed, Qwen3.8/GLM/Kimi)
@@ -817,8 +847,12 @@ Trae PAT rate limits: some extended models are rate-limited per account and per 
 | POST | `/v1/chat/completions` | OpenAI chat (tools + streaming) |
 | POST | `/v1/responses`       | Responses API (Codex CLI) |
 | POST | `/v1/messages`        | Anthropic Messages (Claude Code) |
+| POST | `/v1/tools/search`    | DeepSeek web search (fixed to the official API) |
+| POST | `/v1/tools/fetch`     | DeepSeek page fetch → Markdown (fixed to the official API) |
 
 Endpoints authenticate using the local session; no extra token is required.
+
+`/v1/tools/search` and `/v1/tools/fetch` are the odd ones out: every other endpoint routes by model name, but these take only a query/URL and are **DeepSeek-private** APIs with no equivalent anywhere else, so they are hard-wired to `https://api.deepseek.com/v1/tools/*`. They need `DEEPSEEK_API_KEY` / `~/.buddy-proxy/deepseek_api_key` (the same key as the DeepSeek channel — `/health` reports the tool endpoints' readiness under `tools`). Billing is **per successful request** ($0.75 / 1000; failures, empty results and timeouts are free), which is why nothing is cached here — caching would decouple the bill from the realtime behaviour. Callers should treat 408/429/5xx as retryable and other 4xx as deterministic; upstream error bodies are passed through verbatim.
 
 ## Disclaimer
 

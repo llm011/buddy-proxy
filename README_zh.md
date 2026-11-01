@@ -443,6 +443,58 @@ python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS �
   那些通道（否则新增 ark 会悄悄抢走既有流量），ark 的这个模型用 `ark/<id>` 调用
   （`route_priority = 50`，CodeBuddy 是 100）。模型页每行「复制」按钮复制的就是带前缀的
   全名，直接填进客户端的 `model` 字段即可。
+### 11. DeepSeek 官方 Provider（`providers/deepseek.py`，可选）
+
+直连 **DeepSeek 开放平台**自家 API（`https://api.deepseek.com`），中间不经过任何 IDE
+登录态或第三方套餐：
+
+```bash
+buddy login deepseek      # 打印去哪领 key、怎么配、怎么验证
+```
+
+凭据取 `DEEPSEEK_API_KEY` 或 `~/.buddy-proxy/deepseek_api_key`（首行裸 key 或
+`name=value`，0600）；`DEEPSEEK_BASE_URL` 可整体改基址（自建反代/网关）。
+启动加 `--deepseek`（或 `DEEPSEEK_ENABLED=1`）。
+
+本开关只管**对话通道**。下面两个工具端点共用同一把 key，但注册是无条件的——配好 key 后即使 `--deepseek` 没开它们也照常可用。这也是 `/health` 把它们放在 `tools` 字段、而不是混进 `providers` 的原因。
+
+| 方面 | 行为 |
+| --- | --- |
+| 协议 | **三协议上游原生支持**，全部直通零转换：`openai` → `/v1/chat/completions`，`responses` → `/v1/responses`，`anthropic` → `/anthropic/v1/messages`（注意 anthropic 挂在 `/anthropic` 前缀下）。因此不需要 ark 那套「Responses 优先 + 降级 chat + 再翻回 anthropic」的复杂度 |
+| 模型 | `deepseek-flash` 与 `deepseek-v4-pro`（1M 上下文；前者还支持图片输入）。目录从官方 `GET /models` 刷新，上游直接给能力元数据（上下文窗口、输出上限、输入模态、effort 档位），所以 `/v1/models` 报的是真实图片能力而不是猜的 |
+| 模型名 | 官方**只认** `deepseek-flash` / `deepseek-v4-pro`。旧写法与 CodeBuddy 目录里的写法（`deepseek-v4.1-flash`、`deepseek-v4-flash`、`deepseek-chat`）在**本地做别名归一**——官方对这些回的是 `400` 而不是静默改名，所以由代理把差异吸收掉，别把一次费解的 400 丢给用户 |
+| 额度 | 账户**余额**，查 `GET /user/balance`（预付费钱包，不是订阅套餐）。只报 `remaining`、**不填 `total`**——官方没有总量分母，编一个出来界面会显示假的「已用 N%」水位。管理页以通用额度卡展示 |
+| 计费 | 按 token 从预付费余额扣。**没有积分倍率概念**，所以请求日志的 Credit 列刻意显示 `—`，不编估算值 |
+
+**裸名不抢既有流量。** `deepseek-v4-pro` 在本地 CodeBuddy 目录里也有，而官方 API 是**要花钱**的，所以加 `--deepseek` 绝不能把本来走别处的请求静默改道。本通道声明 `route_priority = 50`（低于 CodeBuddy 的 100），撞车的裸名仍解析到兜底通道；要显式走官方就写 `deepseek/deepseek-v4-pro`。`deepseek-flash` 不撞车，自动路由。
+
+### 12. 联网检索 / 抓取（`web/tools_api.py`，固定走 DeepSeek 官方）
+
+`POST /v1/tools/search` 与 `POST /v1/tools/fetch` 是 **DeepSeek 独有的私有接口**：不在
+OpenAI / Anthropic 任何标准里，本仓库其它通道（CodeBuddy / Trae / Qoder / Kimi…）也一律
+只有对话端点。所以这两个路由**写死官方**——「路由到别家」在物理上不存在，而写死反而
+消除了「名字一样、行为不一样」的误配。它们与对话端点的另一处不同：只收 query / url，
+**没有模型名**，本来就没有可路由的维度。
+
+```bash
+curl -s http://127.0.0.1:8787/v1/tools/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "DeepSeek V4 release", "count": 5}'
+
+curl -s http://127.0.0.1:8787/v1/tools/fetch \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com/article"}'
+```
+
+- 与 DeepSeek 通道**共用**同一把 key 与同一个基址（`DEEPSEEK_API_KEY` /
+  `~/.buddy-proxy/deepseek_api_key` / `DEEPSEEK_BASE_URL`）；`/health` 的 `tools`
+  字段一眼可见配没配好。
+- 本地只做**能省一次计费往返**的轻校验（query 空/超 128 字、count 不在 1~50、url 为空），
+  其余字段原样透传（官方明确未知字段会被忽略）。
+- 按**成功请求次数**计费（$0.75 / 1000 次），失败 / 空结果 / 超时都不计费，所以这里
+  **不做本地缓存**——缓存会让账单与实时性对不上。要省钱该少调，而不是在网关悄悄复用旧结果。
+- 上游错误原样透传：401（key 无效）/ 402（余额不足）/ 404（抓不到内容）都是确定性的；
+  408 / 429 / 5xx 才值得重试。
 
 ## 模型列表
 
@@ -833,6 +885,12 @@ providers:
 --ark                     启用火山方舟 provider（Responses 优先、自动降级 chat；
                           模型表取 ~/.buddy-proxy/ark.json，key 取 ARK_API_KEY /
                           ~/.buddy-proxy/ark_api_key）
+--deepseek                启用 DeepSeek 官方 provider（OpenAI / Responses / Anthropic
+                          三协议原生直通，带实时模型目录与账户余额；key 取
+                          DEEPSEEK_API_KEY / ~/.buddy-proxy/deepseek_api_key）。注意
+                          /v1/tools/search 与 /v1/tools/fetch **不受本开关控制**——它们只要
+                          同一把 key，网关一启动就在（见「API 端点」）。裸名与本地目录撞车
+                          时让位，要显式走官方用 deepseek/<模型>
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --dumate                  启用百度搭子 provider（DuMate 本地代理，需 App 在运行）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
@@ -866,8 +924,18 @@ Trae PAT 频控：部分扩展模型上游按「账号 × 模型」限频（队�
 | POST | `/v1/chat/completions` | OpenAI 对话（工具 + 流式） |
 | POST | `/v1/responses`       | Responses API（Codex CLI） |
 | POST | `/v1/messages`        | Anthropic Messages（Claude Code） |
+| POST | `/v1/tools/search`    | DeepSeek 联网检索（固定走官方 API） |
+| POST | `/v1/tools/fetch`     | DeepSeek 抓网页转 Markdown（固定走官方 API） |
 
 端点使用本地 session 认证，无需额外 token。
+
+`/v1/tools/search` 与 `/v1/tools/fetch` 是这群端点里的异类：别的端点都按模型名路由，
+而它们只收 query / url，且是 **DeepSeek 独有**的接口、别处没有对应实现，所以写死
+`https://api.deepseek.com/v1/tools/*`。凭据与 DeepSeek 通道共用同一把 key
+（`DEEPSEEK_API_KEY` / `~/.buddy-proxy/deepseek_api_key`；`/health` 的 `tools` 字段
+可直接看就绪状态）。计费按**成功请求次数**（$0.75 / 1000 次；失败、空结果、超时都不计费），
+所以这里**不做缓存**——缓存会让账单与实时性脱钩。调用方按 408 / 429 / 5xx 可重试、
+其余 4xx 确定性处理；上游错误体原样透传。
 
 ---
 

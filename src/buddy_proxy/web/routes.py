@@ -108,6 +108,14 @@ async def health():
         open_fds = len(os.listdir("/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"))
     except OSError:
         open_fds = -1
+    # Search/Fetch 工具端点的就绪状态：它们固定打官方，凭据独立于任何 provider，
+    # 配没配 key 直接决定客户端能不能用，值得在 /health 一眼看到。延迟导入是因为
+    # tools_api 需要本模块的 client_meta/parse_request_body，顶层导入会成环。
+    try:
+        from buddy_proxy.web.tools_api import _tool_status
+        tools_health = _tool_status()
+    except Exception as exc:  # noqa: BLE001 - 健康检查自身不能成为故障源
+        tools_health = {"error": f"{type(exc).__name__}: {exc}"}
     return {
         "status": "ok",
         "authenticated": bool(auth.get("accessToken")),
@@ -116,6 +124,7 @@ async def health():
         "rss_mb": rss_mb,
         "open_fds": open_fds,
         "providers": providers_health,
+        "tools": tools_health,
     }
 
 
