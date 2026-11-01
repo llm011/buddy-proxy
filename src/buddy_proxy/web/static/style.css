@@ -63,10 +63,11 @@
   .lf-clip { --lffold-max: 22px; max-height: var(--lffold-max); overflow: hidden;
              position: relative; transition: max-height .15s; }
   .lf-clip.open { max-height: none; }
-  /* 收起且被裁时，底部压一层渐隐，暗示还有内容没露出来 */
-  .lf-clip.clipped::after { content: ''; position: absolute; left: 0; right: 0; bottom: 0;
-                            height: 18px; pointer-events: none;
-                            background: linear-gradient(transparent, var(--card)); }
+  /* 收起且被裁时，底部渐隐暗示「下面还有」。用 mask-image 而不是叠一层
+     带背景色的渐变块：筛选区直接坐在页面背景 --bg 上、没有卡片包裹，
+     叠 --card 色会显出一条比周围亮的横带（额度折叠同款用 mask，此处跟齐）。 */
+  .lf-clip.clipped { mask-image: linear-gradient(180deg, #000 72%, transparent);
+                     -webkit-mask-image: linear-gradient(180deg, #000 72%, transparent); }
   .lf-main { display: flex; flex-direction: column; gap: 7px; }
   .lf-more { align-self: flex-start; background: transparent; border: 1px solid var(--line);
              color: var(--muted); border-radius: 999px; padding: 2px 12px; font-size: 11.5px;
