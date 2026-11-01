@@ -76,14 +76,14 @@ def test_detail_toggle_survives_rerender_and_does_not_touch_other_actions():
     script = _fn(text, "checkinDetailToggle") + """
 const CHECKIN_DETAIL_FOLD = {open: {}};
 const body = {hidden: true};
-const btn = {attrs: {'aria-expanded': 'false'}, textContent: '',
+const btn = {dataset: {checkinFold: "tr'ae"}, attrs: {'aria-expanded': 'false'}, textContent: '',
   setAttribute(n, v) { this.attrs[n] = v; }};
-globalThis.document = {querySelector: () => btn, getElementById: () => body};
-checkinDetailToggle('trae');
+globalThis.document = {getElementById: () => body};
+checkinDetailToggle(btn);
 const opened = {hidden: body.hidden, aria: btn.attrs['aria-expanded'], text: btn.textContent};
 // 模拟 30 秒重绘：新 DOM 按 JS 状态重建，而不是读旧 DOM。
-const newBody = {hidden: !CHECKIN_DETAIL_FOLD.open['trae']};
-checkinDetailToggle('trae');
+const newBody = {hidden: !CHECKIN_DETAIL_FOLD.open["tr'ae"]};
+checkinDetailToggle(btn);
 console.log(JSON.stringify({opened, redrawHidden: newBody.hidden,
   closed: body.hidden, aria: btn.attrs['aria-expanded']}));
 """
@@ -103,5 +103,6 @@ def test_only_multiple_accounts_get_detail_controls():
     assert "checkinAccountDetails(c)" in text
     assert 'class="ck-account-grid"' in text
     # 折叠入口是独立按钮，不包住改名/强刷/打卡，也不需要事件冒泡补丁。
-    assert 'onclick="checkinDetailToggle' in text
+    assert 'onclick="checkinDetailToggle(this)"' in text
+    assert "checkinDetailToggle('${esc(p.id)}')" not in text
     assert "stopPropagation" not in text

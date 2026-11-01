@@ -172,10 +172,10 @@ function checkinAccountDetails(c) {
   }).join('');
 }
 
-function checkinDetailToggle(pid) {
+function checkinDetailToggle(btn) {
+  const pid = btn.dataset.checkinFold;
   CHECKIN_DETAIL_FOLD.open[pid] = !CHECKIN_DETAIL_FOLD.open[pid];
   const open = CHECKIN_DETAIL_FOLD.open[pid];
-  const btn = document.querySelector(`[data-checkin-fold="${pid}"]`);
   const body = document.getElementById('checkin-details-' + pid);
   if (body) body.hidden = !open;
   if (btn) {
@@ -297,7 +297,7 @@ function renderBenefits(opts) {
     const detailToggle = multiAccounts
       ? `<button class="ghost ck-detail-toggle" data-checkin-fold="${esc(p.id)}" ` +
         `aria-expanded="${detailOpen}" aria-controls="checkin-details-${esc(p.id)}" ` +
-        `onclick="checkinDetailToggle('${esc(p.id)}')">${detailOpen ? '收起明细 ▴' : '账号明细 ▾'}</button>` : '';
+        `onclick="checkinDetailToggle(this)">${detailOpen ? '收起明细 ▴' : '账号明细 ▾'}</button>` : '';
     const details = multiAccounts
       ? `<div class="ck-account-grid" id="checkin-details-${esc(p.id)}"${detailOpen ? '' : ' hidden'}>` +
         checkinAccountDetails(c) + '</div>' : '';
