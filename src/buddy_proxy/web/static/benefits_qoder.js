@@ -158,18 +158,19 @@ function renderQoderPanel() {
   const noticeHtml = notices.map(quotaItemHtml).join('');
   const multi = n > 1;
 
+  const fold = quotaProviderFold(qoder.quota.items || [], 'qoder');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Qoder</span>
-        <span class="tag">${multi ? '多账号 · 自动切换' : 'Qoder 订阅'}</span>
+        <span class="tag">${multi ? '多账号 · 自动切换' : 'Qoder 订阅'}</span>${fold.badge}
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">${multi ? '403/额度尽自动冷却换号（按登录顺位）' : '403/额度尽自动切换下一个账号'}</span>
-        ${providerRefreshButton('qoder')}
+        ${fold.toggle}${providerRefreshButton('qoder')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
-        : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login qoder</span>）</div>'}
+      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login qoder</span>）</div>'}${fold.bodyEnd}
     </div>`;
   loadQoderAccounts();
 }
@@ -260,15 +261,16 @@ function renderQoderIntlPanel() {
       `${acct ? `<span class="ag-move">${acctRenameButton('qoderintl', acct)}</span>` : ''}</div>`;
   }).join('');
   const noticeHtml = notices.map(quotaItemHtml).join('');
+  const fold = quotaProviderFold(provider.quota.items || [], 'qoderintl');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head"><span class="name">Qoder 海外版</span>
-        <span class="tag">Global · 额度与签到</span><span class="grow"></span>
-        ${providerRefreshButton('qoderintl')}
+        <span class="tag">Global · 额度与签到</span>${fold.badge}<span class="grow"></span>
+        ${fold.toggle}${providerRefreshButton('qoderintl')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
-        : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（登录后重启 Buddy 注册通道）</div>'}
+      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（登录后重启 Buddy 注册通道）</div>'}${fold.bodyEnd}
     </div>`;
   loadQoderIntlAccounts();
 }

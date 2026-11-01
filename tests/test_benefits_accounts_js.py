@@ -480,6 +480,7 @@ def test_dumate_status_ready_triggers_rerender():
         # （汇总行 head_only，传 sum_items 反而翻倍，见 provider.quota），桩若还
         # 卡在 sum_items 上就变成钉住旧 bug。
         + "globalThis.quotaHeadSum = q => q && q.items ? '<span>HEADSUM</span>' : 'NOSUM';\n"
+        + "globalThis.quotaProviderFold = () => ({badge: '', toggle: '', bodyStart: '', bodyEnd: ''});\n"
         + "globalThis.api = async (path) => path.includes('/accounts')\n"
         + "  ? globalThis.__DM_ACCTS : globalThis.__DM_RESPONSE;\n"
         # 数渲染次数：段里的 renderDumatePanel 声明与函数体里的自调用一起

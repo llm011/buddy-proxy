@@ -249,19 +249,20 @@ function renderCodexPanel() {
   const noticeHtml = notices.map(quotaItemHtml).join('');
   const multi = n > 1;
 
+  const fold = quotaProviderFold(codex.quota.items || [], 'codex');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Codex</span>
-        <span class="tag">${multi ? '多账号 · 自动切换' : 'ChatGPT 订阅 · 自动切换'}</span>
+        <span class="tag">${multi ? '多账号 · 自动切换' : 'ChatGPT 订阅 · 自动切换'}</span>${fold.badge}
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">${multi ? '429/403 自动冷却换号（按账号顺位）' : '额度耗尽自动切换下一个账号'}</span>
-        ${providerRefreshButton('codex')}
+        ${fold.toggle}${providerRefreshButton('codex')}
         <button class="ghost" title="粘贴 ~/.codex/auth.json 或同构 JSON（无需安装 Codex CLI）" onclick="openCodexImport()">导入账号</button>
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${allGrps.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
-        : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}
+      ${fold.bodyStart}${allGrps.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}
     </div>`;
   loadCodexAccounts();
 }

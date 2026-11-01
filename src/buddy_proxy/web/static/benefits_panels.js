@@ -38,17 +38,18 @@ function renderTraepatPanel() {
     </div>`;
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
 
+  const fold = quotaProviderFold(pat.quota.items || [], 'traepat');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Trae PAT</span>
-        <span class="tag">多账号 · 自愈</span>
+        <span class="tag">多账号 · 自愈</span>${fold.badge}
         <span class="grow"></span>
         <span class="pat-keeper" id="pat-keeper"></span>
-        ${providerRefreshButton('traepat')}
+        ${fold.toggle}${providerRefreshButton('traepat')}
         <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
       </div>
-      <div class="pat-quota-grid">${quotaHtml}</div>
+      ${fold.bodyStart}<div class="pat-quota-grid">${quotaHtml}</div>${fold.bodyEnd}
       <div id="traepat-account-error"></div>
       <div class="pat-load-section">
         <div class="pat-col-head">

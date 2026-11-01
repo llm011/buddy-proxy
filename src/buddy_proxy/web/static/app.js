@@ -149,7 +149,7 @@ function renderAlert() {
       <div class="ab-detail">${esc(s.error || '未知错误')}
         ${s.mtime ? ` · 文件修改于 ${esc(s.mtime)}` : ''}
         ${s.size != null ? ` · ${s.size} 字节` : ''}</div>
-      <div class="ab-detail">路径 <code>${esc(s.path)}</code>　修好后点右上角「↻ 刷新」重载</div>
+      <div class="ab-detail">路径 <code>${esc(s.path)}</code>　修好后到「请求日志」点「↻ 刷新」重载</div>
     </span>
     <button class="ab-close" onclick="dismissAlert()">关闭</button>`;
   el.classList.add('show');

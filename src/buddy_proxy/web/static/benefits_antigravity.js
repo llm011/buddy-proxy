@@ -220,17 +220,18 @@ function renderAntigravityPanel() {
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
   const noticeHtml = notices.map(quotaItemHtml).join('');
 
+  const fold = quotaProviderFold(ag.quota.items || [], 'antigravity');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Antigravity</span>
-        <span class="tag">多账号 · 自动切换</span>
+        <span class="tag">多账号 · 自动切换</span>${fold.badge}
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">429/403 自动冷却换号（按登录顺位）</span>
-        ${providerRefreshButton('antigravity')}
+        ${fold.toggle}${providerRefreshButton('antigravity')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      <div class="pat-quota-grid">${quotaHtml}</div>
+      ${fold.bodyStart}<div class="pat-quota-grid">${quotaHtml}</div>${fold.bodyEnd}
     </div>`;
   loadAntigravityAccounts();
 }

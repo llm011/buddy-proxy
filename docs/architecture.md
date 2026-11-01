@@ -93,7 +93,14 @@ src/buddy_proxy/
   The benefits UI is split by responsibility: `benefits.js` holds the calendar,
   expiry alerts and shared rendering; `benefits_accounts.js` shared account
   helpers; `benefits_checkin.js` check-in actions; `benefits_quota.js` and
-  `benefits_nav.js` quota folding and side navigation; and the remaining
+  `benefits_nav.js` quota folding and side navigation. Multi-account check-in
+  rows stay compact by default and expose an independent details toggle;
+  `CHECKIN_DETAIL_FOLD` preserves it across redraws without intercepting account
+  actions. Provider-level exhaustion folding (`PROVIDER_QUOTA_FOLD`) is separate
+  from item-height folding (`QUOTA_FOLD`): only known numeric zero balances fold
+  the provider body, while errors, unknown values and empty results stay open.
+  Manual overrides survive redraws and recovered balances always reopen. The
+  remaining
   `benefits_<provider>.js` files hold their provider panels. `benefits_panels.js`
   retains the Trae PAT panel, while `benefits_dumate.js` also owns the
   account-loader registry. Classic scripts share top-level bindings, so the

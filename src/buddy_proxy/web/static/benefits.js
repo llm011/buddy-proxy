@@ -144,6 +144,46 @@ function renderExpiryBanner() {
 // 让快照里新出现的账号也能把名字/按钮补上——没变就走加载器的早退，不发请求。
 // 非静默路径下 fill<X>Accounts 会整卡重渲（与渲染同一份快照，按钮组不会叠第二份）；
 // 静默才只回填。
+const CHECKIN_DETAIL_FOLD = { open: {} };
+
+function checkinAccountState(a) {
+  const cls = a.error ? 'bad'
+    : a.unavailable || a.inactive ? ''
+    : a.ok === false ? 'bad'
+    : a.claimable ? 'pending' : 'ok';
+  const label = a.error ? '查询失败'
+    : a.unavailable ? '暂无可领奖励'
+    : a.inactive ? '无活动'
+    : a.ok === false ? '失败'
+    : a.claimable ? '可领' : '已签到';
+  return {cls, label};
+}
+
+function checkinAccountDetails(c) {
+  return (c.accounts || []).map(a => {
+    const st = checkinAccountState(a);
+    const name = a.name || ('#' + a.index);
+    const message = a.error || a.message;
+    const credit = a.daily_credit > 0 ? `<span class="muted">每日 +${esc(fmtCredit(a.daily_credit))}</span>` : '';
+    return `<div class="ck-account-card ${st.cls}">
+      <div class="ck-account-head"><strong>${esc(name)}</strong><span class="br-state ${st.cls}">${esc(st.label)}</span></div>
+      ${credit}${message ? `<div class="ck-account-message">${esc(message)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+
+function checkinDetailToggle(pid) {
+  CHECKIN_DETAIL_FOLD.open[pid] = !CHECKIN_DETAIL_FOLD.open[pid];
+  const open = CHECKIN_DETAIL_FOLD.open[pid];
+  const btn = document.querySelector(`[data-checkin-fold="${pid}"]`);
+  const body = document.getElementById('checkin-details-' + pid);
+  if (body) body.hidden = !open;
+  if (btn) {
+    btn.setAttribute('aria-expanded', String(open));
+    btn.textContent = open ? '收起明细 ▴' : '账号明细 ▾';
+  }
+}
+
 function renderBenefits(opts) {
   if (!BENEFITS) return;
   const quiet = !!(opts && opts.quiet);
@@ -236,18 +276,9 @@ function renderBenefits(opts) {
     // 的 .ck-pill::before：✓ 已签到 / ＋ 可领 / ✕ 失败）双重表达，长句子
     // （如「有活动，但当前没有可领取的签到奖励」）不铺在卡面上。
     const acctsHtml = (c.accounts || []).map(a => {
-      // 颜色分支与下面的文案分支同序——这是原来 br-state 的类映射原样搬过来的，
-      // 只把「哪段文案」换成「整颗胶囊什么色」
-      const cls = a.error ? 'bad'
-        : a.unavailable ? ''
-        : a.inactive ? ''
-        : a.ok === false ? 'bad'
-        : a.claimable ? 'pending' : 'ok';
-      const label = a.error ? '查询失败'
-        : a.unavailable ? '暂无可领奖励'
-        : a.inactive ? '无活动'
-        : a.ok === false ? '失败'
-        : a.claimable ? '可领' : '已签到';
+      const st = checkinAccountState(a);
+      const cls = st.cls;
+      const label = st.label;
       const name = a.name || ('#' + a.index);
       // 名字也进 title：胶囊里名字超 230px 会被省略号收掉，不带上名字就再没有
       // 地方能看全（2026-11-01 反馈）。状态文字另外用 .sr-only 交给读屏——
@@ -261,19 +292,29 @@ function renderBenefits(opts) {
     // 照 antigravity 面板的卡中卡（pat-pkg）包一层：每通道一张子卡，横向分隔一眼
     // 能看出来；行内四列（标识 ｜ 状态/奖励/账号 ｜ 下次时间 ｜ 按钮），下次时间
     // 与按钮成组靠右，各行的右边缘因此能对齐。
+    const multiAccounts = (c.accounts || []).length > 1;
+    const detailOpen = multiAccounts && !!CHECKIN_DETAIL_FOLD.open[p.id];
+    const detailToggle = multiAccounts
+      ? `<button class="ghost ck-detail-toggle" data-checkin-fold="${esc(p.id)}" ` +
+        `aria-expanded="${detailOpen}" aria-controls="checkin-details-${esc(p.id)}" ` +
+        `onclick="checkinDetailToggle('${esc(p.id)}')">${detailOpen ? '收起明细 ▴' : '账号明细 ▾'}</button>` : '';
+    const details = multiAccounts
+      ? `<div class="ck-account-grid" id="checkin-details-${esc(p.id)}"${detailOpen ? '' : ' hidden'}>` +
+        checkinAccountDetails(c) + '</div>' : '';
     return `<div class="pat-pkg ck-pkg">
       <div class="benefit-row">
         <div class="br-id">
           <i class="br-dot" style="background:${pcolor(p.id)}"></i>
           <span class="br-name">${esc(p.id)}</span>
         </div>
-        <div class="br-meta">${badge}${meta}${acctsHtml ? `<span class="ck-pills">${acctsHtml}</span>` : ''}</div>
+        <div class="br-meta">${badge}${meta}${acctsHtml ? `<span class="ck-pills">${acctsHtml}</span>` : ''}${detailToggle}</div>
         ${nextTimeHtml(c)}
         <div class="br-act">
           <button onclick="refreshCheckin('${esc(p.id)}', this)" title="绕过缓存，真打上游重查该通道签到状态">强刷</button>
           <button class="primary" ${(unknown || c.done_today || c.inactive || c.unavailable) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)" ${unknown ? 'title="状态未知，先点「强刷」重查"' : ''}>立即打卡</button>
         </div>
       </div>
+      ${details}
     </div>`;
   }).join('') : '<div class="empty" style="grid-column:1/-1;padding:14px 0">当前没有支持打卡的通道</div>';
   // 数据换了新的一批 data-next-ts，重算一次并决定要不要起 ticker
@@ -296,12 +337,13 @@ function renderBenefits(opts) {
     const q = p.quota;
     const items = quotaItemsHtml(q.items || [], p.id);
     const headSum = quotaHeadSum(q);
+    const fold = quotaProviderFold(q.items || [], p.id);
     return `<div class="chart-card" style="margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="font-weight:600">${esc(p.name)}</span>
-        ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}
-        ${headSum}<span style="flex:1"></span>${providerRefreshButton(p.id)}
-      </div>${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}</div>`;
+        ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}${fold.badge}
+        ${headSum}<span style="flex:1"></span>${fold.toggle}${providerRefreshButton(p.id)}
+      </div>${fold.bodyStart}${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}${fold.bodyEnd}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
   if (quiet) {
     // 上面已把签到区和通用额度卡换成新快照；各通道面板原样留着，只补角标和

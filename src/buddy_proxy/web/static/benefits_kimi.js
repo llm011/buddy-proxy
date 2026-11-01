@@ -182,19 +182,20 @@ function renderKimiPanel() {
   const noticeHtml = notices.map(quotaItemHtml).join('');
   const multi = n > 1;
 
+  const fold = quotaProviderFold(kimi.quota.items || [], 'kimi');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Kimi</span>
-        <span class="tag">${multi ? '多账号 · 自动切换' : 'Kimi Code 订阅'}</span>
+        <span class="tag">${multi ? '多账号 · 自动切换' : 'Kimi Code 订阅'}</span>${fold.badge}
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">${multi ? '429/403 自动冷却换号（按导入顺位）' : '额度耗尽自动切换下一个账号'}</span>
-        ${providerRefreshButton('kimi')}
+        ${fold.toggle}${providerRefreshButton('kimi')}
         <button class="ghost" title="粘贴 kimi cli 导出的 token JSON" onclick="openKimiImport()">导入账号</button>
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
-        : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}
+      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+        : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}
     </div>`;
   loadKimiAccounts();
 }

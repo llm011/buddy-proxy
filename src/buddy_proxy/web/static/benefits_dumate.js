@@ -66,19 +66,20 @@ function renderDumatePanel() {
     : st && st.installed ? (st.hint || '已安装 DuMate.app，但当前未在运行。')
     : '正在检测本地代理…';
 
+  const fold = quotaProviderFold(items, 'dumate');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">百度搭子 (DuMate)</span>
-        <span class="tag">本地代理 · 复用 App 登录态</span>
+        <span class="tag">本地代理 · 复用 App 登录态</span>${fold.badge}
         <span class="grow"></span>
         <span class="muted" style="font-size:11px;display:flex;align-items:center;gap:5px">
           <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor}"></i>
           ${esc(stateText)}${esc(ver)}${ready && st && st.bceconsole_authenticated ? ' · 已登录' : ''}
         </span>
-        ${providerRefreshButton('dumate')}
+        ${fold.toggle}${providerRefreshButton('dumate')}
       </div>
-      <div class="pat-quota-grid">
+      ${fold.bodyStart}<div class="pat-quota-grid">
         <div class="pat-pkg">
           <span class="pat-pkg-name">${esc(acct ? (acct.display_name || acct.id) : '本机账号')}</span>
           ${acctSubHtml(acct, _dumate_sub_extra, 'data-dumate-sub')}
@@ -88,7 +89,7 @@ function renderDumatePanel() {
             : `<div class="muted" style="font-size:11px;line-height:1.5;padding:8px 0">${esc(notReadyHint)}</div>`}
           ${rowBtns}
         </div>
-      </div>
+      </div>${fold.bodyEnd}
     </div>`;
   loadDumateAccounts().catch(() => {});  // 状态获取失败留给下一轮轮询
 }

@@ -56,6 +56,7 @@ globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) +
 globalThis.quotaItemsHtml = (items, key) =>
   '<div class="qbody" data-qfold="' + esc(key) + '">' +
   items.map(globalThis.quotaItemHtml).join('') + '</div>';
+globalThis.quotaProviderFold = () => ({badge: '', toggle: '', bodyStart: '', bodyEnd: ''});
 globalThis.BENEFITS = {};
 globalThis.__SYNC_CALLS = 0;
 globalThis.syncQuotaFold = () => { globalThis.__SYNC_CALLS++; };

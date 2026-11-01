@@ -158,8 +158,11 @@ def test_models_credits_and_name(client):
         # 两档的倍率**装反了**（1.56 给了不带后缀的 id、0.97 给了 -lite），
         # 2026-11-01 修正：可路由的裸 id 是 0.97 档，实测输出单价与 kimi-k3
         # 之比 1.51 ≈ 1.62/0.97（若为 1.56 档该比值应是 1.04）。1.56 档的
-        # 上游 id 未找到（-hi.lite 等全部 11102），故不收录、不臆造 id。
+        # 独立高速 id 于 2026-11-02 经真实 CodeBuddy 请求确认可通。
         ("kimi-k3.1-pro", "moonshot"): ("x0.97 credits", "Kimi-K3.1-Pro"),
+        ("kimi-k3.1-pro-highspeed", "moonshot"): (
+            "x1.56 credits", "Kimi-K3.1-Pro-Highspeed",
+        ),
         # CodeBuddy 也支持 MiMo（用户 2026-11-01 指出此前一直漏收）。
         # 上游名就是裸 mimo-v2.6-pro；xiaomi- 前缀 / MiMo-V2.6-Pro 原样名
         # 都是 11102，实测只有裸小写能通。
