@@ -35,6 +35,10 @@ _BONUS_INFO = f"{_BCE_CONSOLE}/api/dumate/points/loginBonusInfo"
 _BONUS_CLAIM = f"{_BCE_CONSOLE}/api/dumate/points/loginBonus"
 _TIMEOUT = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=10.0)
 
+#: 哨兵：区分「调用方没传 auth，自己解」与「调用方明确传 None（无登录态）」
+#: ——后者若当成前者会多解一次 cookie，且退款逻辑里怕把「无凭据」误当「用默认」。
+_AUTH_UNSET: Any = object()
+
 
 def fetch_checkin_status(timeout: float = 20.0) -> dict[str, Any] | None:
     """查询签到状态；未登录 / 失败返回 None。
@@ -143,14 +147,24 @@ def _parse_status_payload(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _bce_get(path: str, *, timeout: float = 20.0) -> dict[str, Any] | None:
-    """带 cookie 的 bceConsole GET；未登录 / 失败返回 None。"""
-    auth = resolve_bceconsole_auth()
+def _bce_get(path: str, *, timeout: float = 20.0, client: httpx.Client | None = None,
+             auth: Any = _AUTH_UNSET) -> dict[str, Any] | None:
+    """带 cookie 的 bceConsole GET；未登录 / 失败返回 None。
+
+    ``client`` / ``auth`` 可选：批量调用（如按天扫 30 天账单）时传进来复用一个
+    连接与一份已解好的登录态，别每条都新开 TLS、重复解 cookie。不传（``auth``
+    保持哨兵 ``_AUTH_UNSET``）则照旧自建、自行解登录态。
+    """
+    if auth is _AUTH_UNSET:
+        auth = resolve_bceconsole_auth()
     if auth is None:
         return None
     try:
-        with httpx.Client(timeout=httpx.Timeout(timeout)) as client:
+        if client is not None:
             resp = client.get(f"{_BCE_CONSOLE}{path}", headers=auth.headers())
+        else:
+            with httpx.Client(timeout=httpx.Timeout(timeout)) as c:
+                resp = c.get(f"{_BCE_CONSOLE}{path}", headers=auth.headers())
     except httpx.HTTPError as exc:
         log.debug("dumate bce GET %s failed: %s", path, type(exc).__name__)
         return None
@@ -221,6 +235,7 @@ def fetch_quota_overview(timeout: float = 20.0) -> dict[str, Any] | None:
 
 def fetch_usage_records(
     *, start_ts: int, end_ts: int, page: int = 1, limit: int = 20, timeout: float = 15.0,
+    client: httpx.Client | None = None, auth: Any = _AUTH_UNSET,
 ) -> dict[str, Any] | None:
     """查积分消耗流水（真实逐笔数据，bceConsole 通道）。
 
@@ -237,7 +252,7 @@ def fetch_usage_records(
     data = _bce_get(
         f"/api/dumate/points/records/usage?page={page}&limit={limit}"
         f"&startAt={int(start_ts)}&endAt={int(end_ts)}",
-        timeout=timeout,
+        timeout=timeout, client=client, auth=auth,
     )
     if data is None:
         return None

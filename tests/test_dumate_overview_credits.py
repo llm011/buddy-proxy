@@ -21,6 +21,14 @@ from buddy_proxy.dumate import billing
 from buddy_proxy.web.ui import queries
 
 
+@pytest.fixture
+def _fake_auth(monkeypatch):
+    """假登录态：_refresh 现在先解一次 auth（解不到就整轮跳过，不打上游），
+    这些用例只关心按天累计逻辑，给个真值让它继续走。"""
+    monkeypatch.setattr("buddy_proxy.dumate.cookies.resolve_bceconsole_auth",
+                        lambda: object())
+
+
 @pytest.fixture(autouse=True)
 def _reset_billing():
     billing.reset_cache()
@@ -34,11 +42,11 @@ def _today() -> str:
 
 # --- billing：按天累计 + 定稿跳过 + 失败保留旧值 -----------------------------
 
-def test_refresh_accumulates_one_entry_per_day(monkeypatch):
+def test_refresh_accumulates_one_entry_per_day(monkeypatch, _fake_auth):
     """逐日扫一遍：每天一条，值来自当日账单（不是宽窗合计）。"""
     seen_days = []
 
-    def fake(*, start_ts, end_ts, page=1, limit=20, timeout=15.0):
+    def fake(*, start_ts, end_ts, page=1, limit=20, timeout=15.0, **k):
         seen_days.append(time.strftime("%Y-%m-%d", time.localtime(start_ts)))
         return {"total_count": 1, "consumed_points": 12.5, "records": []}
 
@@ -52,11 +60,11 @@ def test_refresh_accumulates_one_entry_per_day(monkeypatch):
     assert len(set(seen_days)) == billing._DAYS
 
 
-def test_refresh_skips_final_days_on_rescan(monkeypatch):
+def test_refresh_skips_final_days_on_rescan(monkeypatch, _fake_auth):
     """已结束的日期定稿后重扫不再打上游——只补还在变的「今天」。"""
     calls = []
 
-    def fake(*, start_ts, end_ts, page=1, limit=20, timeout=15.0):
+    def fake(*, start_ts, end_ts, page=1, limit=20, timeout=15.0, **k):
         calls.append(time.strftime("%Y-%m-%d", time.localtime(start_ts)))
         return {"total_count": 1, "consumed_points": 1.0, "records": []}
 
@@ -69,7 +77,7 @@ def test_refresh_skips_final_days_on_rescan(monkeypatch):
     assert first == billing._DAYS
 
 
-def test_failed_day_keeps_previous_value(monkeypatch):
+def test_failed_day_keeps_previous_value(monkeypatch, _fake_auth):
     """某天上游失败时保留旧值，不把已算出的数字抹成 0。"""
     monkeypatch.setattr(
         billing, "fetch_usage_records",
@@ -166,3 +174,30 @@ def test_refresh_is_clean_noop_without_login():
     billing.reset_cache()
     billing._refresh()          # 用真 fetch_usage_records；隔离目录无凭据 → 全 None
     assert billing.get_day_totals() == {}
+
+
+# --- 一轮扫描共用一个连接与一份登录态（review 提出的连接churn） ---------------
+
+def test_refresh_reuses_one_client_and_auth(monkeypatch, _fake_auth):
+    """30 天按天查时，只该 new 一次 httpx.Client，且每条都带着同一份 auth——
+    早期版本是每条 `with httpx.Client()` 各自新开 TLS，首轮 30 次握手打上游。"""
+    import httpx
+    made = []
+    real_client = httpx.Client
+
+    class _Counting(real_client):
+        def __init__(self, *a, **k):
+            made.append(1)
+            super().__init__(*a, **k)
+
+    seen_auth = []
+    def fake(*, start_ts, end_ts, page=1, limit=20, timeout=15.0, client=None, auth=None):
+        seen_auth.append((client is not None, auth is not None))
+        return {"total_count": 0, "consumed_points": 1.0, "records": []}
+
+    monkeypatch.setattr(billing.httpx, "Client", _Counting)
+    monkeypatch.setattr(billing, "fetch_usage_records", fake)
+    billing._refresh()
+    assert len(made) == 1, f"应只建一个连接池，实际 {len(made)} 次"
+    assert len(seen_auth) == billing._DAYS
+    assert all(c and a for c, a in seen_auth), "每条都要复用 client 与 auth"

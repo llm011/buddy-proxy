@@ -28,6 +28,9 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from typing import Any
+
+import httpx
 
 from .checkin import fetch_usage_records
 
@@ -67,11 +70,16 @@ def _day_window(d: str) -> tuple[int, int]:
     return start, start + 86400
 
 
-def _fetch_day(d: str) -> float | None:
-    """查某一天（本地日）的消耗合计；未登录 / 失败返回 None。"""
+def _fetch_day(d: str, client: httpx.Client, auth: Any) -> float | None:
+    """查某一天（本地日）的消耗合计；未登录 / 失败返回 None。
+
+    ``client`` / ``auth`` 由 :func:`_refresh` 传入：一轮扫描共用一个连接、一份
+    登录态，别 30 天各新开一次 TLS、重复解 cookie。
+    """
     start, end = _day_window(d)
     rec = fetch_usage_records(
-        start_ts=start, end_ts=end, page=1, limit=1, timeout=_TIMEOUT_S)
+        start_ts=start, end_ts=end, page=1, limit=1, timeout=_TIMEOUT_S,
+        client=client, auth=auth)
     if rec is None:
         return None
     return float(rec.get("consumed_points") or 0.0)
@@ -93,13 +101,21 @@ def _refresh() -> None:
             if not (ent and ent[1]):
                 todo.append(d)
         if todo:
-            with ThreadPoolExecutor(max_workers=_SCAN_WORKERS) as pool:
-                for d, pts in zip(todo, pool.map(_fetch_day, todo)):
-                    if pts is None:
-                        continue  # 上游失败：保留旧值（如有），本轮不覆盖
-                    ok_any = True
-                    with _lock:
-                        _cache[d] = (pts, d < today)
+            from .cookies import resolve_bceconsole_auth
+
+            auth = resolve_bceconsole_auth()
+            if auth is None:
+                return  # 未登录：整轮跳过（finally 里按「空手」退避）
+            # 一轮共用一个连接池：30 天走同一条 TCP/TLS，别各开各的。
+            with httpx.Client(timeout=httpx.Timeout(_TIMEOUT_S)) as client:
+                with ThreadPoolExecutor(max_workers=_SCAN_WORKERS) as pool:
+                    for d, pts in zip(
+                            todo, pool.map(lambda x: _fetch_day(x, client, auth), todo)):
+                        if pts is None:
+                            continue  # 上游失败：保留旧值（如有），本轮不覆盖
+                        ok_any = True
+                        with _lock:
+                            _cache[d] = (pts, d < today)
         # 清掉滑出窗口的旧日期，别让缓存无限长
         cutoff = _local_date(now - (_DAYS - 1) * 86400)
         with _lock:
