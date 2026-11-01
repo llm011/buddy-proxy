@@ -26,9 +26,16 @@ inapp key 用 ``secrets`` 现生成。用户不再需要为了跑代理而开着
 
 - 默认**会话内**：随本进程退出而退出——``__main__`` 的关停钩子调
   :func:`shutdown_standalone`。
-- 可选**常驻**：``BUDDY_DUMATE_STANDALONE=persist`` 时记 ``dumate_standalone.json``
-  （含 pid/port），且不随会话退出清理；由用户/launchd 管理。想继续复用它，直接
-  让 ``discovery`` 从 pgrep 里发现即可（与我们无关的独立实例，同样能命中）。
+- 可选**常驻**：``BUDDY_DUMATE_STANDALONE=persist`` 时不随会话退出清理；由
+  用户/launchd 管理。想继续复用它，直接让 ``discovery`` 从 pgrep 里发现即可
+  （与我们无关的独立实例，同样能命中）。
+- **孤儿回收**：子进程用 ``start_new_session=True`` 起（前台进程组的 Ctrl-C
+  不该连带杀掉正在转发的子进程），代价是父进程被 ``kill -9`` 时 finally 不执行、
+  子进程 reparent 到 PID 1。所以每个拉起实例按 owner pid 登记 ``state_dir()/
+  dumate-standalone/<owner>.json``，下次 :func:`ensure_running` 前
+  :func:`reap_orphans` 扫一遍：owner 已死且非 persist 的遗留实例回收掉。
+  孤儿本身仍能被 ``discover`` 按 pgrep 命中复用（不是永久故障），回收只是让
+  生命周期重新确定。
 """
 
 from __future__ import annotations
@@ -53,7 +60,8 @@ log = logging.getLogger(__name__)
 _BIN_REL = ("extra-resource", "backend", "bin", "dumate-main-server")
 _CONFIG_REL = ("config", "desktop-main", "config.yml")
 
-#: App 安装位置候选（与 discovery.is_app_installed 同源口径）。
+#: App 安装位置候选（**单一事实源**：discovery.is_app_installed 也复用这份，
+#: 免得两处各写一份、加个安装位置只改一处就出现「installed=True 却拉不起来」）。
 _APP_CANDIDATES = ("/Applications/DuMate.app", os.path.expanduser("~/Applications/DuMate.app"))
 
 #: spawn 后等待 /health 就绪的上限（秒）。实测冷启 ~1s 内 ok。
@@ -218,8 +226,7 @@ def spawn(app_res_root: Path | None = None, *,
             with _child_lock:
                 _child = proc
                 _inapp_key = key
-            if is_persistent():
-                _persist_pid(proc.pid, port)
+            _record_spawned(proc.pid, port)
             log.info("dumate standalone spawned pid=%d port=%d", proc.pid, port)
             return {"ok": True, "port": port, "pid": proc.pid}
         time.sleep(0.3)
@@ -240,6 +247,12 @@ def ensure_running() -> dict[str, Any] | None:
     with _spawn_lock:
         if discovery.discover() is not None:
             return None
+        # 拉起前先回收上次遗留的孤儿（owner 已死且非 persist 的），避免每轮
+        # 不可控退场都白留一个常驻 Go 进程。
+        try:
+            reap_orphans()
+        except Exception:  # noqa: BLE001 - 回收失败不该挡住本次拉起
+            log.debug("dumate standalone reap failed", exc_info=True)
         return spawn()
 
 
@@ -259,7 +272,7 @@ def shutdown_standalone() -> None:
         return
     if proc is not None:
         _terminate(proc)
-    _clear_pid()
+    _clear_own_pid()
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -277,27 +290,126 @@ def _terminate(proc: subprocess.Popen) -> None:
         pass
 
 
-# --- 常驻模式的 pid 文件（可选） --------------------------------------------
+# --- 拉起的实例的登记与回收 ------------------------------------------------
+#
+# 为什么需要：子进程用 ``start_new_session=True`` 起（否则前台进程组的 Ctrl-C
+# 会把正在转发的子进程一起杀掉）。代价是父进程被 ``kill -9`` 时——launchd 超时
+# 兜底 / proxy.sh 的 pattern_kill 都会走这条路——``shutdown_standalone`` 的
+# finally 不执行，子进程被 reparent 到 PID 1 成孤儿（实测 PPID 变 1 存活）。
+#
+# 孤儿本身还能被下次 ``discovery.discover()`` 按 pgrep 命中复用，不是永久故障；
+# 但它再也无人回收。于是每个拉起实例按 owner（本代理进程）pid 登记一个文件，
+# 下次启动时 ``reap_orphans`` 扫一遍：owner 已死且非 persist 的遗留实例回收掉，
+# 让生命周期重新变确定（谁拉起、谁负责清）。
 
 
-def _pid_path() -> Path:
+def _pid_dir() -> Path:
     from ..core.paths import state_dir
 
-    return state_dir() / "dumate_standalone.json"
+    return state_dir() / "dumate-standalone"
 
 
-def _persist_pid(pid: int, port: int) -> None:
+def _record_spawned(pid: int, port: int) -> None:
+    """登记本进程拉起的实例（文件名=owner pid，多 worktree 并存不互相覆盖）。"""
     try:
-        path = _pid_path()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"pid": pid, "port": port}), encoding="utf-8")
+        d = _pid_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{os.getpid()}.json"
+        path.write_text(json.dumps({
+            "pid": pid, "port": port,
+            "persistent": is_persistent(),
+            "owner": os.getpid(),
+        }), encoding="utf-8")
         os.chmod(path, 0o600)
     except OSError:
         pass
 
 
-def _clear_pid() -> None:
+def _clear_own_pid() -> None:
     try:
-        _pid_path().unlink(missing_ok=True)
+        (_pid_dir() / f"{os.getpid()}.json").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _is_main_server(pid: int) -> bool:
+    """确认 pid 仍在跑、且确实是 dumate-main-server（避免 pid 复用误杀）。"""
+    from . import discovery
+
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    cmd = (out.stdout or "").strip()
+    return bool(cmd) and cmd.split(" ", 1)[0].endswith(discovery._MAIN_SERVER_BIN)  # noqa: SLF001
+
+
+def reap_orphans() -> int:
+    """回收上次遗留的独立实例（owner 已死且非 persist 的），返回回收个数。
+
+    安全性：只处理登记文件里 owner 已死的条目；杀之前再用 ``_is_main_server``
+    确认目标仍是 dumate-main-server（防 pid 复用误伤）；persist 条目一律跳过
+    ——那是「常驻」语义，归用户/launchd 管。任何异常都吞掉，回收绝不该反过来
+    让代理起不来。
+    """
+    d = _pid_dir()
+    if not d.is_dir():
+        return 0
+    reaped = 0
+    for f in d.glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            child = int(data.get("pid") or 0)
+            owner = int(data.get("owner") or 0)
+            if data.get("persistent"):
+                continue  # 常驻：不动
+            if owner and _owner_alive(owner):
+                continue  # owner 还活着（另一个并存的代理实例）：不动
+            if child and _is_main_server(child):
+                _terminate_pid(child)
+                reaped += 1
+        except (OSError, ValueError):
+            pass
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+    if reaped:
+        log.info("dumate standalone reaped %d orphaned instance(s)", reaped)
+    return reaped
+
+
+def _owner_alive(pid: int) -> bool:
+    """owner 进程是否还在（signal 0 探测；无权限也视为活着，别乱杀）。"""
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
+def _terminate_pid(pid: int) -> None:
+    """SIGTERM → 短暂等待 → SIGKILL（不持有进程句柄时按 pid 杀）。"""
+    import signal
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return
+    for _ in range(6):
+        time.sleep(0.2)
+        if not _is_main_server(pid):
+            return
+    try:
+        os.kill(pid, signal.SIGKILL)
     except OSError:
         pass

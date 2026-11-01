@@ -156,8 +156,14 @@ def discover() -> DumateEndpoint | None:
 
 
 def is_app_installed() -> bool:
-    """本机是否装了 DuMate.app（用于「没运行」时给出可操作的提示）。"""
-    for cand in ("/Applications/DuMate.app", os.path.expanduser("~/Applications/DuMate.app")):
+    """本机是否装了 DuMate.app（用于「没运行」时给出可操作的提示）。
+
+    安装位置候选复用 ``standalone._APP_CANDIDATES``——两处各写一份的话，将来
+    加个安装位置只改一处就会出现「提示已安装、实际拉不起来」的不一致。
+    """
+    from . import standalone
+
+    for cand in standalone._APP_CANDIDATES:  # noqa: SLF001 - 共享同一份候选常量
         if os.path.isdir(cand):
             return True
     return False

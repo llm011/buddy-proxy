@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -257,19 +258,25 @@ def test_persistent_mode_does_not_kill_on_shutdown(tmp_path):
 
     state_dir = tmp_path / "state"
 
+    def _fake_dir():
+        return state_dir / "dumate-standalone"
+
     with mock.patch.object(st.subprocess, "Popen", return_value=proc), \
          mock.patch.object(st, "_probe_health", return_value=True), \
-         mock.patch.object(st, "_pid_path", return_value=state_dir / "dumate_standalone.json"), \
+         mock.patch.object(st, "_pid_dir", side_effect=_fake_dir), \
          mock.patch.dict("os.environ", {"BUDDY_DUMATE_STANDALONE": "persist"}):
         res = st.spawn(res_root, login={"login_mode": "bce", "user_id": "u", "account_id": "a"})
         assert res["ok"] is True
-        # 落了 pid 文件
-        assert (state_dir / "dumate_standalone.json").is_file()
+        # 落了登记文件（文件名=owner pid，标 persistent）
+        rec = _fake_dir() / f"{os.getpid()}.json"
+        assert rec.is_file()
+        data = json.loads(rec.read_text(encoding="utf-8"))
+        assert data["pid"] == 99 and data["persistent"] is True
         st.shutdown_standalone()
 
     proc.terminate.assert_not_called()
-    # persist 不清 pid 文件（留给用户/launchd）
-    assert (state_dir / "dumate_standalone.json").is_file()
+    # persist 不清登记文件（留给用户/launchd；reap_orphans 也会跳过它）
+    assert (_fake_dir() / f"{os.getpid()}.json").is_file()
 
 
 # --- 状态提示与自动拉起一致 ---------------------------------------------------
@@ -331,3 +338,83 @@ def test_describe_state_hint_falls_back_when_standalone_disabled(tmp_path):
         info = discovery.describe_state()
 
     assert "请先打开" in info["hint"], f"兜底关闭时应回退旧提示: {info['hint']}"
+
+
+# --- 孤儿回收 -----------------------------------------------------------------
+
+
+def _write_record(d, *, owner: int, child: int, persistent: bool = False) -> Path:
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{owner}.json"
+    p.write_text(json.dumps({
+        "pid": child, "port": 1234, "persistent": persistent, "owner": owner,
+    }), encoding="utf-8")
+    return p
+
+
+def test_reap_orphans_kills_when_owner_dead(tmp_path):
+    """owner 已死 + 非 persist + 子进程确实还是 dumate-main-server → 回收。"""
+    d = tmp_path / "dumate-standalone"
+    _write_record(d, owner=0, child=4242)
+
+    with mock.patch.object(st, "_pid_dir", return_value=d), \
+         mock.patch.object(st, "_owner_alive", return_value=False), \
+         mock.patch.object(st, "_is_main_server", return_value=True), \
+         mock.patch.object(st, "_terminate_pid") as term:
+        n = st.reap_orphans()
+
+    assert n == 1
+    term.assert_called_once_with(4242)
+    # 登记文件被清（回收完不留残条）
+    assert not list(d.glob("*.json"))
+
+
+def test_reap_orphans_keeps_when_owner_alive(tmp_path):
+    """owner 还活着（并存代理实例）→ 不回收它拉起的实例。"""
+    d = tmp_path / "dumate-standalone"
+    _write_record(d, owner=777, child=4242)
+
+    with mock.patch.object(st, "_pid_dir", return_value=d), \
+         mock.patch.object(st, "_owner_alive", return_value=True), \
+         mock.patch.object(st, "_is_main_server", return_value=True), \
+         mock.patch.object(st, "_terminate_pid") as term:
+        n = st.reap_orphans()
+
+    assert n == 0
+    term.assert_not_called()
+
+
+def test_reap_orphans_skips_persistent(tmp_path):
+    """persist 条目：常驻语义，归用户/launchd 管，一律跳过。"""
+    d = tmp_path / "dumate-standalone"
+    _write_record(d, owner=0, child=4242, persistent=True)
+
+    with mock.patch.object(st, "_pid_dir", return_value=d), \
+         mock.patch.object(st, "_owner_alive", return_value=False), \
+         mock.patch.object(st, "_is_main_server", return_value=True), \
+         mock.patch.object(st, "_terminate_pid") as term:
+        n = st.reap_orphans()
+
+    assert n == 0
+    term.assert_not_called()
+    assert (d / "0.json").is_file()  # persist 的登记文件保留
+
+
+def test_reap_orphans_ignores_pid_reuse(tmp_path):
+    """登记里的 pid 已不再是 dumate-main-server（pid 复用）→ 不杀，别误伤无关进程。"""
+    d = tmp_path / "dumate-standalone"
+    _write_record(d, owner=0, child=4242)
+
+    with mock.patch.object(st, "_pid_dir", return_value=d), \
+         mock.patch.object(st, "_owner_alive", return_value=False), \
+         mock.patch.object(st, "_is_main_server", return_value=False), \
+         mock.patch.object(st, "_terminate_pid") as term:
+        n = st.reap_orphans()
+
+    assert n == 0
+    term.assert_not_called()
+
+
+def test_reap_orphans_noop_when_dir_missing(tmp_path):
+    with mock.patch.object(st, "_pid_dir", return_value=tmp_path / "nope"):
+        assert st.reap_orphans() == 0

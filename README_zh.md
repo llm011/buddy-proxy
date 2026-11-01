@@ -200,9 +200,11 @@ buddy start
 - **前置**：本机已安装百度搭子桌面端并登录百度云账号。**不再要求 App 处于运行中**
   （2026-11-01）：`discovery` 找不到运行中的实例时，代理会从 App 包内自己拉起一个独立的
   `dumate-main-server`——登录标识从 `auth.json` 现读、inapp key 自生成（仅本机回环），
-  所以关掉桌面端也能正常转发。拉起的实例是本代理会话的子进程、退出即回收；设
-  `BUDDY_DUMATE_STANDALONE=persist` 可让它常驻复用，设 `off` 则关闭兜底、恢复
-  「必须开着 App」的旧行为。`buddy login dumate` 只做状态自检
+  所以关掉桌面端也能正常转发。拉起的实例按 owner 进程登记
+  （`state_dir()/dumate-standalone/<owner>.json`），正常退出即回收；若代理被
+  `kill -9`，子进程本就成为孤儿，下次启动会自动回收 owner 已死的遗留实例。设
+  `BUDDY_DUMATE_STANDALONE=persist` 可让它常驻复用（不参与回收），设 `off` 则
+  关闭兜底、恢复「必须开着 App」的旧行为。`buddy login dumate` 只做状态自检
 - **模型**（2026-11 抓包 + 逐个实测）：`kimi-k3`、`qwen3.8-max`、
   `deepseek-v4.1-flash`、`deepseek-v4-pro`。App 的 `dm-auto-model/text.L0` 自动路由
   及其别名（`model-text` / `model-mm` / `model-gui-use` / `deepseek-v4.1-flash`）实测
