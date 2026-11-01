@@ -8,6 +8,29 @@ let MIX = null;        // 最近一次 /ui/api/model-mix 响应
 let MIX_QS = null;     // 该响应对应的查询串（相同则跳过，不重复请求）
 let MIX_SEQ = 0;       // 并发防抖：只有最后发起的请求结果生效
 let MIX_FOCUS = null;  // 当前聚焦的模型键 `provider/model`（null = 全部）
+// 展开状态（默认折叠）。存模块变量而不是 DOM 属性：整页每 30s 重建
+// innerHTML，挂 DOM 上的状态会被下一轮刷掉——用户刚展开、30 秒后自己收回去。
+// （与额度折叠 QUOTA_FOLD 同一套思路。）
+let MIX_FOLD_OPEN = false;
+
+// 把折叠态套到卡片上：头部常显（标题+副标题+箭头），`.mix-body` 收起。
+// renderModelMix 每次重渲都要调它——重渲不改 DOM 结构，但会让卡片 class 与
+// aria 状态保持一致（切页签/切范围后仍记得用户是展开还是收起）。
+function applyMixFold() {
+  const card = document.getElementById('log-mix');
+  if (!card) return;
+  card.classList.toggle('collapsed', !MIX_FOLD_OPEN);
+  const btn = document.getElementById('mix-toggle');
+  if (btn) {
+    btn.setAttribute('aria-expanded', MIX_FOLD_OPEN ? 'true' : 'false');
+    btn.textContent = MIX_FOLD_OPEN ? '▾' : '▸';
+  }
+}
+
+function toggleMixFold() {
+  MIX_FOLD_OPEN = !MIX_FOLD_OPEN;
+  applyMixFold();
+}
 
 // 饼图配色：catmull 风格的柔和色板，与图表卡片的深色底相容。
 // 通道色（pcolor）只用于请求趋势图——那里同一通道必须同色，而这里每个模型
@@ -116,6 +139,7 @@ function renderModelMix() {
     return;
   }
   setMixVisible(true);   // 切范围/筛选后模型变多了，要能重新露出来
+  applyMixFold();        // 保持用户上次的展开/收起状态（默认折叠）
   const focus = slices.some(s => s.key === MIX_FOCUS) ? MIX_FOCUS : null;
   MIX_FOCUS = focus;
 
@@ -231,7 +255,11 @@ async function loadModelMix(force) {
     MIX_BROKEN = gone;
     // 出错时要**强制重新露出卡片**：如果上一次是「只有一种模型」而隐藏了，
     // 现在接口挂了却把错误提示也一并隐藏，用户只会看到空白，比报错还困惑。
+    // 同理若用户此前把卡片收起了，错误提示在 .mix-body 里会被折叠藏掉——
+    // 隐式展开，把问题直接摆在面前（用户收起的是图，不是错误）。
     setMixVisible(true);
+    MIX_FOLD_OPEN = true;
+    applyMixFold();
     if (el) el.innerHTML = mixErrorHtml(e.message || '请求失败', gone ? 404 : null);
     // 副标题也要收尾：否则会一直挂着「加载中…」，看着像还在跑
     const subEl = document.getElementById('mix-sub');

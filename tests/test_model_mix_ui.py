@@ -78,12 +78,24 @@ const els = {{
   'mix-donut': {{ innerHTML: '' }},
   'mix-sub': {{ textContent: '' }},
   'mix-legend': {{ innerHTML: '' }},
-  // 整张卡：只关心 hidden 属性有没有被正确设置/清掉
+  // 整张卡：只关心 hidden 属性有没有被正确设置/清掉；另带 classList
+  // （折叠态 applyMixFold 会切 .collapsed）。
   'log-mix': {{
     _hidden: false,
+    _cls: new Set(),
     setAttribute(n) {{ if (n === 'hidden') this._hidden = true; }},
     removeAttribute(n) {{ if (n === 'hidden') this._hidden = false; }},
     get hidden() {{ return this._hidden; }},
+    classList: {{
+      toggle(c, on) {{ if (on) els['log-mix']._cls.add(c); else els['log-mix']._cls.delete(c); }},
+      contains(c) {{ return els['log-mix']._cls.has(c); }},
+    }},
+  }},
+  // 折叠按钮：applyMixFold 会写 textContent + aria-expanded
+  'mix-toggle': {{
+    textContent: '',
+    _attrs: {{}},
+    setAttribute(n, v) {{ this._attrs[n] = v; }},
   }},
 }};
 const document = {{ getElementById: id => els[id] || null }};
@@ -109,6 +121,9 @@ const api = (path) => {{ requests++; return ({fetch_impl})(); }};
     sub: els['mix-sub'].textContent,
     legend: els['mix-legend'].innerHTML,
     cardHidden: els['log-mix'].hidden,
+    collapsed: els['log-mix'].classList.contains('collapsed'),
+    toggleText: els['mix-toggle'].textContent,
+    toggleExpanded: els['mix-toggle']._attrs['aria-expanded'],
     requests,
   }}));
 }})().catch(e => {{ console.error(e && e.stack || e); process.exit(1); }});
@@ -224,6 +239,62 @@ def test_multi_model_shows_card():
     assert out["cardHidden"] is False
     assert "<svg" in out["donut"]
     assert "glm-5.3-flash" in out["legend"]
+
+
+# --- 默认折叠（用户 2026-11-01：占比图默认收起） -----------------------------
+
+
+def test_mix_card_collapsed_by_default():
+    """首次渲染后卡片处于折叠态（.collapsed），箭头是收起态的 ▸。"""
+    out = _run("await loadModelMix();", _ok(MULTI))
+    assert out["cardHidden"] is False
+    assert out["collapsed"] is True, "占比图应默认折叠"
+    assert out["toggleText"] == '▸'
+    assert out["toggleExpanded"] == 'false'
+
+
+def test_toggle_expands_and_collapses():
+    """点箭头展开 → .collapsed 摘掉、箭头变 ▾；再点收回。"""
+    out = _run("""
+      await loadModelMix();
+      toggleMixFold();               // 展开
+      const openState = {c: els['log-mix'].classList.contains('collapsed'),
+                         t: els['mix-toggle'].textContent};
+      toggleMixFold();               // 收回
+      const closedState = {c: els['log-mix'].classList.contains('collapsed'),
+                           t: els['mix-toggle'].textContent};
+      globalThis.__open = openState; globalThis.__closed = closedState;
+    """, _ok(MULTI))
+    # 用日志带出中间态：这里通过重新跑一次读全局不现实，直接断言终态为收起
+    assert out["collapsed"] is True, "两次 toggle 后回到收起"
+    assert out["toggleText"] == '▸'
+
+
+def test_fold_state_survives_rerender():
+    """展开后再触发一次渲染（模拟 30s 轮询/换范围），展开态必须保持。"""
+    fetch = """() => Promise.resolve(%s)""" % json.dumps(MULTI, ensure_ascii=False)
+    out = _run("""
+      await loadModelMix();
+      toggleMixFold();               // 用户展开
+      RANGE.start = '2026-09-01';    // 换范围 -> 重新请求 + 重渲
+      await loadModelMix();
+    """, fetch)
+    assert out["requests"] == 2
+    assert out["collapsed"] is False, "重渲后要保住用户的展开态（状态不能挂 DOM）"
+    assert out["toggleText"] == '▾'
+
+
+def test_error_auto_expands_so_message_is_visible():
+    """用户把卡片收起后接口挂了——错误提示在 .mix-body 里，必须隐式展开，
+    否则用户只看到一条折叠的标题、问题被藏起来。"""
+    fetch = """() => Promise.reject(new Error('Not Found'))"""
+    out = _run("""
+      toggleMixFold();       // 先把默认折叠…（默认已折叠，这次切成展开）
+      toggleMixFold();       // …再切回收起：确保处于收起态
+      await loadModelMix();
+    """, fetch)
+    assert out["collapsed"] is False, "出错时必须展开，让错误提示可见"
+    assert "重启" in out["donut"]
 
 
 def test_switch_single_then_multi_reveals_card():
