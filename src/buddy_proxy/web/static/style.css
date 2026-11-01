@@ -374,29 +374,68 @@
   .cal-head label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
   .cal-head input[type="time"] { background: var(--card2); border: 1px solid var(--line); color: var(--text);
                                  border-radius: 6px; padding: 3px 8px; font-size: 12.5px; }
-  /* 打卡行：左侧通道标识（色块 + 名字 + 活动档期）｜中间状态与下次时间｜右侧动作。
-     三列用 grid 而不是 flex：各行的 tag 数量不一样（trae 没有活动档期），
-     flex 一换行右边缘就对不齐——按钮会掉到第二行、各行参差（02:14 那版就是这样）。
-     minmax(0,1fr) 让中列可压缩，长活动名不会把按钮挤出卡片。
+  /* 打卡行：单列整行，每通道一行。四列 = ①通道标识 ｜ ②状态徽标/奖励 chip/逐账号
+     明细（可压缩的 1fr，内容靠左）｜ ③下次时间 ｜ ④动作。
+     ②③之间的空档是刻意的：按钮文案各行一致、宽度也就一致，③跟着④右对齐，
+     跨行扫下来右边缘是一条线。原先两列并排时每张卡只有 538px，②里的「状态 +
+     每日+X + 下次时间」挤不下就换行，行高在 29px / 58px 之间跳（02:14 那版
+     更糟：flex 换行把按钮挤到第二行、各行参差），所以这里用 grid 钉死列。
+     minmax(0,1fr) 让中列可压缩，长账号名/长活动名不会把按钮挤出卡片。
      行外层套 .pat-pkg 子卡（卡中卡，照 antigravity 面板），分隔靠子卡描边，
      行自身不再画底线。 */
   .benefit-row { display: grid; align-items: center; gap: 10px 14px;
-                 grid-template-columns: auto minmax(0, 1fr) auto; }
-  .ck-pkg { padding: 12px 14px; }
-  /* 多账号 per-account 明细（trae）：子卡内底部逐账号一行。缩进对齐通道名
-     （色块 9px + gap 9px），徽标复用 .br-state，失败原因跟在名字后。 */
-  .ck-accts { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line);
-              display: flex; flex-direction: column; gap: 5px; }
-  .ck-acct { display: flex; align-items: center; gap: 8px; min-width: 0;
-             padding-left: 18px; flex-wrap: wrap; }
-  .ck-acct-name { font-size: 11.5px; font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .br-id { display: flex; align-items: center; gap: 9px; min-width: 0; }
+                 grid-template-columns: auto minmax(0, 1fr) auto auto; }
+  .ck-pkg { padding: 10px 14px; }
+  /* 多账号逐账号明细：压成**同行**小胶囊（状态字形 + 名字，整颗按状态上色）。
+     另起一行会让带明细的卡高出不带的一截，两列并排时被拉到同高、空出一大片；
+     状态文案与失败原因都进 title（`.ck-pill` 的悬停提示），卡面只留名字。
+     名字过长时省略号收窄（上限 230px），把整行让给右边的按钮。 */
+  .ck-pills { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; }
+  .ck-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px;
+             padding: 1px 9px; border-radius: 999px; background: var(--bg);
+             border: 1px solid var(--line); color: var(--muted); max-width: 230px; }
+  /* 状态不能只有颜色：胶囊头一个字形成「状态字形」（✓ 已签到 / ＋ 可领 /
+     ✕ 失败·查询失败 / · 无活动），配色照旧。原来只有一颗纯色圆点，色盲、
+     黑白截图、放大看都读不出「哪个号没签上」——而这正是这张卡的全部意义
+     （2026-11-01 反馈）。读屏那一路再由 .sr-only 的文字状态兜底。 */
+  .ck-pill::before { content: '·'; flex: none; font-size: 12px; line-height: 1;
+                     opacity: .9; }
+  .ck-pill.ok::before { content: '✓'; }
+  .ck-pill.pending::before { content: '＋'; }
+  .ck-pill.bad::before { content: '✕'; }
+  /* 只给读屏用的文字：视觉上收成 1px 不占位，但能被读出来（状态字形解决的是
+     「看得见但分不清颜色」，听的人要的是真文字） */
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+             overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .ck-pill-name { font-weight: 600; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ck-pill.ok { color: var(--ok); border-color: rgba(62,207,142,.35);
+                background: rgba(62,207,142,.09); }
+  .ck-pill.pending { color: var(--accent); border-color: rgba(79,140,255,.4);
+                     background: rgba(79,140,255,.1); }
+  .ck-pill.bad { color: var(--err); border-color: rgba(255,107,107,.35);
+                 background: rgba(255,107,107,.09); }
+  /* 胶囊里的 ✎ 改名按钮：跟胶囊等高。⚠ 必须带 .benefit-row 压过下面那条
+     `.benefit-row button`（同为 0,2,1 且它写在后面），否则默认的 5px 15px
+     内边距会让胶囊变成 36px 高、把整行撑起来 */
+  .benefit-row .ck-pill button { padding: 0 3px; font-size: 10.5px; line-height: 1.6;
+                                 border-color: transparent; background: transparent;
+                                 opacity: .55; }
+  .benefit-row .ck-pill button:hover { opacity: 1; }
+  /* 四列显式点名归属。只靠自动排布的话，某个通道算不出下次时间时
+     `nextTimeHtml()` 不渲染 `.br-next`，`.br-act` 会顺势补进第三轨（那个
+     minmax(0,1fr)），右边缘比别的行少一个 gap——2026-11-01 用最小页面加载
+     本文件实测：有下次时间的行按钮右边缘 1068、没有的 1054，正好差 14px。
+     钉死轨道后有没有下次时间，按钮都在第 4 轨，跨行右边缘一条线。
+     ⚠ 窄卡分支（下面 @container 640px）用 grid-area 简写覆盖这四条，它写在
+     后面、特异性相同，所以折行布局不受影响。 */
+  .br-id { grid-column: 1; display: flex; align-items: center; gap: 9px; min-width: 0; }
   /* 通道色块：用 pcolor() 上色，与日历 tooltip / 图表里的同通道颜色一致 */
   .br-dot { flex: none; width: 9px; height: 9px; border-radius: 3px; }
   .br-name { font-weight: 600; font-size: 13px; letter-spacing: .2px;
              font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-  .br-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
-  .br-act { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .br-meta { grid-column: 2; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+  .br-act { grid-column: 4; display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
   .benefit-row button { padding: 5px 15px; font-size: 12.5px; white-space: nowrap; }
   /* 签到态徽标：比 .tag 更醒目一点，带状态点 */
   .br-state { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px;
@@ -416,7 +455,7 @@
              background: rgba(255,255,255,.035); color: var(--muted);
              border: 1px solid var(--line); white-space: nowrap; }
   /* 「下次时间」：招牌信息，给它一块独立的底 */
-  .br-next { display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
+  .br-next { grid-column: 3; display: inline-flex; align-items: center; gap: 7px; font-size: 12px;
              padding: 3px 11px; border-radius: 999px; white-space: nowrap;
              background: var(--card2); border: 1px solid var(--line); color: var(--text); }
   .br-next .lbl { color: var(--muted); font-size: 11px; }
@@ -432,16 +471,11 @@
   /* 打卡行的排布按**卡片自身宽度**决定，不看视口——原来两栏布局时这张卡只有
      约 560px，而单栏时反而是整宽。视口宽 → 卡窄，media query 的直觉正好
      是反的，所以用容器查询：窄时折成两行（通道 + 按钮一行，状态/时间另起
-     一行），宽时三列一行排开，两种情况按钮都贴右对齐。 */
+     一行），宽时四列一行排开，两种情况按钮都贴右对齐。 */
   .rows-card { container-type: inline-size; }
-  /* 签到行容器：全宽卡里两列平摊（左右各一列），行与行之间留缝（子卡不共
-     边界，缝太小会贴成一片）。同样用容器查询按**卡片实际宽度**判断——窄屏
-     收单栏时卡片还是整宽、仍能放两列；真窄到连两列都挤不下（≤720px）再退
-     回单列。 */
-  #checkin-rows { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 22px; }
-  @container (max-width: 720px) {
-    #checkin-rows { grid-template-columns: 1fr; }
-  }
+  /* 签到行容器：单列整行——每通道一张子卡，行与行之间留缝（子卡不共边界，
+     缝太小会贴成一片）。 */
+  #checkin-rows { display: grid; grid-template-columns: 1fr; gap: 8px; }
   @container (max-width: 640px) {
     .benefit-row { grid-template-columns: minmax(0, 1fr) auto; }
     /* 显式定位：只写 .br-meta{grid-column:1/-1} 的话，它跨行占掉第二行，
@@ -449,10 +483,12 @@
        按钮掉到 top 79），得把「通道 + 按钮」钉在同一行、状态另起一行。
        ⚠ 按钮**只占第 1 行**（不要写 1/2/3/3 跨两行去居中）：br-meta 横跨整行
        时，跨行的按钮会与它在第 2 行右半区重叠，把「22 小时 18 分后」压在按钮
-       底下。两者必须错开行。 */
+       底下。两者必须错开行。
+       折行后「下次时间」跟着状态那一行走（第 2 行右列），不再单独占第三行。 */
     .br-id  { grid-area: 1 / 1; }
     .br-act { grid-area: 1 / 2; }
-    .br-meta { grid-area: 2 / 1 / 2 / -1; }
+    .br-meta { grid-area: 2 / 1; min-width: 0; }
+    .br-next { grid-area: 2 / 2; }
     /* 单列回退时按钮行贴右对齐还靠 .br-act 自身 justify-content，不动 */
   }
   .grow { flex: 1; }

@@ -154,8 +154,10 @@
          登录状态变了导航也要跟着变）。 -->
     <nav class="sidenav" id="benefits-sidenav" aria-label="额度页通道导航"></nav>
     <h2>打卡 &amp; 额度 <span class="sub">自动打卡 · 最近 35 天 · 按通道额度</span></h2>
-    <!-- 各通道签到：全宽卡（横跨两栏）。里面的行左右两列平摊，卡不够宽时
-         自动退回单列——都用容器查询按卡片实际宽度判断，见 style.css -->
+    <!-- 各通道签到：全宽卡（横跨两栏）。每通道一行、单列排布——行内四列
+         （标识 ｜ 状态/奖励/逐账号胶囊 ｜ 下次时间 ｜ 按钮），下次时间与按钮
+         成组靠右好跨行对齐；卡窄到 640px 以下折成两行。都按卡片实际宽度
+         判断（容器查询），见 style.css -->
     <div class="chart-card rows-card" style="margin-bottom:12px">
       <div class="benefit-head">
         <span class="bh-title">各通道签到</span>

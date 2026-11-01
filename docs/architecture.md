@@ -426,7 +426,12 @@ either state. Three invariants matter because getting them wrong is silent:
   aggregated badge (`checked_in`/`claimable`) cannot say *which* account
   failed, so `checkin_status` (multi-account) and `checkin_claim` attach an
   `accounts` list (`index`/`name`/state, or `error: 查询失败` for a failed
-  probe) and the check-in card renders one line per account; the claim toast
+  probe) and the check-in card folds each account into an inline pill on the
+  channel's own row (state shown by the pill's tint, the 已签到 / 可领 / 失败 /
+  查询失败 wording and any reason in its tooltip) rather than stacking a second
+  line per account — the stacking made broken-down cards taller than plain ones
+  and, in the old two-column grid, stretched the short neighbour with dead space
+  (fixed 2026-11-01 together with the single-column check-in card rework); the claim toast
   reports each account's outcome too. Qoder also queries each same-region
   account because their campaign lists are independent; it aggregates whether
   any account can claim and exposes the per-account state. Manual Qoder claims

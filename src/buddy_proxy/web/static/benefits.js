@@ -228,34 +228,52 @@ function renderBenefits(opts) {
     // activity_name（上游 campaign key，如 act-20260930-551）不再展示：对用户
     // 纯粹是噪音，用户反馈「看得更迷糊」；字段后端仍下发，排查日志时有用。
     const meta = chips.map(t => `<span class="br-chip">${esc(t)}</span>`).join('');
-    // 多账号通道的 per-account 明细（Trae/Qoder 下发的 accounts 列表）：一行一账号，
-    // 徽标 + 失败原因。整体聚合态说不清「哪个号没签上」，用户反馈过这个盲点。
+    // 多账号通道的 per-account 明细（Trae/Qoder 下发的 accounts 列表）：整体聚合态
+    // 说不清「哪个号没签上」，所以逐号都要露出名字——但**同行**压成小胶囊，不再
+    // 另起一行。另起一行会让带明细的卡比不带的高出一截，原先两列并排时同行的两张
+    // 卡被拉到同高、内容少的那张空一大块（2026-11-01 实测 doubao 空 88px、dumate
+    // 60px、qoder 42px，卡本身才 129px 高）。状态由胶囊配色 + 状态字形（CSS
+    // 的 .ck-pill::before：✓ 已签到 / ＋ 可领 / ✕ 失败）双重表达，长句子
+    // （如「有活动，但当前没有可领取的签到奖励」）不铺在卡面上。
     const acctsHtml = (c.accounts || []).map(a => {
-      const s = a.error ? `<span class="br-state bad" title="${esc(a.error)}">查询失败</span>`
-        : a.unavailable ? `<span class="br-state" title="${esc(a.message || '')}">暂无可领奖励</span>`
-        : a.inactive ? '<span class="br-state">无活动</span>'
-        : a.ok === false ? '<span class="br-state bad">失败</span>'
-        : (a.claimable ? '<span class="br-state pending">可领</span>'
-          : '<span class="br-state ok">已签到</span>');
-      const extra = a.message ? `<span class="muted" style="font-size:11px">${esc(a.message)}</span>` : '';
-      return `<div class="ck-acct">${s}<span class="ck-acct-name">${esc(a.name || ('#' + a.index))}</span>` +
-        `${a.id ? acctRenameButton(p.id, a) : ''}${extra}</div>`;
+      // 颜色分支与下面的文案分支同序——这是原来 br-state 的类映射原样搬过来的，
+      // 只把「哪段文案」换成「整颗胶囊什么色」
+      const cls = a.error ? 'bad'
+        : a.unavailable ? ''
+        : a.inactive ? ''
+        : a.ok === false ? 'bad'
+        : a.claimable ? 'pending' : 'ok';
+      const label = a.error ? '查询失败'
+        : a.unavailable ? '暂无可领奖励'
+        : a.inactive ? '无活动'
+        : a.ok === false ? '失败'
+        : a.claimable ? '可领' : '已签到';
+      const name = a.name || ('#' + a.index);
+      // 名字也进 title：胶囊里名字超 230px 会被省略号收掉，不带上名字就再没有
+      // 地方能看全（2026-11-01 反馈）。状态文字另外用 .sr-only 交给读屏——
+      // 字形解决「看得见但分不清颜色」，听的人只能靠这句。
+      const tip = [name, label, a.error || a.message].filter(Boolean).join(' · ');
+      return `<span class="ck-pill${cls ? ' ' + cls : ''}" title="${esc(tip)}">` +
+        `<span class="sr-only">${esc(label)}</span>` +
+        `<span class="ck-pill-name">${esc(name)}</span>` +
+        `${a.id ? acctRenameButton(p.id, a) : ''}</span>`;
     }).join('');
-    // 照 antigravity 面板的卡中卡（pat-pkg）包一层：两列平摊时裸行 + 底线
-    // 会把左右两列糊成一片，子卡（亮底 + 描边 + 圆角）分隔一眼能看出来
+    // 照 antigravity 面板的卡中卡（pat-pkg）包一层：每通道一张子卡，横向分隔一眼
+    // 能看出来；行内四列（标识 ｜ 状态/奖励/账号 ｜ 下次时间 ｜ 按钮），下次时间
+    // 与按钮成组靠右，各行的右边缘因此能对齐。
     return `<div class="pat-pkg ck-pkg">
       <div class="benefit-row">
         <div class="br-id">
           <i class="br-dot" style="background:${pcolor(p.id)}"></i>
           <span class="br-name">${esc(p.id)}</span>
         </div>
-        <div class="br-meta">${badge}${meta}${nextTimeHtml(c)}</div>
+        <div class="br-meta">${badge}${meta}${acctsHtml ? `<span class="ck-pills">${acctsHtml}</span>` : ''}</div>
+        ${nextTimeHtml(c)}
         <div class="br-act">
           <button onclick="refreshCheckin('${esc(p.id)}', this)" title="绕过缓存，真打上游重查该通道签到状态">强刷</button>
           <button class="primary" ${(unknown || c.done_today || c.inactive || c.unavailable) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)" ${unknown ? 'title="状态未知，先点「强刷」重查"' : ''}>立即打卡</button>
         </div>
       </div>
-      ${acctsHtml ? `<div class="ck-accts">${acctsHtml}</div>` : ''}
     </div>`;
   }).join('') : '<div class="empty" style="grid-column:1/-1;padding:14px 0">当前没有支持打卡的通道</div>';
   // 数据换了新的一批 data-next-ts，重算一次并决定要不要起 ticker
