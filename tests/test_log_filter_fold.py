@@ -35,7 +35,8 @@ FOLD_RE = re.compile(
 )
 
 
-def _run(body: str, *, scroll_height: int = 51, limit: str = "24px") -> dict:
+def _run(body: str, *, scroll_height: int = 51, limit: str = "24px",
+         range_models: str = "[]") -> dict:
     text = APP_JS.read_text(encoding="utf-8")
     m = FOLD_RE.search(text)
     assert m, "app_state.js 里找不到筛选折叠切片（renderLogFilters…toggleLogFilterFold）"
@@ -57,7 +58,7 @@ const document = {{
 }};
 globalThis.document = document;
 globalThis.getComputedStyle = () => ({{ getPropertyValue: () => '{limit}' }});
-const RANGE_MODELS = [];
+const RANGE_MODELS = {range_models};
 let RANGE_CLIENTS = [];
 const pcolor = () => '#000';
 const esc = s => String(s);
@@ -149,3 +150,21 @@ renderLogFilters();        // 重建
 """)
     assert out["openFlag"] is True, "重渲后展开标志要保留"
     assert out["open"] is True, "重渲后 open 类要保留"
+
+
+def test_empty_model_name_is_not_a_filter_chip():
+    """dumate 的账号级合成桶 model 留空 → 不能渲染成一个空白「模型」筛选项。
+
+    2026-11-01：总览积分图为了补上 dumate，后端往 model_daily 加了
+    ``{provider:'dumate', model:''}`` 的合成桶；RANGE_MODELS 直接摊平出模型名，
+    空串会变成列表里一个点不动的空按钮。回归钉。
+    """
+    out = _run(
+        "renderLogFilters();",
+        range_models="[{provider:'dumate', model:''}, {provider:'dumate', model:'kimi-k3'}]")
+    assert ">dumate<" in out["html"]           # 通道按钮在
+    assert ">kimi-k3<" in out["html"]           # 真模型按钮在
+    # 没有空的模型按钮：模型组里除了 kimi-k3 不该再多一个空值按钮
+    import re
+    model_btns = re.findall(r'data-kind="model" data-val="([^"]*)"', out["html"])
+    assert model_btns == ["kimi-k3"], f"模型筛选项应只有真模型名: {model_btns}"

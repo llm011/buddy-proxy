@@ -203,3 +203,65 @@ console.log(JSON.stringify({daily: element('chart-credits-daily').innerHTML,
     assert "暂无积分消耗数据" in data["daily"]
     assert "暂无积分消耗数据" in data["providers"]
     assert "0.00 积分" not in data["providers"]
+
+
+def test_dumate_synthetic_provider_bucket_is_charted_as_real():
+    """dumate 的账号级每日消耗（后端补的合成桶，model 空、count=0）要画进图里。
+
+    2026-11-01 用户报障：dumate 的逐条 usage 不带积分，被过滤掉了。后端
+    ``_inject_dumate_credits`` 按天补合成桶后，这里确认总览图真的把它当「上游
+    实扣」画出来——按渠道有 dumate 一根条、按天有它那段堆叠。
+    """
+    data = _run_chart("""
+STATS = {model_daily: [
+  {date: '2026-10-01', provider: 'dumate', model: '', count: 0, credit_sum: 120.5, credit_est_sum: 0},
+  {date: '2026-10-02', provider: 'dumate', model: '', count: 0, credit_sum: 80.0, credit_est_sum: 0},
+]};
+renderCreditsBars();
+const bars = creditsByProvider();
+renderCreditsDaily();
+const daily = CREDITS_VIEW.map(d => ({date: d.date, total: d.total}));
+console.log(JSON.stringify({bars, daily, dailyHtml: element('chart-credits-daily').innerHTML}));
+""")
+    assert data["bars"] == [{"provider": "dumate", "real": 200.5, "est": 0}]
+    assert data["daily"] == [{"date": "2026-10-01", "total": 120.5},
+                             {"date": "2026-10-02", "total": 80.0}]
+    assert "120.50" in data["dailyHtml"] and "80.00" in data["dailyHtml"]
+
+
+def test_dumate_scope_note_appears_in_both_tooltips():
+    """dumate 是账号级口径（含直接在 App 里的用量）——两张图的 tooltip 都要点明，
+    否则用户会把 27000+ 误读成「本代理转发了这么多」。"""
+    data = _run_chart("""
+STATS = {model_daily: [
+  {date: '2026-10-01', provider: 'dumate', model: '', count: 0, credit_sum: 100, credit_est_sum: 0},
+]};
+renderCreditsBars();
+renderCreditsDaily();
+listeners.get('chart-credits-providers:mousemove')({target: {closest: () => ({
+  dataset: {ci: '0'}, getBoundingClientRect: () => ({}),
+})}});
+const providerTip = TOOLTIP;
+listeners.get('chart-credits-daily:mousemove')({target: {closest: () => ({
+  dataset: {i: '0'}, getBoundingClientRect: () => ({}),
+})}});
+const dailyTip = TOOLTIP;
+console.log(JSON.stringify({providerTip, dailyTip}));
+""")
+    assert "账号级口径" in data["providerTip"] and "App" in data["providerTip"]
+    assert "账号级口径" in data["dailyTip"]
+
+
+def test_non_dumate_tooltip_has_no_dumate_note():
+    """别的通道不该背上 dumate 的口径说明。"""
+    data = _run_chart("""
+STATS = {model_daily: [
+  {date: '2026-10-01', provider: 'qoder', model: 'a', credit_sum: 5, credit_est_sum: 0},
+]};
+renderCreditsBars();
+listeners.get('chart-credits-providers:mousemove')({target: {closest: () => ({
+  dataset: {ci: '0'}, getBoundingClientRect: () => ({}),
+})}});
+console.log(JSON.stringify({tip: TOOLTIP}));
+""")
+    assert "账号级口径" not in data["tip"]

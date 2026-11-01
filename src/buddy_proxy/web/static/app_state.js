@@ -116,8 +116,11 @@ let LOG_FILTERS_OPEN = false;
 function renderLogFilters() {
   const el = document.getElementById('log-filters');
   if (!el) return;
-  const provs = [...new Set(RANGE_MODELS.map(m => m.provider))];
-  const models = [...new Set(RANGE_MODELS.map(m => m.model))];
+  // 过滤空串：后端会给 dumate 补「账号级每日消耗」的合成桶（model 留空、
+  // count=0，见 queries._inject_dumate_credits），空模型名不是合法筛选项——
+  // 放进去就是列表里一个空白按钮。
+  const provs = [...new Set(RANGE_MODELS.map(m => m.provider).filter(Boolean))];
+  const models = [...new Set(RANGE_MODELS.map(m => m.model).filter(Boolean))];
   const clients = RANGE_CLIENTS;
   const btn = (kind, val, inner) =>
     `<button class="rb-btn${LOG_FILTERS[kind].has(val) ? ' active' : ''}" data-kind="${kind}" data-val="${esc(val)}">${inner}</button>`;
@@ -178,11 +181,17 @@ document.getElementById('log-filters').addEventListener('click', ev => {
 let RANGE_MODELS = [];
 // 客户端筛选候选（按出现次数降序），由 /ui/api/logs 响应带回（见 renderRecent）。
 let RANGE_CLIENTS = [];
+// 只统计**真实有请求**的桶：count=0 的桶是「该渠道当天的账号级积分」，不是某个
+// 模型的请求——前端为补上 dumate 的积分图，后端会往 model_daily 里塞
+// {provider:'dumate', model:'', count:0} 的合成桶（见 queries._inject_dumate_credits）。
+// 让它们进 RANGE_MODELS 会污染所有按流量口径的视图：耗时图/型号占比/Top10 里凭空
+// 多出一个空模型名行、筛选区多一个空白按钮（2026-11-01 回归）。积分图直接读原始
+// model_daily，不受这里影响。
 function modelsInRange() {
   const md = (STATS && STATS.model_daily) || [];
   const per = new Map();
   for (const b of md) {
-    if (!inRange(b.date)) continue;
+    if (!inRange(b.date) || !b.count) continue;
     const k = b.provider + '/' + b.model;
     let e = per.get(k);
     if (!e) {

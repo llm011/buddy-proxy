@@ -20,6 +20,11 @@
 - codex 多账号状态（`CODEX_STATE_DIR`，index.json + 每账号 cred 文件）同理：
   登录/导入/刷新/quota/转发测试都会落盘。注意它**不**读本机 ~/.codex/auth.json
   （那份只在显式导入时读），所以这里只需要隔离我们自己的目录。
+- dumate 的 App 用户数据目录（`DUMATE_USER_DATA_DIR`，auth.json 与 .cookie-key
+  所在）。默认是真实的 `~/Library/Application Support/qianfan-desktop-app`，
+  而 standalone spawn 与总览的账号级账单扫描都会读它——本机装了 App 时，不隔离
+  就会读真实登录态、甚至打上游（`/ui/api/stats` 里的 billing 刷新就是这样被
+  test_stats_empty 意外触发的）。
 
 个别测试想自定路径时在测试体内再 setenv 覆盖即可（autouse fixture 先跑，
 测试体里的 monkeypatch.setenv 后生效）。
@@ -50,3 +55,8 @@ def _isolate_gemini_state_paths(tmp_path, monkeypatch):
                        str(tmp_path / "codebuddy_legacy_session.json"))
     # codex 多账号状态（见模块 docstring）
     monkeypatch.setenv("CODEX_STATE_DIR", str(tmp_path / "codex"))
+    # dumate：App 用户数据目录（auth.json / .cookie-key 所在）。默认路径是真实
+    # 的 App 目录 `~/Library/Application Support/qianfan-desktop-app`——本机装了
+    # App 时，任何触达 dumate 凭据的用例（如 /ui/api/stats 里的账号级账单扫描、
+    # standalone spawn）都会读真实登录态、甚至打上游。必须隔离。
+    monkeypatch.setenv("DUMATE_USER_DATA_DIR", str(tmp_path / "dumate-app"))

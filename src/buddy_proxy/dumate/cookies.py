@@ -182,6 +182,15 @@ def aes256_gcm_decrypt(key: bytes, iv: bytes, ct: bytes, tag: bytes,
 # ---------------------------------------------------------------------------
 
 def _user_data_dir() -> str:
+    """DuMate App 的用户数据目录（``DUMATE_USER_DATA_DIR`` 可覆盖；测试隔离点）。
+
+    与其它通道的 ``*_STATE_DIR`` 同款：测试必须能把 auth.json/.cookie-key 指到
+    tmp，否则任何触达 dumate 凭据的用例都会读真实 App 目录、甚至打上游（本机
+    装了 App 时）。生产不带这个环境变量，照常走 App 的默认位置。
+    """
+    env = os.environ.get("DUMATE_USER_DATA_DIR", "").strip()
+    if env:
+        return env
     return os.path.expanduser(
         "~/Library/Application Support/qianfan-desktop-app"
     )

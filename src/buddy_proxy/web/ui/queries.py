@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import importlib
 import time
 from typing import Any
@@ -55,6 +56,7 @@ async def ui_stats(request: Request):
     if metrics is None:
         return {"models": [], "daily": [], "model_daily": [], "recent": [], "summary": {}, "credits_map": {}}
     snap = metrics.snapshot(days=30)
+    _inject_dumate_credits(snap)
 
     def _credits_tag(v: Any) -> Any:
         """倍率统一成展示字符串：数字（如 qoder 的 price_factor 0.2）补「x」前缀，
@@ -130,6 +132,7 @@ async def ui_logs(request: Request, start: str = "", end: str = "",
     result = await asyncio.to_thread(
         metrics.query_logs, start or None, end or None, page, page_size, provs, mds, cls)
     await _attach_account_names(result.get("rows") or [])
+    await _attach_dumate_credits(result.get("rows") or [])
     return result
 
 
@@ -202,6 +205,108 @@ async def _attach_account_names(rows: list[dict[str, Any]]) -> None:
         name = nmap.get(str(r.get("account") or ""))
         if name:
             r["account_name"] = name
+
+
+def _claim_dumate_credits(
+    dumate_rows: list[dict[str, Any]],
+    records: list[tuple[float, float]],
+) -> None:
+    """把 dumate 的真实逐笔消耗认领给日志行（就地写 ``credit``）。
+
+    dumate 的 chat 响应 usage 里**没有**单次积分（实测确认），但账号的
+    ``records/usage`` 有真实逐笔扣减（秒级时间戳）。两者按时间戳最近邻 1:1
+    认领，容差内才写——认错一笔就是给别人安了个数字，宁可留空。命中率实测
+    ~87%（中位差 1.2s）。
+
+    ``records`` 里的 ``points`` 是带符号值（消耗为负），取绝对值。只在容差内
+    认领；超容差不写。
+    """
+    if not records:
+        return
+    rts = [t for t, _ in records]
+    taken = [False] * len(records)
+    tol = 5.0
+    for r in sorted(dumate_rows, key=lambda r: r.get("ts") or 0):
+        if r.get("credit") is not None:
+            continue
+        ts = r.get("ts")
+        if ts is None:
+            continue
+        i = bisect.bisect_left(rts, ts)
+        best_j = -1
+        best_d = tol + 1
+        for j in range(max(0, i - 6), min(len(records), i + 6)):
+            if taken[j]:
+                continue
+            d = abs(rts[j] - ts)
+            if d < best_d:
+                best_d, best_j = d, j
+        if 0 <= best_j and best_d <= tol:
+            taken[best_j] = True
+            r["credit"] = abs(records[best_j][1])   # 实扣：上游原始逐笔值
+            r["credit_source"] = "dumate_usage_records"
+
+
+async def _attach_dumate_credits(rows: list[dict[str, Any]]) -> None:
+    """给 dumate 日志行补 ``credit``——读账号真实消耗流水（逐笔）按时间戳认领。
+
+    只对当前页里的 dumate 行动手（通常几十条），上游只问**这一页时间跨度**的
+    流水，不会为了翻一页把 30 天全拉一遍。上游不可达 / 未登录时静默跳过，
+    行照常显示「—」，与其它不报单次消耗的通道一致。任何异常都不该拖垮日志页。
+    """
+    dumate_rows = [r for r in rows if r.get("provider") == "dumate"]
+    if not dumate_rows:
+        return
+    ts = [r.get("ts") for r in dumate_rows if isinstance(r.get("ts"), (int, float))]
+    if not ts:
+        return
+    try:
+        from buddy_proxy.dumate import checkin
+
+        records = await asyncio.to_thread(
+            checkin.fetch_usage_records_cached, int(min(ts)) - 10, int(max(ts)) + 10)
+    except Exception:
+        return
+    if not records:
+        return
+    _claim_dumate_credits(dumate_rows, records)
+
+
+def _inject_dumate_credits(snap: dict[str, Any]) -> None:
+    """把 dumate 的账号级每日消耗并进 ``model_daily``，让总览积分图能看到它。
+
+    dumate 的 chat ``usage`` 不带单次积分（实测），逐条指标恒为 ``None``，所以
+    ``credit_sum`` 一直是 0、被 ``chart_credits.js`` 整条过滤掉（2026-11-01
+    用户报障）。这里把 ``dumate.billing`` 里按天查到的**账号级真实扣减**补成合成
+    桶——一天一条，``model`` 留空（就是「这一天、这个渠道」的量，不是某个模型的）。
+
+    **只补没有已有桶的日期**：真某天指标里带上了 dumate 的积分（上游哪天开始在
+    usage 里回传），那张图上已经有这条，别叠加成双倍。补出来的桶 ``count=0``，
+    对耗时 / Top10 / 型号占比（都按 count 排序或无 count 即不出）无影响。
+
+    上游未登录 / 不可达时 ``get_day_totals`` 返回空，这里什么都不补——图里没
+    dumate，与其它不报消耗的通道一致，不会错误地画成 0。
+    """
+    try:
+        from buddy_proxy.dumate import billing
+        totals = billing.get_day_totals()
+    except Exception:  # noqa: BLE001 - 上游问题不该打挂 /ui/api/stats
+        return
+    if not totals:
+        return
+    md: list[dict[str, Any]] = snap.get("model_daily") or []
+    # 已经在指标里带 dumate 积分的日期（credit_sum>0），跳过别重复
+    have = {b["date"] for b in md
+            if b.get("provider") == "dumate" and (b.get("credit_sum") or 0)}
+    for d, pts in totals.items():
+        if not pts or d in have:
+            continue
+        md.append({
+            "date": d, "provider": "dumate", "model": "",
+            "count": 0, "errors": 0, "duration_ms_sum": 0, "duration_ms_max": 0,
+            "prompt_tokens": 0, "completion_tokens": 0,
+            "credit_sum": float(pts), "credit_est_sum": 0.0, "last_ts": 0.0,
+        })
 
 
 @app.get("/ui/api/benefits")

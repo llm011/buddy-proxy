@@ -156,6 +156,49 @@ no aliases; its local profile list resolves an id to `PAT #N（id）`, matching
 the quota-card title. Rows that cannot be resolved (pre-change trae rows,
 deleted accounts) pass through untouched.
 
+**DuMate's per-request credit is reconstructed, not reported.** Its chat
+`usage` has tokens only (verified against a live response: no `credit` /
+`credits` field ever), so the log row's Credit cell would sit at `—`. The
+account does publish a genuine per-entry consumption bill
+(`GET /api/dumate/points/records/usage` on the bceConsole channel,
+second-level `createdAt` + signed `pointsChange`), so `web/ui/queries.
+_attach_dumate_credits` matches each dumate row on the current page to the
+nearest bill entry by timestamp (greedy 1:1, ≤5 s, absolute value taken as
+the deduction; measured ~87% of rows match at a 1.2 s median gap) and writes
+`credit` + `credit_source='dumate_usage_records'`, which the cell renders
+with its own tooltip. Only the page's own `[min ts − 10, max ts + 10]` span
+is queried (`dumate.checkin.fetch_usage_records_cached` — 30 s per-range
+cache, 24 h clamp because the upstream windows at ~24 h, and the cache
+reuses a same-start/superset window since the bill is append-only), so
+paging never drags 30 days each time. Upstream down / not logged in is
+silent: the cell falls back to `—`, same as any channel that reports no
+per-request credit. Unmatched rows are left blank on purpose — an
+off-by-one claim would put a number on the wrong request.
+
+**The overview credit charts read the same bill, aggregated per day.**
+`chart_credits.js` builds both charts from `STATS.model_daily[*].credit_sum`
+/ `credit_est_sum`, so a channel whose rows never carry `credit` shows up
+nowhere — which is exactly why DuMate was missing from them (its per-request
+`usage` has no credit). `dumate.billing.get_day_totals` fills that gap with
+the account-level bill: it queries `records/usage` **one day at a time**
+(measured: wide windows are unreliable — a 1-day and a 10-day window both
+returned the identical total, a 14-day and a 25-day window both returned a
+second identical (larger) total that was still missing the standalone
+10-19 day, and only the 30-day window pulled in 10-06/10-05 while still
+dropping 10-02; only the per-day query is exact, and the days sum to the
+full history), marks each finished day final so a re-scan only re-queries today,
+and runs the scan on a daemon thread with an 8-way pool (serial was ~16 s of
+TLS handshakes; the first open of the overview now sees data in ~2 s).
+`web/ui/queries._inject_dumate_credits` turns the `{date: points}` map into
+synthetic `(date, "dumate", model="")` buckets appended to `model_daily` —
+`count=0`, so latency / Top-10 / model-mix (all count-driven) are untouched,
+and credit charts pick them up as solid "upstream" bars. The bucket is
+skipped for any day metrics already carries a non-zero dumate `credit_sum`,
+so if the upstream ever starts reporting per-request credit the two never
+double-count. Numbers are **account-level**: they include what the account
+spent in the DuMate app directly, not just what this proxy forwarded; single
+account, so there is no per-account split to do.
+
 **qoder's model catalog is per-account.** The upstream model list is bucketed
 by account (a risk-controlled account may only see the Qwen3.8 pair while a
 full account sees all 14, and the state drifts), so `qoder.refresh_models`

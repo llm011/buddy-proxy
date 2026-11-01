@@ -3,6 +3,10 @@
 // （本地估算，trae/zcode 等不给单次消耗的通道）。两档分开展示：混加会把真扣
 // 和估的揉成一个数，看不出可信度。只报了倍率、没有单次消耗的通道（kimi 等）
 // 不在图里——倍率×次数不是消耗，画了会误导。
+// dumate 的逐条 usage 不带积分，但它是**账号级真实扣减**：后端
+// `_inject_dumate_credits` 按天把账号账单补成合成桶（model 留空、count=0）
+// 并进 model_daily，所以这里照常当「上游实扣」画——图里看到的就是账号真实
+// 消耗（含用户直接在 App 里用的量，不止经本代理转发的）。
 let CREDITS_VIEW = [];
 function creditsByProvider() {
   const per = new Map();  // provider -> {real, est}
@@ -112,6 +116,7 @@ document.getElementById('chart-credits-providers').addEventListener('mousemove',
   const lines = [`<div class="t-date"><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i>${esc(r.provider)} · ${rangeLabel()}</div>`];
   if (r.real) lines.push(`<div class="t-p">上游实扣<b style="margin-left:auto;padding-left:12px">${fmtCredit(r.real)} 积分</b></div>`);
   if (r.est) lines.push(`<div class="t-p">本地估算<b style="margin-left:auto;padding-left:12px">≈${fmtCredit(r.est)} 积分</b></div>`);
+  if (r.provider === 'dumate') lines.push(`<div class="t-p muted">账号级口径：含直接在 App 里的用量，不止经本代理转发的</div>`);
   lines.push(`<div class="t-p muted">不含只报倍率、无单次消耗的通道</div>`);
   showChartTip(lines.join(''), row.getBoundingClientRect());
 });
@@ -130,8 +135,11 @@ document.getElementById('chart-credits-daily').addEventListener('mousemove', e =
       if (v.est) rows.push(`<div class="t-p">${label} · 本地估算<b style="margin-left:auto;padding-left:12px">≈${fmtCredit(v.est)} 积分</b></div>`);
       return rows;
     }).join('');
+  const dumateNote = d.by_provider.has('dumate')
+    ? '<div class="t-p muted">dumate 为账号级口径（含直接在 App 里的用量）</div>' : '';
   showChartTip(
     `<div class="t-date">${esc(d.date)} · 上游实扣与本地估算分项</div>` +
+    dumateNote +
     (lines || '<div class="t-p muted">无消耗</div>'),
     hz.getBoundingClientRect());
 });
