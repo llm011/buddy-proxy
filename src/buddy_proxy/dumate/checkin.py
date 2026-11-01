@@ -266,6 +266,63 @@ def fetch_usage_records(
     }
 
 
+# 消耗流水缓存：请求日志页每次翻页/筛选都会问一次 [窗口] 的逐笔消耗，而上游
+# 这份流水只增不改、且（实测）每次要 0.5~1.5s，不缓存翻个页就把上游打肿了。
+# 按区间缓存，短 TTL 之内命中同一页直接复用；跨天调用传的 end_ts 在变，但
+# 泛型键会把「只多了一天」也当未命中——据此再叠一条「同起点、缓存更晚结束」
+# 的复用（新数据在末尾，旧结果仍覆盖前段）。只缓存成功结果。
+_USAGE_CACHE: dict[tuple[int, int], tuple[float, list[tuple[float, float]]]] = {}
+_USAGE_TTL_S = 30.0
+_USAGE_MAX_SPAN_S = 86400  # 上游把单次查询窗口截到 ~24h（实测 2 天窗也只回一天）
+
+
+def fetch_usage_records_cached(start_ts: int, end_ts: int) -> list[tuple[float, float]] | None:
+    """取 [start_ts, end_ts] 内**逐笔**消耗流水 ``[(ts, points)]``（带符号）。
+
+    ``points`` 是各笔的带符号扣减（``pointsChange``，消耗为负）；调用方按需取
+    绝对值。命中 TTL 缓存直接返回；上游不可达 / 未登录返回 None（调用方据此
+    静默跳过，不显示这一列）。窗口超 24h 时只取**最近**一段——上游本就截窗，
+    早于 24h 的部分拿多少漏多少，明确边界好过静默给半截。
+    """
+    end_ts = int(end_ts)
+    start_ts = int(start_ts)
+    if start_ts >= end_ts:
+        return []
+    if end_ts - start_ts > _USAGE_MAX_SPAN_S:
+        start_ts = end_ts - _USAGE_MAX_SPAN_S
+    now = time.monotonic()
+    key = (start_ts, end_ts)
+    hit = _USAGE_CACHE.get(key)
+    if hit and now - hit[0] < _USAGE_TTL_S:
+        return hit[1]
+    # 同起点、缓存窗口更晚结束的旧结果仍覆盖 [start, end]（流水只增不改），复用
+    for (cs, ce), (ts, recs) in _USAGE_CACHE.items():
+        if cs == start_ts and ce >= end_ts and now - ts < _USAGE_TTL_S:
+            return [r for r in recs if r[0] <= end_ts]
+    out: list[tuple[float, float]] = []
+    t = start_ts
+    while t < end_ts:
+        e = min(t + _USAGE_MAX_SPAN_S, end_ts)
+        page = 1
+        while True:
+            rec = fetch_usage_records(start_ts=t, end_ts=e, page=page, limit=2000,
+                                      timeout=6.0)
+            if rec is None:
+                return None
+            out += [(r["ts"], r["points"]) for r in rec["records"] if r["points"]]
+            if not rec["records"] or page * 2000 >= rec["total_count"]:
+                break
+            page += 1
+        t = e
+    out.sort()
+    _USAGE_CACHE[key] = (now, out)
+    # 缓存别无限长：只留最近的若干个区间，日志页跨天翻页不会把它撑爆
+    if len(_USAGE_CACHE) > 32:
+        for k in sorted(_USAGE_CACHE, key=lambda k: _USAGE_CACHE[k][0])[:-32]:
+            _USAGE_CACHE.pop(k, None)
+    return out
+
+
 def claim_checkin() -> dict[str, Any] | None:
     """领取今日签到；成功返回状态 dict，失败 / 未登录返回 None。"""
     auth = resolve_bceconsole_auth()

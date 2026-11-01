@@ -266,6 +266,8 @@ async function renderRecent() {
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
       <td class="num mono">${r.credit != null ? (r.credit_estimated
           ? `<b style="color:var(--ok)" title="本地估算，非上游实扣：trae 已实测模型按官方账单校准的输入/输出单价×token（随倍率面板调价自动缩放；会话首请求实测偏高约 2~3 倍），未实测模型按倍率粗估；zcode 按 GLM Coding Plan 官方抵扣系数（含时段折扣）">≈${creditTxt}</b>`
+          : r.credit_source === 'dumate_usage_records'
+          ? `<b style="color:var(--ok)" title="账号真实消耗流水：dumate 的 chat 响应不带单次积分，这里按时间戳把账号逐笔消耗账单（records/usage）认领到本行（最近邻 ≤5s）——是真实扣减、不是估算；时间戳对不上的行显示 —">${creditTxt}</b>`
           : `<b style="color:var(--ok)" title="上游实扣积分（原始值 ${esc(r.credit)}）">${creditTxt}</b>`)
         : (creditTxt ? `<span class="tag" title="仅倍率参考（×基准单价），非本次实际消耗；${esc(r.provider)} 不提供单次消耗">${esc(creditTxt)}</span>` : '<span class="muted" title="该上游未提供单次积分消耗">—</span>')}</td>
       <td>${bad ? `<span class="tag bad" title="${esc(r.error || '')}">${r.status || 'ERR'}</span>` : '<span class="tag ok">OK</span>'}</td>

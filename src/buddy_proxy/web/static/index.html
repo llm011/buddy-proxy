@@ -92,7 +92,7 @@
     <div class="log-filters" id="log-filters"></div>
     <div class="chart-card" style="padding: 4px 8px;">
       <table>
-        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>客户端</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回）；≈ 绿字 = 按 token 估算（trae 已实测模型：输入/输出单价×token，官方账单校准；其余模型：(输入+输出)/1M × 100 × 模型倍率）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
+        <thead><tr><th>时间</th><th>通道</th><th>模型</th><th>客户端</th><th class="num">TTFT</th><th class="num">总耗时</th><th class="num">Tokens</th><th class="num" title="绿字 = 上游实扣积分（CodeBuddy 在 usage 里直接返回；dumate 按时间戳认领账号逐笔消耗账单，也是真实扣减）；≈ 绿字 = 按 token 估算（trae 已实测模型：输入/输出单价×token，官方账单校准；其余模型：(输入+输出)/1M × 100 × 模型倍率）；灰标签 = 该模型积分倍率（非实际消耗）；zcode/豆包不提供单次消耗">积分</th><th>状态</th></tr></thead>
         <tbody id="recent"><tr><td colspan="9" class="empty">加载中…</td></tr></tbody>
       </table>
       <div class="pager" id="recent-pager"></div>
