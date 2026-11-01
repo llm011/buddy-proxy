@@ -197,18 +197,28 @@ buddy start
   `127.0.0.1:<port>`），以你的百度云登录态直连 `dumate-svc.baidu.com` 网关。
   无需扫码、无需配 token——本地鉴权 key（`X-Dumate-Inapp-Key`）从运行中的
   App 进程环境自动抽取，每次 App 重启自动轮换
-- **前置**：本机已安装百度搭子桌面端并登录百度云账号，且 App 正在运行。
-  重启电脑 / 退出 App 后重新打开即可，`buddy login dumate` 只做状态自检
-- **模型**（2026-10 抓包 + 逐个实测）：`dm-auto-model/text.L0`（自动路由，
-  App 默认）、`kimi-k3`、`qwen3.8-max`。上下文 192k / 输出 128k，支持
+- **前置**：本机已安装百度搭子桌面端并登录百度云账号。**不再要求 App 处于运行中**
+  （2026-11-01）：`discovery` 找不到运行中的实例时，代理会从 App 包内自己拉起一个独立的
+  `dumate-main-server`——登录标识从 `auth.json` 现读、inapp key 自生成（仅本机回环），
+  所以关掉桌面端也能正常转发。拉起的实例按 owner 进程登记
+  （`state_dir()/dumate-standalone/<owner>.json`），正常退出即回收；若代理被
+  `kill -9`，子进程本就成为孤儿，下次启动会自动回收 owner 已死的遗留实例。设
+  `BUDDY_DUMATE_STANDALONE=persist` 可让它常驻复用（不参与回收），设 `off` 则
+  关闭兜底、恢复「必须开着 App」的旧行为。`buddy login dumate` 只做状态自检
+- **模型**（2026-11 抓包 + 逐个实测）：`kimi-k3`、`qwen3.8-max`、
+  `deepseek-v4.1-flash`、`deepseek-v4-pro`。App 的 `dm-auto-model/text.L0` 自动路由
+  及其别名（`model-text` / `model-mm` / `model-gui-use` / `deepseek-v4.1-flash`）实测
+  都路由到同一个 `deepseek-v4.1-flash-low-latency` 底座，故合并成一条——真实路由目标
+  用响应头 `x-dumate-gw-realmodel` 核对。上下文 192k / 输出 128k，支持
   function calling，system prompt 完全可控且如实计费（实测 9.6k 字符 system
-  精确计入 prompt_tokens）。deepseek / glm-5.3 / 海外模型（claude/gpt/gemini）
-  未对百度账号开放
+  精确计入 prompt_tokens）。海外模型（claude/gpt/gemini）未对百度账号开放
 - **签到**：自动打卡循环每日领取（`POST /api/dumate/points/loginBonus`，
   bceConsole 通道）；管理页显示累计签到积分
 - **额度**：走 App 自己的 bceConsole 接口拿数字积分（`GET /api/dumate/points/quota_overview`，
   注意是下划线版；camelCase 的 `quotaOverview` 永远 500）：订阅总额/已用/剩余 +
-  各积分包明细（含到期日）。未登录时退回本地代理的布尔态 `/api/dumate/points/remaining`
+  各积分包明细（含到期日）。标题行「剩 X / Y」取第一条有数的——即「订阅积分」汇总行，
+  它本身已是下面各包的合计（`head_only`），因此**不给** `sum_items`（把它和各包一起相加
+  会翻倍）。未登录时退回本地代理的布尔态 `/api/dumate/points/remaining`
 - **消耗流水**：真实逐笔扣减走 `GET /api/dumate/points/records/usage`
   （`startAt`/`endAt` 是**秒级**时间戳，毫秒会 500）。面板副标题显示「今日消耗
   N 分（M 次）」；`GET /ui/api/dumate/usage-records?days=N&page=&limit=` 可查原始流水

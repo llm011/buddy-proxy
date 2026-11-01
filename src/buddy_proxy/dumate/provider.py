@@ -24,6 +24,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, AsyncIterator, Sequence
@@ -133,6 +134,16 @@ class DumateProvider(BaseProvider):
         """
         ep = discovery.discover()
         if ep is None:
+            # 发现不到不代表不可用：只要本机装了 App 且已登录，``forward`` 会
+            # 自己拉起独立实例（用户 2026-11-01：不该必须开着桌面端）。此刻
+            # **不能**在同步 ensure_auth 里阻塞 spawn，所以放行，把真正的拉起
+            # 与失败提示留给 async 的 forward。只有「确实无从拉起」（未装 /
+            # 未登录）才在这里 401。
+            from . import standalone
+
+            if (standalone.is_enabled() and standalone.standalone_supported()
+                    and standalone.read_login_context().get("user_id")):
+                return
             state = discovery.describe_state()
             raise HTTPException(
                 status_code=401,
@@ -164,7 +175,28 @@ class DumateProvider(BaseProvider):
 
         ep = discovery.discover()
         if ep is None:
-            # App 可能刚被关掉：清掉残留端点，给客户端可操作提示
+            # App 没在跑 → 兜底自己拉起一个独立的 dumate-main-server（用户
+            # 2026-11-01：不该为了跑代理而必须开着桌面端）。spawn 会阻塞约
+            # 1s（等 /health），但这里已是 async 上下文、且转发本就是长任务，
+            # 放这儿安全（ensure_auth 是同步调用、不能阻塞，故留在这儿）。
+            from . import standalone
+
+            if standalone.is_enabled() and standalone.standalone_supported():
+                spawned = await asyncio.to_thread(standalone.ensure_running)
+                if spawned and not spawned.get("ok"):
+                    self._last_ep = None
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"error": {
+                            "message": "dumate 独立代理拉起失败：" + spawned.get("reason", ""),
+                            "type": "upstream_unavailable",
+                        }},
+                    )
+                # spawned 为 None 表示「发现到已有实例可复用」（可能是并发请求
+                # 先我们一步拉起的）——无论哪种都重新 discover 一次拿到端点。
+                ep = discovery.discover()
+        if ep is None:
+            # 仍发现不到（本机未装 App / 未登录 / 拉起失败）：清残留端点给提示
             self._last_ep = None
             state = discovery.describe_state()
             raise HTTPException(
@@ -275,9 +307,13 @@ class DumateProvider(BaseProvider):
             total = q["total_points"]
             used = q["used_points"]
             # 「订阅积分」= quota_overview 的 totalPoints（subscription 付费主池 +
-            # incremental 赠送包的合计），留在明细首位当账号卡的总结行（用户
-            # 2026-10-05：卡片上要有「剩 X / Y · 已用 Z%」总结，与 antigravity 账号卡
-            # 同款；下面各池明细跟在后面，口径与总结行对得上）。
+            # incremental 赠送包的**合计**）。它本身**就是下面各包的总和**，所以
+            # 标 ``head_only``：只供标题行「剩 X / Y」的数字，不进明细列表、也
+            # 不参与前端相加（Trae「总额度」同款处理）。
+            #
+            # 早先没标 head_only 又声明了 sum_items，前端把这条汇总行和它下面的
+            # 每个包**一起相加**——标题行直接翻倍（用户 2026-11-01 报障：界面
+            # 33,037 而线上只有 16,286，恰好差一倍）。
             items = [{
                 "label": "订阅积分",
                 "used": round(used, 2),
@@ -287,6 +323,7 @@ class DumateProvider(BaseProvider):
                 "reset_ts": None,
                 "expire_ts": None,
                 "unit": "points",
+                "head_only": True,
             }]
             # 展开各池明细：subscription 付费主池（plan_pro 等，按 packageType 命名）
             # + incremental 赠送包（login_bonus 等，按 source 命名）。都有过期时间。
@@ -309,11 +346,12 @@ class DumateProvider(BaseProvider):
                     "expire_ts": exp,
                     "unit": "points",
                 })
-            # items 是并存的份额（订阅主池 + 各赠送包，同一积分量纲），合计即
-            # 账号当前真实总积分，所以显式声明 sum_items 让前端标题行相加——
-            # 不声明的话前端走「取第一条有数的」，一旦首条缺失/变成说明条，
-            # 标题行就整个消失（用户 2026-11-01 报障「没有展示总额」）。
-            return {"items": items, "level": "百度搭子", "sum_items": True}
+            # **不给 sum_items**（与 Trae 同款）：汇总行已是各包合计，前端标题行
+            # 走非 sum_items 分支「取第一条有数的」正好取到它，不加下面各包。
+            # 早先同时给了 sum_items，前端（和 benefits.py 的低额度横幅）sum_items
+            # 分支把汇总行 + 每个包一起相加，标题行直接翻倍（用户 2026-11-01 报障：
+            # 界面 33,037 而线上只有 16,286，差一倍）。
+            return {"items": items, "level": "百度搭子"}
 
         # 兜底：本地代理布尔态 → 百分制（保持原有「至少显示有/无」的行为）
         ep = discovery.discover()

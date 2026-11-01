@@ -52,14 +52,18 @@ function renderDumatePanel() {
   const delBtn = acctDeleteButton('dumate', acct, '清除本地累计签到缓存');
   // 单账号没有 ▲▼ 顺位（moveBtns 传空串），↻ + ✕ 两个。
   const rowBtns = acctRowButtons('dumate', '', delBtn);
-  // 合计行：订阅积分/订阅套餐/各积分包是并存的份额（后端 sum_items 声明可合计），
-  // 与 qoder/codebuddy 同款 chip，放在账号名下面。
+  // 合计行：取 items[0]「订阅积分」——它本身已是各积分包的合计（head_only）。
+  // **不能传 sum_items**：那样会把汇总行和它下面的每个包一起相加，标题翻倍
+  // （用户 2026-11-01 报障 33,037 vs 线上 16,286）。传非合计模式，quotaHeadSum
+  // 走「取第一条有数的」正好取到汇总行。
   const items = dm.quota.items || [];
-  const headSum = quotaHeadSum({items, sum_items: true});
+  const headSum = quotaHeadSum({items});
   // 未就绪说明（未安装/未运行/检测中）：替换积分明细位置，整块 muted 提示。
+  // 优先用后端 status 的 hint（单一事实源）——它区分「装了但没跑（会自动拉起，
+  // 无需手动开）」与「没装」，前端硬编码会把自动拉起说成「请先打开桌面端」。
   const notReadyHint = st && st.installed === false
     ? '未检测到 DuMate.app。请先安装并登录百度搭子（千帆桌面端）。'
-    : st && st.installed ? '已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。'
+    : st && st.installed ? (st.hint || '已安装 DuMate.app，但当前未在运行。')
     : '正在检测本地代理…';
 
   panel.innerHTML = `

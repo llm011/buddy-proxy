@@ -689,7 +689,17 @@ def main():
     logger.info("Endpoints: /ui /v1/models /v1/chat/completions /v1/responses /v1/messages /health")
 
     # 启动 uvicorn
-    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    try:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+    finally:
+        # 会话内（非 persist）兜底拉起的 dumate-main-server 随本进程退出而清理，
+        # 不留孤儿 Go 进程占着端口/凭据（BUDDY_DUMATE_STANDALONE=persist 时不清理）。
+        try:
+            from buddy_proxy.dumate import standalone
+
+            standalone.shutdown_standalone()
+        except Exception:  # noqa: BLE001 - 关停清理绝不该反过来让进程退不出
+            logger.debug("dumate standalone shutdown failed", exc_info=True)
 
 
 if __name__ == "__main__":
