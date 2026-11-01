@@ -58,9 +58,12 @@
   /* 折叠：默认只露一行（--lffold-max ≈ 一行按钮高），溢出裁掉并在底下给
      「更多筛选 ▾」；点开铺满自然高度。用高度裁剪而非「超出 N 个就藏」——
      同一批按钮在窄屏/长模型名下高度不同，按条数裁会裁错。 */
-  /* 22px = 实测单行按钮高度（rb-btn padding 3+3 + 12.5px 字 + 1+1 边框）。
-     收起态正好露出一行；--lffold-max 是唯一数字来源，JS 读它判是否裁。 */
-  .lf-clip { --lffold-max: 22px; max-height: var(--lffold-max); overflow: hidden;
+  /* 单行高 23.8px：一行里最高的不是按钮（.rb-btn 实测 22px = 3+3 padding +
+     1+1 边框 + ~14px 内容），而是组名胶囊 .lf-label——11.5px 字 × 1.55 行高
+     ≈ 17.8 + 2×2 padding + 1×2 边框 = 23.8，略高于按钮，才决定这一行的高度。
+     按按钮的 22px 裁会把第一行切掉 ~2px（被底部渐隐盖着不易察觉，差额再大就
+     露出半截字）。--lffold-max 是唯一数字来源，JS 读它判是否裁。 */
+  .lf-clip { --lffold-max: 24px; max-height: var(--lffold-max); overflow: hidden;
              position: relative; transition: max-height .15s; }
   .lf-clip.open { max-height: none; }
   /* 收起且被裁时，底部渐隐暗示「下面还有」。用 mask-image 而不是叠一层

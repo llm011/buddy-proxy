@@ -35,7 +35,7 @@ FOLD_RE = re.compile(
 )
 
 
-def _run(body: str, *, scroll_height: int = 51, limit: str = "22px") -> dict:
+def _run(body: str, *, scroll_height: int = 51, limit: str = "24px") -> dict:
     text = APP_JS.read_text(encoding="utf-8")
     m = FOLD_RE.search(text)
     assert m, "app_state.js 里找不到筛选折叠切片（renderLogFilters…toggleLogFilterFold）"
@@ -97,10 +97,19 @@ def test_content_taller_than_one_line_is_clipped_with_button():
 
 
 def test_content_within_one_line_not_clipped():
-    """内容不超过一行（scrollHeight 20 ≤ 22）→ 不裁、不显示按钮（假按钮没意义）。"""
+    """内容不超过一行（scrollHeight 20 ≤ 24）→ 不裁、不显示按钮（假按钮没意义）。"""
     out = _run("renderLogFilters();", scroll_height=20)
     assert out["clipped"] is False
     assert out["moreHidden"] is True
+
+
+def test_single_row_at_real_height_24_is_not_clipped():
+    """单行的**真实**高度恰是 24px（组名胶囊撑的，见 style.css 的 --lffold-max
+    注释），不能被判成「超过一行」而裁掉。这是回归钉：早先 limit 写成按钮的
+    22px，比真实单行矮 2px，于是单行也被裁、底下还多出一个点了没用的假按钮。"""
+    out = _run("renderLogFilters();", scroll_height=24)
+    assert out["clipped"] is False, "单行真实高度 24 不该被裁"
+    assert out["moreHidden"] is True, "没被裁就不该露「更多筛选」按钮"
 
 
 def test_toggle_expands_then_collapses():
