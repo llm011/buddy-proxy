@@ -156,3 +156,13 @@ def test_inject_survives_billing_exception(monkeypatch):
                    "count": 1, "credit_sum": 0.0, "credit_est_sum": 0.0}])
     queries._inject_dumate_credits(snap)   # 不抛
     assert len(snap["model_daily"]) == 1
+
+def test_refresh_is_clean_noop_without_login():
+    """隔离目录里没有 auth.json/.cookie-key → 逐日查询一律返回 None，不触网、缓存空。
+
+    回归本 PR 暴露出的隐患：/ui/api/stats 现在会触发账号级账单扫描，若 dumate
+    的 App 用户目录没被隔离，本机装了 App 时测试就会读真实登录态、打上游。
+    """
+    billing.reset_cache()
+    billing._refresh()          # 用真 fetch_usage_records；隔离目录无凭据 → 全 None
+    assert billing.get_day_totals() == {}
