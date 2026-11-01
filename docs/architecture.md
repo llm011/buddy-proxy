@@ -181,10 +181,12 @@ off-by-one claim would put a number on the wrong request.
 nowhere — which is exactly why DuMate was missing from them (its per-request
 `usage` has no credit). `dumate.billing.get_day_totals` fills that gap with
 the account-level bill: it queries `records/usage` **one day at a time**
-(measured: wide windows are unreliable — `[now-24h, now]` and
-`[now-14d, now]` returned the identical total, dropping earlier standalone
-days; only the per-day query is exact, and the days sum to the full
-history), marks each finished day final so a re-scan only re-queries today,
+(measured: wide windows are unreliable — a 1-day and a 10-day window both
+returned the identical total, a 14-day and a 25-day window both returned a
+second identical (larger) total that was still missing the standalone
+10-19 day, and only the 30-day window pulled in 10-06/10-05 while still
+dropping 10-02; only the per-day query is exact, and the days sum to the
+full history), marks each finished day final so a re-scan only re-queries today,
 and runs the scan on a daemon thread with an 8-way pool (serial was ~16 s of
 TLS handshakes; the first open of the overview now sees data in ~2 s).
 `web/ui/queries._inject_dumate_credits` turns the `{date: points}` map into
