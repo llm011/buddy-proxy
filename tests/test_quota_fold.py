@@ -33,6 +33,9 @@ PANELS_JS = [STATIC / name for name in (
     "benefits_trae.js", "benefits_codebuddy.js", "benefits_kimi.js",
     "benefits_codex.js",
 )]
+# DuMate 面板（benefits_dumate.js）单列：它有一条独一份的 status 驱动自重建，
+# 额度明细也走 quotaItemsHtml，一并进接线检查。
+DUMATE_JS = STATIC / "benefits_dumate.js"
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑前端 JS（CI 有，本机可选）"
@@ -78,8 +81,6 @@ globalThis.mkBox = (key, scrollHeight, spentCount, actCount) => {
     },
     _cls: cls,
     querySelector: sel => sel === '.qspent' ? spent : null,
-    // 浮钮（.qfold-float）是兄弟元素，按 ``parentElement.children`` 扫。
-    // 默认没有 children → 等价于「没渲染浮钮」的旧形状；要测浮钮用 mkFloat。
     parentElement: {},
     _spent: spent,
   };
@@ -92,20 +93,6 @@ globalThis.mkBox = (key, scrollHeight, spentCount, actCount) => {
   box.nextElementSibling = btn;
   globalThis.__boxes.push(box);
   return {box, btn};
-};
-
-// 给 box 挂一枚视口浮钮（兄弟元素），返回它。key 可显式传「带引号的危险名」
-// 来验证属性选择器那条老路会炸、兄弟扫描这条路不会。浮钮藏不藏由
-// syncQuotaFold 按 ``box.scrollHeight``（即 mkBox 的第一个参数）与展开视口
-// 上限（``--qfold-max`` 的 2 倍 + 30）比较得出，不需要单独传高度。
-globalThis.mkFloat = (box, key) => {
-  const el = {
-    dataset: {qfold: key === undefined ? box.dataset.qfold : key},
-    hidden: true, textContent: '',
-    classList: {contains: c => c === 'qmore' || c === 'qfold-float'},
-  };
-  box.parentElement = {children: [box, el]};
-  return el;
 };
 
 globalThis.document = {
@@ -328,108 +315,40 @@ console.log(JSON.stringify({
     assert _last(out) == {"adjacent": True}, out
 
 
-def test_fold_buttons_have_wellformed_attrs():
-    """两枚按钮（主钮 + 视口浮钮）的属性都必须**拼得完整**。
+def test_fold_button_is_the_only_button():
+    """整组只有**一枚**按钮：主钮。不做第二枚浮钮。
 
-    回归：``quotaMoreButton`` 加第三个参数 ``attrs`` 时，浮钮那一处调用漏改，
-    生成出 ``class="qmore qfold-float" data-act="" ...""`` 这种半截标签——浏览器
-    解析出的属性串位，且按钮被渲染成全宽（用户 2026-11-01 截图：一条通栏的
-    「展开 1 项已用完」压在其它条目上）。这里盯住：qmore 恰好两枚、都带
-    data-qfold、都不含 ``undefined`` / 空属性名残留。
+    2026-10-31 曾加过一枚视口浮钮（绝对定位，想接住被 ``overflow-y:auto``
+    推出滚动视口的主钮），它和主钮同文案、同状态。连出三次同一类事故——收起
+    态两枚「展开」(2026-11-01 首图) → 浮钮包含块退化铺成整页通栏(第二图) →
+    展开态两枚「收起」(2026-11-01 第三图)。为了根除，浮钮整个去掉：独一的
+    按钮不可能再出现「两枚」。这里盯住数量恒为 1、属性拼得完整、带 data-qfold。
     """
     out = _run("""
 const html = quotaItemsHtml(%s, 'mimo');
 const btns = html.match(/<button[^>]*>/g) || [];
 console.log(JSON.stringify({
   n: btns.length,
-  floats: btns.filter(b => b.includes('qfold-float')).length,
   allHaveKey: btns.every(b => /data-qfold="mimo"/.test(b)),
   clean: btns.every(b => !/undefined|=""/.test(b)),
   handlers: btns.every(b => b.includes('onclick="quotaFoldToggle(this)"')),
 }));
 """ % _js([_item("周窗口", 80.0, 100), _item("5 小时窗口", 0.0, 100)]))
-    assert _last(out) == {"n": 2, "floats": 1, "allHaveKey": True,
+    assert _last(out) == {"n": 1, "allHaveKey": True,
                           "clean": True, "handlers": True}, out
 
 
-def test_float_button_hidden_when_collapsed():
-    """收起态浮钮必须藏起来——它是「展开后接住被推出滚动视口的主钮」的，
-    收起态没有滚动区，露出来就是第二枚与主钮同文案的按钮。
+def test_quota_fold_has_no_float_artifacts():
+    """折叠逻辑里不能再留 qfold-float 的蛛丝马迹（按钮/查找/校准全清）。
 
-    回归：早期把同一个 ``show`` 套给两枚按钮，收起态渲染出上下两个
-    「展开全部 N 项」（用户 2026-11-01 截图）。
+    去掉浮钮时最容易漏掉的是 syncQuotaFold 里那段「按兄弟扫浮钮」——留着
+    它不报错、也找不到浮钮，白算一遍还占着一条「浮钮存在过」的暗线。这里
+    直接锁死源码里不再出现 qfold-float / mkFloat 依赖。
     """
-    out = _run("""
-const {box, btn} = mkBox('trae', 900, 12);
-const floatBtn = mkFloat(box);
-syncQuotaFold();
-console.log(JSON.stringify({
-  mainShown: btn.hidden === false,
-  floatHidden: floatBtn.hidden,
-}));
-""")
-    assert _last(out) == {"mainShown": True, "floatHidden": True}, out
-
-
-def test_float_button_shown_only_when_expanded_and_overflows():
-    """只有「展开 且 内容确实高出滚动视口」时才露浮钮（接住被滚出去的主钮）。"""
-    out = _run("""
-// 超视口：展开后浮钮出现，文案跟主钮（"收起 ▴"）
-const a = mkBox('trae', 900, 12);
-const fa = mkFloat(a.box);
-// 未超视口：展开后浮钮仍藏（主钮自己就够用）
-const b = mkBox('qoder', 250, 12);
-const fb = mkFloat(b.box);
-QUOTA_FOLD.open['trae'] = true;
-QUOTA_FOLD.open['qoder'] = true;
-syncQuotaFold();
-console.log(JSON.stringify({
-  overflowsFloatHidden: fa.hidden, overflowsFloatText: fa.textContent,
-  fitsFloatHidden: fb.hidden, fitsMainText: b.btn.textContent,
-}));
-""")
-    assert _last(out) == {"overflowsFloatHidden": False,
-                          "overflowsFloatText": "收起 ▴",
-                          "fitsFloatHidden": True,
-                          "fitsMainText": "收起 ▴"}, out
-
-
-def test_float_lookup_survives_hostile_group_name():
-    """分组名含引号/空格时仍能找到浮钮——**不许**回落成属性选择器。
-
-    key 取自额度 label 的账号分组名，也就是用户可自由 rename 的显示名。
-    老写法 ``querySelector(`.qfold-float[data-qfold="${key}"]`)`` 在这种名字上
-    抛 SyntaxError，异常掀掉整个 forEach，一屏所有按钮一起失联。
-    """
-    out = _run("""
-const hostile = 'qoder #1 · "我的" 号';
-const {box, btn} = mkBox(hostile, 900, 12);
-const floatBtn = mkFloat(box);
-QUOTA_FOLD.open[hostile] = true;
-syncQuotaFold();
-console.log(JSON.stringify({
-  found: floatBtn.hidden === false,
-  mainStillAlive: btn.hidden === false,
-  text: floatBtn.textContent,
-}));
-""")
-    assert _last(out) == {"found": True, "mainStillAlive": True,
-                          "text": "收起 ▴"}, out
-
-
-def test_float_lookup_ignores_sibling_with_other_key():
-    """兄弟里另一组的浮钮不会被误认（同容器多组时要按 key 对上号）。"""
-    out = _run("""
-const a = mkBox('grp-a', 900, 12);
-const foreign = mkFloat(a.box, 'grp-b');   // 挂在 a 的容器里，但 key 不是 a
-QUOTA_FOLD.open['grp-a'] = true;
-syncQuotaFold();
-console.log(JSON.stringify({
-  foreignUntouched: foreign.hidden === true,
-  mainShown: a.btn.hidden === false,
-}));
-""")
-    assert _last(out) == {"foreignUntouched": True, "mainShown": True}, out
+    text = BENEFITS_JS.read_text(encoding="utf-8")
+    assert "qfold-float" not in text, "benefits_quota.js 还留着 qfold-float"
+    style = (STATIC / "style.css").read_text(encoding="utf-8")
+    assert "qfold-float" not in style, "style.css 还留着 .qfold-float 规则"
 
 
 # ---------------------------------------------------------------------------
@@ -583,3 +502,24 @@ def test_render_benefits_syncs_after_rebuild():
     body = text[text.index("function renderBenefits(opts)"):]
     body = body[:body.index("\n}\n")]
     assert "syncQuotaFold()" in body, "renderBenefits 没调 syncQuotaFold"
+
+
+def test_dumate_self_rerender_recalibrates_fold():
+    """DuMate 面板重渲自己后必须补一次 syncQuotaFold。
+
+    它有一条别处没有的 status 驱动自重建：``loadDumateStatus`` 拉到本机就绪态
+    **变化**后会在 await 回调里再调一次 ``renderDumatePanel()`` 换整块 DOM
+    （圆点/版本/已登录）。renderBenefits 末尾那次 syncQuotaFold 早已跑完、看不到
+    这次重渲后的高度，而这条路径又不经 ``acctLoad``（那里尾部有校准）——于是
+    重渲出来的 .qbody 停在模板原样：未裁切、按钮 hidden。Dumate 明细 31 条
+    （29 条有余额）全铺开且没有「收起」按钮（用户 2026-11-01 报障）。
+
+    断言 **重渲调用之后** 紧跟着一次校准；只查「文件里有 syncQuotaFold」不够
+    ——acctLoad 那条路径已经贡献了调用，漏的正是这条。
+    """
+    src = DUMATE_JS.read_text(encoding="utf-8")
+    body = src[src.index("async function loadDumateStatus()"):]
+    call = body.index("renderDumatePanel();")
+    after = body[call:call + 800]
+    assert "syncQuotaFold()" in after, \
+        "DuMate status 驱动重渲后没补 syncQuotaFold——重渲出的 .qbody 不会裁切、按钮不露"

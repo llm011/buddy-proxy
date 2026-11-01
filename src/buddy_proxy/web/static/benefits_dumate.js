@@ -99,6 +99,13 @@ async function loadDumateStatus() {
     // ——renderDumatePanel 尾部会调本函数，无条件重渲会自己套自己死循环。
     if (r && r.ready && JSON.stringify(r) !== JSON.stringify(prev)) {
       renderDumatePanel();
+      // 重渲换了整块 DOM（.qbody 高度随明细条数变），校准必须跟着走一次：
+      // renderBenefits 末尾那次 syncQuotaFold 跑在本函数 await 之前，看不到
+      // 重渲后的高度。不补这一步，这条路径出来的 .qbody 保持模板里「未裁切 +
+      // 按钮 hidden」的原样——Dumate 明细 31 条全铺开、也没有「收起」按钮
+      // （用户 2026-11-01 报障）。别的面板的异步重渲都包在 acctLoad 里、尾部带
+      // 校准，只有这条 status 驱动的自重建漏了。（antigravity/kimi 同款）
+      syncQuotaFold();
     }
   } catch (e) {
     DUMATE_STATE.status = null;  // 静默：下轮 30s 自动重试
