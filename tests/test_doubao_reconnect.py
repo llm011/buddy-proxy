@@ -36,6 +36,7 @@ class _FakeClient:
         self.restarts = 0
         self.fail_first = 0          # 前 N 次 chat_completion 抛 WSClosed
         self.calls = 0
+        self.consecutive_failures = 0  # _with_reconnect 的 401/409 判据读它
 
     async def start(self) -> None:
         self.starts += 1
@@ -358,3 +359,53 @@ def test_real_evaluate_keeps_ready_on_timeout_ws_closed():
         client._evaluate("location.href")
     assert client._ready is True, "读超时不该把好连接判死"
     assert client.is_ready is True
+
+
+# ----------------------------------------------------------------------
+# 401 vs 409：曾经连上、重连又失败 = 409「连接丢失」（不可换档），
+# 只有从未连上才是 401「未登录」。否则 App 关了会被误报成「请扫码登录」。
+# ----------------------------------------------------------------------
+def _dead_fake() -> _FakeClient:
+    """连接已失效、重连也拉不回来的客户端（模拟 App 关了）。"""
+    c = _FakeClient()
+    c.is_ready = False
+
+    async def _restart_fail() -> None:
+        c.restarts += 1
+        c.is_ready = False
+
+    c.restart = _restart_fail  # type: ignore[assignment]
+    return c
+
+
+def test_with_reconnect_reports_409_when_reconnect_fails():
+    from fastapi import HTTPException
+    from buddy_proxy.codebuddy_provider.forward import _RETRYABLE_STATUS
+
+    client = _dead_fake()
+    p = _provider(client)
+    p._started = True   # 曾经连上 → App 关了，应报 409 而非 401
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(p._with_reconnect())
+    assert ei.value.status_code == 409, "App 关了不能报成「未登录」"
+    assert 409 not in _RETRYABLE_STATUS
+
+
+def test_with_reconnect_reports_401_when_never_connected():
+    from fastapi import HTTPException
+
+    client = _FakeClient()
+    client.is_ready = False
+
+    async def _start_fail() -> None:
+        client.starts += 1
+        client.is_ready = False
+
+    client.start = _start_fail  # type: ignore[assignment]
+    p = _provider(client)
+    p._started = False       # 从未连上 → 401
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(p._with_reconnect())
+    assert ei.value.status_code == 401

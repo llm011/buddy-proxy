@@ -225,13 +225,28 @@ class DoubaoProvider(BaseProvider):
             return bool(self._client.is_ready)
 
     async def _with_reconnect(self) -> None:
-        """请求入口用：先确保已连接，仍未就绪才抛 401。
+        """请求入口用：先确保已连接，仍未就绪才报错。
 
         重连只在这里做一次：``_ensure_started`` 内部已经把「启动过但失效」
         的客户端 ``restart`` 过了，不再叠一次，免得白白关闭刚拉起来的 App。
+
+        区分两种「不就绪」：**曾经连上、重连又失败**（App 关了/挂了）走 409，
+        与 ``_stream``/``_collect`` 断线路径的文案一致、都是不可换档；**从未
+        连上**（初次拉起失败）才是 401。别把「App 关了」误报成「未登录」。
+
+        判据取 ``_started`` 的**调用前**值：它表示「这个进程里成功启动过客户端」。
+        ``_ensure_started`` 走完可能已把它置 True（start 成功但 is_ready 还没
+        跟上），所以必须提前捕获。
         """
+        was_connected = bool(self._started)
         await self._ensure_started()
         if not self._client.is_ready:
+            if was_connected:
+                raise HTTPException(
+                    status_code=409,
+                    detail="doubao CDP connection lost (App closed or reloaded); "
+                           "reopen Doubao desktop app and retry",
+                )
             raise HTTPException(
                 status_code=401,
                 detail="doubao not logged in - 请先完成豆包扫码登录",
@@ -748,9 +763,21 @@ class DoubaoProvider(BaseProvider):
     # ------------------------------------------------------------------
 
     async def ensure_ready(self) -> None:
-        """惰性启动 + 就绪检查；失败抛 HTTPException（消息含可操作提示）。"""
+        """惰性启动 + 就绪检查；失败抛 HTTPException（消息含可操作提示）。
+
+        与 ``_with_reconnect`` 同一口径：曾经连上、重连又失败报 409「连接丢失」，
+        只有从未连上才是 401「未登录」。判据同 ``_with_reconnect``：调用前
+        ``_started``。
+        """
+        was_connected = bool(self._started)
         await self._ensure_started()
         if not self._client.is_ready:
+            if was_connected:
+                raise HTTPException(
+                    status_code=409,
+                    detail="doubao CDP connection lost (App closed or reloaded); "
+                           "reopen Doubao desktop app and retry",
+                )
             raise HTTPException(
                 status_code=401,
                 detail="doubao not logged in - 请先完成豆包扫码登录",
