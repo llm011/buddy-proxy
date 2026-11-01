@@ -490,9 +490,8 @@
   @media (max-width: 720px) { .pat-quota-grid { grid-template-columns: minmax(0, 1fr); } }
   /* 账号块 = 卡中卡：背景亮一档 + 描边 + 圆角。原先只有一条 rgba(.4) 的
      底线，两栏并排时两个账号的额度内容直接糊成一片（用户截图：分隔看不
-     出来）。trae PAT / antigravity / kimi 三个面板共用这个类，一起变样。 */
-  /* 账号块 = 卡中卡：背景亮一档 + 描边 + 圆角。overflow:hidden 把圆角外的背景
-     切干净，也让卡内超长内容不外溢。 */
+     出来）。trae PAT / antigravity / kimi 三个面板共用这个类，一起变样。
+     overflow:hidden 把圆角外的背景切干净，也让卡内超长内容不外溢。 */
   .pat-pkg { position: relative; overflow: hidden; padding: 10px 12px 12px;
              background: var(--card2); border: 1px solid var(--line);
              border-radius: 8px; }
