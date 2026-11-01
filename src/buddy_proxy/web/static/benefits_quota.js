@@ -245,11 +245,15 @@ function syncQuotaFold() {
     const label = open ? '收起 ▴'
       : (!Number(main && main.dataset.act) ? `展开 ${main ? main.dataset.spent : 0} 项已用完 ▾`
         : `展开全部 ${main.dataset.total} 项 ▾`);
-    for (const btn of [main, floatBtn]) {
-      if (!btn) continue;
-      btn.hidden = !show;
-      btn.textContent = label;
-    }
+    // 只有**展开且确实高出滚动视口**时才需要浮钮：它的唯一用途是接住被
+    // ``overflow-y: auto`` 推出视口的主钮。收起态没有滚动区，浮钮只会变成
+    // 第二枚与主钮同文案的按钮——早期这里把同一个 ``show`` 套给两枚按钮，
+    // 收起态就渲染出上下两个「展开全部 N 项」（用户 2026-11-01 截图）。
+    // 视口上限与 CSS ``.qbody.open { max-height }`` 同一表达式。
+    const openLimit = limit * 2 + 30;
+    const floatShow = open && box.scrollHeight > openLimit + 1;
+    if (main) { main.hidden = !show; main.textContent = label; }
+    if (floatBtn) { floatBtn.hidden = !floatShow; floatBtn.textContent = label; }
   });
 }
 

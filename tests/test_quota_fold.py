@@ -95,7 +95,9 @@ globalThis.mkBox = (key, scrollHeight, spentCount, actCount) => {
 };
 
 // 给 box 挂一枚视口浮钮（兄弟元素），返回它。key 可显式传「带引号的危险名」
-// 来验证属性选择器那条老路会炸、兄弟扫描这条路不会。
+// 来验证属性选择器那条老路会炸、兄弟扫描这条路不会。浮钮藏不藏由
+// syncQuotaFold 按 ``box.scrollHeight``（即 mkBox 的第一个参数）与展开视口
+// 上限（``--qfold-max`` 的 2 倍 + 30）比较得出，不需要单独传高度。
 globalThis.mkFloat = (box, key) => {
   const el = {
     dataset: {qfold: key === undefined ? box.dataset.qfold : key},
@@ -350,21 +352,46 @@ console.log(JSON.stringify({
                           "clean": True, "handlers": True}, out
 
 
-def test_float_button_mirrors_main_button():
-    """视口浮钮与主钮同显同藏同文案（展开后主钮被推到滚动区外，靠它点收起）。"""
+def test_float_button_hidden_when_collapsed():
+    """收起态浮钮必须藏起来——它是「展开后接住被推出滚动视口的主钮」的，
+    收起态没有滚动区，露出来就是第二枚与主钮同文案的按钮。
+
+    回归：早期把同一个 ``show`` 套给两枚按钮，收起态渲染出上下两个
+    「展开全部 N 项」（用户 2026-11-01 截图）。
+    """
     out = _run("""
 const {box, btn} = mkBox('trae', 900, 12);
 const floatBtn = mkFloat(box);
 syncQuotaFold();
-const closed = {floatHidden: floatBtn.hidden, floatText: floatBtn.textContent};
-quotaFoldToggle(btn);
-const opened = {floatHidden: floatBtn.hidden, floatText: floatBtn.textContent};
-console.log(JSON.stringify({closed, opened}));
+console.log(JSON.stringify({
+  mainShown: btn.hidden === false,
+  floatHidden: floatBtn.hidden,
+}));
 """)
-    assert _last(out) == {
-        "closed": {"floatHidden": False, "floatText": "展开全部 15 项 ▾"},
-        "opened": {"floatHidden": False, "floatText": "收起 ▴"},
-    }, out
+    assert _last(out) == {"mainShown": True, "floatHidden": True}, out
+
+
+def test_float_button_shown_only_when_expanded_and_overflows():
+    """只有「展开 且 内容确实高出滚动视口」时才露浮钮（接住被滚出去的主钮）。"""
+    out = _run("""
+// 超视口：展开后浮钮出现，文案跟主钮（"收起 ▴"）
+const a = mkBox('trae', 900, 12);
+const fa = mkFloat(a.box);
+// 未超视口：展开后浮钮仍藏（主钮自己就够用）
+const b = mkBox('qoder', 250, 12);
+const fb = mkFloat(b.box);
+QUOTA_FOLD.open['trae'] = true;
+QUOTA_FOLD.open['qoder'] = true;
+syncQuotaFold();
+console.log(JSON.stringify({
+  overflowsFloatHidden: fa.hidden, overflowsFloatText: fa.textContent,
+  fitsFloatHidden: fb.hidden, fitsMainText: b.btn.textContent,
+}));
+""")
+    assert _last(out) == {"overflowsFloatHidden": False,
+                          "overflowsFloatText": "收起 ▴",
+                          "fitsFloatHidden": True,
+                          "fitsMainText": "收起 ▴"}, out
 
 
 def test_float_lookup_survives_hostile_group_name():
@@ -377,7 +404,8 @@ def test_float_lookup_survives_hostile_group_name():
     out = _run("""
 const hostile = 'qoder #1 · "我的" 号';
 const {box, btn} = mkBox(hostile, 900, 12);
-const floatBtn = mkFloat(box);      // 浮钮的 data-qfold 与 box 相同（这里由 mkBox 给）
+const floatBtn = mkFloat(box);
+QUOTA_FOLD.open[hostile] = true;
 syncQuotaFold();
 console.log(JSON.stringify({
   found: floatBtn.hidden === false,
@@ -386,14 +414,15 @@ console.log(JSON.stringify({
 }));
 """)
     assert _last(out) == {"found": True, "mainStillAlive": True,
-                          "text": "展开全部 15 项 ▾"}, out
+                          "text": "收起 ▴"}, out
 
 
 def test_float_lookup_ignores_sibling_with_other_key():
     """兄弟里另一组的浮钮不会被误认（同容器多组时要按 key 对上号）。"""
     out = _run("""
 const a = mkBox('grp-a', 900, 12);
-const foreign = mkFloat(a, 'grp-b');   // 挂在 a 的容器里，但 key 不是 a
+const foreign = mkFloat(a.box, 'grp-b');   // 挂在 a 的容器里，但 key 不是 a
+QUOTA_FOLD.open['grp-a'] = true;
 syncQuotaFold();
 console.log(JSON.stringify({
   foreignUntouched: foreign.hidden === true,
