@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 from unittest import mock
 
@@ -221,6 +222,84 @@ def test_spawn_success_records_child_and_shutdown_kills_it(tmp_path):
     st.shutdown_standalone()
     proc.terminate.assert_called_once()
     assert st._child is None and st._inapp_key is None
+
+
+# --- spawn：stdin 不能是 DEVNULL（连命符回归钉）-------------------------------
+#
+# 背景（2026-11-01 用户报障根因）：``dumate-main-server`` 自带
+# ``main.watchParentStdin``——stdin 读到 EOF 就 shutdown。旧实现给它
+# ``stdin=DEVNULL``（`/dev/null`），读它下一秒就 EOF，于是子进程 ~2s 后自杀；
+# 而就绪探活 ~0.8s 就返回 200——``spawn()`` 报 ok、请求转过去时进程已死，回
+# 一个 ``Server disconnected``（502 dumate upstream error）。旧单测全部 mock
+# 掉 Popen，从没检查 stdin 实参，所以这个真机能复现的 bug 从测试里漏了出去。
+#
+# 修法：给子进程一根**父进程还攥着写端的管道**。会话内写端留父进程（父死→
+# EOF→子干净退场）；persist 把写端也交给子进程自己（我们死它也不 EOF）。
+# 下面两条钉住这个实参语义。
+
+
+def _res_root(tmp_path):
+    res_root = tmp_path / "DuMate.app" / "Contents" / "Resources"
+    res_root.joinpath(*st._BIN_REL).parent.mkdir(parents=True)
+    res_root.joinpath(*st._BIN_REL).write_text("x")
+    res_root.joinpath(*st._CONFIG_REL).parent.mkdir(parents=True)
+    res_root.joinpath(*st._CONFIG_REL).write_text("x")
+    return res_root
+
+
+def test_spawn_session_gives_child_a_live_pipe_not_devnull(tmp_path):
+    """会话内：子进程的 stdin 必须是活管道（不是 DEVNULL），写端父进程留着。
+
+    DEVNULL 会让子进程 2s 内 EOF 自杀——这正是被漏掉的 bug。这里断言：
+    ``stdin`` 既不是 ``DEVNULL`` 也不是 ``None``，且父进程攥着 ``_stdin_hold_w``。
+    """
+    res_root = _res_root(tmp_path)
+    proc = mock.Mock()
+    proc.poll.return_value = None
+    proc.pid = 4242
+    proc.returncode = None
+
+    with mock.patch.object(st.subprocess, "Popen", return_value=proc) as popen, \
+         mock.patch.object(st, "_probe_health", return_value=True), \
+         mock.patch.dict("os.environ", {}, clear=True):  # 非 persist
+        res = st.spawn(res_root, login={"login_mode": "bce", "user_id": "u", "account_id": "a"})
+        try:
+            assert res["ok"] is True
+            kw = popen.call_args.kwargs
+            assert kw["stdin"] not in (subprocess.DEVNULL, None), \
+                "会话内子进程的 stdin 不能是 DEVNULL（会立刻 EOF 自杀）"
+            assert kw["pass_fds"] == (), "会话内写端不交给子进程，留在父进程手里"
+            assert isinstance(st._stdin_hold_w, int), "父进程该攥着连命符写端"
+            # 写端确实还开着（没被误关）：能对它 fstat 不抛
+            os.fstat(st._stdin_hold_w)
+        finally:
+            st.shutdown_standalone()
+    assert st._stdin_hold_w is None
+
+
+def test_spawn_persist_hands_write_end_to_child(tmp_path):
+    """常驻：写端通过 ``pass_fds`` 交给子进程自己，父进程两侧都关。
+
+    这样即便代理进程死了，子进程的 stdin 也读不到 EOF，能照常常驻。
+    """
+    res_root = _res_root(tmp_path)
+    proc = mock.Mock()
+    proc.poll.return_value = None
+    proc.pid = 99
+    proc.returncode = None
+
+    with mock.patch.object(st.subprocess, "Popen", return_value=proc) as popen, \
+         mock.patch.object(st, "_probe_health", return_value=True), \
+         mock.patch.object(st, "_record_spawned"), \
+         mock.patch.dict("os.environ", {"BUDDY_DUMATE_STANDALONE": "persist"}):
+        res = st.spawn(res_root, login={"login_mode": "bce", "user_id": "u", "account_id": "a"})
+
+    assert res["ok"] is True
+    kw = popen.call_args.kwargs
+    assert kw["stdin"] not in (subprocess.DEVNULL, None)
+    assert len(kw["pass_fds"]) == 1, "写端应交给子进程（persist 靠它续命）"
+    # persist 把写端给了子进程、父进程立刻关掉，故父进程不再持有连命符
+    assert st._stdin_hold_w is None
 
 
 def test_spawn_exit_immediately_returns_not_ok(tmp_path):

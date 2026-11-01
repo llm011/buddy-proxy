@@ -25,17 +25,21 @@ inapp key 用 ``secrets`` 现生成。用户不再需要为了跑代理而开着
 生命周期：
 
 - 默认**会话内**：随本进程退出而退出——``__main__`` 的关停钩子调
-  :func:`shutdown_standalone`。
+  :func:`shutdown_standalone`。**实现靠 stdin 连命符**：子进程自带「stdin
+  读到 EOF 就自杀」的看门狗，我们给它一根父进程攥着写端的管道，父进程一死
+  写端即关、子进程立刻干净退场（详见 :func:`spawn`）。父进程被 ``kill -9``
+  也一样——写端随内核关 fd 而消失，不再产生孤儿（旧版给 ``DEVNULL`` 的老
+  实现反而会让子进程 2s 后自杀，见 :func:`spawn` 的注释）。
 - 可选**常驻**：``BUDDY_DUMATE_STANDALONE=persist`` 时不随会话退出清理；由
-  用户/launchd 管理。想继续复用它，直接让 ``discovery`` 从 pgrep 里发现即可
-  （与我们无关的独立实例，同样能命中）。
+  用户/launchd 管理。子进程自己抱着那根管道的写端，我们死了它也不 EOF。想继续
+  复用它，直接让 ``discovery`` 从 pgrep 里发现即可（与我们无关的独立实例，同样
+  能命中）。
 - **孤儿回收**：子进程用 ``start_new_session=True`` 起（前台进程组的 Ctrl-C
-  不该连带杀掉正在转发的子进程），代价是父进程被 ``kill -9`` 时 finally 不执行、
-  子进程 reparent 到 PID 1。所以每个拉起实例按 owner pid 登记 ``state_dir()/
+  不该连带杀掉正在转发的子进程），遗留实例仍按 owner pid 登记 ``state_dir()/
   dumate-standalone/<owner>.json``，下次 :func:`ensure_running` 前
-  :func:`reap_orphans` 扫一遍：owner 已死且非 persist 的遗留实例回收掉。
-  孤儿本身仍能被 ``discover`` 按 pgrep 命中复用（不是永久故障），回收只是让
-  生命周期重新确定。
+  :func:`reap_orphans` 扫一遍：owner 已死且非 persist 的遗留实例回收掉。有了
+  stdin 连命符后非 persist 的孤儿基本不再出现，但 persist 的遗留、或旧版本
+  留下的登记仍可能命中，回收逻辑照旧保留。
 """
 
 from __future__ import annotations
@@ -78,6 +82,11 @@ _spawn_lock = threading.Lock()
 
 #: 本进程自设的 inapp key（每个代理进程一把，随进程存亡）。
 _inapp_key: str | None = None
+
+#: 会话内拉起时父进程攥着的 stdin 写端 fd——子进程的「连命符」：它一关，
+#: 子进程的 stdin 就读到 EOF 并干净退场（见 ``spawn`` 里的长注释）。同一时刻
+#: 至多一个会话内子进程（``spawn`` 由 ``_spawn_lock`` 串行），故单个全局够用。
+_stdin_hold_w: int | None = None
 
 
 def app_resources_root() -> Path | None:
@@ -209,18 +218,56 @@ def spawn(app_res_root: Path | None = None, *,
         log_cwd.mkdir(parents=True, exist_ok=True)
     except OSError:
         log_cwd = Path(tempfile.gettempdir())
+
+    # 子进程自带「父进程 stdin 关了就自杀」的看门狗（二进制里的
+    # ``main.watchParentStdin`` / ``parent-stdin:eof``）：stdin 读到 EOF 就
+    # 主动 Shutdown——这是它作为 Electron 子进程时的正常退出路径。
+    #
+    # **不能给它 ``DEVNULL``**：DEVNULL 是 `/dev/null`，读它下一秒就 EOF，
+    # 子进程 ~2s 后就自己退场（实测）。而 spawn 的就绪探活在 ~0.8s 就返回
+    # 200——于是 ``spawn()`` 报 ok、请求转过去时进程已经死了，回一个
+    # ``Server disconnected without sending a response``（502
+    # ``dumate upstream error``）。2026-11-01 用户报障的根因就是这个竞态。
+    #
+    # 正解是给它一根**父进程还攥着写端的管道**：
+    # - 会话内（默认）：写端留在父进程（``_stdin_hold_w``）。父进程活着 → 写端
+    #   不关 → 读端不 EOF → 子进程一直活；父进程正常退出或被 kill -9 → 写端
+    #   随进程关闭 → 子进程立刻拿到 EOF 干净退场。「随会话退出」语义不打折，
+    #   还免掉了孤儿。
+    # - 常驻（persist）：把写端也交给子进程自己（``pass_fds``），父进程两侧全
+    #   关——它自己抱着写端，读端永远不 EOF，即便我们死了它也照常跑。要停它
+    #   直接 SIGTERM（见 ``_terminate_pid``）。
+    _r, _w = os.pipe()
+    persistent = is_persistent()
     try:
-        proc = subprocess.Popen(
-            args, env=env, cwd=str(log_cwd),  # noqa: S603 - 本机固定二进制
+        proc = subprocess.Popen(  # noqa: S603 - 本机固定二进制
+            args, env=env, cwd=str(log_cwd),
+            stdin=_r,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
+            pass_fds=(_w,) if persistent else (),
         )
     except OSError as exc:
+        _close_fd(_r)
+        _close_fd(_w)
         return {"ok": False, "reason": f"拉起 dumate-main-server 失败: {exc.__class__.__name__}"}
+    # 读端交给子进程后父进程不再需要它。
+    _close_fd(_r)
+    if persistent:
+        # 常驻：子进程自己拿着写端，父进程这条多余的关掉。
+        _close_fd(_w)
+    else:
+        # 会话内：父进程攥着写端——它就是我们与子进程的「连命符」。
+        global _stdin_hold_w
+        if _stdin_hold_w is not None:
+            # 上一个会话内实例已死但写端没来得及收：先关掉，别一路漏 fd。
+            _close_fd(_stdin_hold_w)
+        _stdin_hold_w = _w
 
     deadline = time.monotonic() + _READY_TIMEOUT_S
     while time.monotonic() < deadline:
         if proc.poll() is not None:
+            _release_stdin_hold()
             return {"ok": False, "reason": f"dumate-main-server 启动即退出（exit={proc.returncode}）"}
         if _probe_health(port, key):
             with _child_lock:
@@ -230,6 +277,7 @@ def spawn(app_res_root: Path | None = None, *,
             log.info("dumate standalone spawned pid=%d port=%d", proc.pid, port)
             return {"ok": True, "port": port, "pid": proc.pid}
         time.sleep(0.3)
+    _release_stdin_hold()
     _terminate(proc)
     return {"ok": False, "reason": f"dumate-main-server {_READY_TIMEOUT_S:.0f}s 内未就绪"}
 
@@ -263,13 +311,19 @@ def shutdown_standalone() -> None:
     实例活下去，下次代理启动时 ``discovery`` 会从 pgrep 里发现并复用它（inapp
     key 从子进程 env 读，与本进程内存里的那份无关）。
     """
-    global _child, _inapp_key
+    global _child, _inapp_key, _stdin_hold_w
     with _child_lock:
         proc = _child
         _child = None
         _inapp_key = None
+        hold = _stdin_hold_w
+        _stdin_hold_w = None
     if is_persistent():
         return
+    # 先关「连命符」写端：子进程的 stdin 立刻 EOF，它会自己干净退场；下面
+    # 的 _terminate 只是加速与兜底（万一它卡在关停流程里）。
+    if hold is not None:
+        _close_fd(hold)
     if proc is not None:
         _terminate(proc)
     _clear_own_pid()
@@ -288,6 +342,23 @@ def _terminate(proc: subprocess.Popen) -> None:
             proc.wait(timeout=3)
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def _close_fd(fd: int) -> None:
+    """关一个裸 fd，吞掉「已关/非法」的竞态。"""
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _release_stdin_hold() -> None:
+    """放弃当前会话内子进程的 stdin 写端（失败路径收尾，避免漏 fd）。"""
+    global _stdin_hold_w
+    hold = _stdin_hold_w
+    _stdin_hold_w = None
+    if hold is not None:
+        _close_fd(hold)
 
 
 # --- 拉起的实例的登记与回收 ------------------------------------------------
