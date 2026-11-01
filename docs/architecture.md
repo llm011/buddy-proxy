@@ -19,8 +19,12 @@ src/buddy_proxy/
   protocols/             # anthropic_adapter, responses_adapter,
                          #   responses_projection, dsml_parser (解析层),
                          #   dsml_scanner (底层扫描原语)
-  web/                   # routes, ui, model_list + models_config.json + static/
-  providers/             # base.py (BaseProvider), zcode.py, glm.py (官方 key 子类)
+  web/                   # routes, tools_api (固定打 DeepSeek 官方的
+                         #   /v1/tools/search + /v1/tools/fetch), ui,
+                         #   model_list + models_config.json + static/
+  providers/             # base.py (BaseProvider), zcode.py, glm.py (官方 key 子类),
+                         #   ark.py (本地接入点表), deepseek.py (官方 API 直通 +
+                         #   余额；route_priority=50 让撞车裸名让位)
   auth/                  # login, trae_work_login, trae_work_login_server
   codebuddy_provider/    # default provider pkg; client.py = CodeBuddy HTTP client
   trae/                  # trae domain (credentials, transport, sse, pat, ...)
@@ -54,6 +58,12 @@ src/buddy_proxy/
 ```
 
 - **`web/routes.py`** owns public protocol endpoints and request parsing.
+- **`web/tools_api.py`** owns `/v1/tools/search` and `/v1/tools/fetch`. These are
+  the deliberate exception to the rule below: they carry no model name (only a
+  query/URL) and the endpoints are DeepSeek-private with no equivalent on any
+  other channel, so they are hard-wired to the official API instead of going
+  through `forward_chat`. Adding a second implementation of them would be a
+  reason to revisit that, not a reason to route them by model name.
 - **`codebuddy_provider/forward.py`** owns cross-provider routing and model
   availability policy. New protocol endpoints must use this path rather than
   call a provider directly.

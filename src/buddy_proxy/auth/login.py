@@ -53,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -351,6 +351,10 @@ def _login_trae(open_browser: bool = True, region: str | None = None, **_kwargs)
 ZCODE_CONSOLE_URL = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys"
 ZCODE_PLAN_URL = "https://bigmodel.cn/glm-coding"
 
+#: DeepSeek 开放平台地址（取 key / 充值余额）。同上：打印给人看，不写死在正文。
+DEEPSEEK_CONSOLE_URL = "https://platform.deepseek.com/api_keys"
+DEEPSEEK_TOPUP_URL = "https://platform.deepseek.com/top_up"
+
 
 def _login_zcode(**_kwargs) -> int:
     """zcode 无交互登录：凭据是 API key，这里检查配置并打印指引。
@@ -389,6 +393,49 @@ def _login_zcode(**_kwargs) -> int:
     print("       c) 已装 ZCode CLI 的话，在 CLI 里登录 coding-plan 也行 "
           "（读 ~/.zcode/v2/config.json）")
     print("    ③ 让网关重新读取：buddy restart")
+    return 1
+
+
+def _login_deepseek(**_kwargs) -> int:
+    """deepseek 官方渠道无交互登录：凭据是 DeepSeek 开放平台签发的 API key。
+
+    与 glm/zcode 同属「key 型」通道——没有账号密码可登、也没有可实现的
+    OAuth/device flow（key 在控制台人工签发），所以本子命令的全部价值就是把
+    「去哪儿领、怎么配、怎么验证」说清楚。除了对话用的 ``--deepseek``，顺带
+    提一句 ``/v1/tools/search``、``/v1/tools/fetch`` 用的也是这把 key——用户
+    常以为那是两个独立服务，不知道配一次两处都能用。
+    """
+    from buddy_proxy.providers.deepseek import (
+        DeepSeekProvider,
+        resolve_api_key,
+        secret_file_path,
+    )
+
+    key = resolve_api_key()
+    if key:
+        print(f"[OK] deepseek 凭据已配置: {key[:6]}***{key[-4:]}")
+        provider = DeepSeekProvider()
+        print(f"     base: {provider.health().get('base_url')}")
+        print("     deepseek 用 API key 认证，无需登录；换 key 改下面任意一处即可：")
+        print("     1. 环境变量 DEEPSEEK_API_KEY")
+        print(f"     2. 文件 {secret_file_path()}（首行裸 key 或 name=value）")
+        print(f"     控制台（换 key）: {DEEPSEEK_CONSOLE_URL}")
+        print("     这把 key 同时供 /v1/tools/search 与 /v1/tools/fetch 使用。")
+        return 0
+    print("[!] deepseek 未配置凭据。它要的是 DeepSeek 开放平台的 API key，不是账号密码。")
+    print()
+    print(f"    ① 领 key：{DEEPSEEK_CONSOLE_URL}")
+    print("       登录后 → API Keys → 创建 → 复制（形如 sk-xxxxxxxx）")
+    print(f"       余额/充值：{DEEPSEEK_TOPUP_URL}（官方为预付费余额，不是订阅套餐）")
+    print("    ② 配到本机，任选一种：")
+    print("       a) 环境变量（临时）：export DEEPSEEK_API_KEY=<粘贴 key>")
+    secret = secret_file_path()
+    print(f"       b) 写文件（长期）: mkdir -p {secret.parent} && "
+          f"echo '<粘贴 key>' > {secret}")
+    print("          然后 chmod 600（key 是明文凭据）")
+    print("          （`>` 是覆盖：重复配置时把旧 key 换掉，别用 `>>` 追加）")
+    print("    ③ 让网关重新读取：buddy restart（启动参数里要有 --deepseek）")
+    print("       配好这把 key，/v1/tools/search 与 /v1/tools/fetch 也就同时可用了。")
     return 1
 
 
@@ -817,6 +864,7 @@ _DISPATCH = {
     "antigravity": _login_antigravity,
     "kimi": _login_kimi,
     "codex": _login_codex,
+    "deepseek": _login_deepseek,
 }
 
 

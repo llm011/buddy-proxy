@@ -47,6 +47,7 @@ from buddy_proxy.core.settings import normalize_default_model
 
 # 导入 routes / ui 以注册所有 @app 路由（副作用导入）
 from buddy_proxy.web import routes as _routes  # noqa: F401
+from buddy_proxy.web import tools_api as _tools_api  # noqa: F401
 from buddy_proxy.web import ui as _ui  # noqa: F401
 
 
@@ -249,6 +250,11 @@ def main():
                         help="启用 DuMate provider（百度搭子/千帆桌面端本地代理；需本机已安装并登录 DuMate.app 且在运行）")
     parser.add_argument("--zcode-start", action="store_true", default=os.getenv("ZCODE_START_ENABLED", "") == "1",
                         help="启用 ZCode Start Plan (Trust Build) provider（glm-5.3-flash，凭据自动从 ~/.zcode/cli/config.json 读取）")
+    parser.add_argument("--deepseek", action="store_true", default=os.getenv("DEEPSEEK_ENABLED", "") == "1",
+                        help="启用 DeepSeek 官方 API provider（openai/responses/anthropic 三协议原生直通，"
+                             "带模型目录刷新与账户余额；凭据取 DEEPSEEK_API_KEY / "
+                             "~/.buddy-proxy/deepseek_api_key；同时启用 /v1/tools/search 与 /v1/tools/fetch）。"
+                             "裸名与本地静态表撞车时让位，用 deepseek/<模型> 显式点名走官方计费")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
                              "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
@@ -473,6 +479,25 @@ def main():
         print("[ZCode Start Plan] Enabled (glm-5.3-flash)")
     else:
         print("[ZCode Start Plan] Disabled (pass --zcode-start or ZCODE_START_ENABLED=1 to enable)")
+
+    # DeepSeek 官方：与 ark 同款「缺配置只告警不阻断启动」——用户可能刚装好、
+    # 还没来得及填 key，转发时 ensure_auth 会再报一次可操作的 401。
+    if args.deepseek:
+        from buddy_proxy.providers.deepseek import DeepSeekProvider
+
+        deepseek = DeepSeekProvider()
+        try:
+            deepseek.ensure_auth()
+        except HTTPException as exc:
+            logger.warning("deepseek provider 认证未就绪: %s", exc.detail)
+        providers[deepseek.id] = deepseek
+        health = deepseek.health()
+        logger.info("DeepSeek provider enabled (%s, models=%s)",
+                    health.get("base_url"), ",".join(health.get("models") or []))
+        print(f"[DeepSeek] Enabled (官方 API, {len(health.get('models') or [])} 个模型; "
+              f"/v1/tools/search + /v1/tools/fetch 亦已启用)")
+    else:
+        print("[DeepSeek] Disabled (pass --deepseek or DEEPSEEK_ENABLED=1 to enable)")
 
     if args.trae:
         from buddy_proxy.trae.provider import TraeProvider

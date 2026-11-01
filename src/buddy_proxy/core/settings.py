@@ -167,7 +167,7 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 #: 分支下注册。
 KNOWN_PROVIDER_IDS = frozenset(
     {"codebuddy", "codebuddyintl", "zcode", "glm", "ark", "mimo", "qoder", "qoderintl",
-     "doubao", "dumate", "trae", "traepat", "traeintl", "kimi", "codex"}
+     "doubao", "dumate", "trae", "traepat", "traeintl", "kimi", "codex", "deepseek"}
 )
 
 #: 通道没启用时，告诉用户**怎么启用**。值是要打印给用户看的短句。
@@ -194,6 +194,8 @@ PROVIDER_ENABLE_HINTS: dict[str, str] = {
     "codebuddyintl": "先 `buddy login codebuddy --region global` 登录海外账号，重启 Buddy 自动注册",
     "kimi": "加 --kimi（或设 KIMI_ENABLED=1）",
     "codex": "加 --codex（或设 CODEX_ENABLED=1），先 `buddy login codex` 登录 ChatGPT 订阅账号",
+    "deepseek": "加 --deepseek（或设 DEEPSEEK_ENABLED=1），并配置 DEEPSEEK_API_KEY "
+                "或 ~/.buddy-proxy/deepseek_api_key",
     # codebuddy 是默认通道，进到这里只可能是「认得但没注册」的异常态
     "codebuddy": "检查启动参数（codebuddy 是默认通道，不应缺失）",
 }

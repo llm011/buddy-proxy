@@ -69,6 +69,17 @@ function quotaItemHtml(it) {
   // 0%」这种把未知当零的假象。百分比窗口是例外，它不需要绝对分母。
   const hasNums = rem != null;
   const hasVolume = hasNums && it.total != null;
+  // 预付费余额（unit=currency，如 DeepSeek 官方）：上游给的是「还能花多少钱」，
+  // 没有总量分母，所以既不是百分比水位、也没有「已用 N%」可算。单独一条分支，
+  // 免得掉进下面「剩 X · 已用未知」——那句话在这种形态下是误导（用户会以为
+  // 少了一个分母，实际是本来就没有）。
+  //
+  // 必须要求**真是数字**：余额取不到时后端发的是字符串说明文案（「余额未知」），
+  // 而 hasNums 只判 ``rem != null``，字符串会照过——不卡这一道，说明条会被
+  // 塞进数字位、渲染成大字「余额未知（USD） 可用」（与 quotaHeadSum 剔除
+  // 字符串说明条是同一条来由）。
+  const currencyOnly = it.unit === 'currency' && hasNums
+    && typeof rem !== 'boolean' && rem !== '' && Number.isFinite(Number(rem));
   const fmtReset = it.reset_ts ? new Date(it.reset_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'}) : '';
   // 已过重置时刻的 standard 池：后端不再给用量（那份快照是撞码时采集的，必然接近
   // 满额，池重置后不会有新数据来覆盖），这里明确说明「待下一次撞码确认」，
@@ -99,7 +110,9 @@ function quotaItemHtml(it) {
   const notice = it.unreachable === true || it.query_failed === true || it.query_empty === true;
   const noticeColor = it.unreachable ? 'var(--err)'
     : (it.query_failed ? 'var(--warn)' : 'var(--muted)');
-  const nums = hasNums
+  const nums = currencyOnly
+    ? `<span class="mono"><span style="color:var(--ok);font-weight:600">${fmtNum(rem)}</span> <span class="muted">可用</span></span>`
+    : (hasNums
     ? (percentOnly
         ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}%</span> · 已用 ${pct}%</span>`
         : (hasVolume
@@ -114,7 +127,7 @@ function quotaItemHtml(it) {
                 // 次数）——明说「剩 — / N · 已用未知」，别兜底成空 span
                 //（那行只剩 label + 到期日，看不出是没用量还是没渲染出来）
                 ? `<span class="mono"><span style="color:var(--text)">剩 —</span> / ${fmtNum(it.total)} · 已用未知</span>`
-                : '<span class="mono"></span>')));
+                : '<span class="mono"></span>'))));
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
   const bar = (hasVolume || percentOnly) && hasBar ? `<div class="qbar"><div style="width:${pct > 0 ? Math.max(2, pct) : 0}%;background:${color}"></div></div>` : '';
