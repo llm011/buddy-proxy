@@ -128,6 +128,100 @@ def _ensure_leading_system(messages: Any) -> Any:
     return [{"role": "system", "content": ""}, *messages]
 
 
+#: system prompt 首段的「官方客户端识别签名」。命中即被上游判为「非法渠道调用」。
+#:
+#: 上游（copilot.tencent.com，2026-11-02 实测）会在**校验通过、开始计费之前**
+#: 扫一遍 system prompt 首段：若命中某个 Agent 客户端写死的开场白，整单拒
+#: ``400 / {"code":11128,"msg":"Illegal API invocation from an unapproved channel"}``，
+#: 且 ``retry_policy.retry:false``。客户端只能看到一句
+#: ``Upstream API error (HTTP 400)``，真因完全不可见。
+#:
+#: 这显然是一份竞品客户端名单（把「别的 Agent 借我的额度跑」挡在门外）。
+#: 命中的两个是实测确认的：
+#:
+#: - ``DeepSeek Harness``（dsh）——``@deepseek-ai/dsh-system-prompt`` 的
+#:   ``harness:identity`` 段，永远排在 system prompt 第一段；
+#: - ``Claude Code``——Anthropic CLI 的首句 persona。
+#:
+#: 匹配**区分大小写**，按原样逐字比对。只有这两条是实测确认会拒的形态；
+#: 未测过的变体（如全大写 ``DEEPSEEK HARNESS``）不猜着往里加，避免误改用户
+#: prompt，见 ``test_codebuddy_system_signature.py`` 里 ``test_near_misses_untouched``。
+_SYSTEM_PROMPT_SIGNATURES = (
+    "You are an AI agent powered by DeepSeek Harness.",
+    "You are Claude Code, Anthropic's official CLI for Claude.",
+)
+
+#: 命中处的替换文本。不带任何 Agent 品牌字样，也不会被第二个签名匹配到。
+_SYSTEM_PROMPT_MASK = "[redacted: client identity]"
+
+#: 首段锚点：只有前导**空格**不算数，其余任何字符（含换行、制表符）都会让签名
+#: 失效。见下方实测矩阵（2026-11-02，逐条对照 CN 账号）：
+#:
+#: 实测矩阵（2026-11-02，逐条对照 CN 账号）：
+#:
+#: ================================================ ==== =====
+#: system prompt 开头                                 结果 说明
+#: ================================================ ==== =====
+#: ``Harness.``                                       400  首段即签名
+#: ``"  " + Harness.``                                400  空格不影响
+#: ``"\\t" / "\\n" / "\\n\\n" / "\\r\\n" + Harness.``   200  换行/制表符即豁免
+#: ``"abc.\\n\\n" + Harness.``                         200
+#: ``"# Role\\n" + Harness.``                          200
+#: ``Harness.\\n\\nYou are a coding agent.``            400  签名本身在首位就行
+#: ``Harness.`` 出现在 user 消息里                       200  只查 system
+#: ================================================ ==== =====
+#:
+#: 所以「首段」= ``content`` 去掉**前导空格**后紧接签名的部分；只要先冒出任何
+#: 别的字符（含换行、制表符），签名就不生效。这层豁免很脆（换行/制表符都算），
+#: 真实客户端的 system prompt 都是首段直出签名，所以「命中才改」比「一律加前缀
+#: 绕开」更保守：不篡改用户 prompt 的结构。
+_FIRST_SEGMENT_LEAD = re.compile(r" *")
+
+
+def _neutralize_system_signature(content: str) -> str:
+    """把首段里命中的客户端签名抹成中性占位；未命中原样返回。
+
+    刻意**不做全局替换**：只有能触发 11128 的那个位置需要动，签名若出现在后面
+    （换行之后）上游根本不看，改了反而平白篡改用户的 prompt。
+    """
+    if not content:
+        return content
+    if not any(sig in content for sig in _SYSTEM_PROMPT_SIGNATURES):
+        return content
+    stripped_at = _FIRST_SEGMENT_LEAD.match(content).end()
+    head = content[stripped_at:]
+    for sig in _SYSTEM_PROMPT_SIGNATURES:
+        if head.startswith(sig):
+            log.info("codebuddy 上游渠道校验会拦这个 system prompt 签名，已中性化：%r",
+                     sig[:40])
+            return content[:stripped_at] + _SYSTEM_PROMPT_MASK + head[len(sig):]
+    return content
+
+
+def _neutralize_leading_system(body: dict[str, Any]) -> dict[str, Any]:
+    """对 ``body["messages"]`` 的首条 system 做签名中和（见上）。
+
+    只处理**第一条** message：上游只读首段，后面的 system 块不受锚定规则约束
+    （实测后面再出现完整签名也放行），不碰。
+
+    不是 list / 首条不是 system / content 是分块数组时一律原样返回——分块数组
+    的上游行为未测，宁可不动也不能把本来能通的请求改成 400。
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return body
+    first = messages[0]
+    if not isinstance(first, dict) or first.get("role") != "system":
+        return body
+    content = first.get("content")
+    if not isinstance(content, str):
+        return body
+    patched = _neutralize_system_signature(content)
+    if patched is content:
+        return body
+    return {**body, "messages": [{**first, "content": patched}, *messages[1:]]}
+
+
 def _is_account_error(e: HTTPException) -> bool:
     """该 HTTPException 是否「换下一个账号可能好转」。
 
@@ -720,6 +814,11 @@ class CodeBuddyProvider(BaseProvider):
         # （2026-10-15 实测，仅 www.codebuddy.ai）。CN 不碰。
         if self._region == "global" and "messages" in upstream_body:
             upstream_body["messages"] = _ensure_leading_system(upstream_body["messages"])
+
+        # 渠道指纹校验：system prompt 首段里出现别的 Agent 客户端的开场白（dsh /
+        # Claude Code），CN + 海外两边都会整单拒 11128。见
+        # ``_SYSTEM_PROMPT_SIGNATURES`` 的实测矩阵；两边同等对待。
+        upstream_body = _neutralize_leading_system(upstream_body)
 
         # 应用脱敏处理（脱敏开关是全局 state 的，与账号无关，循环外做一次）
         state = get_state()

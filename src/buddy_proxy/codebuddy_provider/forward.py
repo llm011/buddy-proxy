@@ -104,6 +104,73 @@ def _is_codebuddy_model(model: str) -> bool:
     return model in _codebuddy_static_ids()
 
 
+def _tool_name(tool: Any) -> str:
+    """取出工具定义里的名字，兼容 OpenAI / Anthropic 两种形状。
+
+    - OpenAI：``{"type": "function", "function": {"name": ...}}``
+    - Anthropic：``{"name": ..., "input_schema": ...}``（名字在顶层）
+
+    取不到的返回空串——那种条目**不参与去重**（见 :func:`_dedupe_tools`）。
+    """
+    if not isinstance(tool, dict):
+        return ""
+    fn = tool.get("function")
+    if isinstance(fn, dict):
+        name = fn.get("name")
+    else:
+        name = tool.get("name")
+    return name.strip() if isinstance(name, str) else ""
+
+
+def _dedupe_tools(body: dict[str, Any]) -> dict[str, Any]:
+    """按工具名去重 ``body["tools"]``，保留首次出现的定义。
+
+    **为什么需要**：上游 CodeBuddy 对同名工具直接拒
+    ``400 / {"code":11152,"msg":"the tool name is invalid or duplicated"}``，
+    且 ``retry_policy.retry: false``。而 400 在 :func:`_forward_with_order`
+    里属确定性错误、不换档，所以客户端只能看到一句
+    ``Upstream API error (HTTP 400)``，真因（工具重名）被完全遮住。
+
+    **重复从哪来**：客户端自己的工具合并策略。部分 Agent 客户端把工具更新模式
+    配成 ``addition-only``——只追加、从不合并，对话变长后同一个工具会在 ``tools``
+    里反复出现（实测同名 27 个必 400、不同名 27 个正常 200）。改客户端配置未必
+    及时生效，故在此兜底。
+
+    **取舍**：重复项是同一工具的再次声明，保留首次出现的即可——真出现「同名但
+    schema 不同」时，取先声明的与客户端历史顺序一致，不会比现状更差（现状是直接
+    400 全挂）。
+
+    不是列表、或没有重复时**原样返回同一个对象**，不制造无谓的拷贝。
+    """
+    tools = body.get("tools")
+    if not isinstance(tools, list) or len(tools) < 2:
+        return body
+
+    seen: set[str] = set()
+    kept: list[Any] = []
+    dropped: list[str] = []
+    for tool in tools:
+        name = _tool_name(tool)
+        if name:
+            if name in seen:
+                dropped.append(name)
+                continue
+            seen.add(name)
+        kept.append(tool)
+
+    if not dropped:
+        return body
+
+    # ``diagnostic()`` 在代理未初始化时抛 503（见 ``core.state.diagnostic``）。
+    # 去重是**纯附加**的兜底，绝不能让它反过来把请求弄挂——所以吞掉异常。
+    try:
+        diagnostic("tools_deduped", original=len(tools), kept=len(kept),
+                   dropped=sorted(set(dropped)))
+    except Exception:  # noqa: BLE001 - 观测失败不影响转发
+        pass
+    return {**body, "tools": kept}
+
+
 def _resolved_model_id(provider: Any, model: str) -> str:
     """把请求里的模型名归一成**停用/时段配置使用的键名**。
 
@@ -428,6 +495,22 @@ async def forward_chat(
     所有路径统一经 :func:`_instrument` 记录请求指标（/ui 图表数据源）。
     """
     state = get_state()
+
+    # ---- 工具定义去重（所有入口统一兜底）----
+    # 上游 codebuddy 对**同名工具**直接拒 400/11152「the tool name is invalid
+    # or duplicated」，且 ``retry_policy.retry: false``——换档也不会成功（400 属
+    # 确定性错误，见 ``_RETRYABLE_STATUS``），客户端只会看到一句
+    # 「Upstream API error (HTTP 400)」，真因完全不可见。
+    #
+    # 触发源是客户端而不是本仓库：部分 Agent 客户端用 ``toolUpdate: addition-only``
+    # 之类的策略，只往历史里**追加**工具、从不合并，对话一长同一个工具就在
+    # ``tools`` 里出现多次（实测同名 27 个即 400）。
+    # 客户端侧改配置不一定及时生效，所以在这里按**工具名**去重：保留首次出现
+    # 的定义（后面的重复项是同一工具的再次声明，没有新信息）。
+    #
+    # 只对 openai/anthropic 这类带 ``tools`` 数组的协议生效；不是列表就原样放过，
+    # 绝不为「修重复」引入新的 500。
+    body = _dedupe_tools(body)
 
     # ---- 默认模型：客户端未指定 model 时补齐 ----
     requested_model = body.get("model")
