@@ -138,11 +138,10 @@ class DumateProvider(BaseProvider):
             # 自己拉起独立实例（用户 2026-11-01：不该必须开着桌面端）。此刻
             # **不能**在同步 ensure_auth 里阻塞 spawn，所以放行，把真正的拉起
             # 与失败提示留给 async 的 forward。只有「确实无从拉起」（未装 /
-            # 未登录）才在这里 401。
-            from . import standalone
-
-            if (standalone.is_enabled() and standalone.standalone_supported()
-                    and standalone.read_login_context().get("user_id")):
+            # 未登录）才在这里 401。判据统一走 ``discovery.can_auto_start``
+            # ——面板 hint 与这里各写一份条件的话，迟早会一个说「会自动拉起」、
+            # 另一个却 401。
+            if discovery.can_auto_start():
                 return
             state = discovery.describe_state()
             raise HTTPException(
@@ -181,7 +180,7 @@ class DumateProvider(BaseProvider):
             # 放这儿安全（ensure_auth 是同步调用、不能阻塞，故留在这儿）。
             from . import standalone
 
-            if standalone.is_enabled() and standalone.standalone_supported():
+            if discovery.can_auto_start():
                 spawned = await asyncio.to_thread(standalone.ensure_running)
                 if spawned and not spawned.get("ok"):
                     self._last_ep = None
@@ -297,6 +296,11 @@ class DumateProvider(BaseProvider):
         used/total/remaining（积分单位）+ percent（已用%）。未登录 / App 未装 /
         查询失败时退回本地代理的布尔 ``hasRemainingPoints`` 翻译成的百分制条目，
         至少别让面板空着；百分制 unit 标 ``"percent"``，数字条目标 ``"points"``。
+
+        **两条链路都不依赖 ``dumate-main-server`` 在不在跑**（用户 2026-11-02
+        报障）：额度主链路走 bceConsole cookie + 公网 HTTPS，与本地进程无关；
+        兜底链路才需要本地进程，而它也能自己拉起（见下）。关了桌面端不该让
+        额度区整块消失。
         """
         from . import checkin as dumate_checkin
 
@@ -356,7 +360,20 @@ class DumateProvider(BaseProvider):
         # 兜底：本地代理布尔态 → 百分制（保持原有「至少显示有/无」的行为）
         ep = discovery.discover()
         if ep is None:
-            raise RuntimeError("dumate 本地代理不可达（DuMate 未运行）")
+            # 首次打开面板时桌面端没开、独立实例也还没被转发拉起——这里顺手拉
+            # 一个（约 1s，本函数本就在 thread 里跑）。不拉的话面板会把「进程
+            # 没起来」说成额度查询失败，而用户点开额度卡根本不会触发转发（用户
+            # 2026-11-02 报障：没开 App 时额度区只有一句「App 未运行」）。
+            if discovery.can_auto_start():
+                from . import standalone
+
+                try:
+                    standalone.ensure_running()
+                except Exception:  # noqa: BLE001 - 拉起失败按不可达处理，别掩盖成别的错
+                    log.debug("dumate quota ensure_running failed", exc_info=True)
+                ep = discovery.discover()
+        if ep is None:
+            raise RuntimeError("dumate 本地代理不可达（独立实例拉不起来）")
         try:
             with httpx.Client(timeout=10.0) as client:
                 resp = client.get(ep.points_url(), headers=ep.headers())

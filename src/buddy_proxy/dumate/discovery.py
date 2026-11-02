@@ -169,6 +169,20 @@ def is_app_installed() -> bool:
     return False
 
 
+def can_auto_start() -> bool:
+    """未运行状态下，本机是否具备「首次转发自动拉起独立实例」的条件。
+
+    三个条件缺一不可：兜底开关没关（``standalone.is_enabled``）、App 包内
+    二进制/配置齐全（``standalone_supported``）、``auth.json`` 里有登录标识。
+    :func:`describe_state` 与 provider 的 ``ensure_auth`` / ``forward`` 共用这一处
+    判据——早先各写一遍，面板与转发行为迟早会说法不一。
+    """
+    from . import standalone
+
+    return (standalone.is_enabled() and standalone.standalone_supported()
+            and bool(standalone.read_login_context().get("user_id")))
+
+
 def describe_state() -> dict[str, Any]:
     """返回一个人类可读的发现状态摘要（供 /health、鉴权面板、日志用）。
 
@@ -180,33 +194,77 @@ def describe_state() -> dict[str, Any]:
             "ready": True,
             "installed": True,
             "running": True,
+            "auto_start": False,  # 已经在跑，用不上兜底拉起
             "port": ep.port,
             "pid": ep.pid,
             "app_version": ep.app_version,
             "inapp_key_hint": f"{ep.inapp_key[:6]}…(len{len(ep.inapp_key)})",
         }
     installed = is_app_installed()
+    auto = False
     # 装了 App 但没在跑：若本机具备独立拉起条件（App 包内二进制齐全 + 已登录），
     # 首次转发会自动 spawn 一个独立 dumate-main-server，**无需**用户手动开桌面端。
     # 提示必须如实反映这一点，否则面板让用户「先打开 App」，而实际请求根本不用开
     # （用户 2026-11-01：不该必须开着桌面端）。
     if installed:
-        from . import standalone
-
-        if (standalone.is_enabled() and standalone.standalone_supported()
-                and standalone.read_login_context().get("user_id")):
+        auto = can_auto_start()
+        if auto:
             hint = "已安装 DuMate.app，当前未运行——首次转发时代理会自动拉起独立实例，无需手动打开。"
         else:
             hint = "已安装 DuMate.app，但当前未在运行——请先打开百度搭子桌面端。"
     else:
         hint = "未检测到 DuMate.app。请先安装并登录百度搭子（千帆桌面端）。"
-    return {
+    state: dict[str, Any] = {
         "ready": False,
         "installed": installed,
         "running": False,
+        # 能自动拉起 ≠ 已就绪：这里仍是要等首次转发的「待命」态。前端据此把
+        # 圆点画成琥珀而不是红色报警，并把话说明白（用户 2026-11-02 看到红点
+        # 「App 未运行」以为通道坏了，其实转发根本不用开桌面端）。
+        "auto_start": auto,
         "port": None,
         "pid": None,
         "app_version": "",
         "inapp_key_hint": "",
         "hint": hint,
     }
+    # 进程没在跑 ≠ 不知道是谁。额度/签到走的是本机 bceConsole 登录态（auth.json
+    # 里那套），与 dumate-main-server 在不在毫无关系——面板不认出账号，卡片标题
+    # 就退化成「本机账号」、也不显示「已登录」（用户 2026-11-02 报障：没开 App
+    # 时额度区整块是「App 未运行」，看着像什么都查不到）。
+    login = _login_identity()
+    if login:
+        state["account_id"] = login.get("user_id", "")
+        state["display_name"] = login.get("display_name", "")
+    return state
+
+
+def _login_identity() -> dict[str, str]:
+    """从 ``auth.json`` 读面板要用的账号身份（只读、失败返回空 dict）。
+
+    ``user_id`` 与独立拉起用的是同一个 ``bceUserId``（面板拿它当 dumate 单账号的
+    固定标识）；``display_name`` 取自当前 profile。不读 cookie、不触网。
+    """
+    from . import standalone
+    from . import cookies as dumate_cookies
+
+    ctx = standalone.read_login_context()
+    if not ctx.get("user_id"):
+        return {}
+    out = {"user_id": ctx["user_id"], "display_name": ""}
+    try:
+        import json
+        from pathlib import Path
+
+        auth = json.loads((Path(dumate_cookies._user_data_dir()) / "auth.json")  # noqa: SLF001
+                          .read_text("utf-8"))
+        active = auth.get("activeProfileId")
+        profiles = auth.get("accountProfiles") or []
+        prof = next((p for p in profiles if p.get("profileId") == active), None)
+        if prof is None and profiles:
+            prof = profiles[0]
+        if isinstance(prof, dict):
+            out["display_name"] = str(prof.get("displayName") or "")
+    except (OSError, ValueError):
+        pass
+    return out
