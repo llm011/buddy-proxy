@@ -149,6 +149,9 @@ def test_forward_spawns_standalone_when_app_closed():
         with mock.patch.object(discovery, "discover", side_effect=_fake_discover), \
              mock.patch.object(standalone, "is_enabled", return_value=True), \
              mock.patch.object(standalone, "standalone_supported", return_value=True), \
+             mock.patch.object(standalone, "read_login_context",
+                               return_value={"login_mode": "bce", "user_id": "u",
+                                             "account_id": "a"}), \
              mock.patch.object(standalone, "ensure_running",
                                return_value={"ok": True, "port": ep.port, "pid": 42}) as er, \
              mock.patch.object(p, "_get_client") as gc:
@@ -174,6 +177,9 @@ def test_forward_reports_spawn_failure_with_reason():
         with mock.patch.object(discovery, "discover", return_value=None), \
              mock.patch.object(standalone, "is_enabled", return_value=True), \
              mock.patch.object(standalone, "standalone_supported", return_value=True), \
+             mock.patch.object(standalone, "read_login_context",
+                               return_value={"login_mode": "bce", "user_id": "u",
+                                             "account_id": "a"}), \
              mock.patch.object(standalone, "ensure_running",
                                return_value={"ok": False, "reason": "本机无 DuMate 登录态"}):
             with pytest.raises(HTTPException) as ei:
@@ -594,6 +600,58 @@ def test_quota_falls_back_to_boolean_when_overview_fails():
 
     assert q["items"][0]["remaining"] == 100
     assert q["items"][0]["unit"] == "percent"
+
+
+def test_quota_fallback_spawns_when_app_closed():
+    """App 没开、独立实例也还没起时，额度兜底**先自己拉起**再查，而不是直接报不可达。
+
+    用户 2026-11-02 报障：没开桌面端时额度区整块变成「App 未运行」。额度本身就是
+    「打开面板就会查」的东西，不点转发就永远等不到实例——所以兜底路径要自己拉。
+    """
+    from buddy_proxy.dumate import checkin as dumate_checkin
+    from buddy_proxy.dumate import standalone
+
+    p = DumateProvider()
+    ep = _endpoint()
+    seen = {"n": 0}
+
+    def _fake_discover():
+        seen["n"] += 1
+        return None if seen["n"] == 1 else ep  # 首次未运行 → 拉起；之后可发现
+
+    class _FakeResp:
+        status_code = 200
+        def json(self): return {"hasRemainingPoints": False}
+
+    with mock.patch.object(dumate_checkin, "fetch_quota_overview", return_value=None), \
+         mock.patch.object(discovery, "discover", side_effect=_fake_discover), \
+         mock.patch.object(standalone, "is_enabled", return_value=True), \
+         mock.patch.object(standalone, "standalone_supported", return_value=True), \
+         mock.patch.object(standalone, "read_login_context",
+                           return_value={"login_mode": "bce", "user_id": "u",
+                                         "account_id": "a"}), \
+         mock.patch.object(standalone, "ensure_running",
+                           return_value={"ok": True, "port": ep.port, "pid": 42}) as er, \
+         mock.patch.object(httpx, "Client") as client_cls:
+        client_cls.return_value.__enter__.return_value.get.return_value = _FakeResp()
+        q = p.quota()
+
+    er.assert_called_once()
+    assert q["items"][0]["remaining"] == 0  # hasRemainingPoints=False → 百分制 0
+    assert q["items"][0]["unit"] == "percent"
+
+
+def test_quota_fallback_raises_when_spawn_impossible():
+    """既没在跑、也无从拉起（未装/未登录）→ 仍按不可达报错（面板画说明条）。"""
+    from buddy_proxy.dumate import checkin as dumate_checkin
+    from buddy_proxy.dumate import standalone
+
+    p = DumateProvider()
+    with mock.patch.object(dumate_checkin, "fetch_quota_overview", return_value=None), \
+         mock.patch.object(discovery, "discover", return_value=None), \
+         mock.patch.object(standalone, "standalone_supported", return_value=False):
+        with pytest.raises(RuntimeError, match="拉不起来"):
+            p.quota()
 
 
 def test_quota_overview_parse():

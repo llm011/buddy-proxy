@@ -219,7 +219,11 @@ buddy start
   注意是下划线版；camelCase 的 `quotaOverview` 永远 500）：订阅总额/已用/剩余 +
   各积分包明细（含到期日）。标题行「剩 X / Y」取第一条有数的——即「订阅积分」汇总行，
   它本身已是下面各包的合计（`head_only`），因此**不给** `sum_items`（把它和各包一起相加
-  会翻倍）。未登录时退回本地代理的布尔态 `/api/dumate/points/remaining`
+  会翻倍）。数字查询拿不到时退回本地代理的布尔态 `/api/dumate/points/remaining`
+  ——这条兜底会按需拉起独立实例，所以桌面端没开也不会把额度卡刷白。额度、账号身份
+  与签到走的都是本机 `auth.json` + bceConsole 登录态，与本地进程在不在无关：App 关着
+  时面板照样显示账号名、「已登录」和完整明细，就绪圆点写「待命 · 首次转发自动拉起」
+  （琥珀待命，不是故障）；只有「未装 / 无从拉起」才退回说明文案
 - **消耗流水**：真实逐笔扣减走 `GET /api/dumate/points/records/usage`
   （`startAt`/`endAt` 是**秒级**时间戳，毫秒会 500）。面板副标题显示「今日消耗
   N 分（M 次）」；`GET /ui/api/dumate/usage-records?days=N&page=&limit=` 可查原始流水

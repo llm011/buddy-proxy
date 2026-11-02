@@ -753,12 +753,13 @@ async def ui_dumate_accounts(request: Request):
 
     dumate 是单账号（复用本机 App 登录态），这里返回恰好一个账号条目，走
     benefits_accounts.js 的通用卡片渲染（标题=displayName、副标题=累计签到）。
+
+    **不看本地进程在不在**：账号身份与签到累计全来自 ``auth.json`` + bceConsole
+    登录态，和 ``dumate-main-server`` 跑没跑无关。早先这里 ``discover() is None``
+    就返回空列表，于是桌面端一关，卡片标题就退化成「本机账号」、签到/今日消耗
+    也整块消失（用户 2026-11-02 报障）。
     """
     _ensure_local(request)
-    from ...dumate import discovery
-
-    if discovery.discover() is None:
-        return {"enabled": False, "accounts": []}
     info = await asyncio.to_thread(_dumate_account_info_cached)
     if not info.get("bceconsole_authenticated"):
         return {"enabled": True, "accounts": []}

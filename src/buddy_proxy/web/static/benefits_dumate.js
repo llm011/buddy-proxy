@@ -14,6 +14,12 @@ function _dumate_ready() {
   return !!(DUMATE_STATE.status && DUMATE_STATE.status.ready);
 }
 
+// 「本机具备独立拉起条件」——未运行时也照样能转发（首次请求时代理自起实例）。
+// 后端 discovery.can_auto_start() 的统一判据经 /ui/api/dumate/status 下发。
+function _dumate_auto() {
+  return !!(DUMATE_STATE.status && DUMATE_STATE.status.auto_start);
+}
+
 // 账号副标题 bits（渲染与 acctLoad 就地回填共用同一份逻辑）：
 // 今日消耗走 bceConsole records/usage 的真实流水合计（consumedPoints，正数），
 // 不是估算；拿不到（未登录/超时）就不显示这一位。
@@ -45,8 +51,13 @@ function renderDumatePanel() {
 
   const st = DUMATE_STATE.status;
   const ready = _dumate_ready();
-  const dotColor = ready ? 'var(--ok)' : (st && st.installed ? 'var(--warn)' : 'var(--err)');
-  const stateText = ready ? '已就绪' : (st ? (st.installed ? 'App 未运行' : '未安装') : '检测中…');
+  const auto = _dumate_auto();
+  // 圆点三态：绿=进程已起、琥珀=未起但能自动拉起（转发时自起，不是故障）、
+  // 红=未装/无从拉起。早先「未运行」一律画琥珀，用户看到「App 未运行」就以为
+  // 通道坏了（2026-11-02 报障），其实点下去照样能用。
+  const dotColor = ready ? 'var(--ok)' : (auto || (st && st.installed) ? 'var(--warn)' : 'var(--err)');
+  const stateText = ready ? '已就绪'
+    : (st ? (auto ? '待命 · 首次转发自动拉起' : (st.installed ? 'App 未运行' : '未安装')) : '检测中…');
   const ver = st && st.app_version ? ` · v${st.app_version}` : '';
   const acct = acctFor(DUMATE_STATE, 1);
   const delBtn = acctDeleteButton('dumate', acct, '清除本地累计签到缓存');
@@ -58,13 +69,18 @@ function renderDumatePanel() {
   // 走「取第一条有数的」正好取到汇总行。
   const items = dm.quota.items || [];
   const headSum = quotaHeadSum({items});
-  // 未就绪说明（未安装/未运行/检测中）：替换积分明细位置，整块 muted 提示。
+  // 未就绪说明（未安装/检测中）：替换积分明细位置，整块 muted 提示。
   // 优先用后端 status 的 hint（单一事实源）——它区分「装了但没跑（会自动拉起，
   // 无需手动开）」与「没装」，前端硬编码会把自动拉起说成「请先打开桌面端」。
   const notReadyHint = st && st.installed === false
     ? '未检测到 DuMate.app。请先安装并登录百度搭子（千帆桌面端）。'
     : st && st.installed ? (st.hint || '已安装 DuMate.app，但当前未在运行。')
     : '正在检测本地代理…';
+  // 额度明细该不该铺：**不再只看进程在不在**。额度走 bceConsole cookie（公网
+  // HTTPS），与本地 dumate-main-server 毫无关系；进程没起时后端也会顺手拉起独立
+  // 实例再兜底。早先这里按 ready 一刀切，桌面端一关整块额度就变成一句
+  // 「App 未运行」（用户 2026-11-02 报障）。只有「未装 / 拉起也免谈」时才退回提示。
+  const showQuota = ready || auto || (st && st.installed !== false && items.length > 0);
 
   const fold = quotaProviderFold(items, 'dumate');
   panel.innerHTML = `
@@ -75,7 +91,7 @@ function renderDumatePanel() {
         <span class="grow"></span>
         <span class="muted" style="font-size:11px;display:flex;align-items:center;gap:5px">
           <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor}"></i>
-          ${esc(stateText)}${esc(ver)}${ready && st && st.bceconsole_authenticated ? ' · 已登录' : ''}
+          ${esc(stateText)}${esc(ver)}${st && st.bceconsole_authenticated ? ' · 已登录' : ''}
         </span>
         ${fold.toggle}${providerRefreshButton('dumate')}
       </div>
@@ -83,7 +99,7 @@ function renderDumatePanel() {
         <div class="pat-pkg">
           <span class="pat-pkg-name">${esc(acct ? (acct.display_name || acct.id) : '本机账号')}</span>
           ${acctSubHtml(acct, _dumate_sub_extra, 'data-dumate-sub')}
-          ${ready
+          ${showQuota
             ? `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
               quotaItemsHtml(items, 'dumate')
             : `<div class="muted" style="font-size:11px;line-height:1.5;padding:8px 0">${esc(notReadyHint)}</div>`}
@@ -102,7 +118,12 @@ async function loadDumateStatus() {
     // 就绪态是异步拉回来的：状态**变化**时刷新一次面板让圆点/版本/已登录反映
     // 新状态（否则首渲的「检测中…」要等下个 30s 轮询才消失）。只在变化时重渲
     // ——renderDumatePanel 尾部会调本函数，无条件重渲会自己套自己死循环。
-    if (r && r.ready && JSON.stringify(r) !== JSON.stringify(prev)) {
+    //
+    // 判据用「状态变了」而不是「变成 ready」：auto_start / installed /
+    // bceconsole_authenticated 同样决定圆点与额度区怎么画，只盯 ready 的话
+    // 非就绪态的变化（刚检出「可自动拉起」、刚解密出登录态）永远刷不出来。
+    // 重渲尾部又调本函数 → 同一份响应回来后比对相等、自然不再重渲（不会自套）。
+    if (r && JSON.stringify(r) !== JSON.stringify(prev)) {
       renderDumatePanel();
       // 重渲换了整块 DOM（.qbody 高度随明细条数变），校准必须跟着走一次：
       // renderBenefits 末尾那次 syncQuotaFold 跑在本函数 await 之前，看不到
