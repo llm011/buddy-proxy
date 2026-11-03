@@ -23,6 +23,7 @@ from buddy_proxy.core.state import (
 )
 from buddy_proxy.core import settings as settings_mod
 from buddy_proxy.web.model_list import load_models_from_local_config, model_to_codex_format
+from buddy_proxy.web.model_aggregate import aggregate_models
 from buddy_proxy.codebuddy_provider import (
     CLIENT_TAG,
     HAS_PROJECTION,
@@ -187,6 +188,18 @@ async def list_models():
             visible.append(m)
     data = visible
 
+    # 去重聚合：同名模型在每个通道各报一份（deepseek-v4.1-flash 曾出现 7 次），
+    # 直接并集会让客户端选择器里同名项重复、且 id 夹带通道前缀。这里按裸名压成
+    # 一条：裸名请求由 forward_chat 按 model_order 自动 failover，客户端不必知道
+    # 通道存在。能力字段取交集（见 model_aggregate 模块头），避免目录声明得比
+    # 某个候选通道能给的更多、failover 过去才失败。
+    known_providers = frozenset(getattr(state, "providers", {}) or {}) | {"codebuddy"}
+    data = aggregate_models(
+        data,
+        order=getattr(state, "model_order", None) or {},
+        known_providers=known_providers,
+    )
+
     # 记录模型列表请求
     diagnostic(
         "models_list_request",
@@ -200,14 +213,17 @@ async def list_models():
     # 扩展数组，缺了能力信息就会自行猜测是否支持图片（典型做法是按模型名
     # 匹配关键词），导致支持读图的模型被判为纯文本、图片在客户端就被剥掉。
     # 这里显式声明，让客户端可直接读取。
+    #
+    # ``provider`` 字段**不再对外输出**：聚合后的 id 已是裸名，客户端拿它即可
+    # 直接调用（服务端按 model_order failover）。继续吐通道名只会让客户端
+    # 以为要自己拼 ``<provider>/<model>``，拼出来反而把 failover 丢了。
+    # 通道信息改放 ``providers``（候选列表，排障用），不参与路由。
     openai_models = [
         {
             "id": m.get("id", "unknown"),
             "object": "model",
             "created": 1720872952,
             "owned_by": m.get("vendor") or "codebuddy",
-            # 通道归属：codebuddy（默认）/ trae / doubao ...
-            "provider": m.get("provider", "codebuddy"),
             "name": m.get("name") or m.get("id", "unknown"),
             "display_name": m.get("name") or m.get("id", "unknown"),
             "credits": m.get("credits"),
@@ -216,6 +232,11 @@ async def list_models():
             "input_modalities": ["text", "image"] if m.get("images") else ["text"],
             "supports_images": bool(m.get("images")),
             "supports_tool_call": bool(m.get("tool_call")),
+            # 推理能力：客户端（dsh / Claude Code 等）据此决定要不要给 effort 选项。
+            # 之前一条都没有，等于对所有模型宣称「不支持推理」。
+            "supports_reasoning": bool(m.get("reasoning")),
+            **({"providers": m["providers"]} if m.get("providers") else {}),
+            **({"failover": True} if m.get("failover") else {}),
             # 上游内部代号（Qoder 的 qfmodel 等）：对外 id 是人读的小写真实名，
             # 排障时要能对回上游目录。无此概念的通道不出现该字段。
             **({"upstream_key": m["upstream_key"]} if m.get("upstream_key") else {}),
