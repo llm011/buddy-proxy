@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from buddy_proxy.web.model_aggregate import (
     PLACEHOLDER_IDS,
+    _strip_known_prefix,
     aggregate_models,
-    bare_model_id,
 )
 
 KNOWN = frozenset({"codebuddy", "qoder", "ark", "traepat"})
@@ -147,6 +147,8 @@ def test_empty_and_blank_ids_are_skipped():
     assert [m["id"] for m in out] == ["ok"]
 
 
-def test_bare_model_id_helper():
-    assert bare_model_id("qoder/glm-5.3") == "glm-5.3"
-    assert bare_model_id("glm-5.3") == "glm-5.3"
+def test_strip_known_prefix_only_strips_known_channels():
+    assert _strip_known_prefix("qoder/glm-5.3", KNOWN) == "glm-5.3"
+    assert _strip_known_prefix("glm-5.3", KNOWN) == "glm-5.3"
+    # 不是已知通道的前缀不能切（模型可能自带斜杠）
+    assert _strip_known_prefix("meta-llama/Llama-4", KNOWN) == "meta-llama/Llama-4"

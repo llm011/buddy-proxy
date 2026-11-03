@@ -42,19 +42,16 @@ _CAPABILITY_BOOLS = ("images", "tool_call", "reasoning")
 _CAPABILITY_NUMS = ("max_input", "max_output", "context_window")
 
 
-def bare_model_id(model_id: str) -> str:
-    """``qoder/glm-5.3`` → ``glm-5.3``。
-
-    只剥**已知通道前缀**——模型自带斜杠（如 ``meta-llama/Llama-4``）时不能误切。
-    已知前缀集合由调用方从 state 里带进来。
-    """
-    if "/" not in model_id:
-        return model_id
-    prefix, rest = model_id.split("/", 1)
-    return rest if rest and prefix and not rest.startswith("/") else model_id
-
-
 def _strip_known_prefix(model_id: str, known_providers: frozenset[str]) -> str:
+    """``qoder/glm-5.3`` → ``glm-5.3``（只剥**已知通道**前缀）。
+
+    模型自带斜杠时不能误切（``meta-llama/Llama-4`` 原样返回），所以必须靠
+    ``known_providers`` 判断而不是「见斜杠就切」。
+
+    ⚠️ 与 ``ui/models_api._bare_model_id(model_id, provider_id)`` **不是一件事**：
+    那个只剥**调用方指定的那一个** provider 前缀（管理页按通道分组展示时用），
+    这个剥**任何已知通道**前缀（聚合去重时用）。别拿错。
+    """
     if "/" not in model_id:
         return model_id
     prefix, rest = model_id.split("/", 1)
