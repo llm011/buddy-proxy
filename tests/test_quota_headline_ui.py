@@ -24,6 +24,8 @@ STATIC = pathlib.Path(__file__).resolve().parents[1] / "src/buddy_proxy/web/stat
 BENEFITS_JS = STATIC / "benefits.js"
 QUOTA_JS = STATIC / "benefits_quota.js"
 FUNC_RE = re.compile(r"function quotaHeadSum\(q\) \{(.*?)\n\}\n", re.S)
+#: quotaHeadSum 只剩两行转发——真正取数是这两个纯函数（跨账号合计也共用）
+_HELPERS = ("quotaSumOf", "quotaHeadSumHtml")
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="需要 node 跑内联 JS（CI 有，本机可选）"
@@ -35,12 +37,13 @@ def _run_js(body: str) -> str:
     text = QUOTA_JS.read_text(encoding="utf-8")
     match = FUNC_RE.search(text)
     assert match, "benefits.js 里找不到 quotaHeadSum（被改名/挪走了？）"
+    helpers = "".join(_extract_fn(text, n) for n in _HELPERS)
     stub = """
 globalThis.esc = s => String(s);
 globalThis.fmtNum = n => (Math.round(n * 100) / 100).toLocaleString('en-US');
 """
     proc = subprocess.run(
-        ["node", "-e", stub + match.group(0) + "\n" + body],
+        ["node", "-e", stub + helpers + match.group(0) + "\n" + body],
         capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, f"node 执行失败:\n{proc.stderr}"
@@ -189,13 +192,16 @@ function __snap() {
 }
 """
 
-_EXPIRY_FNS = ("fmtExpireDate", "fmtDaysLeft", "renderExpiryBanner")
+#: renderExpiryBanner 现在会先过 mergeExpiring（同类条目合并），依赖链要一起抽
+_EXPIRY_FNS = ("fmtExpireDate", "fmtDaysLeft", "_expiryGroupKey",
+               "_expiryAmountOf", "mergeExpiring", "renderExpiryBanner")
 
 
 def _extract_fn(text: str, name: str) -> str:
-    match = re.search(rf"^function {name}\(.*?\n\}}\n", text, re.S | re.M)
-    assert match, f"benefits.js 里找不到 {name}（被改名/挪走了？）"
-    return match.group(0)
+    """抽一个顶层函数（``function name(...) { ... }`` 到独占行的 ``}``）。"""
+    m = re.search(rf"^function {name}\(.*?\n\}}\n", text, re.S | re.M)
+    assert m, f"benefits_quota.js 里找不到 {name}"
+    return m.group(0)
 
 
 def _run_fn(names: tuple[str, ...], body: str) -> str:

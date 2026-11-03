@@ -182,13 +182,17 @@ function renderKimiPanel() {
   const noticeHtml = notices.map(quotaItemHtml).join('');
   const multi = n > 1;
 
-  const fold = quotaProviderFold(kimi.quota.items || [], 'kimi');
+  // 有卡才有额度可看：一张卡都画不出来（没登录 / 查询失败）就收起整块明细，
+  // 标题行留徽标与展开开关（用户 2026-11-02：没额度的通道不该大敞着）。
+  // 没登录 / 查询失败时没有任何账号卡，展开只剩一句空态：一并收起。
+  const fold = quotaProviderFold((groups.size || notices.length) ? kimi.quota.items || [] : 'empty', 'kimi');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Kimi</span>
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Kimi Code 订阅'}</span>${fold.badge}
         <span class="grow"></span>
+        ${quotaAccountTotal(groups)}
         <span class="muted" style="font-size:11px">${multi ? '429/403 自动冷却换号（按导入顺位）' : '额度耗尽自动切换下一个账号'}</span>
         ${fold.toggle}${providerRefreshButton('kimi')}
         <button class="ghost" title="粘贴 kimi cli 导出的 token JSON" onclick="openKimiImport()">导入账号</button>

@@ -249,7 +249,11 @@ function renderCodexPanel() {
   const noticeHtml = notices.map(quotaItemHtml).join('');
   const multi = n > 1;
 
-  const fold = quotaProviderFold(codex.quota.items || [], 'codex');
+  // 额度卡该不该折：按**画得出来的东西**判，不按 items 条数——账号登录着、
+  // 用量接口却没回窗口（items 为空或全是说明条）时 allGrps 为空，展开只剩
+  // 一句「暂无账号额度数据」（用户 2026-11-02 报障）。有窗口但全部为 0 交给
+  // 公共函数判；有余额或有部分失败说明条时照常展开。
+  const fold = quotaProviderFold(allGrps.size ? codex.quota?.items || [] : 'empty', 'codex');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">

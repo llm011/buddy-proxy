@@ -27,6 +27,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 _FUNC_RE = re.compile(r"function quotaHeadSum\(q\) \{(.*?)\n\}\n", re.S)
+#: quotaHeadSum 只剩两行转发——真正取数是这两个纯函数
+_HELPERS = ("quotaSumOf", "quotaHeadSumHtml")
+
+
+def _extract_fn(text: str, name: str) -> str:
+    """抽一个顶层函数（``function name(...) { ... }`` 到独占行的 ``}``）。"""
+    m = re.search(rf"^function {name}\(.*?\n\}}\n", text, re.S | re.M)
+    assert m, f"benefits_quota.js 里找不到 {name}"
+    return m.group(0)
+
 
 
 def _run_js(body: str) -> str:
@@ -37,7 +47,8 @@ def _run_js(body: str) -> str:
 globalThis.esc = s => String(s);
 globalThis.fmtNum = n => String(n);
 """
-    proc = subprocess.run(["node", "-e", stub + m.group(0) + "\n" + body],
+    helpers = "".join(_extract_fn(text, n) for n in _HELPERS)
+    proc = subprocess.run(["node", "-e", stub + helpers + m.group(0) + "\n" + body],
                           capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     return proc.stdout

@@ -66,6 +66,9 @@ globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) + '</div>
 globalThis.quotaItemsHtml = (items, key) =>
   '<div class="qbody" data-qfold="' + esc(key) + '">' +
   items.map(globalThis.quotaItemHtml).join('') + '</div>';
+// 跨账号合计 chip（benefits_quota.js 的真实现由 test_quota_account_total.py 覆盖）；
+// 这里只关心面板布局，出个可辨认的标记就够了
+globalThis.quotaAccountTotal = () => '<span class="acct-total">TOTAL</span>';
 globalThis.quotaProviderFold = () => ({badge: '', toggle: '', bodyStart: '', bodyEnd: ''});
 globalThis.BENEFITS = {};
 // syncQuotaFold 定义在折叠区块（不在本测试切片里），打桩成计数器：

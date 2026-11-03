@@ -38,13 +38,15 @@ function renderTraepatPanel() {
     </div>`;
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
 
-  const fold = quotaProviderFold(pat.quota.items || [], 'traepat');
+  // 没有账号卡（未登录 / 网关全挂）就收起明细，标题行留徽标与展开开关。
+  const fold = quotaProviderFold(groups.size ? pat.quota.items || [] : 'empty', 'traepat');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Trae PAT</span>
         <span class="tag">多账号 · 自愈</span>${fold.badge}
         <span class="grow"></span>
+        ${quotaAccountTotal(groups)}
         <span class="pat-keeper" id="pat-keeper"></span>
         ${fold.toggle}${providerRefreshButton('traepat')}
         <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>

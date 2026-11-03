@@ -11,45 +11,66 @@
 //
 // 所以由后端用 ``sum_items: true`` 显式声明「这些条目可以合计」，前端只认
 // 这个标记，不靠猜——靠猜的话，下一个新通道就会被默默算错。
+//
+// quotaSumOf / quotaHeadSumHtml 拆成纯函数（不碰 DOM）：「单个资源包合计」与
+// 「跨账号合计」（quotaAccountTotal）共用同一套「哪些条目算数」的判断——量纲
+// 口径只准有一处定义，否则两处迟早分叉，标题行的数就跟子卡对不上。
 function quotaHeadSum(q) {
-  const items = q.items || [];
-  // 只认「能当数字用」的值。两道剔除各有来由：
-  // - null / '' / 布尔：``Number(null)`` 和 ``Number('')`` 都是 0，不收的话
-  //   会把「没有数据」当 0 求进合计；``Number(true)`` 是 1，更不能要。
-  // - 收不进数字的字符串：那是**说明条**不是额度——``trae.pat.quota.
-  //   _failure_notice`` 的 remaining 发的是「2/9 个账号本轮未取到新数据」
-  //   这类文案，``quotaItemHtml`` 也正是按 ``typeof === 'string'`` 认它的。
-  //   不加这道判断，说明条会被当数字求和，标题行渲染成「剩 NaN / NaN」，
-  //   比不显示还糟。
-  // 注意**数字字符串（"2000"）要照收**：上游给 zcode 的 unit/number 就发过
-  // 字符串，额度字段同样可能这么来，直接拿 Number.isFinite 会把它误杀。
+  return quotaHeadSumHtml(quotaSumOf(q.items || [], !!q.sum_items));
+}
+
+// 一组条目 → 「本组合计」的原始数值。抽出来是因为跨账号合计要的是**数**而
+// 不是 HTML，但「怎么取」必须与标题行完全一致。
+//
+// - sumItems 为真：所有有数的条目相加，返回 ``{rem, total, n}``（n=参与条数）
+// - 为假：只取第一条有数的条目（Trae 的「总额度」就是这样拿到手的）
+// - 一条可用的都没有：返回 ``null``，调用方据此不渲染（否则「剩 0 / 0」）
+//
+// 只认「能当数字用」的值。两道剔除各有来由：
+// - null / '' / 布尔：``Number(null)`` 和 ``Number('')`` 都是 0，不收的话
+//   会把「没有数据」当 0 求进合计；``Number(true)`` 是 1，更不能要。
+// - 收不进数字的字符串：那是**说明条**不是额度——``trae.pat.quota.
+//   _failure_notice`` 的 remaining 发的是「2/9 个账号本轮未取到新数据」
+//   这类文案，``quotaItemHtml`` 也正是按 ``typeof === 'string'`` 认它的。
+//   不加这道判断，说明条会被当数字求和，标题行渲染成「剩 NaN / NaN」，
+//   比不显示还糟。
+// 注意**数字字符串（"2000"）要照收**：上游给 zcode 的 unit/number 就发过
+// 字符串，额度字段同样可能这么来，直接拿 Number.isFinite 会把它误杀。
+function quotaSumOf(items, sumItems) {
   const num = v => v !== null && v !== '' && typeof v !== 'boolean'
                 && Number.isFinite(Number(v));
   const usable = items.filter(it => num(it.remaining) && num(it.total));
-  if (q.sum_items) {
-    // 一条都没有就别显示（否则会渲染成「剩 0 / 0」）
-    if (!usable.length) return '';
-    const rem = usable.reduce((a, it) => a + Number(it.remaining), 0);
-    const total = usable.reduce((a, it) => a + Number(it.total), 0);
-    const label = usable.length > 1 ? `${usable.length} 项合计` : '';
-    const used = total > 0 ? ` · 已用 ${Math.round((1 - rem / total) * 100)}%` : '';
-    return `<span class="mono" style="margin-left:auto" title="${esc(label || '剩余 / 总额')}">
-      <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(rem)}</span>
-      <span class="muted">/ ${fmtNum(total)}${used}</span>
-      ${label ? `<span class="muted" style="font-size:11px"> · ${esc(label)}</span>` : ''}</span>`;
+  if (!usable.length) return null;
+  if (sumItems) {
+    return {
+      rem: usable.reduce((a, it) => a + Number(it.remaining), 0),
+      total: usable.reduce((a, it) => a + Number(it.total), 0),
+      n: usable.length,
+    };
   }
-  // 未声明可合计：取第一条有数的条目。此时**列表顺序就是语义**——各家自己
-  // 决定先展示哪一档（ZCode 是「窗口由小到大」，5 小时档在前；Trae 是总额度
-  // 在前），前端不再自作主张挑「最紧的」。
-  const head = usable[0];
-  if (!head) return '';
-  // 「已用 N%」放在总量后面（用户 2026-10-03：参考明细行的写法）——各条
-  // 量纲能否相加无所谓，这是单条自己的比例，永远成立
-  const hRem = Number(head.remaining), hTot = Number(head.total);
-  const hUsed = hTot > 0 ? ` · 已用 ${Math.round((1 - hRem / hTot) * 100)}%` : '';
+  return {rem: Number(usable[0].remaining), total: Number(usable[0].total), n: 1};
+}
+
+// quotaSumOf 的结果 → 标题行「剩 X / Y · 已用 N%」chip。
+// 输出与拆分之前逐字节一致（tests/test_quota_headline_ui.py 在盯）。
+function quotaHeadSumHtml(sum) {
+  if (!sum) return '';
+  if (sum.n > 1) {
+    const label = `${sum.n} 项合计`;
+    const used = sum.total > 0 ? ` · 已用 ${Math.round((1 - sum.rem / sum.total) * 100)}%` : '';
+    return `<span class="mono" style="margin-left:auto" title="${esc(label)}">
+      <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(sum.rem)}</span>
+      <span class="muted">/ ${fmtNum(sum.total)}${used}</span>
+      <span class="muted" style="font-size:11px"> · ${esc(label)}</span></span>`;
+  }
+  // 单条：**列表顺序就是语义**——各家自己决定先展示哪一档（ZCode 是「窗口由
+  // 小到大」，5 小时档在前；Trae 是总额度在前），前端不再自作主张挑「最紧的」。
+  // 「已用 N%」放在总量后面（用户 2026-10-03：参考明细行的写法）——这是单条
+  // 自己的比例，永远成立。
+  const hUsed = sum.total > 0 ? ` · 已用 ${Math.round((1 - sum.rem / sum.total) * 100)}%` : '';
   return `<span class="mono" style="margin-left:auto">
-      <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(head.remaining)}</span>
-      <span class="muted">/ ${fmtNum(head.total)}${hUsed}</span></span>`;
+      <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(sum.rem)}</span>
+      <span class="muted">/ ${fmtNum(sum.total)}${hUsed}</span></span>`;
 }
 
 function quotaItemHtml(it) {
@@ -178,36 +199,48 @@ function quotaRemaining(it) {
   return Number(r);
 }
 
-// ---- provider 级折叠：只收明确全部耗尽的通道 ----
-// 与条目层 QUOTA_FOLD 完全独立。任何未知/错误/说明条都阻止折叠；空数组和
-// Free 的 query_empty 也不是「额度为 0」。重置券不代表有可用的订阅额度。
+// ---- provider 级折叠：没额度的通道都收起来 ----
+// 与条目层 QUOTA_FOLD 完全独立。收起的两种情形：
+//
+// 1. **明确全部耗尽**：每条可量化的剩余都 ≤ 0（重置券不计）
+// 2. **压根没有额度明细**：items 为空、或每组只有说明条（未登录 / 查询失败 /
+//    Free 的 query_empty），一张带可量化剩余的行都画不出来。这种卡展开只剩一句
+//    「暂无账号额度数据」，占满一屏却没内容（用户 2026-11-02 报障 Codex 账号
+//    登录着、卡里什么额度都没有还大敞着）。
+//
+// **一组有余额 + 另一组全失败**时照旧展开：失败那组要给用户看见。所以面板传进来
+// 的 items 由「渲染出来的东西」决定（见各 renderXxxPanel），不是原样透传。
+// 重置券既不算耗尽、也不算「有额度」——只有券的通道同样收起。
+// 收起后标题行留徽标与展开开关，点一下就能看回去。
 const PROVIDER_QUOTA_FOLD = { open: {} };
 
 function quotaProviderExhausted(items) {
-  if (!items || !items.length) return false;
-  let measured = false;
-  for (const it of items) {
+  for (const it of items || []) {
     if (it.unit === 'reset_credit' || it.reset_credit === true) continue;
-    if (it.query_failed || it.unreachable || it.query_empty || it.reset_pending) return false;
     const remaining = quotaRemaining(it);
-    if (remaining == null) return false;
-    measured = true;
+    if (remaining == null) continue;   // 说明条 / 未知：不参与耗尽判定
     if (remaining > 0) return false;
   }
-  return measured;
+  // 没有任何一条可量化的剩余 > 0：全部耗尽，或压根没有额度明细
+  return true;
 }
 
 // 普通卡和专属卡共用的外层折叠。有余额时永远展开，不让旧的「手动收起」
 // 覆盖值把新到账的额度藏住；只有耗尽卡才显示开关并记住用户选择。
+// items 传 'empty'（或 null）表示「面板压根画不出带额度的行」：没有可量化的
+// 剩余就收起。徽标写「无额度数据」而不是「无剩余额度」——后者是查到了、且确实
+// 是 0，前者是查不到。别的字符串（非数组）按「无从判断」处理，保持展开。
 function quotaProviderFold(items, key) {
-  const exhausted = quotaProviderExhausted(items);
+  const exhausted = items === 'empty' || quotaProviderExhausted(items);
+  const empty = items === 'empty';
   const overridden = Object.prototype.hasOwnProperty.call(PROVIDER_QUOTA_FOLD.open, key);
   const open = !exhausted || (overridden ? PROVIDER_QUOTA_FOLD.open[key] : false);
   const id = 'provider-quota-' + key.replace(/[^A-Za-z0-9_-]/g, (m, i) =>
     '-' + key.charCodeAt(i).toString(16) + '-');
   return {
     exhausted,
-    badge: exhausted ? '<span class="tag bad">无剩余额度</span>' : '',
+    badge: exhausted ? '<span class="tag ' + (empty ? '' : 'bad') + '">'
+      + (empty ? '无额度数据' : '无剩余额度') + '</span>' : '',
     toggle: exhausted ? `<button class="ghost provider-quota-toggle" data-provider-fold="${esc(key)}" ` +
       `aria-expanded="${open}" aria-controls="${esc(id)}" title="${open ? '收起' : '展开'}额度明细" ` +
       `onclick="quotaProviderToggle(this)">${open ? '收起额度 ▴' : '展开额度 ▾'}</button>` : '',
@@ -315,3 +348,86 @@ function quotaFoldToggle(btn) {
   QUOTA_FOLD.open[key] = !QUOTA_FOLD.open[key];
   syncQuotaFold();
 }
+
+// ---- 多账号通道：面板标题行的「跨账号合计」----
+//
+// 子卡上的合计行（quotaHeadSum）只算**一个账号**里的几个资源包。多账号通道里
+// 用户真正想知道的是「这个通道总共还剩多少」，原先只能自己把几张卡加起来
+// （用户 2026-11-02 提出）。
+//
+// 三条口径，缺一条就会显示成假数字：
+//
+// 1. **按区分别累加。** CN 与 Global 是不同面板 / 不同 provider（额度标签就不同：
+//    ``CodeBuddy`` vs ``CodeBuddy 海外版``；Trae 的 CN 记 credits、海外记 dollars），
+//    各自算各自的。合起来是个既不可兑付、又没有量纲的数字——所以跨区**绝不**由
+//    这里合并；哪怕哪天两个区挤进同一个面板，下面按 unit 分桶也会拆成两个 chip。
+//
+// 2. **取数口径跟子卡一致**：走 ``quotaSumOf``。``opts.sumItems`` 由面板按通道
+//    声明——Qoder / CodeBuddy 系列的条目是并存份额要相加；Trae / traepat /
+//    Antigravity 传假，按「取第一条有数的」处理（Trae 的「总额度」本就是各权益
+//    包的合计，再加一遍就是重复计算）。
+//
+// 3. **不可加的就明确说没加。** 上游只给比例（``percent``，没有绝对积分）的账号
+//    直接跳过，被跳过的个数写进 chip（「2 账号合计 · 1 个未计入」），账号名进
+//    悬停提示。宁可显示一个标注过的不完整总数，也不许拿百分比反推绝对量拼出
+//    一个看起来完整的假数。
+//
+// 返回 chip HTML；不该显示时返回 ``''``：分组不足两个（单账号——子卡上已经有
+// 一行了，标题再写一遍没有信息量），或一个可加的账号都没有。
+function quotaAccountTotal(groups, opts) {
+  const sumItems = !!(opts && opts.sumItems);
+  if (!(groups instanceof Map) || groups.size <= 1) return '';
+  // 千分制 / 美元不是积分：Antigravity 的 total 恒为 1000，加出来的「剩 1,700」
+  // 会被当成积分数。这类量纲在 chip 里点名，免得和 credits 混为一谈。
+  const UNIT_LABEL = {permille: '千分制水位', dollar: '美元'};
+  // unit → {rem, total, counted, skipped: [组名]}
+  const buckets = new Map();
+  const bucket = unit => {
+    if (!buckets.has(unit)) buckets.set(unit, {unit, rem: 0, total: 0, counted: 0, skipped: []});
+    return buckets.get(unit);
+  };
+  for (const [name, items] of groups) {
+    const list = items || [];
+    // 没有额度数字的分组（未登录、查询失败）不算「跳过」：它压根没数据可比，
+    // 标进「N 个未计入」反而让合计看起来比实际情况更可疑。
+    const noticeOnly = list.length > 0 && list.every(
+      it => it.unreachable === true || it.query_failed === true
+        || (it.unit !== 'percent' && !quotaSumOf([it], false)));
+    if (noticeOnly) continue;
+    // 整组都只有比例 → 没有绝对量可加（**先判 percent**：它的 total 是 100
+    // 这种占位分母，``quotaSumOf`` 照样能得出数，但那不是积分）
+    const units = [...new Set(list.map(it => it.unit || 'credit'))];
+    const unit = units.every(u => u === 'percent') ? 'percent'
+      : (units.length === 1 ? units[0] : 'credit');
+    const sum = unit === 'percent' ? null : quotaSumOf(list, sumItems);
+    if (!sum) { bucket(unit).skipped.push(name); continue; }
+    const b = bucket(unit);
+    b.rem += sum.rem; b.total += sum.total; b.counted += 1;
+  }
+  const chips = [];
+  // 整组都不可加的账号（如只给百分比）：挂到「算了的」那份上一起标出来。
+  // 不标的话它们就悄悄消失在合计里——用户看到的总数少了几个账号还不知道。
+  // 顺序有讲究：先扫一遍收齐 dropped，再一次性拼 chip，中途不去碰 dropped。
+  let dropped = 0, droppedNames = [];
+  for (const b of buckets.values()) {
+    if (b.counted) continue;
+    dropped += b.skipped.length;
+    droppedNames = droppedNames.concat(b.skipped);
+  }
+  for (const b of buckets.values()) {
+    if (!b.counted) continue;
+    const parts = [`${b.counted} 账号合计`];
+    const skipped = b.skipped.length + dropped;
+    if (skipped) parts.push(`${skipped} 个未计入`);
+    const used = b.total > 0 ? ` · 已用 ${Math.round((1 - b.rem / b.total) * 100)}%` : '';
+    const label = `${parts.join(' · ')}${UNIT_LABEL[b.unit] ? ` · ${UNIT_LABEL[b.unit]}` : ''}`;
+    const tip = `跨账号合计：各账号子卡合计相加`
+      + (skipped ? `；未计入 ${skipped} 个：${b.skipped.concat(droppedNames).join('、')}` : '');
+    chips.push(`<span class="mono" title="${esc(tip)}">
+        <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(b.rem)}</span>
+        <span class="muted">/ ${fmtNum(b.total)}${used}</span>
+        <span class="muted" style="font-size:11px"> · ${esc(label)}</span></span>`);
+  }
+  return chips.join('');
+}
+
