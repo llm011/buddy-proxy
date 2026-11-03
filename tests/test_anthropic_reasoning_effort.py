@@ -140,3 +140,43 @@ def test_qoder_upstream_body_keeps_reasoning_effort():
     )
     assert out["reasoning_effort"] == "high"
 
+
+
+# ---- /v1/responses：原生 reasoning.effort 形状 ----
+#
+# Codex CLI 发的是 Responses 原生形状 ``reasoning: {effort: ...}``，只透传
+# ``reasoning_effort`` 会让它整段丢掉——与 /v1/messages 的 thinking 同一个坑。
+
+
+def test_responses_native_reasoning_effort_is_mapped():
+    from buddy_proxy.protocols.responses_adapter import responses_request_to_chat
+
+    chat = responses_request_to_chat(
+        {"model": "deepseek-v4.1-flash", "input": "hi",
+         "reasoning": {"effort": "HIGH", "summary": "auto"}})
+    assert chat["reasoning_effort"] == "high"
+
+
+def test_responses_reasoning_effort_field_still_wins():
+    from buddy_proxy.protocols.responses_adapter import responses_request_to_chat
+
+    chat = responses_request_to_chat(
+        {"model": "deepseek-v4.1-flash", "input": "hi",
+         "reasoning_effort": "low", "reasoning": {"effort": "high"}})
+    assert chat["reasoning_effort"] == "low"
+
+
+def test_responses_null_effort_adds_nothing():
+    """``reasoning.effort: null`` 表示「用默认」，不能写成 "none"。"""
+    from buddy_proxy.protocols.responses_adapter import responses_request_to_chat
+
+    chat = responses_request_to_chat(
+        {"model": "deepseek-v4.1-flash", "input": "hi", "reasoning": {"effort": None}})
+    assert "reasoning_effort" not in chat
+
+
+def test_responses_without_reasoning_adds_nothing():
+    from buddy_proxy.protocols.responses_adapter import responses_request_to_chat
+
+    chat = responses_request_to_chat({"model": "deepseek-v4.1-flash", "input": "hi"})
+    assert "reasoning_effort" not in chat

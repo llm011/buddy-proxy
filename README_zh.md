@@ -823,6 +823,11 @@ codex --profile codebuddy "your task"
 客户端设了也毫无效果、日志里还看不出来。客户端直接在 Anthropic body 里发 `reasoning_effort`
 时以它为准；两个字段都没有就不写，保持原状。不支持强度的上游会忽略该字段。
 
+`/v1/responses` 上有同一个坑：Responses 原生写法 `reasoning: {effort: ...}`（Codex CLI 就这么发）
+以前也被丢掉，只有 `reasoning_effort` 被透传。现在两种都认，显式 `reasoning_effort` 优先；
+`reasoning.effort` 为 `null` 表示「用默认」，不写。
+
+
 ### OpenCode
 
 `opencode.json`:

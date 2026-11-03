@@ -717,6 +717,9 @@ codex --profile codebuddy "your task"
 
 **Reasoning effort.** Anthropic clients express strength as `thinking: {type: "enabled", budget_tokens: N}`, while the channels behind this proxy (`qoder` / `codebuddy` / `ark` / `dumate`) speak chat's `reasoning_effort`. `/v1/messages` now maps the budget onto a level before forwarding — `≤2048` → `low`, `≤8192` → `medium`, above → `high`, and `type: "disabled"` → `none`. Before 2026-11-04 the field was dropped outright, so a client's setting silently did nothing on this path. A client that sends `reasoning_effort` directly in an Anthropic body wins over `thinking`; when neither is present nothing is added. Upstreams without effort support simply ignore it.
 
+The same gap existed on `/v1/responses`: the Responses-native `reasoning: {effort: ...}` shape (what Codex CLI sends) was dropped while only `reasoning_effort` was forwarded. It is now mapped too, with an explicit `reasoning_effort` still taking precedence and `reasoning.effort: null` meaning "use the default" (nothing is written).
+
+
 ### OpenCode
 
 `opencode.json`:
