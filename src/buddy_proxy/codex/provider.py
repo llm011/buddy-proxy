@@ -32,6 +32,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..asyncutil import LoopSafeLock
 from ..core.metrics import ACCOUNT_META
 from ..providers.base import BaseProvider
 from . import failover
@@ -144,7 +145,9 @@ class CodexProvider(BaseProvider):
         self._models: list[dict[str, Any]] = _load_models()
         self._images = _load_images()
         self._client: httpx.AsyncClient | None = None
-        self._refresh_lock = asyncio.Lock()
+        # LoopSafeLock：provider 是进程级单例，锁不能再被单个事件循环钉死
+        # （同 doubao 的跨循环事故，见 buddy_proxy.asyncutil）
+        self._refresh_lock = LoopSafeLock("codex.refresh")
 
     # -- 目录 --
 
@@ -167,7 +170,7 @@ class CodexProvider(BaseProvider):
         抛错，由接口层转成 502——绝不把空表写进文件。
         """
         del force  # 目录没有缓存期：按钮本来就是「强制重拉」
-        async with self._refresh_lock:
+        async with self._refresh_lock.guard():
             accounts = list_accounts()
             if not accounts:
                 raise CatalogError("未登录：先跑 `buddy login codex`")
