@@ -310,6 +310,46 @@ def repair_tool_sequence(messages: list[dict]) -> list[dict]:
     return result
 
 
+#: Anthropic ``thinking.budget_tokens`` 上限 → OpenAI ``reasoning_effort`` 档位。
+#:
+#: Anthropic 协议只有「开/关 + 预算」，没有档位概念；而本代理下游那批通道
+#: （qoder / codebuddy / ark / dumate）认的是 chat 的 ``reasoning_effort``。
+#: 不映射就被整段丢掉——客户端设了强度、日志里也看不出来，只留下「怎么不思考了」
+#: 这种无头案（2026-11-04 实测：anthropic 路径 ``thinking`` 全丢，reasoning_tokens
+#: 恒为 0，而同一模型走 openai 路径能拿到 282）。边界取 Anthropic 文档里的最小
+#: 可用预算 1024 与常见配置（2k 轻量 / 8k 常规 / 更大为重推理）。
+_THINKING_BUDGET_EFFORT: tuple[tuple[int, str], ...] = (
+    (2048, "low"),
+    (8192, "medium"),
+)
+#: 超出上表的预算按最高档落地。
+_THINKING_BUDGET_EFFORT_TOP = "high"
+
+
+def effort_from_thinking(thinking: Any) -> str | None:
+    """Anthropic ``thinking`` 对象 → ``reasoning_effort`` 档位；无从判断时 None。
+
+    ``type=disabled`` 明确表达「不思考」，映射成 ``none``（实测上游接受且
+    reasoning_tokens 为 0）；``type=enabled`` 按预算分档。type 缺失/未知时返回
+    None，交给调用方保持「什么都没设」的原状，不擅自替客户端决定。
+    """
+    if not isinstance(thinking, dict):
+        return None
+    kind = str(thinking.get("type") or "").strip().lower()
+    if kind == "disabled":
+        return "none"
+    if kind != "enabled":
+        return None
+    budget = thinking.get("budget_tokens")
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        # enabled 但没给预算：语义是「要思考」，按中档落地，别退化成不思考
+        return "medium"
+    for limit, level in _THINKING_BUDGET_EFFORT:
+        if budget <= limit:
+            return level
+    return _THINKING_BUDGET_EFFORT_TOP
+
+
 def anthropic_request_to_chat(body: dict) -> dict:
     """将Anthropic Messages API请求体转换为Chat Completions请求体
     
@@ -318,6 +358,7 @@ def anthropic_request_to_chat(body: dict) -> dict:
         messages → messages（展开content blocks）
         tools → Chat格式tools
         tool_choice → Chat格式
+        thinking → reasoning_effort（预算分档，见 :func:`effort_from_thinking`）
     """
     messages: list[dict] = []
     
@@ -363,7 +404,15 @@ def anthropic_request_to_chat(body: dict) -> dict:
     for key in ("max_tokens", "temperature", "top_p", "stop", "top_k"):
         if key in body:
             chat[key] = body[key]
-    
+
+    # 推理强度：显式 reasoning_effort 优先（部分客户端两套字段混着发），
+    # 否则从 anthropic 的 thinking 推导。都没有就什么都不加，保持原状。
+    effort = body.get("reasoning_effort")
+    if not isinstance(effort, str) or not effort.strip():
+        effort = effort_from_thinking(body.get("thinking"))
+    if effort:
+        chat["reasoning_effort"] = effort.strip().lower()
+
     return chat
 
 

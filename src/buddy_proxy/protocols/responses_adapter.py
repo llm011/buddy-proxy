@@ -228,6 +228,17 @@ def responses_request_to_chat(body: dict) -> dict:
         if key in body:
             chat[key] = body[key]
 
+    # 推理强度：Responses 的原生形状是 ``reasoning: {effort: ...}``（Codex CLI
+    # 就这么发），而 chat 认的是 ``reasoning_effort``。只透传后者会让原生写法整段
+    # 丢掉——客户端设了强度、日志里也看不出来（与 /v1/messages 的 ``thinking``
+    # 是同一个坑）。effort 为 null 表示「用默认」，不写即可。
+    if "reasoning_effort" not in chat:
+        reasoning = body.get("reasoning")
+        if isinstance(reasoning, dict):
+            effort = reasoning.get("effort")
+            if isinstance(effort, str) and effort.strip():
+                chat["reasoning_effort"] = effort.strip().lower()
+
     # max_output_tokens → max_tokens
     if "max_output_tokens" in body:
         chat["max_tokens"] = body["max_output_tokens"]
