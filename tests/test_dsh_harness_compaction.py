@@ -13,6 +13,8 @@ invocation from an unapproved channel``。dsh（deepseek-harness TUI）的默认
 
 from __future__ import annotations
 
+import pytest
+
 from buddy_proxy.core.desensitize import desensitize_body
 
 #: dsh 真实模板的开头（请求体里 system 的第一段），足以触发上游校验。
@@ -57,7 +59,7 @@ def test_deepseek_harness_system_is_compacted():
 def test_deepseek_harness_mixed_case_also_compacted():
     """大小写变体同样会被上游拦，规则必须不分大小写。"""
     out = desensitize_body(
-        _body("You are powered by DEEPSEEK HARNESS. Be helpful."),
+        _body("You are an AI agent powered by DEEPSEEK HARNESS."),
         compact_harness=True,
     )
     text = _system_text(out)
@@ -77,6 +79,52 @@ def test_deepseek_without_harness_untouched():
     plain = "You are running on DeepSeek. Answer concisely."
     out = desensitize_body(_body(plain), compact_harness=True)
     assert "Answer concisely" in _system_text(out)
+
+
+def test_benign_mention_of_harness_is_not_wiped():
+    """用户自己写的 prompt 里提到 Harness，不能被整段替换掉。
+
+    上游拦的是 dsh 那条固定身份声明，不是「提到 Harness」；这种正常业务
+    prompt 实测返回 200，替换了反而丢掉用户语义。
+    """
+    benign = "Help me compare the DeepSeek Harness benchmark numbers."
+    out = desensitize_body(_body(benign), compact_harness=True)
+    text = _system_text(out)
+    assert "benchmark" in text, "正常业务 prompt 不该被整段替换"
+
+
+def test_long_prompt_mentioning_harness_is_not_wiped():
+    """即使很长，只要不是 dsh 身份声明句式，也不该被替换。"""
+    long_prompt = "DeepSeek Harness runtime.\n\n" + ("Follow these rules carefully. " * 200)
+    out = desensitize_body(_body(long_prompt), compact_harness=True)
+    text = _system_text(out)
+    assert "Follow these rules" in text, "长但非 dsh 句式不该被替换"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        # 都不是 dsh 的身份声明句式，上游实测全部放行
+        "You are a coding agent powered by DeepSeek Harness.",
+        "You are an AI assistant powered by DeepSeek Harness.",
+        "You are an AI agent powered by DeepSeek.",
+        "You are an AI agent. DeepSeek Harness.",
+        "Powered by DeepSeek Harness, you are an AI agent.",
+    ],
+)
+def test_similar_phrasings_are_not_compacted(prompt):
+    """邻近句式都不拦，不该被误伤。"""
+    out = desensitize_body(_body(prompt), compact_harness=True)
+    assert "Help with software engineering tasks" not in _system_text(out)
+
+
+def test_exact_declaration_is_compacted():
+    """dsh 的原句（就是它会被拦的那条）必须被替换。"""
+    out = desensitize_body(
+        _body("You are an AI agent powered by DeepSeek Harness."),
+        compact_harness=True,
+    )
+    assert "Help with software engineering tasks" in _system_text(out)
 
 
 def test_compaction_is_opt_in():

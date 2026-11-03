@@ -291,12 +291,13 @@ _CLAUDE_HARNESS_SUMMARY = (
 #: （不分大小写）的请求整单拦截，返回 HTTP 400 /
 #: ``code 11128 Illegal API invocation from an unapproved channel``
 #: （displayTips：“这次调用没通过渠道校验，可能不是官方客户端发出的”）。
-#: 二分验证过：单独 ``DeepSeek``、单独 ``Harness``、``Claude Code``、``dsh``
-#: 都放行，只有这两个词连写才拦。
+#: 上游认的是 dsh 那一条固定身份声明，而不是「提到 Harness」这件事——逐条
+#: 实测见 :func:`_looks_like_deepseek_harness` 的表格。只匹配完整句式，
+#: 尽量缩小命中面。
 #:
 #: 注意**不能靠 ``desensitize_text`` 的零宽空格绕**：插 ``​`` 后实测仍
 #: 返回同一个 11128（上游显然做了规范化或另有指纹），必须整段替换成摘要。
-_DEEPSEEK_HARNESS_MARKER = "deepseek harness"
+_DEEPSEEK_HARNESS_MARKER = "you are an ai agent powered by deepseek harness"
 
 _DEEPSEEK_HARNESS_SUMMARY = (
     "Help with software engineering tasks. Follow repository instructions and "
@@ -306,7 +307,27 @@ _DEEPSEEK_HARNESS_SUMMARY = (
 
 
 def _looks_like_deepseek_harness(text: str) -> bool:
-    """识别 dsh 注入的 system 模板（上游按 ``deepseek harness`` 字样拦截）。"""
+    """识别 dsh 注入的 system 模板。
+
+    上游拦的不是「提到 Harness」这个事实，而是 dsh 那**一条固定身份声明**。
+    2026-11-04 逐条实测（codebuddy/deepseek-v4.1-flash，非流式）：
+
+    ==========================================  ======
+    system prompt                               HTTP
+    ==========================================  ======
+    ``You are an AI agent powered by DeepSeek Harness.``   400
+    ``You are a coding agent powered by DeepSeek Harness.`` 200
+    ``You are an AI assistant powered by DeepSeek Harness.`` 200
+    ``You are an AI agent powered by DeepSeek.``            200
+    ``You are an AI agent. DeepSeek Harness.``              200
+    ``Powered by DeepSeek Harness, you are an AI agent.``   200
+    ``DeepSeek Harness runtime.`` ×20（520 字符）            200
+    ==========================================  ======
+
+    所以按「长度」或「出现触发词」判定都会误伤：560 字符的正常业务 prompt
+    只要提到该词就会被整段替换、丢掉用户语义，而上游本来放行。这里只匹配
+    那条完整句式，命中面最小。
+    """
     return _DEEPSEEK_HARNESS_MARKER in text.lower()
 
 
