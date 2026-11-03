@@ -310,6 +310,102 @@ def test_expiry_banner_non_credit_hides_amount():
     assert '19.5' not in out, f"非积分类不该显示余量: {out}"
 
 
+def test_expiry_banner_merges_same_kind_batches():
+    """同类包按通道合并成一行（用户 2026-11-03 报障）。
+
+    DuMate 每天发一个 login_bonus 小包、到期日各差一天，原样铺就是 30 多行
+    「百度搭子 · 积分包（login_bonus）」，把 Trae 那条真告警淹了。合并后应只剩
+    一行：最紧的日期 + 「×N · 合计剩 M」+ 行尾「N 项至 mm-dd」。
+    """
+    items = ",".join(
+        f"{{provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',"
+        f" expire_ts: {1793200000 + i * 86400}, days_left: {2 + i},"
+        f" remaining: 500, unit: 'credit'}}"
+        for i in range(6)
+    )
+    out = _render_banner("{expiring: [" + items + "]}")
+    assert '有 6 项权益将在 7 天内到期' not in out, f"该合并成 1 项: {out}"
+    assert '有 1 项权益将在 7 天内到期' in out, out
+    assert out.count('百度搭子') == 1, f"同类包只该出一行: {out}"
+    assert '×6 · 合计剩 3,000' in out, f"要带上条数与余量合计: {out}"
+    assert '6 项至' in out, f"行尾要补最晚到期日: {out}"
+
+
+def test_expiry_banner_keeps_different_kinds_apart():
+    """合并只针对同类：同通道的「订阅套餐」与「积分包」是两码事，不能被并掉。"""
+    out = _render_banner("""{
+      expiring: [
+        {provider: 'dumate', provider_name: '百度搭子', label: '订阅套餐（plan_pro）',
+         expire_ts: 1793200000, days_left: 3.0, remaining: 5000, unit: 'points'},
+        {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
+         expire_ts: 1793300000, days_left: 4.0, remaining: 800, unit: 'points'},
+      ],
+    }""")
+    assert '有 2 项权益将在 7 天内到期' in out, out
+    assert '订阅套餐（plan_pro）' in out and '积分包（login_bonus）' in out, out
+
+
+def test_expiry_banner_drops_fully_spent_batches():
+    """整组余量都 ≤0 的积分条目不再上横幅：到期也带不走任何额度。
+
+    用例造的是真实形状（DuMate 2026-11-03）：一批包全空 + 一条还有剩。
+    空的那批要消失，有剩的那条必须留着。
+    """
+    out = _render_banner("""{
+      expiring: [
+        {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
+         expire_ts: 1793200000, days_left: 2.0, remaining: 0, unit: 'points'},
+        {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
+         expire_ts: 1793286400, days_left: 3.0, remaining: 0, unit: 'points'},
+        {provider: 'trae', provider_name: 'Trae', label: '加油包',
+         expire_ts: 1793300000, days_left: 4.0, remaining: 900, unit: 'credit'},
+      ],
+    }""")
+    assert '有 1 项权益将在 7 天内到期' in out, f"空包组该整组剔除: {out}"
+    assert '百度搭子' not in out, out
+    assert '加油包' in out, out
+
+
+def test_expiry_banner_prefers_low_quota_over_expiry_for_same_provider():
+    """同一通道既到期又告急时只说一遍，且留「余额告急」（现在更急、信息更全）。
+
+    用户 2026-11-03 的原报障：DuMate 6 行「积分包到期」+ 1 行「余额告急」，
+    全在讲同一份额度。压掉到期行后，汇总计数也要跟着降到 0 项。
+    """
+    out = _render_banner("""{
+      expiring: [{provider: 'dumate', provider_name: '百度搭子',
+                  label: '积分包（login_bonus）', expire_ts: 1793200000,
+                  days_left: 2.0, remaining: 800, unit: 'credit'}],
+      low_quota: [{provider: 'dumate', provider_name: '百度搭子',
+                   label: '订阅积分', unit: 'points', remaining: 500, percent_left: 1.1}],
+    }""")
+    assert '项权益' not in out, f"该通道的到期行已被余额告急覆盖: {out}"
+    assert '余额告急 · 订阅积分 · 剩 1.1%' in out, out
+    assert '积分包（login_bonus）' not in out, f"不该再铺到期行: {out}"
+    assert out.count('百度搭子') == 1, f"同一通道只该出现一次: {out}"
+
+
+def test_expiry_banner_keeps_expiry_for_other_providers():
+    """只在同通道上去重：别的通道的到期行照常显示。"""
+    out = _render_banner("""{
+      expiring: [{provider: 'trae', provider_name: 'Trae', label: '加油包',
+                  expire_ts: 1793200000, days_left: 2.0, remaining: 900, unit: 'credit'}],
+      low_quota: [{provider: 'dumate', provider_name: '百度搭子',
+                   label: '订阅积分', unit: 'points', remaining: 500, percent_left: 1.1}],
+    }""")
+    assert '有 1 项权益将在 7 天内到期' in out, out
+    assert '加油包' in out and '订阅积分' in out, out
+
+
+def test_expiry_banner_does_not_drop_batches_without_amounts():
+    """拿不到余量的条目保持宽松放行——不能因为「判不出」就替用户吞掉告警。"""
+    out = _render_banner("""{
+      expiring: [{provider: 'trae', provider_name: 'Trae', label: '会员 Pro',
+                  expire_ts: 1793200000, days_left: 2.0, remaining: null, unit: 'credit'}],
+    }""")
+    assert '会员 Pro' in out, out
+
+
 def test_quota_item_renders_percent_only_window_with_bar():
     """Codex /wham/usage 只给已用百分比，不给 used/total 的绝对量。
 
