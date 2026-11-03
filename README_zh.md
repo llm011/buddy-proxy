@@ -13,7 +13,7 @@
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
 - **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、每个模型一键复制**带通道前缀**的全名（`trae/gpt-6`、`ark/ds-flash`——正是客户端 `model` 字段该填的值；「模型顺序」页每一档也可单独复制）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
 - **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）；本地隐藏项会同时从该端点、管理页目录和模型顺序候选中移除
-- **脱敏**（`--desensitize`）— 向 system 消息里的合规关键词插入零宽空格，避免后端关键词审核误拦
+- **脱敏**（`--desensitize`）— 向 system 消息里的合规关键词插入零宽空格，避免后端关键词审核误拦。带客户端指纹的 harness 模板另行处理：当 system prompt 里含 CodeBuddy 会在链路层硬拦的标识（Claude Code、Codex，以及 **DeepSeek Harness** / dsh）时，整段替换成简短的「行为约定」摘要。零宽空格**绕不过** CodeBuddy 的渠道校验（`11128 Illegal API invocation from an unapproved channel`），那条路只有整段替换有效
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
 - **工具调用** — 完整的 function calling 支持，自动过滤无效工具定义；`tool_choice` 在 OpenAI / Anthropic 两种形态之间统一归一化，绝不会以 object 形式发给上游
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
