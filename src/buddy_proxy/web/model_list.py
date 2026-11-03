@@ -162,8 +162,11 @@ def model_to_codex_format(m: dict[str, Any]) -> dict[str, Any]:
         "object": "model",
         "created": 1720872952,  # 2024-07-13 的时间戳（Unix epoch）
         "owned_by": m.get("vendor", "codebuddy"),
-        # 通道归属：codebuddy（默认）/ trae / doubao ...（与 owned_by 厂牌区分）
-        "provider": m.get("provider", "codebuddy"),
+        # 通道归属**不再对外输出**：聚合后 id 已是裸名，服务端按 model_order
+        # failover。吐 provider 会让客户端以为要自己拼 ``<provider>/<model>``，
+        # 拼出来反而钉死单通道、把 failover 丢了。候选通道见 ``providers``。
+        **({"providers": m["providers"]} if m.get("providers") else {}),
+        **({"failover": True} if m.get("failover") else {}),
 
         # Reasoning 支持
         "default_reasoning_level": None,
