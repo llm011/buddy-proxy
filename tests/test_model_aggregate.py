@@ -47,13 +47,33 @@ def test_placeholders_are_dropped():
     assert "auto" in PLACEHOLDER_IDS
 
 
-def test_capability_bool_is_intersection():
-    """任一通道不支持就不能声明支持——裸名会 failover 过去。"""
+def test_capability_bool_intersection_without_failover():
+    """没有候选链 = 只打首选通道，没兜底，任一不支持就不能声明支持。"""
     out = _agg([
         {"id": "m", "provider": "codebuddy", "images": True},
         {"id": "qoder/m", "provider": "qoder", "images": False},
     ])
+    assert out[0]["failover"] is False
     assert out[0]["images"] is False
+
+
+def test_capability_bool_union_with_failover():
+    """有候选链时取并集：不支持的那个通道失败后自动换到支持的通道。
+
+    实测反例（2026-11-04）：deepseek-v4.1-flash 只有 codebuddy 报图片，
+    取交集后目录说 supports_images=false，客户端在本地把图剥了，
+    可裸名发图上游答得很好。
+    """
+    out = _agg(
+        [
+            {"id": "deepseek-v4.1-flash", "provider": "codebuddy", "images": True},
+            {"id": "qoder/deepseek-v4.1-flash", "provider": "qoder", "images": False},
+        ],
+        order={"deepseek-v4.1-flash": ["codebuddy/deepseek-v4.1-flash",
+                                       "qoder/deepseek-v4.1-flash"]},
+    )
+    assert out[0]["failover"] is True
+    assert out[0]["images"] is True
 
 
 def test_capability_bool_all_true_stays_true():

@@ -60,12 +60,25 @@ def _strip_known_prefix(model_id: str, known_providers: frozenset[str]) -> str:
     return model_id
 
 
-def _merge_capability_bool(entries: list[dict[str, Any]], key: str) -> bool | None:
-    """能力布尔取交集；全部条目的该字段都缺失时返回 None。"""
+def _merge_capability_bool(
+    entries: list[dict[str, Any]], key: str, *, union: bool
+) -> bool | None:
+    """能力布尔合并；全部条目的该字段都缺失时返回 None。
+
+    口径取决于这条模型**会不会 failover**：
+
+    - ``union=True``（``model_order`` 里有候选链）：取**并集**。任一通道支持就
+      声明支持——裸名请求会按候选链往下走，不支持它的那个通道失败后自动换到
+      支持它的通道，能力不会被浪费。取交集反而白白砍功能（实测
+      ``deepseek-v4.1-flash``：只有 codebuddy 报图片，取交集后目录说
+      ``supports_images: false``，客户端在本地就把图剥了，可上游答得很好）。
+    - ``union=False``（没有候选链，实际只打首选通道）：取**交集**。没有兜底时
+      按「任一支持」声明，会让请求落到不支持的那个通道才失败。
+    """
     seen = [bool(e[key]) for e in entries if key in e]
     if not seen:
         return None
-    return all(seen)
+    return any(seen) if union else all(seen)
 
 
 def _merge_capability_num(entries: list[dict[str, Any]], key: str) -> int | None:
@@ -160,7 +173,7 @@ def aggregate_models(
             merged["tags"] = preferred["tags"]
 
         for key in _CAPABILITY_BOOLS:
-            value = _merge_capability_bool(group, key)
+            value = _merge_capability_bool(group, key, union=merged["failover"])
             if value is not None:
                 merged[key] = value
         for key in _CAPABILITY_NUMS:
