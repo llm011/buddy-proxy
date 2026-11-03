@@ -285,19 +285,23 @@ _CLAUDE_HARNESS_SUMMARY = (
     "outcomes accurately. Be precise, helpful, concise, and safe."
 )
 
-#: DeepSeek Harness（dsh TUI）系统模板的渠道校验触发词。
+#: DeepSeek Harness（dsh TUI）固定身份声明。
 #:
-#: 2026-11-04 实测：codebuddy 对 system prompt 里出现 ``deepseek harness``
-#: （不分大小写）的请求整单拦截，返回 HTTP 400 /
+#: 2026-11-04 实测：codebuddy 收到 dsh 模板时返回 HTTP 400 /
 #: ``code 11128 Illegal API invocation from an unapproved channel``
 #: （displayTips：“这次调用没通过渠道校验，可能不是官方客户端发出的”）。
-#: 上游认的是 dsh 那一条固定身份声明，而不是「提到 Harness」这件事——逐条
-#: 实测见 :func:`_looks_like_deepseek_harness` 的表格。只匹配完整句式，
-#: 尽量缩小命中面。
+#: 但触发条件不是「出现 ``deepseek harness`` 这个词」，而是**下面这一条
+#: 完整身份声明**——逐条实测见 :func:`_looks_like_deepseek_harness` 的表格，
+#: 改动任意一个词或语序上游都放行。所以只匹配完整句式，命中面最小。
 #:
 #: 注意**不能靠 ``desensitize_text`` 的零宽空格绕**：插 ``​`` 后实测仍
 #: 返回同一个 11128（上游显然做了规范化或另有指纹），必须整段替换成摘要。
 _DEEPSEEK_HARNESS_MARKER = "you are an ai agent powered by deepseek harness"
+
+#: 会触发渠道校验的角色。dsh 把模板放在 ``system``，个别客户端用
+#: ``developer``；两者都是上游当「指令/身份」读的角色，故一并处理。
+#: 实测普通 ``user`` 消息里出现同样句式**不会**被拦，无需改写。
+_DEEPSEEK_HARNESS_ROLES = frozenset({"system", "developer"})
 
 _DEEPSEEK_HARNESS_SUMMARY = (
     "Help with software engineering tasks. Follow repository instructions and "
@@ -454,10 +458,14 @@ def _compact_harness_message(role: str, content) -> str | None:
     if not text:
         return None
 
-    # dsh 的系统模板固定带 ``DeepSeek Harness`` 字样，codebuddy 会按渠道校验整单
-    # 拦截（11128）；零宽空格绕不过，只能整段替换。放在最前：这是唯一实测会
-    # 100% 触发上游硬拦的标记，命中即改写，不必再看后面的启发式。
-    if role == "system" and _looks_like_deepseek_harness(text):
+    # dsh 的系统模板带固定身份声明，codebuddy 会按渠道校验整单拦截（11128）；
+    # 零宽空格绕不过，只能整段替换。放在最前：这是唯一实测会 100% 触发上游
+    # 硬拦的标记，命中即改写，不必再看后面的启发式。
+    #
+    # 能走到这里的角色由 ``desensitize_body(roles=...)`` 决定，默认只有
+    # ``system``；若调用方显式把 ``developer`` 等指令类角色加进 roles，
+    # 同样按身份声明处理，避免换角色后又被硬拦。
+    if role in _DEEPSEEK_HARNESS_ROLES and _looks_like_deepseek_harness(text):
         return _DEEPSEEK_HARNESS_SUMMARY
 
     # The current Claude Code template is large and its channel identity is

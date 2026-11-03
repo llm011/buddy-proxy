@@ -1,21 +1,45 @@
 """DeepSeek Harness system 模板的渠道校验拦截回归测试。
 
-背景（2026-11-04 实测）：CodeBuddy 对 system prompt 里出现 ``deepseek harness``
-（不分大小写）的请求整单拦截，返回 HTTP 400 / ``code 11128 Illegal API
-invocation from an unapproved channel``。dsh（deepseek-harness TUI）的默认系统
-模板固定带这句，所以它在 codebuddy 通道上**任何请求都失败**；而 400 不在
-``_RETRYABLE_STATUS`` 里，不会 failover 到下一个候选上游，整个模型直接不可用。
+## 背景（2026-11-04 实测）
+
+CodeBuddy 收到 dsh（deepseek-harness TUI）的默认系统模板时整单拦截，返回
+HTTP 400 / ``code 11128 Illegal API invocation from an unapproved channel``
+（displayTips：“这次调用没通过渠道校验，可能不是官方客户端发出的”）。
+dsh 的模板固定带下面这句身份声明，于是它在 codebuddy 通道上**任何 query
+都失败**；而 400 不在 ``_RETRYABLE_STATUS`` 里，不会 failover 到下一个候选
+上游，整个模型直接不可用。
+
+触发条件**不是**「提到 DeepSeek Harness 这个词」，而是那一条完整句式。
+2026-11-04 对 ``codebuddy/deepseek-v4.1-flash``（非流式）逐条实测：
+
+============================================  ====
+system prompt                                 HTTP
+============================================  ====
+``You are an AI agent powered by DeepSeek Harness.``  400
+``You are a coding agent powered by DeepSeek Harness.``  200
+``You are an AI assistant powered by DeepSeek Harness.``  200
+``You are an AI agent powered by DeepSeek.``  200
+``You are an AI agent. DeepSeek Harness.``  200
+``Powered by DeepSeek Harness, you are an AI agent.``  200
+``DeepSeek Harness runtime.`` ×20（520 字符）  200
+============================================  ====
+
+零宽空格也绕不过：把 ``Harness`` 拆成 ``H\\u200barness`` 后实测仍返回同一个
+11128，所以只能整段替换成摘要。替换后同一请求实测 **400 → 200**。
 
 ``desensitize_body(..., compact_harness=True)`` 本来就会把 Claude Code / Codex
 的 harness 模板压成短摘要以躲开同类审核，但没有覆盖 DeepSeek Harness。这里锁定
-该补丁：命中时压成摘要，且摘要本身不得再含触发词。
+该补丁：命中时压成摘要，且摘要本身不得再含触发词；未命中的正常 prompt 原样保留。
 """
 
 from __future__ import annotations
 
 import pytest
 
-from buddy_proxy.core.desensitize import desensitize_body
+from buddy_proxy.core.desensitize import (
+    _DEEPSEEK_HARNESS_SUMMARY,
+    desensitize_body,
+)
 
 #: dsh 真实模板的开头（请求体里 system 的第一段），足以触发上游校验。
 _DSH_SYSTEM = (
@@ -138,3 +162,19 @@ def test_compaction_is_opt_in():
     text = _system_text(out)
     assert len(text) >= len(_DSH_SYSTEM), "未开 compact 时不该被压成短摘要"
     assert "⏵" in text or "状态栏" in text, "原模板正文应保留"
+
+
+def test_developer_role_also_compacted_when_selected():
+    """调用方把 developer 加进 roles 时，同样按身份声明处理。"""
+    body = {
+        "model": "deepseek-v4.1-flash",
+        "stream": False,
+        "messages": [
+            {"role": "developer", "content": _DSH_SYSTEM},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    out = desensitize_body(
+        body, roles=("system", "developer"), compact_harness=True
+    )
+    assert out["messages"][0]["content"] == _DEEPSEEK_HARNESS_SUMMARY
