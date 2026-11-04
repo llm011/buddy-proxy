@@ -158,13 +158,17 @@ function renderQoderPanel() {
   const noticeHtml = notices.map(quotaItemHtml).join('');
   const multi = n > 1;
 
-  const fold = quotaProviderFold(qoder.quota.items || [], 'qoder');
+  // 有卡才有额度可看：一张卡都画不出来（没登录 / 查询失败）就收起整块明细，
+  // 标题行留徽标与展开开关（用户 2026-11-02：没额度的通道不该大敞着）。
+  // 没登录 / 查询失败时没有任何账号卡，展开只剩一句空态：一并收起。
+  const fold = quotaProviderFold((groups.size || notices.length) ? qoder.quota.items || [] : 'empty', 'qoder');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Qoder</span>
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Qoder 订阅'}</span>${fold.badge}
         <span class="grow"></span>
+        ${quotaAccountTotal(groups, {sumItems: true})}
         <span class="muted" style="font-size:11px">${multi ? '403/额度尽自动冷却换号（按登录顺位）' : '403/额度尽自动切换下一个账号'}</span>
         ${fold.toggle}${providerRefreshButton('qoder')}
       </div>
@@ -261,11 +265,14 @@ function renderQoderIntlPanel() {
       `${acct ? `<span class="ag-move">${acctRenameButton('qoderintl', acct)}</span>` : ''}</div>`;
   }).join('');
   const noticeHtml = notices.map(quotaItemHtml).join('');
-  const fold = quotaProviderFold(provider.quota.items || [], 'qoderintl');
+  // 同上：没有账号卡（未登录 / 查询为空）就收起明细，以免整块空白占屏。
+  // 没登录 / 查询失败时没有任何账号卡，展开只剩一句空态：一并收起。
+  const fold = quotaProviderFold((groups.size || notices.length) ? provider.quota.items || [] : 'empty', 'qoderintl');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head"><span class="name">Qoder 海外版</span>
         <span class="tag">Global · 额度与签到</span>${fold.badge}<span class="grow"></span>
+        ${quotaAccountTotal(groups, {sumItems: true})}
         ${fold.toggle}${providerRefreshButton('qoderintl')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}

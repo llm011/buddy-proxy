@@ -302,6 +302,10 @@ def test_claim_warns_when_accepted_but_recheck_is_unconfirmed(fake_page, monkeyp
             return 0, None, ""
         return original(page, path, body, timeout, **kwargs)
     monkeypatch.setattr(FakePage, "request", _request)
+    # 全量跑时别的测试会调 setup_logging（把 buddy_proxy 的 propagate 关掉），
+    # 记录走到 buddy_proxy 那层就停了，caplog 的 handler 挂在 root 上收不到——
+    # 单跑不复现。库里多处这么修，见 tests/test_qoder_umid.py。
+    monkeypatch.setattr(logging.getLogger("buddy_proxy"), "propagate", True)
     with caplog.at_level(logging.WARNING):
         assert doubao_checkin.claim_checkin(client, doubao_checkin._DETAIL_PATH) is None
     assert "accepted but recheck unconfirmed" in caplog.text

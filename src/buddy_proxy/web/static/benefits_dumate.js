@@ -81,8 +81,9 @@ function renderDumatePanel() {
   // 实例再兜底。早先这里按 ready 一刀切，桌面端一关整块额度就变成一句
   // 「App 未运行」（用户 2026-11-02 报障）。只有「未装 / 拉起也免谈」时才退回提示。
   const showQuota = ready || auto || (st && st.installed !== false && items.length > 0);
-
-  const fold = quotaProviderFold(items, 'dumate');
+  // 待命态（进程没起、也拉不起来）只剩下方那句提示，收起时别把它藏掉：
+  // 提示本身是有用的引导。有明细才按「耗尽/没有」判折叠。
+  const fold = quotaProviderFold(items.length ? items : (showQuota ? 'empty' : null), 'dumate');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">

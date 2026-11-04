@@ -25,6 +25,7 @@ from typing import Any, AsyncIterator, Sequence
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..asyncutil import LoopSafeLock
 from ..providers.base import BaseProvider
 from ..core.errors import describe_exception
 from .ws import WSClosed
@@ -134,9 +135,14 @@ class DoubaoProvider(BaseProvider):
         self._startup_timeout = startup_timeout
         self._started = False
         # 防止并发首请求双重启动（双开 Helper / 重复连接 CDP）
-        self._start_lock = asyncio.Lock()
+        #
+        # 必须是 LoopSafeLock 而不是 asyncio.Lock：签到走 to_thread + asyncio.run
+        # 的一次性循环，转发/「测试」走主循环，两边都会拿这把锁；asyncio.Lock
+        # 一旦被某个循环用上就钉死在那里，另一个循环进来直接 RuntimeError
+        # （用户 2026-11-03：豆包点「测试」报 is bound to a different event loop）。
+        self._start_lock = LoopSafeLock("doubao.start")
         # 防止并发请求在断线后各自「重连 + 重试」（同一请求最多重试一次）
-        self._reconnect_lock = asyncio.Lock()
+        self._reconnect_lock = LoopSafeLock("doubao.reconnect")
         # /api/agent/doubao 任务接口的默认会话（缺省续聊最近一次会话）
         self._agent_session: str | None = None
         # 最近一次签到时的服务端登录态：False=明确未登录，None=没探到/没探过
@@ -175,7 +181,7 @@ class DoubaoProvider(BaseProvider):
         """
         if self._is_connected():
             return
-        async with self._start_lock:
+        async with self._start_lock.guard():
             if self._is_connected():  # 等锁期间可能已被启动
                 return
             if self._started:
@@ -207,7 +213,7 @@ class DoubaoProvider(BaseProvider):
         ``restart()`` 会先 :meth:`_drop_connection`（关旧 socket、复位 ready）
         再 ``start()``：端口上已有新 App 的调试口就复用，没有就由 App 身份拉起。
         """
-        async with self._reconnect_lock:
+        async with self._reconnect_lock.guard():
             if self._is_connected():
                 return True  # 排队期间别的请求已经重连好了
             action = "restart" if self._started else "start"

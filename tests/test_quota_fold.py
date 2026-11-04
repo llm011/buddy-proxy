@@ -589,22 +589,29 @@ console.log(JSON.stringify([
   quotaProviderExhausted([{head_only: true, remaining: 0}]),
 ]));
 """)
-    assert _last(out) == [False, True, True, False, False, True, False, True], out
+    # 越过 0 就展开；没有可量化的剩余（空数组、全是说明条）也算「没额度」收起
+    assert _last(out) == [True, True, True, False, True, True, False, True], out
 
 
-def test_provider_exhaustion_rejects_notices_free_and_reset_credit():
-    out = _run("""
-console.log(JSON.stringify([
-  quotaProviderExhausted([{remaining: '余额未知'}]),
-  quotaProviderExhausted([{remaining: 0, query_failed: true}]),
-  quotaProviderExhausted([{remaining: 0, unreachable: true}]),
-  quotaProviderExhausted([{remaining: 0, query_empty: true}]),
-  quotaProviderExhausted([{remaining: 0, reset_pending: true}]),
-  quotaProviderExhausted([{remaining: 0, unit: 'reset_credit'}]),
-  quotaProviderExhausted([{remaining: 0, used: null, total: null}]),
-]));
-""")
-    assert _last(out) == [False] * 7, out
+def test_provider_notice_cards_fold_but_partial_success_stays_open():
+    r = _last(_run("""
+console.log(JSON.stringify({
+  unknown: quotaProviderExhausted([{remaining: '余额未知'}]),
+  failed: quotaProviderExhausted([{remaining: 0, query_failed: true}]),
+  unreachable: quotaProviderExhausted([{remaining: 0, unreachable: true}]),
+  freeEmpty: quotaProviderExhausted([{remaining: 0, query_empty: true}]),
+  resetOnly: quotaProviderExhausted([{remaining: 0, unit: 'reset_credit'}]),
+  nullUsed: quotaProviderExhausted([{remaining: 0, used: null, total: null}]),
+  // 说明条 + 一条有余额：这组卡是画得出来的，不能整块折掉
+  partial: quotaProviderExhausted([{remaining: 0, query_failed: true}, {remaining: 5}]),
+}));
+"""))
+    # 查不到 = 没有额度可看 → 收起（用户 2026-11-02：没额度的卡不该大敞着）
+    assert r["unknown"] and r["failed"] and r["unreachable"] and r["freeEmpty"], r
+    # 只有重置券的通道同样收起；带 used=null 的零剩余仍是零
+    assert r["resetOnly"] is True and r["nullUsed"] is True, r
+    # 但「部分失败 + 部分有余额」必须保持展开：失败那组是用户要看的信息
+    assert r["partial"] is False, r
 
 
 def test_provider_fold_defaults_manual_override_and_recovery():
@@ -644,11 +651,14 @@ console.log(JSON.stringify({html: f.toggle + f.bodyStart + f.bodyEnd,
 
 def test_every_provider_panel_uses_outer_fold_helper():
     core = BENEFITS_CORE_JS.read_text(encoding="utf-8")
-    assert "quotaProviderFold(q.items || [], p.id)" in core
+    # 通用额度卡也走外层折叠；「一条明细都没有」时传 'empty' 让它收起（空态不占屏）
+    assert "quotaProviderFold(" in core and ", p.id)" in core
     panels = "".join(p.read_text(encoding="utf-8") for p in PANELS_JS)
     expected = {"traepat", "antigravity", "qoder", "qoderintl", "trae", "traeintl",
                 "codebuddy", "codebuddyintl", "kimi", "codex", "dumate"}
-    calls = set(re.findall(r"quotaProviderFold\([^;]+?, '(\w+)'\)", panels))
+    # 第一个参数可能是「有卡才给 items、没卡给 'empty'」的条件式，[^)] 配平不了，
+    # 这里只认「最后一个参数是通道 id」这一要点，不深究前面的表达式。
+    calls = set(re.findall(r"quotaProviderFold\([^;\n]+?, '(\w+)'\)", panels))
     assert calls == expected, f"专属通道外层折叠接线不全: {calls}"
 
 

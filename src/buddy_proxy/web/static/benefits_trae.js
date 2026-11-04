@@ -153,13 +153,17 @@ function renderTraePanel() {
   const noticeHtml = notices.map(quotaItemHtml).join('');
   const multi = n > 1;
 
-  const fold = quotaProviderFold(trae.quota.items || [], 'trae');
+  // 有卡才有额度可看：一张卡都画不出来（没登录 / 查询失败）就收起整块明细，
+  // 标题行留徽标与展开开关。
+  // 没登录 / 查询失败时没有任何账号卡，展开只剩一句空态：一并收起。
+  const fold = quotaProviderFold((groups.size || notices.length) ? trae.quota.items || [] : 'empty', 'trae');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Trae</span>
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Trae Work'}</span>${fold.badge}
         <span class="grow"></span>
+        ${quotaAccountTotal(groups)}
         <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
         ${fold.toggle}${providerRefreshButton('trae')}
       </div>
@@ -243,11 +247,14 @@ function renderTraeIntlPanel() {
       `${quotaItemsHtml(its, 'traeintl:' + grp)}</div>`;
   }).join('');
   const noticeHtml = notices.map(quotaItemHtml).join('');
-  const fold = quotaProviderFold(provider.quota.items || [], 'traeintl');
+  // 同上：没有账号卡（未登录 / 查询为空）就收起明细，以免整块空白占屏。
+  // 没登录 / 查询失败时没有任何账号卡，展开只剩一句空态：一并收起。
+  const fold = quotaProviderFold((groups.size || notices.length) ? provider.quota.items || [] : 'empty', 'traeintl');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head"><span class="name">Trae 海外版</span>
         <span class="tag">Global · 海外额度</span>${fold.badge}<span class="grow"></span>
+        ${quotaAccountTotal(groups)}
         <span class="muted" style="font-size:11px">海外版无每日签到</span>
         ${fold.toggle}${providerRefreshButton('traeintl')}
       </div>

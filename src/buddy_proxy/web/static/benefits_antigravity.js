@@ -220,13 +220,17 @@ function renderAntigravityPanel() {
   }).join('') || '<div class="empty" style="padding:12px 0">无额度数据</div>';
   const noticeHtml = notices.map(quotaItemHtml).join('');
 
-  const fold = quotaProviderFold(ag.quota.items || [], 'antigravity');
+  // 有卡才有额度可看：一张卡都画不出来（没登录 / 查询失败）就收起整块明细，
+  // 标题行留徽标与展开开关（用户 2026-11-02：没额度的通道不该大敞着）。
+  // 没登录 / 查询失败时没有任何账号卡，展开只剩一句空态：一并收起。
+  const fold = quotaProviderFold((groups.size || notices.length) ? ag.quota.items || [] : 'empty', 'antigravity');
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Antigravity</span>
         <span class="tag">多账号 · 自动切换</span>${fold.badge}
         <span class="grow"></span>
+        ${quotaAccountTotal(groups)}
         <span class="muted" style="font-size:11px">429/403 自动冷却换号（按登录顺位）</span>
         ${fold.toggle}${providerRefreshButton('antigravity')}
       </div>

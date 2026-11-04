@@ -29,6 +29,9 @@ HELPERS_JS = _STATIC / "benefits_accounts.js"   # 公共件（confirmAccountDele
 BENEFITS_CORE = _STATIC / "benefits_quota.js"   # quotaHeadSum 定义在这
 APP_JS = _STATIC / "ui_format.js"               # fmtNum
 SEG_HEAD_SUM = re.compile(r"function quotaHeadSum\(q\) \{.*?\n\}", re.S)
+#: quotaHeadSum 只剩转发，取数逻辑在这两个纯函数里（跨账号合计共用）
+SEG_SUM_OF = re.compile(r"function quotaSumOf\(items, sumItems\) \{.*?\n\}", re.S)
+SEG_HEAD_HTML = re.compile(r"function quotaHeadSumHtml\(sum\) \{.*?\n\}", re.S)
 SEG_FMT_NUM = re.compile(r"function fmtNum\(n\) \{.*?\n\}", re.S)
 
 pytestmark = pytest.mark.skipif(
@@ -45,6 +48,9 @@ globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) + '</div>
 globalThis.quotaItemsHtml = (items, key) =>
   '<div class="qbody" data-qfold="' + esc(key) + '">' +
   items.map(globalThis.quotaItemHtml).join('') + '</div>';
+// 跨账号合计 chip（真实现由 test_quota_account_total.py 覆盖）：本文件验的是
+// 面板布局与合计行调用点，出个可辨认的标记即可
+globalThis.quotaAccountTotal = () => '<span class="acct-total">TOTAL</span>';
 globalThis.quotaProviderFold = () => ({badge: '', toggle: '', bodyStart: '', bodyEnd: ''});
 globalThis.BENEFITS = {};
 globalThis.__SYNC_CALLS = 0;
@@ -81,12 +87,17 @@ globalThis.document = {
 def _run_js(body: str) -> str:
     panels = BENEFITS_JS.read_text(encoding="utf-8")
     assert "function renderQoderPanel" in panels and "function renderQoderIntlPanel" in panels
-    head = SEG_HEAD_SUM.search(BENEFITS_CORE.read_text(encoding="utf-8"))
+    core = BENEFITS_CORE.read_text(encoding="utf-8")
+    head = SEG_HEAD_SUM.search(core)
+    sum_of = SEG_SUM_OF.search(core)
+    head_html = SEG_HEAD_HTML.search(core)
     fmt = SEG_FMT_NUM.search(APP_JS.read_text(encoding="utf-8"))
-    assert head and fmt, "抽不到 quotaHeadSum / fmtNum（定义被改了？）"
+    assert head and sum_of and head_html and fmt, \
+        "抽不到 quotaHeadSum / quotaSumOf / quotaHeadSumHtml / fmtNum（定义被改了？）"
     script = (
         _STUB
         + fmt.group(0) + "\n"                 # quotaHeadSum 依赖
+        + sum_of.group(0) + "\n" + head_html.group(0) + "\n"
         + head.group(0) + "\n"                # 真函数：面板段的调用点一起被验
         + HELPERS_JS.read_text(encoding="utf-8")
         + panels
