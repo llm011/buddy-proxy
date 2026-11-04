@@ -349,17 +349,18 @@ def test_expiry_banner_keeps_different_kinds_apart():
 
 
 def test_expiry_banner_drops_fully_spent_batches():
-    """整组余量都 ≤0 的积分条目不再上横幅：到期也带不走任何额度。
+    """余量已空、且不在 4 天内的积分条目不铺出来：到期也带不走任何额度。
 
     用例造的是真实形状（DuMate 2026-11-03）：一批包全空 + 一条还有剩。
-    空的那批要消失，有剩的那条必须留着。
+    空的那批要消失，有剩的那条必须留着。注意日期都放在 4 天窗口外——4 天内
+    的空包按新规则必须照报（见 test_banner_keeps_urgent_items_even_when_amount_is_zero）。
     """
     out = _render_banner("""{
       expiring: [
         {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
-         expire_ts: 1793200000, days_left: 2.0, remaining: 0, unit: 'points'},
+         expire_ts: 1793200000, days_left: 5.0, remaining: 0, unit: 'points'},
         {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
-         expire_ts: 1793286400, days_left: 3.0, remaining: 0, unit: 'points'},
+         expire_ts: 1793286400, days_left: 6.0, remaining: 0, unit: 'points'},
         {provider: 'trae', provider_name: 'Trae', label: '加油包',
          expire_ts: 1793300000, days_left: 4.0, remaining: 900, unit: 'credit'},
       ],
@@ -426,6 +427,24 @@ def test_banner_keeps_urgent_items_even_when_amount_is_zero():
     assert '资源包' in out, f"4 天内的空包不能被滤掉: {out}"
     assert '4 天内' in out, out
     assert '有 1 项权益将在 7 天内到期' in out, out
+
+
+def test_banner_derives_urgency_when_backend_is_older():
+    """老后端没 `urgent` 字段时按 days_left 自己判，别把 4 天内的空包静默吞掉。
+
+    静态资源先更新、服务还没重启（或浏览器缓存了旧接口快照）时就是这条路径
+    ——此时 `urgent` 和 `expiry_urgent_days` 都不在响应里。
+    """
+    out = _render_banner("""{
+      expiring: [
+        {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
+         expire_ts: 1793894399, days_left: 1.3, remaining: 0, unit: 'points'},
+        {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
+         expire_ts: 1794326399, days_left: 6.3, remaining: 0, unit: 'points'},
+      ],
+    }""")
+    assert out.count('积分包（login_bonus）') == 1, f"只该留 4 天内那条: {out}"
+    assert '1 项临期（1 项 4 天内）' in out, out
 
 
 def test_banner_groups_expiry_by_channel_into_collapsed_rows():

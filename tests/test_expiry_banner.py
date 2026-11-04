@@ -152,12 +152,27 @@ def test_expiring_unknown_unit_fails_open():
 
 
 def test_expiring_credit_without_remaining_is_skipped():
-    """积分类但拿不到余量（None）→ 不报：无法判断值不值得提醒。"""
+    """积分类但拿不到余量（None）、且还在 4 天窗口外 → 不报。"""
+    out = _expiring([
+        _entry("trae", [_item("权益包", expire_days=5,
+                              remaining=None, unit="credit")]),
+    ], now=NOW)
+    assert out == []
+
+
+def test_expiring_urgent_credit_without_remaining_is_reported():
+    """4 天内到期但拿不到余量：照报，别因为「判不出」漏掉真到期。
+
+    和空余量的道理一样——4 天内值不值得提醒不该由余量决定；前端渲染时
+    只是不显示余量、照常打「N 天内」标签。
+    """
     out = _expiring([
         _entry("trae", [_item("权益包", expire_days=2,
                               remaining=None, unit="credit")]),
     ], now=NOW)
-    assert out == []
+    assert [e["label"] for e in out] == ["权益包"]
+    assert out[0]["urgent"] is True
+    assert out[0]["remaining"] is None
 
 
 def test_expiring_urgent_bypasses_credit_amount_filter():

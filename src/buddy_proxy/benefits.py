@@ -151,8 +151,9 @@ def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) 
     的条目跳过第 2 条量过滤，哪怕只剩 0 积分也报。用户明确说「某个通道里的
     某个账号中的某个资源包，离到期剩下 4 天也要告警出来」——这时它值不值得
     提醒已经不该由余量决定：4 天后这份额度就彻底作废了。``urgent`` 字段随
-    条目下发，前端据此打「4 天内」标签。拿不到 ``remaining`` 的条目仍然跳过
-    （无法判断是不是空壳，保持原口径）。
+    条目下发，前端据此打「4 天内」标签。拿不到 ``remaining`` 的积分类条目
+    平时跳过（无法判断是不是空壳），但同样受 4 天例外保护：那几天里漏报的
+    代价比多报一条大，前端只是不显示余量。
 
     ``unit`` 缺失或为 ``None`` 时**不做量过滤**（宽松放行）：宁可多提醒一个，
     也别因为新通道忘了填 ``unit`` 而漏掉真到期。这是有意的取舍。
@@ -185,10 +186,17 @@ def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) 
             within_urgent = days_left <= EXPIRY_URGENT_DAYS
             urgent = 0 <= days_left <= EXPIRY_URGENT_DAYS
             if it.get("unit") == "credit":
-                remaining = _as_num(it.get("remaining"))
+                raw_remaining = it.get("remaining")
+                remaining = _as_num(raw_remaining)
                 if remaining is None:
-                    continue  # 拿不到余量就不报：无法判断值不值得提醒
-                if not within_urgent and remaining <= EXPIRY_WARN_MIN_CREDITS:
+                    # 字段**缺失**（None）才算「拿不到余量」：平时不报（判不出
+                    # 值不值得提醒），但 4 天内到期时照报——这时值不值得提醒
+                    # 已经不由余量决定，漏报的代价更大；前端只是不显示余量。
+                    # 显式给了但取不出数的（布尔/乱码）仍一律跳过，别把 `True`
+                    # 当成「剩 1 分」报出去。
+                    if not within_urgent or raw_remaining is not None:
+                        continue
+                elif not within_urgent and remaining <= EXPIRY_WARN_MIN_CREDITS:
                     continue
             raw_label = it.get("label")
             account, item_label = _split_account_label(raw_label)

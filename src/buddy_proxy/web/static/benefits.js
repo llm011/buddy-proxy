@@ -263,15 +263,27 @@ function bindExpiryFold(el) {
 function renderExpiryBanner() {
   const el = document.getElementById('expirybar');
   if (!el) return;
+  // 窗口天数以后端下发为准；老响应缺字段时退回 7（与后端默认一致）。
+  const warnDays = Number(BENEFITS && BENEFITS.expiry_warn_days) || 7;
+  // 「4 天内」紧急窗口同理，前端不自己存常量。
+  const urgentDays = Number(BENEFITS && BENEFITS.expiry_urgent_days) || 4;
   // 空壳包（余量为 0）不再铺出来：到期也带不走任何额度，只会把真告警淹了
   // （用户 2026-11-03 报障：DuMate 每天一个 login_bonus 小包，全是 0）。
   // 但 **4 天内到期的照报**——后端 4 天内已经跳过「余量 > 300」门槛，正是要
   // 报出这批；这里再按余量滤一次等于把功能滤没了。points 没有后端的量门槛
   // （只有 credit 有），DuMate 的小包全靠这里收。
+  //
+  // 老后端没有 `urgent` 字段（静态资源先更新、服务还没重启）时按同一条规则
+  // 自己算，否则这条过滤会把 4 天内的空包全吞掉，界面上一条都不剩。
+  const isUrgent = e => (e && e.urgent != null)
+    ? !!e.urgent
+    : (Number(e && e.days_left) >= 0 && Number(e && e.days_left) <= urgentDays);
   const list = ((BENEFITS && BENEFITS.expiring) || []).filter(e => {
     const amt = _expiryAmountOf(e);
-    return amt == null || amt > 0 || !!(e && e.urgent);
-  });
+    return amt == null || amt > 0 || isUrgent(e);
+  }).map(e => (e && e.urgent == null)
+    // 老响应：把推导出来的紧急标记补回条目，徽标和「N 天内」标签才有得用
+    ? Object.assign({}, e, {urgent: isUrgent(e)}) : e);
   const low = (BENEFITS && BENEFITS.low_quota) || [];
   if (!list.length && !low.length) {
     el.className = 'expirybar';
@@ -282,10 +294,6 @@ function renderExpiryBanner() {
   bindExpiryFold(el);
   const hasOver = list.some(e => Number(e.days_left) < 0);
   el.className = 'expirybar show' + (hasOver ? ' expired' : '');
-  // 窗口天数以后端下发为准；老响应缺字段时退回 7（与后端默认一致）。
-  const warnDays = Number(BENEFITS && BENEFITS.expiry_warn_days) || 7;
-  // 「4 天内」紧急窗口同理，前端不自己存常量。
-  const urgentDays = Number(BENEFITS && BENEFITS.expiry_urgent_days) || 4;
   const groups = buildAlertGroups(list, low);
   // 两种告警的汇总各说各的段，都命中就用「 · 」接上。计数按条目/通道：
   // 通道数只算一遍（同一通道两边都命中不重复数）。
