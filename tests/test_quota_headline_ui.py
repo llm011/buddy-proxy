@@ -538,7 +538,7 @@ def test_quota_item_renders_percent_only_window_with_bar():
     这种条目仍应显示「剩 75% · 已用 25%」并画 25% 进度条；不能因 total=null
     降级成「剩 75 · 已用未知」且整条进度条消失。
     """
-    out = _run_fn(("quotaItemHtml",), """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd"), """
 console.log(quotaItemHtml({
   label: '5 小时窗口', used: null, total: null, remaining: 75,
   percent: 25, reset_ts: 1792525266, unit: 'percent',
@@ -553,7 +553,7 @@ console.log(quotaItemHtml({
 
 def test_quota_item_percent_only_derives_remaining_when_missing():
     """百分比窗口若没显式给 remaining，也能从已用百分比推出剩余。"""
-    out = _run_fn(("quotaItemHtml",), """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd"), """
 console.log(quotaItemHtml({
   label: '周窗口', used: null, total: null, remaining: null,
   percent: 17, reset_ts: null, unit: 'percent',
@@ -570,7 +570,7 @@ def test_quota_item_renders_expire_not_reset():
     这条盯的正是用户报的问题：Qoder 的 ``expiresAt`` 被塞进 ``reset_ts``，
     界面上显示成「10-30 重置」，用户以为到期日没被记录。
     """
-    out = _run_fn(("quotaItemHtml",), """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd"), """
 console.log(quotaItemHtml({
   label: '订阅额度', used: 100, total: 2000, remaining: 1900, percent: 5,
   reset_ts: null, expire_ts: 1793289600, unit: 'credit',
@@ -651,7 +651,7 @@ def test_quota_item_note_renders_as_visible_line_not_label_title():
     解释。现在改成独立一行 `.muted` 小字：既不挤 label 标题行（日期/数字不被
     挤折行），又能真正被读到。
     """
-    out = _run_fn(("quotaItemHtml",), """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd"), """
 console.log(quotaItemHtml({
   label: 'AG #1 · Gemini 组', note: '组内共享 weekly + 5h 双池，取组内最紧水位',
   used: 0, total: 1000, remaining: 1000, percent: 0,
@@ -673,7 +673,7 @@ def test_quota_item_reset_note_goes_to_title():
     antigravity 的 resetTime 只是下一个 5 小时窗口的滚动刷新点，不是整组/每周池
     重置——这句解释走 title，正文只留「MM-DD HH:MM 重置」。
     """
-    out = _run_fn(("quotaItemHtml",), """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd"), """
 console.log(quotaItemHtml({
   label: 'Gemini 组', used: 0, total: 1000, remaining: 1000, percent: 0,
   reset_ts: 1791056048, reset_note: '下一个 5 小时窗口刷新点（滚动），不代表每周池重置',
@@ -686,7 +686,7 @@ console.log(quotaItemHtml({
 
 def test_quota_item_without_note_has_no_title():
     """没有 note 的条目（trae/zcode 等绝大多数）不渲染空 title、不渲染空说明行。"""
-    out = _run_fn(("quotaItemHtml",), """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd"), """
 console.log(quotaItemHtml({
   label: '5 小时窗口', used: 10, total: 100, remaining: 90, percent: 10,
   reset_ts: 1792692336, expire_ts: null, unit: 'count',

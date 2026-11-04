@@ -19,6 +19,25 @@ function quotaHeadSum(q) {
   return quotaHeadSumHtml(quotaSumOf(q.items || [], !!q.sum_items));
 }
 
+// 到期日「MM-DD」，**不在今年的补上年份**（``2027-10-27``）。
+//
+// 到期是绝对时点，省掉年份就会与同月日的往年/明年撞形：用户看到资源包写
+// 「10/27 到期」时今天是 11-05，会直接当成已过期，而它实际是明年才到期
+// （CodeBuddy 的裂变包里有有效期一年的条目，正是这么撞上的）。
+//
+// 重置时间（``fmtReset``）**保持只显示月日**：它是按周期滚动的相对时点，
+// 同一个「10-30 重置」月月复用，补年份反而噪声。
+//
+// 不直接复用 ``benefits.js`` 的 ``fmtExpireDate``：本文件先于它加载
+// （index.html 里 benefits_quota.js 在 benefits.js 之前），运行时函数虽然
+// 存在、但跨文件依赖加载顺序太脆，两处各留一份小函数更稳。
+function fmtExpireMmdd(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return d.getFullYear() === new Date().getFullYear() ? md : `${d.getFullYear()}-${md}`;
+}
+
 // 一组条目 → 「本组合计」的原始数值。抽出来是因为跨账号合计要的是**数**而
 // 不是 HTML，但「怎么取」必须与标题行完全一致。
 //
@@ -123,9 +142,7 @@ function quotaItemHtml(it) {
   // 到期时间（expire_ts）与重置时间是两回事：到期是这份权益作废、不再回来，
   // 重置是周期回满。早先 Qoder 的 expiresAt 被塞进 reset_ts，界面上显示成
   // 「10-30 重置」——用户以为到期日没被记录。这里分开渲染，措辞也分开。
-  const fmtExpire = it.expire_ts
-    ? new Date(it.expire_ts * 1000).toLocaleString('zh-CN', {month: '2-digit', day: '2-digit'})
-    : '';
+  const fmtExpire = fmtExpireMmdd(it.expire_ts);
   const expire = fmtExpire ? ` · ${fmtExpire} 到期` : '';
   // 查询失败说明条：后端给出 remaining 文案 + unreachable/query_failed 标记，
   // 用警告色区分于正常额度，并说明「是网络问题、已缓存、无需反复刷新」——
