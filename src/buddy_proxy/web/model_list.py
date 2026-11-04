@@ -103,6 +103,13 @@ def normalize_model_format(remote_model: dict[str, Any]) -> dict[str, Any]:
         "vendor": vendor,
         "max_input": max_input,
         "max_output": max_output,
+        # 显式窗口档位：配置里写了就以它为准对外表述，聚合时不被小窗口通道
+        # 拉低（见 model_aggregate）。下游按 ``preferred.get("window_tier")``
+        # 取，所以必须原样透传——漏了就等于没配（第一版就栽在这：tier 写进
+        # models_config.json 却被 normalize 丢掉，实测仍是 180k）。
+        **({"window_tier": remote_model["window_tier"]}
+           if isinstance(remote_model.get("window_tier"), int)
+           and not isinstance(remote_model.get("window_tier"), bool) else {}),
         "tool_call": tool_call,
         "images": images,
         "reasoning": reasoning,

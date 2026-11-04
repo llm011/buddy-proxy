@@ -213,3 +213,43 @@ def test_window_tier_ignored_when_invalid():
             "id": "qoder/m", "provider": "qoder", "max_input": 180000,
         }])
         assert out[0]["max_input"] == 180000, f"tier={bad!r} 不该生效"
+
+
+# ---- 端到端：window_tier 必须活着走到聚合出口 ----
+#
+# 第一版就栽在这：tier 写进了 models_config.json，但 normalize_model_format
+# 构造新 dict 时把它丢了，聚合里 preferred.get("window_tier") 恒为 None，
+# 实测 /v1/models 仍是 180k。这类「字段在中途被丢」的 bug 光测聚合函数
+# 抓不到，必须把 normalize 串进来。
+
+
+def test_window_tier_survives_normalization():
+    from buddy_proxy.web.model_list import normalize_model_format
+
+    norm = normalize_model_format({
+        "id": "deepseek-v4.1-flash",
+        "maxInputTokens": 1000000,
+        "window_tier": 600000,
+    })
+    assert norm["window_tier"] == 600000, "normalize 丢了 window_tier，配置等于没写"
+
+
+def test_window_tier_end_to_end_through_normalize_and_aggregate():
+    from buddy_proxy.web.model_list import normalize_model_format
+
+    raw = [
+        normalize_model_format({"id": "deepseek-v4.1-flash",
+                                "maxInputTokens": 1000000,
+                                "window_tier": 600000}),
+        # 通道目录条目：小窗口，没 tier
+        {"id": "qoder/deepseek-v4.1-flash", "provider": "qoder",
+         "max_input": 180000},
+    ]
+    out = aggregate_models(
+        raw,
+        order={"deepseek-v4.1-flash": ["codebuddy/deepseek-v4.1-flash",
+                                       "qoder/deepseek-v4.1-flash"]},
+        known_providers=KNOWN,
+    )
+    assert out[0]["context_window"] == 600000
+    assert out[0]["max_input"] == 600000
