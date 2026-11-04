@@ -34,9 +34,7 @@
       "images": false,
       "credits": "x1.62 credits",
       "desc": "Kimi K3",
-      "tags": [
-        "badge:订阅优先:#F59E0B"
-      ]
+      "tags": ["badge:订阅优先:#F59E0B"]
     },
     {
       "id": "kimi-k3.1-pro",
@@ -94,9 +92,7 @@
       "reasoning": true,
       "credits": "x0.69 credits",
       "desc": "GLM-5.3 flagship model",
-      "tags": [
-        "badge:订阅优先:#F59E0B"
-      ]
+      "tags": ["badge:订阅优先:#F59E0B"]
     },
     {
       "id": "glm-5.3-flash",
@@ -109,9 +105,7 @@
       "reasoning": true,
       "credits": "x0.08 credits",
       "desc": "GLM-5.3 Flash, fast reasoning model",
-      "tags": [
-        "badge:订阅优先:#F59E0B"
-      ]
+      "tags": ["badge:订阅优先:#F59E0B"]
     },
     {
       "id": "glm-5.3-flashx",
@@ -124,9 +118,7 @@
       "reasoning": true,
       "credits": "x0.19 credits",
       "desc": "GLM-5.3-FlashX",
-      "tags": [
-        "badge:订阅优先:#F59E0B"
-      ]
+      "tags": ["badge:订阅优先:#F59E0B"]
     },
     {
       "id": "glm-5.2",
@@ -295,9 +287,7 @@
       "maxOutputTokens": 32000,
       "name": "Kimi-K2.8-Preview",
       "onlyReasoning": true,
-      "tags": [
-        "badge:订阅优先:#F59E0B"
-      ],
+      "tags": ["badge:订阅优先:#F59E0B"],
       "reasoning": {
         "effort": "medium",
         "summary": "auto"
@@ -360,9 +350,7 @@
       "temperature": 1,
       "vendor": "f",
       "credits": "x0.11 credits",
-      "tags": [
-        "badge:夜间折扣:#3B82F6"
-      ]
+      "tags": ["badge:夜间折扣:#3B82F6"]
     },
     {
       "contextWindow": {
@@ -468,9 +456,7 @@
       "temperature": 1,
       "vendor": "f",
       "config_name": "DeepSeek-V4-Pro",
-      "tags": [
-        "badge:夜间折扣:#3B82F6"
-      ]
+      "tags": ["badge:夜间折扣:#3B82F6"]
     },
     {
       "id": "gpt-5.6-sol-max",
@@ -581,10 +567,7 @@
       "max_input": 1000000,
       "reasoning": true,
       "tool_call": true,
-      "rate_limit": {
-        "requests": 6,
-        "window_s": 75
-      }
+      "rate_limit": {"requests": 6, "window_s": 75}
     },
     {
       "id": "gemini-3.1-pro",
