@@ -40,10 +40,17 @@ FLIP_GRACE_S = 3600
 # 一到 7 天内就刷屏，真正值钱的会员包反而被淹）。判定见 :func:`_expiring`。
 EXPIRY_WARN_DAYS = 7
 EXPIRY_WARN_MIN_CREDITS = 300
-# 余量耗尽的条目（credit/points 明确给了 0）一律不报到期：过期也带不走任何
-# 额度，报「剩 0 · 2 天后到期」纯属噪音（2026-11-06 用户反馈 CodeBuddy 三个
-# 剩 0 的包因为快到期被顶成临期告警：「太傻瓜了」）。余量为负的（超支）同理。
-EXPIRY_EMPTY_REMAINING = 0
+# 余量耗尽的条目（credit/points）一律不报到期：过期也带不走任何额度，报
+# 「剩 0 · 2 天后到期」纯属噪音（2026-11-06 用户反馈 CodeBuddy 三个剩 0 的包
+# 因为快到期被顶成临期告警：「太傻瓜了」）。
+#
+# 阈值不是 0 而是 **0.05**（判 ``remaining < 0.05`` 为空）：界面 ``fmtNum`` 是
+# ``Math.round(x * 10) / 10``，不足 0.05 一律显示成「剩 0」。只认 ``<= 0`` 的话，
+# ``remaining = 0.001`` 这类尾差（CodeBuddy 的 ``remain = round(total - used, 2)``
+# 会给出）后端判定非空照报，用户看到的却仍是「剩 0」，等于没修。判空口径必须
+# 对齐展示精度——凡是在界面上读作「剩 0」的，就不该出现在告警里。负数（超支）
+# 落在阈值之下，同属带不走东西。
+EXPIRY_EMPTY_REMAINING = 0.05
 # 余额告急：通道积分类总额度剩得比它少（或剩余占比比它低）就上横幅（用户
 # 2026-10-03 要求「不足 300 credits（或不足 8%）」）。与到期告警互补——
 # 权益还早但量快烧干的通道，只等到期告警就要在烧干那天才被发现。判定见
@@ -146,14 +153,16 @@ def _remaining_state(item: dict[str, Any]) -> str:
     这类尺度，0 不代表空壳（千分制剩 0 反而是余额告急那边的事），按
     ``"unknown"`` 放行，维持原来的只看天数的行为。
 
-    余量字段缺失或取不出数也归 ``"unknown"``——「不知道」不等于「是 0」。
+    余量字段缺失、取不出数、或取到 ``nan`` 都归 ``"unknown"``——「不知道」不
+    等于「是 0」。``nan`` 要单独拦：拿它跟阈值比大小恒为假，不拦会滑进
+    ``"some"`` 被当成「确定还有额度」报出去。
     """
     if item.get("unit") not in _EXPIRY_AMOUNT_UNITS:
         return "unknown"
     remaining = _as_num(item.get("remaining"))
-    if remaining is None:
+    if remaining is None or remaining != remaining:  # x != x 即 nan
         return "unknown"
-    return "empty" if remaining <= EXPIRY_EMPTY_REMAINING else "some"
+    return "empty" if remaining < EXPIRY_EMPTY_REMAINING else "some"
 
 
 def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) -> list[dict[str, Any]]:

@@ -20,6 +20,7 @@ from unittest import mock
 import pytest
 
 from buddy_proxy.benefits import (
+    EXPIRY_EMPTY_REMAINING,
     EXPIRY_URGENT_DAYS,
     EXPIRY_WARN_DAYS,
     EXPIRY_WARN_MIN_CREDITS,
@@ -233,6 +234,36 @@ def test_expiring_zero_day_remaining_is_not_mistaken_for_empty():
                                      remaining=0.0, unit="permille")]),
     ], now=NOW)
     assert len(out) == 1
+
+
+def test_expiring_treats_display_zero_as_empty():
+    """余量在界面上读作「剩 0」的，就不该进告警——判空口径要对齐展示精度。
+
+    ``fmtNum`` 是 ``Math.round(x * 10) / 10``，不足 0.05 一律显示成「剩 0」。
+    只认 ``<= 0`` 的话，``remaining = 0.004``（``round(total - used, 2)`` 的尾差）
+    后端判非空照报，用户看到的仍是「剩 0 · 2 天后到期」，等于没修。
+    """
+    out = _expiring([
+        _entry("codebuddy", [
+            _item("尾差包", expire_days=1.8, remaining=0.004, unit="credit"),
+            _item("刚好到线", expire_days=1.8,
+                  remaining=EXPIRY_EMPTY_REMAINING, unit="credit"),
+            _item("看得见余量", expire_days=1.8, remaining=0.06, unit="credit"),
+        ]),
+    ], now=NOW)
+    # 0.004 读作「剩 0」→ 不报；阈值本身（0.05 → 显示「剩 0.1」）及往上照报。
+    # 后端判 `remaining < 阈值` 为空、前端放行 `>= 阈值`，两边严丝合缝。
+    assert [e["label"] for e in out] == ["刚好到线", "看得见余量"]
+
+
+def test_remaining_state_nan_is_unknown_not_some():
+    """``nan`` 归 unknown：``nan <= 阈值`` 恒为假，不拦就会滑进「确定还有额度」。"""
+    from buddy_proxy.benefits import _remaining_state
+
+    assert _remaining_state({"unit": "credit", "remaining": float("nan")}) == "unknown"
+    assert _remaining_state({"unit": "credit", "remaining": 0}) == "empty"
+    assert _remaining_state({"unit": "credit", "remaining": -3}) == "empty"
+    assert _remaining_state({"unit": "credit", "remaining": 1}) == "some"
 
 
 def test_expiring_splits_account_and_item_label_for_two_level_list():

@@ -452,6 +452,23 @@ def test_banner_keeps_urgent_items_with_small_amount():
     assert '有 1 项权益将在 7 天内到期' in out, out
 
 
+def test_banner_treats_display_zero_as_spent():
+    """余量不足 0.05 的包在界面上读作「剩 0」，同样不该铺出来。
+
+    后端已按 0.05 判空，前端再兜一层同口径（老后端快照 / 缓存旧响应时走这条）。
+    `fmtNum` 会把 0.004 渲染成「剩 0」，滤掉它才不会出现「剩 0 却告警」。
+    """
+    out = _render_banner("""{
+      expiry_warn_days: 7, expiry_urgent_days: 4,
+      expiring: [{provider: 'codebuddy', provider_name: 'CodeBuddy', account: '#1',
+                  item_label: '资源包', label: 'CodeBuddy #1 · 资源包',
+                  expire_ts: 1793932708, days_left: 1.8, remaining: 0.004,
+                  unit: 'credit', urgent: true}],
+    }""")
+    assert '资源包' not in out, f"读作剩 0 的包不该告警: {out}"
+    assert 'expirybar show' not in out, out
+
+
 def test_banner_derives_urgency_when_backend_is_older():
     """老后端没 `urgent` 字段时按 days_left 自己判，徽标和标签才有得用。
 
