@@ -82,6 +82,19 @@
       "desc": "Hy4（原 hy4-preview；0 倍率）"
     },
     {
+      "id": "hy4free",
+      "name": "hy4-free",
+      "vendor": "tencent",
+      "max_input": 168000,
+      "max_output": 32000,
+      "tool_call": true,
+      "images": false,
+      "onlyReasoning": true,
+      "supportsReasoning": true,
+      "credits": "x0.00 credits",
+      "desc": "Hy4 免费档（2026-11-04 实测 upstream usage.credit=0）。上游名必须写 hy4free（无横杠），回包 model 字段才是 hy4-free；请求写 hy4-free 会 11102"
+    },
+    {
       "id": "glm-5.3",
       "name": "GLM-5.3",
       "vendor": "zhipu",

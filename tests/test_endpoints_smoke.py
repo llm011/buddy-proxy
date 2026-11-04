@@ -129,7 +129,7 @@ def test_models_shape_and_count(client):
 def test_models_has_required_ids(client):
     """用户要求的模型 id 必须都在静态配置里。"""
     required = {
-        "glm-5.3", "glm-5.3-flash", "hy3", "hy4",
+        "glm-5.3", "glm-5.3-flash", "hy3", "hy4", "hy4free",
         "minimax-m3", "kimi-k3", "kimi-k2.7",
         "kimi-k3.1-pro",
         "deepseek-v4-flash", "deepseek-v4-pro",
@@ -149,6 +149,8 @@ def test_models_credits_and_name(client):
         ("glm-5.3", "zhipu"): ("x0.69 credits", "GLM-5.3"),
         ("glm-5.3-flash", "zhipu"): ("x0.08 credits", "GLM-5.3-Flash"),
         ("hy4", "tencent"): ("x0.00 credits", "Hy4"),
+        # 上游名是 hy4free（无横杠），显示名才是 hy4-free；见 models_config 的 desc。
+        ("hy4free", "tencent"): ("x0.00 credits", "hy4-free"),
         ("minimax-m3", "f"): ("x0.25 credits", "MiniMax-M3"),
         ("deepseek-v4-flash", "f"): ("x0.17 credits", "Deepseek-V4-Flash"),
         ("deepseek-v4-pro", "f"): ("x0.51 credits", "Deepseek-V4-Pro"),

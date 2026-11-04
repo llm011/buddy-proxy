@@ -116,6 +116,7 @@ The static catalog in `src/buddy_proxy/web/models_config.json` contains **52 Cod
 | `glm-5v-turbo` | GLM-5v-Turbo (vision) | x0.71 |
 | `hy3` | Hy3 (限时免费) | x0.00 |
 | `hy4` | Hy4 | x0.00 |
+| `hy4free` | hy4-free | x0.00 |
 | `minimax-m3` | MiniMax-M3 | x0.25 |
 | `kimi-k3` | Kimi-K3 | x1.62 |
 | `kimi-k3.1-pro-highspeed` | Kimi-K3.1-Pro-Highspeed | x1.56 |
