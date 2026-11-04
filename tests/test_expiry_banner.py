@@ -188,11 +188,51 @@ def test_expiring_urgent_bypasses_credit_amount_filter():
                   remaining=50, unit="credit"),
             _item("刚好超过 4 天", expire_days=EXPIRY_URGENT_DAYS + 0.1,
                   remaining=50, unit="credit"),
-            _item("4 天内空包", expire_days=1, remaining=0, unit="credit"),
         ]),
     ], now=NOW)
-    assert [e["label"] for e in out] == ["4 天内空包", "4 天内小包"]
+    assert [e["label"] for e in out] == ["4 天内小包"]
     assert all(e["urgent"] for e in out)
+
+
+def test_expiring_skips_spent_batches_even_when_urgent():
+    """剩 0 的包不管还有几天到期都不报（用户 2026-11-06）。
+
+    4 天例外只豁免「余量小」，不豁免「余量为空」：烧干的包过期也带不走任何
+    额度，报「剩 0 · 2 天后到期」只是噪音（CodeBuddy 三个 0 包被顶成临期
+    告警，用户原话「太傻瓜了吧」）。负数（超支）同理。
+    """
+    out = _expiring([
+        _entry("codebuddy", [
+            _item("资源包", expire_days=1.8, remaining=0, unit="credit"),
+            _item("订阅套餐", expire_days=-0.5, remaining=0, unit="credit"),
+            _item("超支包", expire_days=2, remaining=-12, unit="credit"),
+            _item("还有剩的", expire_days=2, remaining=50, unit="credit"),
+        ]),
+    ], now=NOW)
+    assert [e["label"] for e in out] == ["还有剩的"]
+
+
+def test_expiring_spent_points_batches_are_skipped_too():
+    """points（DuMate 这类积分制）同样是按量计费，剩 0 一样不报。"""
+    out = _expiring([
+        _entry("dumate", [
+            _item("积分包（login_bonus）", expire_days=0.3,
+                  remaining=0, unit="points"),
+            _item("订阅套餐（plan_pro）", expire_days=0.3,
+                  remaining=5000, unit="points"),
+        ]),
+    ], now=NOW)
+    assert [e["label"] for e in out] == ["订阅套餐（plan_pro）"]
+
+
+def test_expiring_zero_day_remaining_is_not_mistaken_for_empty():
+    """非按量计费量纲的 0 不当空壳：千分制剩 0 是余额告急的事，
+    这里只看天数，别顺手把条目吞掉。"""
+    out = _expiring([
+        _entry("antigravity", [_item("Gemini 组", expire_days=3,
+                                     remaining=0.0, unit="permille")]),
+    ], now=NOW)
+    assert len(out) == 1
 
 
 def test_expiring_splits_account_and_item_label_for_two_level_list():
@@ -203,13 +243,13 @@ def test_expiring_splits_account_and_item_label_for_two_level_list():
     """
     out = _expiring([
         _entry("codebuddy", [
-            _item("CodeBuddy #2 · 资源包", expire_days=1, remaining=0,
+            _item("CodeBuddy #2 · 资源包", expire_days=1, remaining=180,
                   unit="credit"),
             _item("CodeBuddy #2 · 资源包 #2", expire_days=2, remaining=500,
                   unit="credit"),
         ]),
         _entry("dumate", [
-            _item("积分包（login_bonus）", expire_days=1, remaining=0,
+            _item("积分包（login_bonus）", expire_days=1, remaining=200,
                   unit="points"),
         ]),
     ], now=NOW)

@@ -352,8 +352,8 @@ def test_expiry_banner_drops_fully_spent_batches():
     """余量已空、且不在 4 天内的积分条目不铺出来：到期也带不走任何额度。
 
     用例造的是真实形状（DuMate 2026-11-03）：一批包全空 + 一条还有剩。
-    空的那批要消失，有剩的那条必须留着。注意日期都放在 4 天窗口外——4 天内
-    的空包按新规则必须照报（见 test_banner_keeps_urgent_items_even_when_amount_is_zero）。
+    空的那批要消失，有剩的那条必须留着。日期都放在 4 天窗口外——4 天内的
+    空包同样不报（见 test_banner_drops_spent_items_even_when_urgent）。
     """
     out = _render_banner("""{
       expiring: [
@@ -411,39 +411,63 @@ def test_expiry_banner_does_not_drop_batches_without_amounts():
     assert '会员 Pro' in out, out
 
 
-def test_banner_keeps_urgent_items_even_when_amount_is_zero():
-    """4 天内到期但余量为 0 的包必须照报（用户 2026-11-04）。
+def test_banner_drops_spent_items_even_when_urgent():
+    """4 天内到期但余量为 0 也不铺出来（用户 2026-11-06 推翻 11-04 那条）。
 
-    空包过滤只看「还有没有额度」，4 天内的例外正是这次的新规则：额度 4 天后
-    就作废，值不值得提醒不该再由余量决定。旧版「空包一律剔掉」会把它藏了。
+    用户实报：CodeBuddy 三个剩 0 的包（资源包×2、订阅套餐）因为 2 天后到期
+    被顶成「3 项临期（3 项 4 天内）」「太傻瓜了吧」。烧干的包过期也带不走任何
+    额度，4 天例外只该豁免「余量小」，不豁免「余量为空」。
+    """
+    out = _render_banner("""{
+      expiry_warn_days: 7, expiry_urgent_days: 4,
+      expiring: [{provider: 'codebuddy', provider_name: 'CodeBuddy', account: '#1',
+                  item_label: '资源包', label: 'CodeBuddy #1 · 资源包',
+                  expire_ts: 1793932708, days_left: 1.8, remaining: 0,
+                  unit: 'credit', urgent: true},
+                 {provider: 'codebuddy', provider_name: 'CodeBuddy', account: '#1',
+                  item_label: '订阅套餐', label: 'CodeBuddy #1 · 订阅套餐',
+                  expire_ts: 1793932708, days_left: 1.8, remaining: 0,
+                  unit: 'credit', urgent: true}],
+    }""")
+    assert '资源包' not in out and '订阅套餐' not in out, f"空包不该告警: {out}"
+    assert '临期' not in out and '4 天内' not in out, out
+    assert 'expirybar show' not in out, f"横幅不该出现: {out}"
+
+
+def test_banner_keeps_urgent_items_with_small_amount():
+    """4 天内有剩（哪怕很少）的包照报，并挂「4 天内」标签。
+
+    这是 2026-11-04 那条规则的保留部分：额度过几天就作废，值不值得提醒不该
+    再由 300 门槛决定。
     """
     out = _render_banner("""{
       expiry_warn_days: 7, expiry_urgent_days: 4,
       expiring: [{provider: 'codebuddy', provider_name: 'CodeBuddy', account: '#2',
                   item_label: '资源包', label: 'CodeBuddy #2 · 资源包',
-                  expire_ts: 1793932708, days_left: 1.8, remaining: 0,
+                  expire_ts: 1793932708, days_left: 1.8, remaining: 40,
                   unit: 'credit', urgent: true}],
     }""")
-    assert '资源包' in out, f"4 天内的空包不能被滤掉: {out}"
+    assert '资源包' in out, out
     assert '4 天内' in out, out
     assert '有 1 项权益将在 7 天内到期' in out, out
 
 
 def test_banner_derives_urgency_when_backend_is_older():
-    """老后端没 `urgent` 字段时按 days_left 自己判，别把 4 天内的空包静默吞掉。
+    """老后端没 `urgent` 字段时按 days_left 自己判，徽标和标签才有得用。
 
     静态资源先更新、服务还没重启（或浏览器缓存了旧接口快照）时就是这条路径
-    ——此时 `urgent` 和 `expiry_urgent_days` 都不在响应里。
+    ——此时 `urgent` 和 `expiry_urgent_days` 都不在响应里。余量为 0 的仍要
+    剔掉，别因为走的是老响应路径就把空包放回来。
     """
     out = _render_banner("""{
       expiring: [
         {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
-         expire_ts: 1793894399, days_left: 1.3, remaining: 0, unit: 'points'},
+         expire_ts: 1793894399, days_left: 1.3, remaining: 60, unit: 'points'},
         {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
          expire_ts: 1794326399, days_left: 6.3, remaining: 0, unit: 'points'},
       ],
     }""")
-    assert out.count('积分包（login_bonus）') == 1, f"只该留 4 天内那条: {out}"
+    assert out.count('积分包（login_bonus）') == 1, f"只该留有余量那条: {out}"
     assert '1 项临期（1 项 4 天内）' in out, out
 
 
@@ -458,11 +482,11 @@ def test_banner_groups_expiry_by_channel_into_collapsed_rows():
       expiring: [
         {provider: 'dumate', provider_name: '百度搭子', account: '',
          item_label: '积分包（login_bonus）', label: '积分包（login_bonus）',
-         expire_ts: 1793807999, days_left: 0.3, remaining: 0, unit: 'points',
+         expire_ts: 1793807999, days_left: 0.3, remaining: 120, unit: 'points',
          urgent: true},
         {provider: 'dumate', provider_name: '百度搭子', account: '',
          item_label: '积分包（login_bonus）', label: '积分包（login_bonus）',
-         expire_ts: 1793894399, days_left: 1.3, remaining: 0, unit: 'points',
+         expire_ts: 1793894399, days_left: 1.3, remaining: 300, unit: 'points',
          urgent: true},
         {provider: 'traeintl', provider_name: 'Trae 海外版', account: '',
          item_label: 'Pro plan', label: 'Pro plan',
@@ -490,7 +514,7 @@ def test_banner_same_channel_low_and_expiry_is_one_row():
       expiring: [{provider: 'dumate', provider_name: '百度搭子', account: '',
                   item_label: '积分包（login_bonus）',
                   label: '积分包（login_bonus）', expire_ts: 1794153599,
-                  days_left: 3.3, remaining: 0, unit: 'points', urgent: true}],
+                  days_left: 3.3, remaining: 80, unit: 'points', urgent: true}],
       low_quota: [{provider: 'dumate', provider_name: '百度搭子',
                    label: '订阅积分', unit: 'points', remaining: 999.5,
                    percent_left: 2.1}],
@@ -523,7 +547,7 @@ def test_banner_renders_account_before_resource_pack():
       expiring: [{provider: 'codebuddy', provider_name: 'CodeBuddy',
                   account: '#2', item_label: '资源包',
                   label: 'CodeBuddy #2 · 资源包', expire_ts: 1793932708,
-                  days_left: 1.8, remaining: 0, unit: 'credit', urgent: true}],
+                  days_left: 1.8, remaining: 260, unit: 'credit', urgent: true}],
     }""")
     assert 'CodeBuddy' in out, out
     assert '资源包' in out, out

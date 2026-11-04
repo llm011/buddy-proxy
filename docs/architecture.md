@@ -544,6 +544,16 @@ either state. Three invariants matter because getting them wrong is silent:
   banner's amount filter — a 200-credit check-in pack expiring in 7 days is
   noise, a 4000-credit plan is not; days and counts are not comparable to a
   credit threshold and are filtered by time alone.
+- **The 4-day exception waives "small", never "empty".** Anything inside the
+  urgent window skips the amount threshold (2026-11-04 request), but an item
+  whose `credit`/`points` remaining is explicitly `0` (or negative) is dropped
+  first (`benefits._remaining_state`), regardless of days left — a drained
+  pack takes nothing with it when it expires, and reporting "0 left · expires
+  in 2 days" only buries the warnings that matter (2026-11-06 feedback). Units
+  whose `remaining` is a scale rather than an amount (`day`/`count`/`permille`)
+  never count as empty, and a missing `remaining` is `unknown`, not `empty`:
+  failing open on "can't tell" is deliberate, the same way an absent `unit`
+  skips the amount filter.
 - **A quota reading's sign convention is part of its meaning.** Antigravity
   reports *remaining* (`remainingFraction=1` means full) and has no interface
   that exposes the weekly pool at all; CLIProxyAPI shows `100%` for the same
