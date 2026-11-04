@@ -162,6 +162,56 @@ quotaAccountTotal(new Map([
     assert "查询失败" not in out, f"说明文案不该混进 chip: {out}"
 
 
+def test_account_total_ignores_failed_accounts_among_normal_ones():
+    """一个号失败、另外两个号有数：失败的号既不进合计，也不标「未计入」。
+
+    真实形状来自 Trae PAT：``_failure_notice`` 插在首位，失败号的组里只剩
+    说明条；另外两个号的组是 ``[说明条, 该号真数据]``。合计要取两个真数，
+    说明条既不进分子分母，也不该把有数的号踢出去。
+    """
+    notice = ("{label: '本轮失败', remaining: '2/9 个账号本轮未取到新数据',"
+              " unit: 'credit', query_failed: true}")
+    out = _render(f"""
+quotaAccountTotal(new Map([
+  ['PAT #1', [{notice}]],
+  ['PAT #2', [{notice},
+              {{label: 'Orange 包', remaining: 400, total: 800, unit: 'credit'}}]],
+  ['PAT #3', [{notice},
+              {{label: 'Orange 包', remaining: 600, total: 800, unit: 'credit'}}]],
+]))""")
+    assert "1,000" in out and "1,600" in out, f"两个真数据该相加: {out}"
+    assert "2 账号合计" in out, out
+    assert "未计入" not in out, f"查询失败的号不算「跳过」: {out}"
+    assert "本轮未取到" not in out, f"说明文案不该混进 chip: {out}"
+
+
+def test_reset_credit_rows_are_not_quota():
+    """重置券（unit=reset_credit）是张数说明不是水位：既不进合计，也不算打平量纲。
+
+    Codex 多账号时只有券的账号带 ``reset_credits`` 张数，``quotaSumOf`` 的
+    数字判断会把张数收进来——只有券的号会把自己那一行张数当成「额度」加进
+    合计，混组时还会把整组打成 credit。
+    """
+    out = _render("""
+quotaAccountTotal(new Map([
+  ['Codex #1', [{label: '重置券', unit: 'reset_credit', reset_credits: 3},
+                {label: '5h 窗口', unit: 'percent', remaining: 60, total: 100}]],
+  ['Codex #2', [{label: '重置券', unit: 'reset_credit', reset_credits: 2}]],
+  ['Codex #3', [{label: '5h 窗口', unit: 'percent', remaining: 40, total: 100}]],
+]))""")
+    # 两个号都只有比例 → 无绝对量可加，一片空白比假数好
+    assert out == '', f"券与比例都不该拼出合计: {out}"
+    out = _render("""
+quotaAccountTotal(new Map([
+  ['Codex #1', [{label: '重置券', unit: 'reset_credit', reset_credits: 3},
+                {label: '5h 窗口', remaining: 120, total: 200, unit: 'credit'}]],
+  ['Codex #2', [{label: '重置券', unit: 'reset_credit', reset_credits: 2},
+                {label: '5h 窗口', remaining: 80, total: 200, unit: 'credit'}]],
+]))""")
+    assert "200" in out and "400" in out, f"只该加两个窗口: {out}"
+    assert "未计入" not in out, f"券不算跳过: {out}"
+
+
 def test_antigravity_permille_is_labelled():
     """Antigravity 的 total 恒为 1000（千分制水位），加出来不是积分数。"""
     out = _render("""

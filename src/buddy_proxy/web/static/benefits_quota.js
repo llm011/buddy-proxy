@@ -39,7 +39,13 @@ function quotaHeadSum(q) {
 function quotaSumOf(items, sumItems) {
   const num = v => v !== null && v !== '' && typeof v !== 'boolean'
                 && Number.isFinite(Number(v));
-  const usable = items.filter(it => num(it.remaining) && num(it.total));
+  // 重置券（unit=reset_credit）是**张数说明**不是额度水位：后端给的
+  // reset_credits 张数会被 num() 当成数字收进来（title 也明说「仅显示、不计入
+  // 合计」）。谁第一个撞上就能整组算错——Codex 多账号时，只有券的账号会顶掉
+  // 真正那张窗口的合计。
+  const usable = items.filter(it =>
+    !(it.unit === 'reset_credit' || it.reset_credit === true)
+    && num(it.remaining) && num(it.total));
   if (!usable.length) return null;
   if (sumItems) {
     return {
@@ -395,8 +401,12 @@ function quotaAccountTotal(groups, opts) {
         || (it.unit !== 'percent' && !quotaSumOf([it], false)));
     if (noticeOnly) continue;
     // 整组都只有比例 → 没有绝对量可加（**先判 percent**：它的 total 是 100
-    // 这种占位分母，``quotaSumOf`` 照样能得出数，但那不是积分）
-    const units = [...new Set(list.map(it => it.unit || 'credit'))];
+    // 这种占位分母，``quotaSumOf`` 照样能得出数，但那不是积分）。
+    // 券行不进量纲集合：它没有单位含义，混进来会把整组打成 credit。
+    const units = [...new Set(list
+      .filter(it => !(it.unit === 'reset_credit' || it.reset_credit === true))
+      .map(it => it.unit || 'credit'))];
+    if (!units.length) continue;   // 只剩券行：没额度可加，也不算「跳过」
     const unit = units.every(u => u === 'percent') ? 'percent'
       : (units.length === 1 ? units[0] : 'credit');
     const sum = unit === 'percent' ? null : quotaSumOf(list, sumItems);
