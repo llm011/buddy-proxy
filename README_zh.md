@@ -115,7 +115,7 @@ PROXY_PORT=9000 PROXY_EXTRA_ARGS="--desensitize --optimize-context" ./proxy.sh s
   订阅包=月结周期结束、裂变包=最近一次发放的窗口结束；聚合接口失败只丢有效期、不影响额度数字），
   另有按请求粒度的消耗流水（`/ui/api/codebuddy/usage-records`）。
 - 账号管理：`GET /ui/api/codebuddy/accounts` 及 `order` / `rename` / `delete` 端点；管理面板支持逐账号 ▲▼ 顺位、✎ 改名、✕ 删除。
-- **海外版（`codebuddyintl`）** —— 同上游家族、换 host：`https://www.codebuddy.ai`，2026-10 实测两边 `/v2/plugin` 协议逐字节同构。登录：`buddy login codebuddy --region global`（别名 `codebuddyintl`）；海外账号在同一账号 store 里落 `region` 标，与 CN 账号互不混用。有海外账号后重启 Buddy 自动注册通道——模型用 `codebuddyintl/<模型>` 前缀显式路由，管理页单独一张「CodeBuddy 海外版」额度卡（额度 + ✎ 改名；▲▼/✕ 仍在 CN 卡）。海外登录态写在 `~/.codebuddy-session-global.json`（绝不写 CN 的历史 session 路径，避免 legacy 迁移把海外号并进 CN 区）。模型目录不再采用桌面包中过期的 `product-ide.json`：其中 Claude 3.7/4.0、GPT-5、Gemini 2.5 已全部实测返回 11102。当前表来自海外客户端在线倍率面板并逐个用真实账号调用通过（2026-10-10），同系列只保留新一代：`hy4-preview`（x0.00）、`gpt-5.6-sol`（x3.47）、`gpt-5.6-terra`（x1.39）、`gpt-5.6-luna`（x0.14）、`gemini-3.5-flash`（x0.99）、`glm-5.3`（x0.79）、`kimi-k3`（x1.62）。
+- **海外版（`codebuddyintl`）** —— 同上游家族、换 host：`https://www.codebuddy.ai`，2026-10 实测两边 `/v2/plugin` 协议逐字节同构。登录：`buddy login codebuddy --region global`（别名 `codebuddyintl`）；海外账号在同一账号 store 里落 `region` 标，与 CN 账号互不混用。有海外账号后重启 Buddy 自动注册通道——模型用 `codebuddyintl/<模型>` 前缀显式路由，管理页单独一张「CodeBuddy 海外版」额度卡（额度 + ✎ 改名；▲▼/✕ 仍在 CN 卡）。海外登录态写在 `~/.codebuddy-session-global.json`（绝不写 CN 的历史 session 路径，避免 legacy 迁移把海外号并进 CN 区）。模型目录不再采用桌面包中过期的 `product-ide.json`：其中 Claude 3.7/4.0、GPT-5、Gemini 2.5 已全部实测返回 11102。当前表来自海外客户端在线倍率面板并逐个用真实账号调用通过（2026-10-10），同系列只保留新一代：`hy4`（x0.00）、`gpt-5.6-sol`（x3.47）、`gpt-5.6-terra`（x1.39）、`gpt-5.6-luna`（x0.14）、`gemini-3.5-flash`（x0.99）、`glm-5.3`（x0.79）、`kimi-k3`（x1.62）。
 
 ### 豆包 Provider（可选）
 

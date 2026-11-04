@@ -168,7 +168,7 @@ def test_intl_enabled_and_provider_region():
     assert p._quota_tag == "CodeBuddy 海外版"
     models = p.models()
     assert [m["id"] for m in models] == [
-        "codebuddyintl/hy4-preview",
+        "codebuddyintl/hy4",
         "codebuddyintl/gpt-5.6-sol",
         "codebuddyintl/gpt-5.6-terra",
         "codebuddyintl/gpt-5.6-luna",
@@ -178,14 +178,14 @@ def test_intl_enabled_and_provider_region():
     ]
     assert all(m["images"] and m["tool_call"] for m in models)
     # 海外目录虽公开，但只能用完整前缀路由；裸名不能抢默认 CN CodeBuddy。
-    assert p.accepts_model("codebuddyintl/hy4-preview") is True
-    assert p.accepts_model("hy4-preview") is False
+    assert p.accepts_model("codebuddyintl/hy4") is True
+    assert p.accepts_model("hy4") is False
     assert p.accepts_model("gpt-5.6-terra") is False
     assert _resolve_auto(
-        SimpleNamespace(providers={"codebuddyintl": p}), "hy4-preview"
+        SimpleNamespace(providers={"codebuddyintl": p}), "hy4"
     ) is None
     assert {m["id"].split("/", 1)[1]: m["credits"] for m in models} == {
-        "hy4-preview": "x0.00 credits",
+        "hy4": "x0.00 credits",
         "gpt-5.6-sol": "x3.47 credits",
         "gpt-5.6-terra": "x1.39 credits",
         "gpt-5.6-luna": "x0.14 credits",

@@ -34,7 +34,7 @@ from .provider import CodeBuddyProvider
 # 5.5/5.4/5.3-Codex、GLM-5.2、Kimi-K2.6。``credits`` 保持项目既有格式，
 # 尤其 x0.00 是有效免费倍率，不能用真值判断吞掉。
 _INTL_MODELS: tuple[dict[str, Any], ...] = (
-    {"id": "hy4-preview", "name": "Hy4 preview", "vendor": "tencent",
+    {"id": "hy4", "name": "Hy4", "vendor": "tencent",
      "credits": "x0.00 credits", "tool_call": True, "images": True},
     {"id": "gpt-5.6-sol", "name": "GPT-5.6-Sol", "vendor": "openai",
      "credits": "x3.47 credits", "tool_call": True, "images": True},
@@ -95,7 +95,7 @@ class CodeBuddyIntlProvider(CodeBuddyProvider):
         """只认完整 ``codebuddyintl/<模型>``，裸名继续交给默认 CN 通道。
 
         基类会把目录 id 的 provider 前缀剥掉后匹配；这里若不覆写，发布海外目录
-        便会让 ``hy4-preview`` 这类与 CN 同名的请求静默改道到海外账号。
+        便会让 ``hy4`` 这类与 CN 同名的请求静默改道到海外账号。
         """
         del aliases
         want = (model or "").strip()
