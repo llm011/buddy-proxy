@@ -172,3 +172,44 @@ def test_strip_known_prefix_only_strips_known_channels():
     assert _strip_known_prefix("glm-5.3", KNOWN) == "glm-5.3"
     # 不是已知通道的前缀不能切（模型可能自带斜杠）
     assert _strip_known_prefix("meta-llama/Llama-4", KNOWN) == "meta-llama/Llama-4"
+
+
+# ---- 显式窗口档位：不被小窗口通道拉低 ----
+
+
+def test_window_tier_overrides_min_across_channels():
+    """实测 deepseek-v4.1-flash：codebuddy 报 1M、qoder 报 180k。
+
+    取最小值会把目录压成 180k，用户明明跑得动长上下文，客户端却按 18 万
+    就开始压缩。配置里写了 window_tier 就该按它对外表述。
+    """
+    out = _agg([{
+        "id": "deepseek-v4.1-flash", "provider": "codebuddy",
+        "max_input": 1000000, "window_tier": 600000,
+    }, {
+        "id": "qoder/deepseek-v4.1-flash", "provider": "qoder",
+        "max_input": 180000,
+    }])
+    assert out[0]["max_input"] == 600000
+    assert out[0]["context_window"] == 600000
+
+
+def test_without_window_tier_min_still_applies():
+    """没写 tier 时保持原口径：取最小值兜底。"""
+    out = _agg([{
+        "id": "m", "provider": "codebuddy", "max_input": 1000000,
+    }, {
+        "id": "qoder/m", "provider": "qoder", "max_input": 180000,
+    }])
+    assert out[0]["max_input"] == 180000
+
+
+def test_window_tier_ignored_when_invalid():
+    for bad in (0, -1, True, "600k", None):
+        out = _agg([{
+            "id": "m", "provider": "codebuddy",
+            "max_input": 1000000, "window_tier": bad,
+        }, {
+            "id": "qoder/m", "provider": "qoder", "max_input": 180000,
+        }])
+        assert out[0]["max_input"] == 180000, f"tier={bad!r} 不该生效"

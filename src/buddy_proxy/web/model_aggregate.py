@@ -180,6 +180,18 @@ def aggregate_models(
             value = _merge_capability_num(group, key)
             if value is not None:
                 merged[key] = value
+
+        # 显式窗口档位覆盖：配置里写了 ``window_tier`` 就按它对外表述，不取最小值。
+        #
+        # 取最小值对「能力」是对的（存疑就别声明），对「窗口」是错的：各通道报的
+        # 是自己那条链路的输入上限，同一模型在不同通道上能吃多少并不相等——实测
+        # ``deepseek-v4.1-flash`` codebuddy 报 1M、qoder 报 180k，取最小值把目录
+        # 压成 180k，用户明明跑得动长上下文，客户端却按 18 万就开始压缩。
+        # 写了 tier 就是明确表态「按这个数对外」，别再让某个小通道改掉。
+        tier = preferred.get("window_tier")
+        if isinstance(tier, int) and not isinstance(tier, bool) and tier > 0:
+            merged["max_input"] = tier
+            merged["context_window"] = tier
         out.append(merged)
 
     # 稳定排序：带 failover 的（配置里点过名的）在前，其余按裸名
