@@ -267,20 +267,30 @@ function renderExpiryBanner() {
   const warnDays = Number(BENEFITS && BENEFITS.expiry_warn_days) || 7;
   // 「4 天内」紧急窗口同理，前端不自己存常量。
   const urgentDays = Number(BENEFITS && BENEFITS.expiry_urgent_days) || 4;
-  // 空壳包（余量为 0）不再铺出来：到期也带不走任何额度，只会把真告警淹了
-  // （用户 2026-11-03 报障：DuMate 每天一个 login_bonus 小包，全是 0）。
-  // 但 **4 天内到期的照报**——后端 4 天内已经跳过「余量 > 300」门槛，正是要
-  // 报出这批；这里再按余量滤一次等于把功能滤没了。points 没有后端的量门槛
-  // （只有 credit 有），DuMate 的小包全靠这里收。
+  // 空壳包（余量为 0）一律不铺出来：到期也带不走任何额度，只会把真告警淹了
+  // （用户 2026-11-03 报障：DuMate 每天一个 login_bonus 小包，全是 0；
+  // 2026-11-06 又反馈 CodeBuddy 三个剩 0 的包因为 4 天内到期被顶成临期告警，
+  // 「太傻瓜了」）。所以这条**不看 days_left / urgent**——后端 4 天例外只豁免
+  // 「余量小」，不豁免「余量为空」，这里守住同一条口径。
+  // 判不出余量的（`_expiryAmountOf` 给 null：量纲不是 credit/points、字段
+  // 缺失、或 NaN）照常放行，别把「不知道」当成「是 0」。
+  //
+  // 阈值是 0.05 而不是 0：下面渲染用 `fmtNum`（`Math.round(x * 10) / 10`），
+  // 不足 0.05 一律显示成「剩 0」。只滤 `> 0` 的话，`remaining = 0.004` 这种尾差
+  // 会被放行，用户看到的还是「剩 0 · 2 天后到期」——和这次要修的现象一样。
+  // 与后端 `EXPIRY_EMPTY_REMAINING` 保持同一个数。
   //
   // 老后端没有 `urgent` 字段（静态资源先更新、服务还没重启）时按同一条规则
-  // 自己算，否则这条过滤会把 4 天内的空包全吞掉，界面上一条都不剩。
+  // 自己算，徽标和「N 天内」标签才有得用。
   const isUrgent = e => (e && e.urgent != null)
     ? !!e.urgent
     : (Number(e && e.days_left) >= 0 && Number(e && e.days_left) <= urgentDays);
+  // 判空阈值 0.05 与后端 `benefits.EXPIRY_EMPTY_REMAINING` 是同一个数，两边
+  // 要一起改。写成字面量是因为这里的函数会被测试按 `function name(...)`
+  // 逐个抽出来单独跑，顶层 const 带不进去。
   const list = ((BENEFITS && BENEFITS.expiring) || []).filter(e => {
     const amt = _expiryAmountOf(e);
-    return amt == null || amt > 0 || isUrgent(e);
+    return amt == null || amt >= 0.05;
   }).map(e => (e && e.urgent == null)
     // 老响应：把推导出来的紧急标记补回条目，徽标和「N 天内」标签才有得用
     ? Object.assign({}, e, {urgent: isUrgent(e)}) : e);

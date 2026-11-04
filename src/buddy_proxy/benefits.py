@@ -40,6 +40,17 @@ FLIP_GRACE_S = 3600
 # 一到 7 天内就刷屏，真正值钱的会员包反而被淹）。判定见 :func:`_expiring`。
 EXPIRY_WARN_DAYS = 7
 EXPIRY_WARN_MIN_CREDITS = 300
+# 余量耗尽的条目（credit/points）一律不报到期：过期也带不走任何额度，报
+# 「剩 0 · 2 天后到期」纯属噪音（2026-11-06 用户反馈 CodeBuddy 三个剩 0 的包
+# 因为快到期被顶成临期告警：「太傻瓜了」）。
+#
+# 阈值不是 0 而是 **0.05**（判 ``remaining < 0.05`` 为空）：界面 ``fmtNum`` 是
+# ``Math.round(x * 10) / 10``，不足 0.05 一律显示成「剩 0」。只认 ``<= 0`` 的话，
+# ``remaining = 0.001`` 这类尾差（CodeBuddy 的 ``remain = round(total - used, 2)``
+# 会给出）后端判定非空照报，用户看到的却仍是「剩 0」，等于没修。判空口径必须
+# 对齐展示精度——凡是在界面上读作「剩 0」的，就不该出现在告警里。负数（超支）
+# 落在阈值之下，同属带不走东西。
+EXPIRY_EMPTY_REMAINING = 0.05
 # 余额告急：通道积分类总额度剩得比它少（或剩余占比比它低）就上横幅（用户
 # 2026-10-03 要求「不足 300 credits（或不足 8%）」）。与到期告警互补——
 # 权益还早但量快烧干的通道，只等到期告警就要在烧干那天才被发现。判定见
@@ -128,6 +139,32 @@ def _split_account_label(label: Any) -> tuple[str, str]:
     return m.group("account"), m.group("label").strip()
 
 
+#: 前端 ``_expiryAmountOf`` 只认这两种量纲（它们才有「能白带走多少额度」的
+#: 概念）。后端判断「是不是空壳」用同一份口径，两边别各写一套慢慢走偏。
+_EXPIRY_AMOUNT_UNITS = ("credit", "points")
+
+
+def _remaining_state(item: dict[str, Any]) -> str:
+    """条目余量三态：``"empty"`` / ``"some"`` / ``"unknown"``。
+
+    「空不空」只有按量计费的条目才判得出来：credit（积分）和 points（DuMate
+    这类积分制）都有「还剩多少」的语义，0 就是真的一分不剩；负数是超支，同样
+    带不走东西。其余量纲（day/count/permille）的 ``remaining`` 是「还剩几天」
+    这类尺度，0 不代表空壳（千分制剩 0 反而是余额告急那边的事），按
+    ``"unknown"`` 放行，维持原来的只看天数的行为。
+
+    余量字段缺失、取不出数、或取到 ``nan`` 都归 ``"unknown"``——「不知道」不
+    等于「是 0」。``nan`` 要单独拦：拿它跟阈值比大小恒为假，不拦会滑进
+    ``"some"`` 被当成「确定还有额度」报出去。
+    """
+    if item.get("unit") not in _EXPIRY_AMOUNT_UNITS:
+        return "unknown"
+    remaining = _as_num(item.get("remaining"))
+    if remaining is None or remaining != remaining:  # x != x 即 nan
+        return "unknown"
+    return "empty" if remaining < EXPIRY_EMPTY_REMAINING else "some"
+
+
 def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) -> list[dict[str, Any]]:
     """挑出「快到期」的权益条目，供管理页顶部横幅展示（2026-10-03）。
 
@@ -148,12 +185,18 @@ def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) 
        本来就该按天预警。
 
     **4 天内例外**（2026-11-04 用户要求）：``days_left <= EXPIRY_URGENT_DAYS``
-    的条目跳过第 2 条量过滤，哪怕只剩 0 积分也报。用户明确说「某个通道里的
-    某个账号中的某个资源包，离到期剩下 4 天也要告警出来」——这时它值不值得
-    提醒已经不该由余量决定：4 天后这份额度就彻底作废了。``urgent`` 字段随
-    条目下发，前端据此打「4 天内」标签。拿不到 ``remaining`` 的积分类条目
-    平时跳过（无法判断是不是空壳），但同样受 4 天例外保护：那几天里漏报的
-    代价比多报一条大，前端只是不显示余量。
+    的条目跳过第 2 条量过滤，哪怕只象征性剩一点也报。用户明确说「某个通道
+    里的某个账号中的某个资源包，离到期剩下 4 天也要告警出来」——这时它值不
+    值得提醒已经不该由余量决定：4 天后这份额度就彻底作废了。``urgent`` 字段
+    随条目下发，前端据此打「4 天内」标签。
+
+    **但余量为 0 的不算**（2026-11-06 用户反馈）：已经烧干的包过期也带不走
+    任何东西，报「剩 0 · 2 天后到期」是纯噪音，还占掉真正该看的那一行（用户
+    原话：「剩余 0 的资源包，没必要因为日期快结束就告警吧，太傻瓜了吧」）。
+    所以 4 天例外只豁免「量小」，不豁免「量空」——``_remaining_state`` 判定
+    为 ``"empty"`` 的，无论哪天到期都不报。拿不到 ``remaining`` 的积分类条目
+    平时跳过（无法判断是不是空壳），但受 4 天例外保护：那是「不知道剩多少」，
+    不是「确定是 0」，漏报的代价更大，前端只是不显示余量。
 
     ``unit`` 缺失或为 ``None`` 时**不做量过滤**（宽松放行）：宁可多提醒一个，
     也别因为新通道忘了填 ``unit`` 而漏掉真到期。这是有意的取舍。
@@ -185,6 +228,11 @@ def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) 
             # 文案，不再挂「4 天内」标签，免得多余且读着别扭。
             within_urgent = days_left <= EXPIRY_URGENT_DAYS
             urgent = 0 <= days_left <= EXPIRY_URGENT_DAYS
+            state = _remaining_state(it)
+            # 剩 0 的包不管还剩几天都不报：过期也带不走任何额度，只会把真正
+            # 要用的告警挤下去（2026-11-06 用户反馈）。
+            if state == "empty":
+                continue
             if it.get("unit") == "credit":
                 raw_remaining = it.get("remaining")
                 remaining = _as_num(raw_remaining)
