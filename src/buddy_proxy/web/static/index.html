@@ -141,9 +141,10 @@
   </section>
 
   <section class="page" id="page-benefits">
-    <!-- 权益到期告警横幅：有权益将在 7 天内到期时挂在 h2 上方。常驻 DOM、
+    <!-- 权益到期/余额告急横幅：有告警时挂在 h2 上方。常驻 DOM、
          默认隐藏（.show 打开），内容由 renderExpiryBanner() 按 /ui/api/benefits
-         的 expiring 字段填。默认收起明细，点 <summary> 展开。 -->
+         的 expiring / low_quota 字段填。明细是两级列表：先按通道折叠
+         （<details class="eb-group">），点开才看该通道的账号/资源包明细。 -->
     <details class="expirybar" id="expirybar"></details>
     <!-- 侧边导航：额度页很长（十来张通道卡），这个锚点导航贴在视口左侧
          固定不随滚动，点按平滑滚到对应通道卡、滚动时自动高亮当前所在

@@ -55,71 +55,32 @@ function syncNextTimeAuto() {
 document.addEventListener('visibilitychange', syncNextTimeAuto);
 
 // ---- 权益到期告警横幅 ----
-// 后端算好 expiring（谁快到期、还剩几天），这里只渲染不判规则——阈值与
-// 「积分类才做量过滤」的逻辑都在 benefits._expiring 一处，免得两边各写一份
-// 慢慢走偏（比如前端漏掉 unit 判断，就会给 mimo 的「还剩 3 天」也套 300 门槛）。
+// 后端算好 expiring（谁快到期、还剩几天）与 low_quota（哪个通道快烧干），
+// 这里只渲染不判规则——阈值与「积分类才做量过滤」的逻辑都在 benefits
+// 一处，免得两边各写一份慢慢走偏。
 //
-// 汇总文案要写「将在 N 天内到期」，这个 N 由后端随 expiring 一起下发
-// （``expiry_warn_days``），前端不自己存一份——两处各写一个常量，改了一处
-// 就会出现「文案写着 7 天、实际窗口 3 天」，比不写更让人困惑。
+// 形态是**两级列表**（用户 2026-11-04 要求）：
+//   第 1 级 = 通道。每个通道一行，summary 里一眼看到「哪个通道、余额告急
+//            多少、几项临期、最近哪天」；默认收起，点开才看明细。
+//   第 2 级 = 该通道的明细行。多账号通道按「账号 #N」逐行铺开，每行是
+//            「账号 / 资源包名 / 到期日 / 剩余天数」，4 天内到期的打
+//            「N 天内」标签。
+// 这样同一个通道无论有 1 个还是 30 个资源包，外层都只占一行（用户
+// 2026-11-03 的旧版聚合会直接合并成一条、丢掉账号归属；现在改成折叠，
+// 信息还在，但默认不刷屏）。
 //
-// 形态用 <details>：默认收起，汇总行说明有几项、最早是哪天；展开才列明细
-// （通道 / 名称 / 到期日 / 剩余天数）。已过期项用红色单独标——那是最该看的。
+// 余额告急与到期**不再互相顶掉**：同一通道两边都命中时，仍然只占一行，
+// 展开后两种明细都在。旧版「同通道与余额告急去重」会把 4 天内到期的资源包
+// 藏掉，正是这次要修的（用户 2026-11-04）。
 //
-// **同类条目按通道合并成一行**（用户 2026-11-03 报障：DuMate 有 30 多个赠送
-// 积分包、每个到期日差一天，横幅就按天刷一整列「百度搭子 · 积分包
-// （login_bonus）」，把 Trae 那条真告警彻底淹了）。
+// 空壳包（余量 0）在渲染前收掉，但 4 天内的例外放行：这条原本是 2026-11-03
+// 「同类合并」里的一半（另一半——同类包并成一行——已经被两级折叠取代：通道行
+// 本来就只占一条，再合并会把「点开看每个包、哪个账号」的信息也合掉）。
 //
-// 合并键是「通道 + 名称 + 量纲」，**不带到期日**：这些包是同一类东西的
-// 流水批次（每天一个 500 分小包），逐个铺等于把「接下来 7 天每天有个包到期」
-// 说 7 遍。带上到期日就只并得掉真正同天的那几条，对 DuMate 这种形状等于没改。
-// 名字里的编号（`积分包（login_bonus）#2`）先剥掉，否则同类包只是序号不同，
-// 合并键永远撞不上。
-//
-// 合并后只留**最紧的那条**的日期与天数（其余批次都比它晚，说不说都不影响
-// 「什么时候开始丢额度」），另挂 `merged` 条数、`merged_last_ts` 最晚到期
-// 日与余量合计，由渲染层写成「×N · 合计剩 M」+ 行尾「N 项 · 至 mm-dd」。
-//
-// 空壳包要等合并完再判：单个包余量可以是 0，但**同组合计还有剩**就照样提醒
-// （DuMate 现在就是这种形状——30 个包全空、只有主池还剩 500，单看每一条都会
-// 被当成噪音剔掉）。只有整组合计 ≤ 0、或一条余量都拿不到时才让后端原样透传。
-function _expiryGroupKey(e) {
-  const base = String(e.label || '').replace(/\s*#\d+\s*$/, '');
-  return [e.provider, base, e.unit == null ? '' : e.unit].join('\u0000');
-}
-function _expiryAmountOf(e) {
-  // 只有积分类才拿余量说话，其余量纲（天/次/千分制/dollar）不参与——它们
-  // 铺出来只会让人困惑，判「空不空」同样不该按它们判。`points` 与 `credit`
-  // 都是积分（DuMate 发的是 points），漏掉就判不出那批包是不是空的。
-  if ((e.unit !== 'credit' && e.unit !== 'points') || e.remaining == null) return null;
-  const n = Number(e.remaining);
-  return Number.isFinite(n) ? n : null;
-}
-function mergeExpiring(list) {
-  const groups = new Map();
-  for (const e of list || []) {
-    if (!e || typeof e !== 'object') continue;
-    const key = _expiryGroupKey(e);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(e);
-  }
-  const out = [];
-  for (const items of groups.values()) {
-    const amounts = items.map(_expiryAmountOf).filter(v => v != null);
-    const total = amounts.length ? amounts.reduce((a, b) => a + b, 0) : null;
-    // 积分类整组都空了才不提醒；拿不到余量的（total == null）保持宽松放行
-    if (total != null && total <= 0) continue;
-    const head = items[0];                     // 后端升序，第一条即最紧
-    out.push(Object.assign({}, head, {
-      merged: items.length,
-      merged_remaining: total,
-      merged_last_ts: items[items.length - 1].expire_ts,
-    }));
-  }
-  // 分组按首次出现排，按到期时刻重排，保证 summary 的「最近一项」仍是最紧的
-  out.sort((a, b) => (Number(a.expire_ts) || 0) - (Number(b.expire_ts) || 0));
-  return out;
-}
+// 展开状态存在 EXPIRY_FOLD 而不是 DOM 上：整页每 30 秒重建一次 innerHTML，
+// 挂 DOM 里会被下一轮刷掉（用户刚点开、30 秒后自己收回去）。
+const EXPIRY_FOLD = { open: {} };
+
 function fmtExpireDate(ts) {
   const d = new Date(ts * 1000), now = new Date();
   const mmdd = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -131,12 +92,186 @@ function fmtDaysLeft(days) {
   if (days < 1) return '今天到期';
   return `剩 ${Math.round(days)} 天`;
 }
+// 余量只对积分类有意义（天数/次数/千分制/dollar 的 remaining 是各自的
+// 量纲，铺出来只会让人困惑）。points 与 credit 都是积分（DuMate 发的是
+// points），漏掉就会把「还剩多少」藏起来。
+function _expiryAmountOf(e) {
+  if ((e.unit !== 'credit' && e.unit !== 'points') || e.remaining == null) return null;
+  const n = Number(e.remaining);
+  return Number.isFinite(n) ? n : null;
+}
+// 后端拆出的包名（已剥掉「通道 #N ·」前缀）；老响应没有 item_label 时
+// 退回原 label，保证前端先于后端更新也能渲染。
+function _expiryItemName(e) {
+  return e.item_label != null && e.item_label !== '' ? e.item_label : e.label;
+}
+// 余额告急的单行文案：credit 通道铺绝对值（那是它的告警依据），其余量纲
+// 铺占比。label 由后端剥过通道名前缀，形如「#1 · 总额度」，多账号下能看出
+// 告的是哪个号。
+function _expiryLowText(p) {
+  const isCredit = p.unit === 'credit';
+  const amt = isCredit
+    ? `剩 ${fmtNum(p.remaining)} credits`
+    : (p.percent_left != null ? `剩 ${fmtNum(p.percent_left)}%` : '余额不足');
+  return `余额告急${p.label ? ' · ' + p.label : ''} · ${amt}`;
+}
+// 账号排序：#1、#2 …；没有账号前缀的（单账号通道）排在最后，但仍算一组。
+function _acctNum(a) {
+  const m = String(a || '').match(/#(\d+)/);
+  return m ? Number(m[1]) : 9999;
+}
+// 把 expiring + low_quota 合成「每通道一组」。同一通道的两种告警合并成
+// 一行，正是用户要的「同一个通道只写一条」；后端 low_quota 目前本就是
+// 一通道一条，这里再兜一道重复（降级/旧响应）也不会多铺行。
+function buildAlertGroups(expiring, lowQuota) {
+  const groups = new Map();
+  const get = (pid, name) => {
+    const key = String(pid == null ? '' : pid);
+    let g = groups.get(key);
+    if (!g) {
+      g = {provider: key, provider_name: name || key, lows: [], items: []};
+      groups.set(key, g);
+    } else if (!g.provider_name && name) {
+      g.provider_name = name;
+    }
+    return g;
+  };
+  for (const e of (expiring || [])) {
+    if (!e || typeof e !== 'object') continue;
+    get(e.provider, e.provider_name).items.push(e);
+  }
+  for (const p of (lowQuota || [])) {
+    if (!p || typeof p !== 'object') continue;
+    get(p.provider, p.provider_name).lows.push(p);
+  }
+  const out = [...groups.values()];
+  for (const g of out) {
+    const byAcct = new Map();
+    for (const e of g.items) {
+      const acct = String(e.account || '');
+      if (!byAcct.has(acct)) byAcct.set(acct, []);
+      byAcct.get(acct).push(e);
+    }
+    // 每个账号内按到期先后（后端已升序，这里再稳一次，旧响应也不乱）
+    for (const items of byAcct.values()) {
+      items.sort((a, b) => (Number(a.expire_ts) || 0) - (Number(b.expire_ts) || 0));
+    }
+    g.accounts = [...byAcct.entries()].sort((a, b) => _acctNum(a[0]) - _acctNum(b[0]));
+    g.earliest = g.items.reduce((a, e) => {
+      if (!a) return e;
+      return (Number(e.expire_ts) || 0) < (Number(a.expire_ts) || 0) ? e : a;
+    }, null);
+    g.hasOver = g.items.some(e => Number(e.days_left) < 0);
+    g.urgentCount = g.items.filter(e => e.urgent).length;
+    // 同一通道若有多条余额告急（理论上不会），取最紧的一条渲染 summary；
+    // 明细里仍全部列出，不丢信息。
+    g.low = g.lows.reduce((a, p) => {
+      if (!a) return p;
+      const av = Number(a.percent_left), pv = Number(p.percent_left);
+      if (!Number.isFinite(av)) return Number.isFinite(pv) ? p : a;
+      if (!Number.isFinite(pv)) return a;
+      return pv < av ? p : a;
+    }, null);
+  }
+  // 余额告急最急（现在就没得用），其次已过期，再按最近到期排
+  out.sort((a, b) => {
+    if (a.lows.length !== b.lows.length) return b.lows.length - a.lows.length;
+    if (a.hasOver !== b.hasOver) return a.hasOver ? -1 : 1;
+    const at = a.earliest ? Number(a.earliest.expire_ts) || 0 : Infinity;
+    const bt = b.earliest ? Number(b.earliest.expire_ts) || 0 : Infinity;
+    if (at !== bt) return at < bt ? -1 : 1;
+    return String(a.provider).localeCompare(String(b.provider));
+  });
+  return out;
+}
+// 第 2 级：通道展开后的明细。先铺余额告急（如果有），再逐账号铺资源包。
+function renderAlertGroupBody(g, urgentDays) {
+  let html = '';
+  for (const p of g.lows) {
+    const isCredit = p.unit === 'credit';
+    const amt = isCredit
+      ? `剩 ${fmtNum(p.remaining)} credits`
+      : (p.percent_left != null ? `剩 ${fmtNum(p.percent_left)}%` : '余额不足');
+    html += `<div class="eb-subrow eb-lowrow">` +
+      `<span class="eb-acct">余额</span>` +
+      `<span class="eb-label">${esc(p.label || '余额告急')} · ${esc(amt)}</span>` +
+      `<span class="eb-date">—</span>` +
+      `<span class="eb-days over">${p.percent_left != null ? esc(fmtNum(p.percent_left)) + '%' : '告急'}</span>` +
+      `</div>`;
+  }
+  for (const [acct, items] of g.accounts) {
+    for (const e of items) {
+      const over = Number(e.days_left) < 0;
+      const amt = _expiryAmountOf(e) != null && e.remaining != null
+        ? `<span class="eb-hint">· 剩 ${fmtNum(e.remaining)}</span>` : '';
+      const urgent = e.urgent
+        ? `<span class="eb-urgent">${esc(String(urgentDays))} 天内</span>` : '';
+      html += `<div class="eb-subrow">` +
+        `<span class="eb-acct">${esc(acct || '')}</span>` +
+        `<span class="eb-label">${esc(_expiryItemName(e))}${amt}</span>` +
+        `<span class="eb-date">${esc(fmtExpireDate(e.expire_ts))}</span>` +
+        `<span class="eb-days${over ? ' over' : ''}">${esc(fmtDaysLeft(e.days_left))}${urgent}</span>` +
+        `</div>`;
+    }
+  }
+  return html || '<div class="eb-subrow"><span class="eb-label eb-hint">无明细</span></div>';
+}
+// 第 1 级：一个通道一行 <details>。summary 里把「余额告急」「N 项临期」
+// 压成徽标，右侧给最近到期日与剩余天数；展开才显示第 2 级明细。
+function renderAlertGroup(g, urgentDays) {
+  const open = !!EXPIRY_FOLD.open[g.provider];
+  const badges = [];
+  if (g.low) {
+    badges.push(`<span class="eb-badge low">${esc(_expiryLowText(g.low))}</span>`);
+  }
+  if (g.items.length) {
+    const n = g.items.length;
+    const u = g.urgentCount;
+    badges.push(`<span class="eb-badge${u ? ' urgent' : ''}">` +
+      `${esc(String(n))} 项临期${u ? `（${esc(String(u))} 项 ${esc(String(urgentDays))} 天内）` : ''}</span>`);
+  }
+  const first = g.earliest;
+  const dateHtml = first
+    ? `<span class="eb-date">${esc(fmtExpireDate(first.expire_ts))}</span>`
+    : `<span class="eb-date">—</span>`;
+  let daysHtml;
+  if (first) {
+    daysHtml = `<span class="eb-days${Number(first.days_left) < 0 ? ' over' : ''}">${esc(fmtDaysLeft(first.days_left))}</span>`;
+  } else {
+    const p = g.low;
+    daysHtml = `<span class="eb-days over">${p && p.percent_left != null ? esc(fmtNum(p.percent_left)) + '%' : '告急'}</span>`;
+  }
+  return `<details class="eb-group" data-eb-group="${esc(g.provider)}"${open ? ' open' : ''}>` +
+    `<summary>` +
+    `<span class="eb-prov">${esc(g.provider_name)}</span>` +
+    `<span class="eb-label">${badges.join(' ')}</span>` +
+    `${dateHtml}${daysHtml}</summary>` +
+    `<div class="eb-sub">${renderAlertGroupBody(g, urgentDays)}</div>` +
+    `</details>`;
+}
+// 嵌套 <details> 的展开状态回写。外层 #expirybar 是常驻元素，监听器只挂
+// 一次；内层每次重建，靠冒泡/toggle 捕获统一收。
+function bindExpiryFold(el) {
+  if (!el || el.__ebBound || !el.addEventListener) return;
+  el.__ebBound = true;
+  el.addEventListener('toggle', ev => {
+    const d = ev.target;
+    if (!d || !d.dataset || !d.dataset.ebGroup) return;
+    EXPIRY_FOLD.open[d.dataset.ebGroup] = !!d.open;
+  }, true);
+}
 function renderExpiryBanner() {
   const el = document.getElementById('expirybar');
   if (!el) return;
-  // 先合并（见 mergeExpiring：同类同天到期的包并成一条），后面所有计数、
-  // 「最近一项」、去重判断都基于合并后的结果
-  const list = mergeExpiring(BENEFITS && BENEFITS.expiring);
+  // 空壳包（余量为 0）不再铺出来：到期也带不走任何额度，只会把真告警淹了
+  // （用户 2026-11-03 报障：DuMate 每天一个 login_bonus 小包，全是 0）。
+  // 但 **4 天内到期的照报**——后端 4 天内已经跳过「余量 > 300」门槛，正是要
+  // 报出这批；这里再按余量滤一次等于把功能滤没了。points 没有后端的量门槛
+  // （只有 credit 有），DuMate 的小包全靠这里收。
+  const list = ((BENEFITS && BENEFITS.expiring) || []).filter(e => {
+    const amt = _expiryAmountOf(e);
+    return amt == null || amt > 0 || !!(e && e.urgent);
+  });
   const low = (BENEFITS && BENEFITS.low_quota) || [];
   if (!list.length && !low.length) {
     el.className = 'expirybar';
@@ -144,67 +279,36 @@ function renderExpiryBanner() {
     el.open = false;
     return;
   }
-  const hasOver = list.some(e => e.days_left < 0);
+  bindExpiryFold(el);
+  const hasOver = list.some(e => Number(e.days_left) < 0);
   el.className = 'expirybar show' + (hasOver ? ' expired' : '');
-  // 窗口天数以后端下发为准；老响应缺字段时退回 7（与后端默认一致）
+  // 窗口天数以后端下发为准；老响应缺字段时退回 7（与后端默认一致）。
   const warnDays = Number(BENEFITS && BENEFITS.expiry_warn_days) || 7;
-  // 两种告警各说各的段，都命中就用「 · 」接上。
-  //
-  // 但同一通道两边都命中时只说一遍（用户 2026-11-03 报障：DuMate 同时出现
-  // 6 行「积分包（login_bonus）到期」+ 1 行「余额告急 · 订阅积分」，全在讲同一
-  // 份额度）。**余额告急优先**：那是「现在就没得用了」，比「过几天到期」更急，
-  // 且它自带剩余占比，信息更全。所以先算 stillLow，再把同通道的到期行压掉。
-  const lowProviders = new Set(low.map(p => p && p.provider).filter(Boolean));
-  const showExpiring = list.filter(e => !lowProviders.has(e.provider));
-  const expHead = showExpiring.length
-    ? (hasOver ? `有 ${showExpiring.length} 项权益已过期或即将到期`
-               : `有 ${showExpiring.length} 项权益将在 ${warnDays} 天内到期`)
+  // 「4 天内」紧急窗口同理，前端不自己存常量。
+  const urgentDays = Number(BENEFITS && BENEFITS.expiry_urgent_days) || 4;
+  const groups = buildAlertGroups(list, low);
+  // 两种告警的汇总各说各的段，都命中就用「 · 」接上。计数按条目/通道：
+  // 通道数只算一遍（同一通道两边都命中不重复数）。
+  const expHead = list.length
+    ? (hasOver ? `有 ${list.length} 项权益已过期或即将到期`
+               : `有 ${list.length} 项权益将在 ${warnDays} 天内到期`)
     : '';
-  const lowHead = low.length ? `${low.length} 个通道余额告急` : '';
+  const lowChannels = new Set(low.map(p => p && p.provider).filter(Boolean)).size;
+  const lowHead = lowChannels ? `${lowChannels} 个通道余额告急` : '';
   const head = [expHead, lowHead].filter(Boolean).join(' · ');
-  const expRows = showExpiring.map(e => {
-    const over = e.days_left < 0;
-    // 余量只对积分类有意义（天数/次数/千分制的 remaining 是各自的量纲，
-    // 铺出来只会让人困惑），故只给 credit/points 带余量
-    const n = Number(e.merged) || 1;
-    const rem = e.merged_remaining;
-    const amt = _expiryAmountOf(e) != null && rem != null
-      ? `<span class="eb-hint">· ${n > 1 ? `×${n} · 合计剩 ` : '剩 '}${fmtNum(rem)}</span>` : '';
-    // 名字里的编号是同类包的序号，合并后已经没有意义（而且还占地方）
-    const label = n > 1 ? String(e.label || '').replace(/\s*#\d+\s*$/, '') : e.label;
-    // 合并行只写第一条的日期，后面批次散在整个预警窗口里——把末日补在行尾，
-    // 免得用户以为「这批 11-04 就全没了」
-    const span = n > 1 && e.merged_last_ts && e.merged_last_ts !== e.expire_ts
-      ? `<span class="eb-hint"> · ${n} 项至 ${esc(fmtExpireDate(e.merged_last_ts))}</span>` : '';
-    return `<span class="eb-prov">${esc(e.provider_name || e.provider)}</span>` +
-      `<span class="eb-label">${esc(label)}${amt}</span>` +
-      `<span class="eb-date">${esc(fmtExpireDate(e.expire_ts))}</span>` +
-      `<span class="eb-days${over ? ' over' : ''}">${esc(fmtDaysLeft(e.days_left))}${span}</span>`;
-  });
-  // 余额告急没有日期可填（eb-date 用 — 占位）；判定与面板标题行同口径，
-  // 后端算好剩余与占比，这里照搬，不自己重算。credit 通道铺绝对值
-  // （「剩 263 credits」——绝对值才是它们的告警依据），其余量纲铺占比。
-  const lowRows = low.map(p => {
-    const isCredit = p.unit === 'credit';
-    const amt = isCredit
-      ? `剩 ${fmtNum(p.remaining)} credits`
-      : (p.percent_left != null ? `剩 ${fmtNum(p.percent_left)}%` : '余额不足');
-    // label 一律拼上（后端已剥掉通道名前缀，形如「#1 · 总额度」）：多账号下
-    // 只有「Trae · 余额告急」看不出告的是哪个号（用户 2026-10-06 反馈）
-    const lbl = p.label ? ` · ${esc(p.label)}` : '';
-    return `<span class="eb-prov">${esc(p.provider_name || p.provider)}</span>` +
-      `<span class="eb-label">余额告急${lbl} · ${amt}</span>` +
-      `<span class="eb-date">—</span>` +
-      `<span class="eb-days over">${p.percent_left != null ? esc(fmtNum(p.percent_left)) + '%' : '告急'}</span>`;
-  });
-  const soonest = showExpiring[0];  // 升序后第一条即最紧的；被余额告急顶掉的通道不再算
+  // 不依赖「后端已排序」这个隐含前提：旧响应/测试桩乱序时，最近一项
+  // 仍要取真正最早的那条，否则 summary 会指错日子。
+  const soonest = list.reduce((a, e) => {
+    if (!a) return e;
+    return (Number(e.expire_ts) || 0) < (Number(a.expire_ts) || 0) ? e : a;
+  }, null);
   const soonHint = soonest
     ? `<span class="eb-hint"> · 最近一项 ${esc(fmtExpireDate(soonest.expire_ts))}（${esc(fmtDaysLeft(soonest.days_left))}）</span>`
     : '';
   el.innerHTML =
     `<summary><span class="eb-count"><b>⏳ ${esc(head)}</b>${soonHint}</span>` +
-    `<span class="eb-hint">展开明细 ▾</span></summary>` +
-    `<div class="eb-list">${expRows.concat(lowRows).join('')}</div>`;
+    `<span class="eb-hint">展开通道 ▾</span></summary>` +
+    `<div class="eb-list">${groups.map(g => renderAlertGroup(g, urgentDays)).join('')}</div>`;
 }
 
 // ---- 打卡日历 + 自动打卡 + 各通道额度 ----
@@ -409,8 +513,7 @@ function renderBenefits(opts) {
     const q = p.quota;
     const items = quotaItemsHtml(q.items || [], p.id);
     const headSum = quotaHeadSum(q);
-    // 一条明细都没有的通道（未登录 / 查询失败）：收起明细，标题行留徽标与开关。
-    const fold = quotaProviderFold(items ? q.items || [] : 'empty', p.id);  // 无明细也收起
+    const fold = quotaProviderFold(q.items || [], p.id);
     return `<div class="chart-card" style="margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="font-weight:600">${esc(p.name)}</span>

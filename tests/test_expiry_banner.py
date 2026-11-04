@@ -20,6 +20,7 @@ from unittest import mock
 import pytest
 
 from buddy_proxy.benefits import (
+    EXPIRY_URGENT_DAYS,
     EXPIRY_WARN_DAYS,
     EXPIRY_WARN_MIN_CREDITS,
     QUOTA_LOW_MIN_CREDITS,
@@ -87,6 +88,9 @@ def test_expiring_includes_already_expired():
     out = _expiring([_entry("trae", [_item("签到奖励", expire_days=-2)])], now=NOW)
     assert len(out) == 1
     assert out[0]["days_left"] == -2.0
+    # 过期项已经有「已过期 N 天」文案，不再挂「4 天内」：urgent 只给
+    # 还没过期、但进入 4 天窗口的条目。
+    assert out[0]["urgent"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -94,24 +98,31 @@ def test_expiring_includes_already_expired():
 # ---------------------------------------------------------------------------
 
 def test_expiring_skips_small_credit_remainders():
-    """积分类剩余 ≤300 不提醒：每天签到送的 200 分小包会刷屏。"""
+    """积分类剩余 ≤300 不提醒：每天签到送的 200 分小包会刷屏。
+
+    用 5 天（4 天紧急窗口之外）来测这条——4 天内的小包另有专门规则，
+    见 ``test_expiring_urgent_bypasses_credit_amount_filter``。
+    """
     out = _expiring([
         _entry("trae", [
-            _item("签到奖励", expire_days=2, remaining=200, unit="credit"),
-            _item("会员 Pro 包", expire_days=2, remaining=4000, unit="credit"),
+            _item("签到奖励", expire_days=5, remaining=200, unit="credit"),
+            _item("会员 Pro 包", expire_days=5, remaining=4000, unit="credit"),
         ]),
     ], now=NOW)
     assert [e["label"] for e in out] == ["会员 Pro 包"]
 
 
 def test_expiring_credit_threshold_is_exclusive():
-    """恰好 300 不报（要求是「大于 300」）。边界值单拎出来盯住。"""
+    """恰好 300 不报（要求是「大于 300」）。边界值单拎出来盯住。
+
+    用 5 天（4 天紧急窗口之外）；4 天内是另一条规则，不受 300 门槛约束。
+    """
     assert _expiring([
-        _entry("trae", [_item("刚好 300", expire_days=2,
+        _entry("trae", [_item("刚好 300", expire_days=5,
                               remaining=EXPIRY_WARN_MIN_CREDITS, unit="credit")]),
     ], now=NOW) == []
     assert len(_expiring([
-        _entry("trae", [_item("300 出头", expire_days=2,
+        _entry("trae", [_item("300 出头", expire_days=5,
                               remaining=EXPIRY_WARN_MIN_CREDITS + 0.01, unit="credit")]),
     ], now=NOW)) == 1
 
@@ -147,6 +158,55 @@ def test_expiring_credit_without_remaining_is_skipped():
                               remaining=None, unit="credit")]),
     ], now=NOW)
     assert out == []
+
+
+def test_expiring_urgent_bypasses_credit_amount_filter():
+    """4 天内到期的小额资源包也要报（用户 2026-11-04 要求）。
+
+    300 门槛是给「还早着呢」的小包降噪的；4 天内作废时，值不值得提醒
+    不该再由余量决定——过期就彻底没了。恰好超过 4 天的同额条目仍被门槛
+    挡掉，两条规则的分界线要钉死。
+    """
+    out = _expiring([
+        _entry("trae", [
+            _item("4 天内小包", expire_days=EXPIRY_URGENT_DAYS - 0.1,
+                  remaining=50, unit="credit"),
+            _item("刚好超过 4 天", expire_days=EXPIRY_URGENT_DAYS + 0.1,
+                  remaining=50, unit="credit"),
+            _item("4 天内空包", expire_days=1, remaining=0, unit="credit"),
+        ]),
+    ], now=NOW)
+    assert [e["label"] for e in out] == ["4 天内空包", "4 天内小包"]
+    assert all(e["urgent"] for e in out)
+
+
+def test_expiring_splits_account_and_item_label_for_two_level_list():
+    """多账号 label 拆成 ``account`` + ``item_label``，供前端两级展开。
+
+    ``label`` 保留原文（兼容旧调用方），前端优先用 ``item_label``
+    和 ``account``；没有账号前缀的通道 account 为空串。
+    """
+    out = _expiring([
+        _entry("codebuddy", [
+            _item("CodeBuddy #2 · 资源包", expire_days=1, remaining=0,
+                  unit="credit"),
+            _item("CodeBuddy #2 · 资源包 #2", expire_days=2, remaining=500,
+                  unit="credit"),
+        ]),
+        _entry("dumate", [
+            _item("积分包（login_bonus）", expire_days=1, remaining=0,
+                  unit="points"),
+        ]),
+    ], now=NOW)
+    cb = [e for e in out if e["provider"] == "codebuddy"]
+    assert cb[0]["account"] == "#2"
+    assert cb[0]["item_label"] == "资源包"
+    assert cb[0]["label"] == "CodeBuddy #2 · 资源包", "label 保留原文"
+    # 名称末尾自带的「#2」不是账号前缀，不能被剥掉
+    assert cb[1]["item_label"] == "资源包 #2"
+    dm = next(e for e in out if e["provider"] == "dumate")
+    assert dm["account"] == ""
+    assert dm["item_label"] == "积分包（login_bonus）"
 
 
 # ---------------------------------------------------------------------------
@@ -218,12 +278,15 @@ def test_expiring_rejects_bool_remaining():
 
 
 def test_expiring_accepts_numeric_string_remaining():
-    """数字字符串的余量照收——上游偶发把数额发成字符串。"""
+    """数字字符串的余量照收——上游偶发把数额发成字符串。
+
+    用 5 天避开 4 天紧急窗口，否则 "200" 也会被紧急规则收进来。
+    """
     assert len(_expiring([
-        _entry("x", [_item("够多", expire_days=1, remaining="500", unit="credit")]),
+        _entry("x", [_item("够多", expire_days=5, remaining="500", unit="credit")]),
     ], now=NOW)) == 1
     assert _expiring([
-        _entry("x", [_item("太少", expire_days=1, remaining="200", unit="credit")]),
+        _entry("x", [_item("太少", expire_days=5, remaining="200", unit="credit")]),
     ], now=NOW) == []
 
 

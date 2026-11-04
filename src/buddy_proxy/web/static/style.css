@@ -115,12 +115,34 @@
   .expirybar .eb-count { flex: 1; min-width: 0; }
   .expirybar .eb-count b { color: #fff; }
   .expirybar .eb-hint { color: inherit; opacity: .65; font-size: 12px; }
-  /* 明细表：通道 / 名称 / 到期日 / 剩余天数。
-     grid 而非 table：列宽按内容自适应，窄屏不撑破卡片。 */
-  .expirybar .eb-list { display: grid; grid-template-columns: auto 1fr auto auto;
-                        gap: 2px 12px; margin-top: 8px; padding-top: 8px;
+  /* 明细：两级列表。第 1 级是通道行（<details class="eb-group">），
+     默认收起；展开后第 2 级才铺「账号 / 资源包 / 到期日 / 剩余天数」。 */
+  .expirybar .eb-list { margin-top: 8px; padding-top: 8px;
                         border-top: 1px solid rgba(255,255,255,.12);
                         font-size: 12.5px; }
+  .expirybar .eb-group { margin: 2px 0; }
+  .expirybar .eb-group > summary { cursor: pointer; list-style: none;
+                                   display: grid;
+                                   grid-template-columns: auto auto 1fr auto auto;
+                                   gap: 2px 12px; align-items: baseline; }
+  .expirybar .eb-group > summary::-webkit-details-marker { display: none; }
+  .expirybar .eb-group > summary::before { content: '▸'; flex: none; color: inherit;
+                                           opacity: .7; transition: transform .15s; }
+  .expirybar .eb-group[open] > summary::before { transform: rotate(90deg); }
+  .expirybar .eb-sub { margin: 2px 0 6px 16px; padding-left: 10px;
+                       border-left: 2px solid rgba(255,255,255,.14); }
+  .expirybar .eb-subrow { display: grid; grid-template-columns: auto 1fr auto auto;
+                          gap: 2px 12px; padding: 1px 0; align-items: baseline; }
+  .expirybar .eb-badge { display: inline-block; padding: 0 6px; border-radius: 6px;
+                         background: rgba(255,255,255,.08); margin-right: 4px;
+                         font-size: 11.5px; white-space: nowrap; }
+  .expirybar .eb-badge.low { background: rgba(255,107,107,.18); color: #ffd0d0; }
+  .expirybar .eb-badge.urgent { background: rgba(255,107,107,.22); color: #ffd0d0; }
+  .expirybar .eb-acct { color: inherit; opacity: .7;
+                        font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .expirybar .eb-urgent { margin-left: 6px; padding: 0 5px; border-radius: 5px;
+                          background: rgba(255,107,107,.2); color: #ffd0d0;
+                          font-size: 11px; font-weight: 600; }
   .expirybar .eb-prov { color: inherit; opacity: .8; }
   .expirybar .eb-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .expirybar .eb-date { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

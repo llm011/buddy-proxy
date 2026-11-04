@@ -46,6 +46,12 @@ EXPIRY_WARN_MIN_CREDITS = 300
 # :func:`_quota_low`。
 QUOTA_LOW_MIN_CREDITS = 300
 QUOTA_LOW_MIN_PERCENT = 8
+# 资源包「紧急到期」窗口：进入这个窗口的条目不再受「积分类余量 > 300」的
+# 过滤（2026-11-04 用户要求「某个通道里的某个账号中的某个资源包，离到期
+# 剩下 4 天也要告警」）。签到送的 200 分小包平时被 300 门槛挡掉是对的，
+# 但还剩 4 天就作废时，它值不值得提醒已经不该再由余量决定——过期就彻底
+# 没了。外层的 7 天窗口仍由 :data:`EXPIRY_WARN_DAYS` 控制。
+EXPIRY_URGENT_DAYS = 4
 
 
 def _state_flipped(data: Any, now: float) -> bool:
@@ -100,6 +106,28 @@ def _as_num(v: Any) -> float | None:
     return None
 
 
+#: 多账号通道把账号编进 label 前缀：``CodeBuddy #2 · 资源包`` /
+#: ``Trae #1 · 会员 Pro 连续包月``。横幅要按「通道 → 账号 → 资源包」两级
+#: 展开，所以把这一段拆成结构化字段，别让前端各写一套正则。
+_ACCOUNT_LABEL_RE = re.compile(r"^(?P<prefix>.*?)\s*(?P<account>#\d+)\s*·\s*(?P<label>.+)$")
+
+
+def _split_account_label(label: Any) -> tuple[str, str]:
+    """``label`` → ``(account, item_label)``；没有账号前缀时 account 为空串。
+
+    只认行首的 ``#N ·``（账号前缀），不碰名称中间的 ``#``。返回的
+    ``item_label`` 已去掉通道名与账号前缀（``CodeBuddy #2 · 资源包`` →
+    ``资源包``），方便前端在「账号 #2」旁边只显示包名。
+    """
+    text = str(label or "").strip()
+    if not text:
+        return "", str(label or "")
+    m = _ACCOUNT_LABEL_RE.match(text)
+    if not m:
+        return "", str(label or "")
+    return m.group("account"), m.group("label").strip()
+
+
 def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) -> list[dict[str, Any]]:
     """挑出「快到期」的权益条目，供管理页顶部横幅展示（2026-10-03）。
 
@@ -119,8 +147,19 @@ def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) 
        无法与 300 比较，只看天数——它们的 ``remaining`` 是「还剩几天」这类量，
        本来就该按天预警。
 
+    **4 天内例外**（2026-11-04 用户要求）：``days_left <= EXPIRY_URGENT_DAYS``
+    的条目跳过第 2 条量过滤，哪怕只剩 0 积分也报。用户明确说「某个通道里的
+    某个账号中的某个资源包，离到期剩下 4 天也要告警出来」——这时它值不值得
+    提醒已经不该由余量决定：4 天后这份额度就彻底作废了。``urgent`` 字段随
+    条目下发，前端据此打「4 天内」标签。拿不到 ``remaining`` 的条目仍然跳过
+    （无法判断是不是空壳，保持原口径）。
+
     ``unit`` 缺失或为 ``None`` 时**不做量过滤**（宽松放行）：宁可多提醒一个，
     也别因为新通道忘了填 ``unit`` 而漏掉真到期。这是有意的取舍。
+
+    每条还带 ``account`` / ``item_label``：多账号通道的 label 形如
+    ``CodeBuddy #2 · 资源包``，拆开后前端才能把「通道 → 账号 → 资源包」
+    两级列表渲染出来（``label`` 保留原文，兼容已有调用方）。
 
     纯函数（``now`` 可注入），便于测试；不触网、不改状态。
     """
@@ -141,20 +180,32 @@ def _expiring(provider_entries: list[dict[str, Any]], now: float | None = None) 
             days_left = (expire_ts - now) / 86400.0
             if days_left >= EXPIRY_WARN_DAYS:
                 continue
+            # 已过期的也算「4 天内」（跳过 300 门槛），但它已经有「已过期」
+            # 文案，不再挂「4 天内」标签，免得多余且读着别扭。
+            within_urgent = days_left <= EXPIRY_URGENT_DAYS
+            urgent = 0 <= days_left <= EXPIRY_URGENT_DAYS
             if it.get("unit") == "credit":
                 remaining = _as_num(it.get("remaining"))
                 if remaining is None:
                     continue  # 拿不到余量就不报：无法判断值不值得提醒
-                if remaining <= EXPIRY_WARN_MIN_CREDITS:
+                if not within_urgent and remaining <= EXPIRY_WARN_MIN_CREDITS:
                     continue
+            raw_label = it.get("label")
+            account, item_label = _split_account_label(raw_label)
             out.append({
                 "provider": entry.get("id"),
                 "provider_name": entry.get("name") or entry.get("id"),
-                "label": it.get("label"),
+                "label": raw_label,
+                # 「通道 → 账号 → 资源包」两级展开用的结构化字段；没有账号
+                # 前缀的通道 account 为空串，item_label 与 label 相同。
+                "account": account,
+                "item_label": item_label,
                 "expire_ts": int(expire_ts),
                 "days_left": round(days_left, 1),
                 "remaining": it.get("remaining"),
                 "unit": it.get("unit"),
+                # 4 天内：前端给红色/「4 天内」标签，与普通临期区分开
+                "urgent": urgent,
             })
     out.sort(key=lambda e: e["expire_ts"])
     return out
@@ -478,6 +529,9 @@ class BenefitsManager:
             # 自己存一份常量，改后端忘改前端就会出现「写着 7 天、实际 3 天」
             # 的文案（比不写更让人困惑）。下发之后只有一处定义。
             "expiry_warn_days": EXPIRY_WARN_DAYS,
+            # 「4 天内」的紧急窗口也由后端下发：前端标签文案要写「4 天内」，
+            # 前端自己存一份常量就会和后端阈值慢慢走偏（与 warn_days 同理）。
+            "expiry_urgent_days": EXPIRY_URGENT_DAYS,
             # 告警过滤掉停用通道：整通道都不用了，它的权益到期/余额告急再上
             # 横幅就是骚扰（数据仍带在 providers 条目上，前端隐藏展示）
             "expiring": _expiring([e for e in provider_entries if not e["disabled"]]),
