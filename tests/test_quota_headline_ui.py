@@ -192,9 +192,12 @@ function __snap() {
 }
 """
 
-#: renderExpiryBanner 现在会先过 mergeExpiring（同类条目合并），依赖链要一起抽
-_EXPIRY_FNS = ("fmtExpireDate", "fmtDaysLeft", "_expiryGroupKey",
-               "_expiryAmountOf", "mergeExpiring", "renderExpiryBanner")
+#: renderExpiryBanner 走两级分组渲染，依赖链要一起抽
+_EXPIRY_FNS = (
+    "fmtExpireDate", "fmtDaysLeft", "_expiryAmountOf", "_expiryItemName",
+    "_expiryLowText", "_acctNum", "buildAlertGroups", "renderAlertGroupBody",
+    "renderAlertGroup", "bindExpiryFold", "renderExpiryBanner",
+)
 
 
 def _extract_fn(text: str, name: str) -> str:
@@ -219,7 +222,7 @@ globalThis.fmtNum = n => {
 };
 """
     proc = subprocess.run(
-        ["node", "-e", stub + _DOM_STUB + src + "\n" + body],
+        ["node", "-e", "var EXPIRY_FOLD = {open: {}};\n" + stub + _DOM_STUB + src + "\n" + body],
         capture_output=True, text=True, timeout=30,
     )
     assert proc.returncode == 0, f"node 执行失败:\n{proc.stderr}"
@@ -310,12 +313,12 @@ def test_expiry_banner_non_credit_hides_amount():
     assert '19.5' not in out, f"非积分类不该显示余量: {out}"
 
 
-def test_expiry_banner_merges_same_kind_batches():
-    """同类包按通道合并成一行（用户 2026-11-03 报障）。
+def test_expiry_banner_folds_same_channel_batches_into_one_row():
+    """同一通道的多个包只占 1 个外层行，展开才是逐包一行（用户 2026-11-04）。
 
-    DuMate 每天发一个 login_bonus 小包、到期日各差一天，原样铺就是 30 多行
-    「百度搭子 · 积分包（login_bonus）」，把 Trae 那条真告警淹了。合并后应只剩
-    一行：最紧的日期 + 「×N · 合计剩 M」+ 行尾「N 项至 mm-dd」。
+    2026-11-03 那版把同类包合并成一条「×N · 合计剩 M」——通道只占一行做到了，
+    但账号归属和每个包的到期日都没了。现在改成两级折叠：外层一行，点开逐包铺。
+    用例仍是 DuMate 每天一个 login_bonus 小包那个形状。
     """
     items = ",".join(
         f"{{provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',"
@@ -324,11 +327,11 @@ def test_expiry_banner_merges_same_kind_batches():
         for i in range(6)
     )
     out = _render_banner("{expiring: [" + items + "]}")
-    assert '有 6 项权益将在 7 天内到期' not in out, f"该合并成 1 项: {out}"
-    assert '有 1 项权益将在 7 天内到期' in out, out
-    assert out.count('百度搭子') == 1, f"同类包只该出一行: {out}"
-    assert '×6 · 合计剩 3,000' in out, f"要带上条数与余量合计: {out}"
-    assert '6 项至' in out, f"行尾要补最晚到期日: {out}"
+    assert '有 6 项权益将在 7 天内到期' in out, out
+    assert out.count('<details class="eb-group"') == 1, f"同通道只该占 1 个外层行: {out}"
+    assert '6 项临期' in out, out
+    assert out.count('积分包（login_bonus）') == 6, f"展开后仍是逐包一行: {out}"
+    assert 'data-eb-group="dumate" open' not in out, "默认应折叠"
 
 
 def test_expiry_banner_keeps_different_kinds_apart():
@@ -346,17 +349,18 @@ def test_expiry_banner_keeps_different_kinds_apart():
 
 
 def test_expiry_banner_drops_fully_spent_batches():
-    """整组余量都 ≤0 的积分条目不再上横幅：到期也带不走任何额度。
+    """余量已空、且不在 4 天内的积分条目不铺出来：到期也带不走任何额度。
 
     用例造的是真实形状（DuMate 2026-11-03）：一批包全空 + 一条还有剩。
-    空的那批要消失，有剩的那条必须留着。
+    空的那批要消失，有剩的那条必须留着。注意日期都放在 4 天窗口外——4 天内
+    的空包按新规则必须照报（见 test_banner_keeps_urgent_items_even_when_amount_is_zero）。
     """
     out = _render_banner("""{
       expiring: [
         {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
-         expire_ts: 1793200000, days_left: 2.0, remaining: 0, unit: 'points'},
+         expire_ts: 1793200000, days_left: 5.0, remaining: 0, unit: 'points'},
         {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
-         expire_ts: 1793286400, days_left: 3.0, remaining: 0, unit: 'points'},
+         expire_ts: 1793286400, days_left: 6.0, remaining: 0, unit: 'points'},
         {provider: 'trae', provider_name: 'Trae', label: '加油包',
          expire_ts: 1793300000, days_left: 4.0, remaining: 900, unit: 'credit'},
       ],
@@ -366,11 +370,11 @@ def test_expiry_banner_drops_fully_spent_batches():
     assert '加油包' in out, out
 
 
-def test_expiry_banner_prefers_low_quota_over_expiry_for_same_provider():
-    """同一通道既到期又告急时只说一遍，且留「余额告急」（现在更急、信息更全）。
+def test_expiry_banner_folds_low_and_expiry_into_one_row():
+    """同一通道既到期又告急时仍只占一行，展开后两种明细都在（用户 2026-11-04）。
 
-    用户 2026-11-03 的原报障：DuMate 6 行「积分包到期」+ 1 行「余额告急」，
-    全在讲同一份额度。压掉到期行后，汇总计数也要跟着降到 0 项。
+    旧版是「余额告急直接把到期行顶掉」，结果 4 天内到期的资源包被藏了——正是
+    这次要修的。现在改成折叠：外层一行挂两个徽标，明细里两种都在。
     """
     out = _render_banner("""{
       expiring: [{provider: 'dumate', provider_name: '百度搭子',
@@ -379,10 +383,11 @@ def test_expiry_banner_prefers_low_quota_over_expiry_for_same_provider():
       low_quota: [{provider: 'dumate', provider_name: '百度搭子',
                    label: '订阅积分', unit: 'points', remaining: 500, percent_left: 1.1}],
     }""")
-    assert '项权益' not in out, f"该通道的到期行已被余额告急覆盖: {out}"
+    assert out.count('data-eb-group="dumate"') == 1, out
+    assert '有 1 项权益将在 7 天内到期' in out, out
     assert '余额告急 · 订阅积分 · 剩 1.1%' in out, out
-    assert '积分包（login_bonus）' not in out, f"不该再铺到期行: {out}"
-    assert out.count('百度搭子') == 1, f"同一通道只该出现一次: {out}"
+    assert '1 项临期' in out, out
+    assert '积分包（login_bonus）' in out, "4 天内到期的资源包不能被余额告急顶掉"
 
 
 def test_expiry_banner_keeps_expiry_for_other_providers():
@@ -404,6 +409,127 @@ def test_expiry_banner_does_not_drop_batches_without_amounts():
                   expire_ts: 1793200000, days_left: 2.0, remaining: null, unit: 'credit'}],
     }""")
     assert '会员 Pro' in out, out
+
+
+def test_banner_keeps_urgent_items_even_when_amount_is_zero():
+    """4 天内到期但余量为 0 的包必须照报（用户 2026-11-04）。
+
+    空包过滤只看「还有没有额度」，4 天内的例外正是这次的新规则：额度 4 天后
+    就作废，值不值得提醒不该再由余量决定。旧版「空包一律剔掉」会把它藏了。
+    """
+    out = _render_banner("""{
+      expiry_warn_days: 7, expiry_urgent_days: 4,
+      expiring: [{provider: 'codebuddy', provider_name: 'CodeBuddy', account: '#2',
+                  item_label: '资源包', label: 'CodeBuddy #2 · 资源包',
+                  expire_ts: 1793932708, days_left: 1.8, remaining: 0,
+                  unit: 'credit', urgent: true}],
+    }""")
+    assert '资源包' in out, f"4 天内的空包不能被滤掉: {out}"
+    assert '4 天内' in out, out
+    assert '有 1 项权益将在 7 天内到期' in out, out
+
+
+def test_banner_derives_urgency_when_backend_is_older():
+    """老后端没 `urgent` 字段时按 days_left 自己判，别把 4 天内的空包静默吞掉。
+
+    静态资源先更新、服务还没重启（或浏览器缓存了旧接口快照）时就是这条路径
+    ——此时 `urgent` 和 `expiry_urgent_days` 都不在响应里。
+    """
+    out = _render_banner("""{
+      expiring: [
+        {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
+         expire_ts: 1793894399, days_left: 1.3, remaining: 0, unit: 'points'},
+        {provider: 'dumate', provider_name: '百度搭子', label: '积分包（login_bonus）',
+         expire_ts: 1794326399, days_left: 6.3, remaining: 0, unit: 'points'},
+      ],
+    }""")
+    assert out.count('积分包（login_bonus）') == 1, f"只该留 4 天内那条: {out}"
+    assert '1 项临期（1 项 4 天内）' in out, out
+
+
+def test_banner_groups_expiry_by_channel_into_collapsed_rows():
+    """两级列表：同一通道的多个资源包只占 1 个外层行，默认收起。
+
+    用户 2026-11-04：DuMate 每天一个小包，旧版平铺会刷一整列；现在同一
+    通道折叠成一行，点开才逐包铺「账号 / 包名 / 到期日 / 天数」。
+    """
+    out = _render_banner("""{
+      expiry_warn_days: 7, expiry_urgent_days: 4,
+      expiring: [
+        {provider: 'dumate', provider_name: '百度搭子', account: '',
+         item_label: '积分包（login_bonus）', label: '积分包（login_bonus）',
+         expire_ts: 1793807999, days_left: 0.3, remaining: 0, unit: 'points',
+         urgent: true},
+        {provider: 'dumate', provider_name: '百度搭子', account: '',
+         item_label: '积分包（login_bonus）', label: '积分包（login_bonus）',
+         expire_ts: 1793894399, days_left: 1.3, remaining: 0, unit: 'points',
+         urgent: true},
+        {provider: 'traeintl', provider_name: 'Trae 海外版', account: '',
+         item_label: 'Pro plan', label: 'Pro plan',
+         expire_ts: 1794158347, days_left: 4.4, remaining: 0, unit: 'dollar',
+         urgent: false},
+      ],
+    }""")
+    assert out.count('<details class="eb-group"') == 2, out
+    assert out.count('data-eb-group="dumate"') == 1, out
+    assert '百度搭子' in out and '2 项临期（2 项 4 天内）' in out, out
+    assert 'Trae 海外版' in out and '4.4' not in out, out
+    # 明细在 eb-sub 里，不在 summary 行；默认没有 open 属性
+    assert 'eb-sub' in out and '积分包（login_bonus）' in out, out
+    assert 'data-eb-group="dumate" open' not in out, "默认应折叠"
+
+
+def test_banner_same_channel_low_and_expiry_is_one_row():
+    """同一通道同时命中余额告急与临期时仍只占一行，展开后两种明细都在。
+
+    旧版「同通道与余额告急去重」会把 4 天内到期的资源包藏掉；现在改成
+    折叠而不是顶掉（用户 2026-11-04）。
+    """
+    out = _render_banner("""{
+      expiry_warn_days: 7, expiry_urgent_days: 4,
+      expiring: [{provider: 'dumate', provider_name: '百度搭子', account: '',
+                  item_label: '积分包（login_bonus）',
+                  label: '积分包（login_bonus）', expire_ts: 1794153599,
+                  days_left: 3.3, remaining: 0, unit: 'points', urgent: true}],
+      low_quota: [{provider: 'dumate', provider_name: '百度搭子',
+                   label: '订阅积分', unit: 'points', remaining: 999.5,
+                   percent_left: 2.1}],
+    }""")
+    assert out.count('data-eb-group="dumate"') == 1, out
+    assert '余额告急 · 订阅积分 · 剩 2.1%' in out, out
+    assert '1 项临期（1 项 4 天内）' in out, out
+    assert '积分包（login_bonus）' in out, "资源包明细不能被余额告急顶掉"
+
+
+def test_banner_dedupes_low_quota_rows_by_channel():
+    """同一个通道多条余额告急（防御旧响应/降级数据）也只渲染一行。"""
+    out = _render_banner("""{
+      low_quota: [
+        {provider: 'trae', provider_name: 'Trae', label: '#1 · 总额度',
+         unit: 'credit', remaining: 200, percent_left: 5.0},
+        {provider: 'trae', provider_name: 'Trae', label: '#2 · 总额度',
+         unit: 'credit', remaining: 100, percent_left: 2.0},
+      ],
+    }""")
+    assert out.count('data-eb-group="trae"') == 1, out
+    assert '1 个通道余额告急' in out, out
+    assert '#2 · 总额度' in out and '2%' in out, "summary 取最紧的一条"
+
+
+def test_banner_renders_account_before_resource_pack():
+    """多账号通道的明细行要能看出「哪个账号里的哪个包」。"""
+    out = _render_banner("""{
+      expiry_warn_days: 7, expiry_urgent_days: 4,
+      expiring: [{provider: 'codebuddy', provider_name: 'CodeBuddy',
+                  account: '#2', item_label: '资源包',
+                  label: 'CodeBuddy #2 · 资源包', expire_ts: 1793932708,
+                  days_left: 1.8, remaining: 0, unit: 'credit', urgent: true}],
+    }""")
+    assert 'CodeBuddy' in out, out
+    assert '资源包' in out, out
+    assert '#2' in out, out
+    assert '1.8' not in out, out
+    assert '4 天内' in out, "后端下发的紧急窗口标签要出现"
 
 
 def test_quota_item_renders_percent_only_window_with_bar():
