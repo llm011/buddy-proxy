@@ -71,15 +71,15 @@
       "desc": "小米 MiMo V2.6 Pro（CodeBuddy 上游实测 200；上游名即 mimo-v2.6-pro，加 xiaomi- 前缀会 11102）"
     },
     {
-      "id": "hy4-preview",
-      "name": "Hy4 preview",
+      "id": "hy4",
+      "name": "Hy4",
       "vendor": "tencent",
       "max_input": 168000,
       "max_output": 32000,
       "tool_call": true,
       "images": false,
-      "credits": "x0.29 credits",
-      "desc": "Hy4 preview"
+      "credits": "x0.00 credits",
+      "desc": "Hy4（原 hy4-preview；0 倍率）"
     },
     {
       "id": "glm-5.3",

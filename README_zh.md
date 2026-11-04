@@ -522,7 +522,7 @@ curl -s http://127.0.0.1:8787/v1/tools/fetch \
 | `glm-5.1` | GLM-5.1 | x0.79 |
 | `glm-5v-turbo` | GLM-5v-Turbo（读图） | x0.71 |
 | `hy3` | Hy3（限时免费） | x0.00 |
-| `hy4-preview` | Hy4 preview | x0.29 |
+| `hy4` | Hy4 | x0.00 |
 | `minimax-m3` | MiniMax-M3 | x0.25 |
 | `kimi-k3` | Kimi-K3 | x1.62 |
 | `kimi-k3.1-pro-highspeed` | Kimi-K3.1-Pro-Highspeed | x1.56 |

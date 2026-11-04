@@ -129,7 +129,7 @@ def test_models_shape_and_count(client):
 def test_models_has_required_ids(client):
     """用户要求的模型 id 必须都在静态配置里。"""
     required = {
-        "glm-5.3", "glm-5.3-flash", "hy3", "hy4-preview",
+        "glm-5.3", "glm-5.3-flash", "hy3", "hy4",
         "minimax-m3", "kimi-k3", "kimi-k2.7",
         "kimi-k3.1-pro",
         "deepseek-v4-flash", "deepseek-v4-pro",
@@ -148,7 +148,7 @@ def test_models_credits_and_name(client):
     checks = {
         ("glm-5.3", "zhipu"): ("x0.69 credits", "GLM-5.3"),
         ("glm-5.3-flash", "zhipu"): ("x0.08 credits", "GLM-5.3-Flash"),
-        ("hy4-preview", "tencent"): ("x0.29 credits", "Hy4 preview"),
+        ("hy4", "tencent"): ("x0.00 credits", "Hy4"),
         ("minimax-m3", "f"): ("x0.25 credits", "MiniMax-M3"),
         ("deepseek-v4-flash", "f"): ("x0.17 credits", "Deepseek-V4-Flash"),
         ("deepseek-v4-pro", "f"): ("x0.51 credits", "Deepseek-V4-Pro"),
