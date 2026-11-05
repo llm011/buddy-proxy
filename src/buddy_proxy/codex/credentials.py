@@ -232,6 +232,7 @@ def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
     入参必须是**完整**的当前账号 id 列表（少一个/多一个/重复即拒绝）；
     priority 重写为 0..n-1，added_at 原样保留。返回重排后的 list_accounts()。
     """
+    list_accounts()  # 先走唯一的枚举入口：迁移/自愈完再重排，别在残缺索引上动刀
     _STORE.reorder(ordered_ids)
     return list_accounts()
 
@@ -243,6 +244,7 @@ def rename_account(account_id: str, alias: str) -> list[AccountRef]:
     priority/added_at 都不动。``alias`` 去首尾空白；空串 = 清除别名，
     显示回退默认名。账号不存在抛 ``ValueError``。返回改后的 list_accounts()。
     """
+    list_accounts()  # 先走唯一的枚举入口：迁移/自愈完再改，别在残缺索引上动刀
     _STORE.rename(account_id, alias)
     return list_accounts()
 
