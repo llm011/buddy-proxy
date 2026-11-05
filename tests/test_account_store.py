@@ -1,7 +1,7 @@
 """共享多账号存储底座（``core/account_store.py``）的测试。
 
-这层是从 trae / qoder / codex 三份逐字重复的 ``credentials.py`` 里抽出来的，
-所以测试分两类：
+这层是从六个多账号通道（trae / qoder / codex / kimi / antigravity / codebuddy）
+逐字重复的 ``credentials.py`` 里抽出来的，所以测试分两类：
 
 1. 底座自己的契约（id 形状、0600 原子写、跨实例互斥、自愈、upsert 语义、
    重排校验、额度缓存代）；
@@ -196,6 +196,37 @@ def test_upsert_sync_cred_runs_before_files_are_written(tmp_path):
     assert store.load_cred("a", required_field="token")["region"] == "set-by-sync"
 
 
+def test_upsert_identity_scope_keeps_regions_apart(tmp_path):
+    """``identity_scope`` 限定身份匹配的条目集：同 uid 跨区不得合并。
+
+    codebuddy 的 CN / 海外账号体系独立，uid 可能撞车；合并会拿一个区的凭据
+    顶掉另一个区的顺位。按 region 隔离后，两边各占一个条目。
+    """
+    store = _store(tmp_path)
+
+    def upsert(cred, region):
+        return store.upsert(
+            cred,
+            required_field="token",
+            derive_id=lambda c: str(c["token"]),
+            identity_fields=("uid",),
+            identity_scope=lambda entry: str(entry.get("region") or "cn") == region,
+            entry_fields=lambda c, prev: {
+                "region": str((prev or {}).get("region") or region)
+            },
+            error=ValueError,
+        )
+
+    cn = upsert({"token": "cn-1", "uid": "same"}, "cn")
+    global_ = upsert({"token": "gl-1", "uid": "same"}, "global")
+    assert (cn["id"], global_["id"]) == ("cn-1", "gl-1")
+    assert (cn["priority"], global_["priority"]) == (0, 1)
+    # 同区内再登录仍然命中原条目，不会追加第三个顺位
+    again = upsert({"token": "cn-2", "uid": "same"}, "cn")
+    assert again["id"] == "cn-1"
+    assert [e["id"] for e in store.list_entries()] == ["cn-1", "gl-1"]
+
+
 def test_load_cred_requires_field_when_declared(tmp_path):
     """``required_field`` 是「这份凭据还能不能用」的判据：缺了当不存在。"""
     store = _store(tmp_path)
@@ -301,9 +332,19 @@ def test_quota_epoch_from_falls_back_to_unknown_on_error():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("module", ["trae", "qoder", "codex"])
-def test_pilot_channels_use_the_shared_store(module):
-    """三个试点通道的 credentials 必须持有同一个底座实例，而不是各写一份。"""
+@pytest.mark.parametrize(
+    "module",
+    [
+        "trae",
+        "qoder",
+        "codex",
+        "kimi",
+        "antigravity",
+        "codebuddy_provider",
+    ],
+)
+def test_all_multi_account_channels_use_the_shared_store(module):
+    """六个多账号通道的 credentials 必须持有同一个底座实例，而不是各写一份。"""
     import importlib
 
     credentials = importlib.import_module(f"buddy_proxy.{module}.credentials")

@@ -2,15 +2,18 @@
 
 六个多账号通道（trae / qoder / codex / kimi / antigravity / codebuddy）各自的
 ``credentials.py`` 里，「``~/.buddy-proxy/<ch>/index.json`` + ``<id>.json`` +
-``index.lock``」这一层是逐字重复的：同样的 0600 原子写、同样的「进程内锁 +
+``index.lock``」这一层曾经是逐字重复的：同样的 0600 原子写、同样的「进程内锁 +
 flock」、同样的「cred 文件没了就从索引里剔除」自愈、同样的 priority 排序与重排
 校验。重复的代价不是行数，而是**修一处漏五处**：原子写漏了 0600、自愈时把新加的
-字段抹掉、重排少一道去重校验，都只会在其中一个通道里静默发生。
+字段抹掉、重排少一道去重校验，都只会在其中一个通道里静默发生。现在六处都收敛到
+本模块，``tests/test_account_store.py`` 里有一条守卫测试盯着别退回去。
 
 这里只收敛「与通道无关」的部分。通道语义留在各自的 ``credentials.py``：
 
 - 账号 id 怎么派生（``derive_id``）；
 - 哪些字段算同一账号（``identity_fields``，命中即更新而不是追加新顺位）；
+- 身份匹配要不要限定在某个子集里（``identity_scope``：codebuddy 用 region 隔离
+  CN / 海外两个互相独立的账号体系，同一 uid 跨区不得合并）；
 - 索引条目里除 ``id`` / ``priority`` / ``added_at`` / ``alias`` 之外还要存什么
   （``entry_fields``），以及落盘前要不要回写 cred（``sync_cred``）。
 
@@ -270,6 +273,7 @@ class AccountStore:
         required_field: str = "",
         derive_id: Callable[[dict[str, Any]], str],
         identity_fields: tuple[str, ...] = (),
+        identity_scope: Callable[[dict[str, Any]], bool] | None = None,
         entry_fields: Callable[
             [dict[str, Any], dict[str, Any] | None], dict[str, Any]
         ] | None = None,
@@ -282,6 +286,10 @@ class AccountStore:
         该条目（``priority`` / ``added_at`` / ``alias`` 保持不变——重新登录不改
         failover 顺位，也不清用户起的别名），全不命中追加为新账号（顺位排最后）。
 
+        ``identity_scope`` 是身份匹配的附加过滤：只有谓词为真的条目参与
+        ``identity_fields`` 比对。codebuddy 用它隔离 CN / 海外两个账号体系——
+        两家的 uid 可能撞车，撞了也不能合并顺位（否则会拿 A 区的凭据顶掉 B 区）。
+
         ``entry_fields(cred, previous)`` 返回要写进索引条目的通道字段，
         ``previous`` 是命中条目的旧值（新账号为 ``None``，用于「已有序优先」类
         合并逻辑）。``sync_cred(cred, entry)`` 在落盘前统一 cred 与条目（trae 把
@@ -293,7 +301,7 @@ class AccountStore:
         previous = _find_by_id(entries, account_id)
         if previous is None and identity_fields:
             previous = self._find_by_identity(
-                entries, cred, identity_fields, required_field
+                entries, cred, identity_fields, required_field, identity_scope
             )
         if previous is None and not is_valid_account_id(account_id):
             # cred 没带合法 account_id（首次登录就是这种）时现场派生。派生用的
@@ -340,12 +348,15 @@ class AccountStore:
         cred: dict[str, Any],
         fields: tuple[str, ...],
         required_field: str,
+        scope: Callable[[dict[str, Any]], bool] | None = None,
     ) -> dict[str, Any] | None:
         wanted = [(f, str(cred.get(f) or "").strip()) for f in fields]
         wanted = [(f, v) for f, v in wanted if v]
         if not wanted:
             return None
         for entry in entries:
+            if scope is not None and not scope(entry):
+                continue
             other = self.load_cred(
                 str(entry.get("id") or ""), required_field=required_field
             ) or {}
