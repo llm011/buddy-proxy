@@ -63,7 +63,7 @@ def _aes_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
 
 def _aes_cbc_decrypt_pure(key: bytes, iv: bytes, data: bytes) -> bytes:
     """纯 Python AES-128-CBC（无 cryptography 时的兜底）。"""
-    from .aes_pure import aes_cbc_decrypt
+    from ..core.aes_pure import aes_cbc_decrypt
 
     return aes_cbc_decrypt(key, iv, data)
 

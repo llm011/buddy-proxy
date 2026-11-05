@@ -11,17 +11,24 @@ import hashlib
 import json
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
 
-if TYPE_CHECKING:
-    # 仅用于类型标注；运行期导入会触发
-    # codebuddy_provider 包 __init__ → observability → core.state 的循环导入
-    # （codebuddy_client 从包根模块迁入 codebuddy_provider.client 后暴露）。
-    from buddy_proxy.codebuddy_provider.client import CodeBuddyClient
-    from buddy_proxy.providers.base import BaseProvider
 from buddy_proxy.core.logging_setup import get_runtime_info
+from buddy_proxy.providers.base import BaseProvider
+
+# 本模块是 core 的汇聚点，**运行期不 import 通道包**：``codebuddy_provider`` 的包
+# ``__init__`` 会 → ``observability`` → ``core.state``，反向依赖直接成环。此前这里用
+# ``if TYPE_CHECKING:`` 挂着 ``CodeBuddyClient`` / ``BaseProvider`` 两个类型 import，
+# 等于把「core 不依赖通道」的约定交给一个只影响类型检查的开关。现在：
+#
+# - ``BaseProvider`` 是真类型，可以运行期 import：它在 ``providers.base``，只依赖
+#   标准库 + fastapi，且 ``providers/__init__.py`` 是空壳，不成环；
+# - ``client`` 用 ``Any``：``codebuddy_provider.client`` 那条边无法绕开包初始化，
+#   注解写清注释即可，不值得为它把循环导入请回来。
+#
+# 边界由 ``tests/test_module_boundaries.py`` 固化（core 模块级不得 import 通道包）。
 
 
 _SENSITIVE_LOG_KEY_PARTS = (
@@ -61,7 +68,8 @@ class ProxyState:
 
     def __init__(
         self,
-        client: CodeBuddyClient,
+        # CodeBuddyClient：见文件头「运行期不 import 通道包」的说明，这里用 Any。
+        client: Any,
         mock_dir: Optional[Any],
         log_file: Optional[Any],
         enable_desensitize: bool = False,

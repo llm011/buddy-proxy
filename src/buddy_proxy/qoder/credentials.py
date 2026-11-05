@@ -542,7 +542,7 @@ def _decrypt_safestorage(blob: bytes) -> bytes | None:
     调用方需容忍（这正是 device flow 存在的意义）。
     """
     try:
-        from buddy_proxy.trae.aes_pure import aes_cbc_decrypt
+        from buddy_proxy.core.aes_pure import aes_cbc_decrypt
     except ImportError:  # pragma: no cover - 环境异常
         return None
     for password in _SAFESTORAGE_PASSWORDS:
