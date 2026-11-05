@@ -368,7 +368,12 @@ benefits, and unrelated model routes in the same process.
   persistence. Callers must not open or write the settings JSON directly.
   Every overwrite keeps the previous version as `settings.json.bak` first, so a
   UI write is always reversible. Backing up is best-effort and must never make
-  a save fail.
+  a save fail. The file belongs to the state root: `BUDDY_PROXY_STATE_DIR`
+  moves it together with accounts/metrics/logs, while an explicit
+  `BUDDY_PROXY_SETTINGS` pins one file. A state-dir-only setup copies the
+  legacy `~/.buddy-proxy/settings.json` in on first access, so upgrading never
+  silently drops the user's defaults; writing the primary profile from an
+  isolated instance is a bug, not a convenience.
 - `model_order` (settings key) maps a **bare model name** to an ordered list of
   `provider/model` candidates, tried top-down by `forward._forward_with_order`.
   The key is the name the client asks for, not a channel-scoped pair: one entry
@@ -708,4 +713,5 @@ quietly rotting into a list of rules that only *used* to be enforced.
 | I18 | Identity matching can be scoped to a subset of index entries: two accounts whose upstream uid/refresh_token collide across regions are never merged into one failover slot. | `core/account_store.py` (`AccountStore.upsert_locked` `identity_scope`) + `codebuddy_provider/credentials.py` | `tests/test_codebuddy_intl.py::test_cross_region_same_uid_not_merged` |
 | I19 | All six multi-account channels use the one shared index/credential store; a channel that grows its own atomic write, flock, or self-heal copy makes the test fail instead of silently forking the semantics. | `core/account_store.py` + each channel `credentials._STORE` | `tests/test_account_store.py::test_all_multi_account_channels_use_the_shared_store` |
 | I20 | Reorder and rename go through the channel's single enumeration entry point first, so legacy single-account migration and self-heal run before validation; the generic store does not know channel migrations. | `*/credentials.py` (`list_accounts()` before `AccountStore.reorder` / `rename`) | `tests/test_antigravity_login.py::test_reorder_accounts_runs_legacy_migration_first` |
+| I21 | `settings.json` lives in the state root: moving `BUDDY_PROXY_STATE_DIR` moves settings with accounts, metrics and logs, so an isolated instance never reads or writes the primary profile's settings. An explicit `BUDDY_PROXY_SETTINGS` still wins, and a state-dir-only setup copies the legacy file in on first access. | `core/settings.py` (`settings_path`) | `tests/test_settings_path.py::test_settings_follow_state_dir` |
 

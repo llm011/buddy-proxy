@@ -1,8 +1,9 @@
 """管理页设置持久化：默认启用模型、兜底通道覆盖等。
 
-存放在 ``~/.buddy-proxy/settings.json``（可用 ``BUDDY_PROXY_SETTINGS`` 覆盖），
-机器本地配置，不进仓库。启动时由 ``__main__`` 加载进 :class:`ProxyState`，
-管理页 POST /ui/api/settings 修改后立即写回并热更新到运行态。
+默认落在状态目录（``BUDDY_PROXY_STATE_DIR``，缺省 ``~/.buddy-proxy/``）下的
+``settings.json``，可用 ``BUDDY_PROXY_SETTINGS`` 单独指向别的文件，机器本地配置，
+不进仓库。启动时由 ``__main__`` 加载进 :class:`ProxyState`，管理页
+POST /ui/api/settings 修改后立即写回并热更新到运行态。
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -18,7 +20,8 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-_DEFAULT_PATH = "~/.buddy-proxy/settings.json"
+from buddy_proxy.core import paths
+
 _SETTINGS_LOCK = threading.Lock()
 
 # 时段判定统一用上海时区，与 trae/pat/cooldown._next_day_timestamp 的日界一致。
@@ -31,9 +34,36 @@ _MAX_ORDER_TARGETS = 8
 
 
 def settings_path() -> pathlib.Path:
-    return pathlib.Path(
-        os.getenv("BUDDY_PROXY_SETTINGS", _DEFAULT_PATH)
-    ).expanduser()
+    """设置文件路径：``BUDDY_PROXY_SETTINGS`` > 状态目录 > 默认 ``~/.buddy-proxy``。
+
+    状态目录是运行时的唯一根（与 ``paths.state_file("settings.json")`` 同一约定），
+    ``BUDDY_PROXY_STATE_DIR`` 挪走它时设置必须跟着走。这里曾经写死
+    ``~/.buddy-proxy/settings.json``：用状态目录起第二个实例（隔离/测试/多套配置）
+    时，设置仍读写主配置——隔离形同虚设，HOME 只读时连「改默认模型」都会 500。
+
+    迁移：只设了状态目录、旧位置已有 settings.json 而新位置没有时，首次访问复制
+    过去（copy 而非 move，与 ``paths.state_file`` 的遗留迁移语义一致）；复制失败
+    就退回旧路径，升级不会把设置弄丢。显式 ``BUDDY_PROXY_SETTINGS`` 永远优先。
+    """
+    override = os.getenv("BUDDY_PROXY_SETTINGS")
+    if override:
+        return pathlib.Path(override).expanduser()
+
+    target = paths.state_dir() / "settings.json"
+    if target.exists() or not os.environ.get("BUDDY_PROXY_STATE_DIR"):
+        return target
+
+    legacy = pathlib.Path.home() / ".buddy-proxy" / "settings.json"
+    if not legacy.exists():
+        return target
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(legacy, target)
+        os.chmod(target, 0o600)
+    except OSError:
+        # 复制失败不阻断业务：按老位置继续读写，避免升级后设置“消失”。
+        return legacy
+    return target
 
 
 def load_settings() -> dict[str, Any]:
