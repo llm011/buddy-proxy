@@ -33,6 +33,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..asyncutil import LoopSafeLock
+from ..core.account_store import quota_epoch_from
 from ..core.metrics import ACCOUNT_META
 from ..providers.base import BaseProvider
 from . import failover
@@ -700,7 +701,7 @@ class CodexProvider(BaseProvider):
 
     def quota_epoch(self) -> str:
         """账号集合指纹：账号变化时让额度缓存失效。"""
-        return ",".join(f"{a.id}:{a.priority}" for a in list_accounts())
+        return quota_epoch_from(list_accounts)
 
 
 # ---------------------------------------------------------------------------

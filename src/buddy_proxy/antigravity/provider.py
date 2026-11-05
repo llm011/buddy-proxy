@@ -31,6 +31,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
+from ..core.account_store import quota_epoch_from
 from ..core.metrics import ACCOUNT_META
 from ..gemini.convert import gemini_response_to_chat
 from . import failover
@@ -738,11 +739,7 @@ class AntigravityProvider(BaseProvider):
         看起来就像多账号被合并了（2026-10-03 实测）。键里带上账号指纹后，
         账号列表一变键就变，旧缓存自然失效（读的是本地 index，纯内存级开销）。
         """
-        try:
-            accts = list_accounts()
-        except Exception:  # noqa: BLE001 - 拿不到就退回常量键，宁可多查不强撑旧值
-            return "unknown"
-        return ",".join(f"{a.id}#{a.priority}" for a in accts) or "empty"
+        return quota_epoch_from(list_accounts)
 
     def _quota_one(
         self, acct: Any, index: int, *, multi: bool
