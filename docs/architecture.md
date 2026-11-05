@@ -13,8 +13,9 @@ src/buddy_proxy/
   __main__.py            # CLI entry + repo-root resolution (parents[2])
   trae_provider.py       # published trae-cli entrypoint + trae façade
   core/                  # state, settings, paths, logging_setup, aes_pure (纯 Python
-                         #   AES, shared by trae + qoder), metrics (aggregation/persistence),
-                         #   metrics_protocol
+                         #   AES, shared by trae + qoder), account_store (多账号索引 +
+                         #   0600 凭据文件 + flock 的共同底座), metrics
+                         #   (aggregation/persistence), metrics_protocol
                          #   (usage normalization + SSE extraction),
                          #   credit_estimate, desensitize, checkin, errors
   protocols/             # anthropic_adapter, responses_adapter,
@@ -49,9 +50,10 @@ instead (see *Module boundaries*).
 The layers are not just a diagram — `tests/test_module_boundaries.py` parses the AST
 of every module and fails the build when a boundary is crossed:
 
-- **Leaf modules** (`core/cooldown.py`, `core/account_failover.py`, `core/aes_pure.py`,
-  `core/paths.py`, `core/errors.py`, `asyncutil.py`, …) may import only the standard
-  library. Anything importable from every layer must not depend back on any of them.
+- **Leaf modules** (`core/cooldown.py`, `core/account_failover.py`,
+  `core/account_store.py`, `core/aes_pure.py`, `core/paths.py`, `core/errors.py`,
+  `asyncutil.py`, …) may import only the standard library. Anything importable from
+  every layer must not depend back on any of them.
 - **`core`** must not import a channel package at module level. Reading channel
   constants is done inside a function with a fallback (`core/credit_estimate.py` is
   the only current case), so a missing channel can never take the core down at import.
@@ -170,22 +172,30 @@ workers, or explicit provider shutdown lifecycles.
 
 ## Multi-account state
 
-Each multi-account channel (trae / kimi / qoder / antigravity) keeps its own
-state dir `~/.buddy-proxy/<ch>/` with `index.json` (the account list) plus one
-0600 credential file per account. `AccountRef` in each `credentials.py` is the
-source of truth for index fields; **every** construction site must pass fields
-as keywords and carry `alias` (the display name edited via the admin ✎ button,
-default `""` = fall back to the default name). Two invariants protect it:
+Each multi-account channel (trae / kimi / qoder / antigravity / codex /
+codebuddy) keeps its own state dir `~/.buddy-proxy/<ch>/` with `index.json` (the
+account list) plus one 0600 credential file per account. The storage layer —
+0600 atomic write, in-process lock + `flock`, self-heal, priority ordering,
+reorder validation — lives in `core/account_store.AccountStore`, shared by the
+three pilot channels (trae / qoder / codex); the remaining channels still carry
+their own copy and can be moved over without changing behaviour. What stays in
+each `credentials.py` is only the channel's own semantics: `derive_id`, which
+fields mean "same account" (`identity_fields`), and which extra fields the index
+entry stores (`entry_fields`). `AccountRef` in each `credentials.py` is the
+source of truth for what the UI/logs see; **every** construction site must pass
+fields as keywords and carry `alias` (the display name edited via the admin ✎
+button, default `""` = fall back to the default name). Two invariants protect it:
 
-- The index self-heal rewrite inside `list_accounts()` (which rebuilds
-  `AccountRef` from raw entries and rewrites the file) is the **only** place
-  that re-creates fields from an entry dict. Dropping a field there silently
-  erases it on the next enumeration — when adding an index field, that
-  `kept.append(AccountRef(...))` site is the one that gets missed.
+- The index self-heal inside `list_entries_locked()` only **drops** entries whose
+  id is malformed or whose credential file is missing/corrupt; it writes the
+  remaining raw entries back untouched. It deliberately does not rebuild entries
+  from `AccountRef` any more — that rewrite used to erase any index field the
+  dataclass did not know about, so adding a field meant also editing the
+  self-heal site in the same commit.
 - `save_account_cred` upsert (same credential → existing account) only rewrites
-  the named credential keys (`nickname`/`name`/`email`); anything outside that
-  list (like `alias`) survives re-login by design. Do not "clean up" the dict
-  wholesale there.
+  the named credential keys (`nickname`/`name`/`email`/`region`); anything
+  outside that list (like `alias`) survives re-login by design. Do not "clean
+  up" the dict wholesale there.
 
 `rename_account(account_id, alias)` (also keyword-safe, file-locked like every
 other index write) is the sole writer of `alias`; the HTTP surface is
@@ -686,4 +696,7 @@ quietly rotting into a list of rules that only *used* to be enforced.
 | I12 | Log rows keep the stable account id and resolve the display name only when rendering, so a rename does not require rewriting history. | `web/ui/queries.py` (`/ui/api/logs`) | `tests/test_log_account_name.py::test_trae_writes_stable_id_to_log` |
 | I13 | A quota item whose remaining amount cannot be determined is never folded away as "spent": unknown is not zero, and folding it would hide the one row that explains the failure. | `web/static/benefits_quota.js` (`quotaItemsHtml`) | `tests/test_quota_fold.py::test_unknown_items_stay_visible_not_folded` |
 | I14 | Account-level failover also honours the committed-stream rule: after the first real chunk, an account failure is surfaced instead of retried on the next account. | `codebuddy_provider/failover.py` + `codebuddy_provider/provider.py` | `tests/test_codebuddy_failover.py::test_forward_stream_committed_after_first_real_chunk` |
+| I15 | Index self-heal only drops stale entries; every other field in an entry survives verbatim, so a new index field needs no matching change in the self-heal code. | `core/account_store.py` (`AccountStore.list_entries_locked`) | `tests/test_account_store.py::test_list_entries_self_heals_and_preserves_unknown_fields` |
+| I16 | Every index and per-account credential file is written 0600 atomically (temp file created with the mode, then renamed): the credential bytes never exist in a world-readable file, not even for the duration of a `write_text` + `chmod`. | `core/account_store.py` (`atomic_write_json`, `AccountStore.write_cred`) | `tests/test_account_store.py::test_atomic_write_is_0600_and_leaves_no_tmp` |
+| I17 | Index read-modify-write is one cross-process critical section (`threading.Lock` then `flock` on `index.lock`); two entry points (gateway + CLI/admin) cannot each write back a stale snapshot and lose the other's account. | `core/account_store.py` (`AccountStore.guard` / `FileLock`) | `tests/test_account_store.py::test_guard_serializes_writers_sharing_a_dir` |
 
