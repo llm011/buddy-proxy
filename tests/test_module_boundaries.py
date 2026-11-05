@@ -52,6 +52,7 @@ _ROOT = "buddy_proxy"
 #: 存在（见 ``test_leaf_modules_exist``），避免改名后规则悄悄失效。
 _LEAF_MODULES = frozenset({
     "buddy_proxy.core.account_failover",  # 账号级冷却状态机（多通道共用）
+    "buddy_proxy.core.account_store",     # 多账号索引 + 0600 凭据文件底座
     "buddy_proxy.core.aes_pure",          # 纯 Python AES（trae/qoder 共用）
     "buddy_proxy.core.browser",           # 拉起浏览器
     "buddy_proxy.core.cooldown",          # 模型级冷却标记
