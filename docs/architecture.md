@@ -176,15 +176,16 @@ Each multi-account channel (trae / kimi / qoder / antigravity / codex /
 codebuddy) keeps its own state dir `~/.buddy-proxy/<ch>/` with `index.json` (the
 account list) plus one 0600 credential file per account. The storage layer —
 0600 atomic write, in-process lock + `flock`, self-heal, priority ordering,
-reorder validation — lives in `core/account_store.AccountStore`, shared by the
-three pilot channels (trae / qoder / codex); the remaining channels still carry
-their own copy and can be moved over without changing behaviour. What stays in
-each `credentials.py` is only the channel's own semantics: `derive_id`, which
-fields mean "same account" (`identity_fields`), and which extra fields the index
-entry stores (`entry_fields`). `AccountRef` in each `credentials.py` is the
+reorder validation — lives in `core/account_store.AccountStore` and is used by
+**all six** channels. What stays in each `credentials.py` is only the channel's
+own semantics: `derive_id`, which fields mean "same account"
+(`identity_fields`), whether identity matching is scoped to a subset of entries
+(`identity_scope` — codebuddy keeps the CN and Global account systems apart even
+when their uids collide), and which extra fields the index entry stores
+(`entry_fields`). `AccountRef` in each `credentials.py` is the
 source of truth for what the UI/logs see; **every** construction site must pass
 fields as keywords and carry `alias` (the display name edited via the admin ✎
-button, default `""` = fall back to the default name). Two invariants protect it:
+button, default `""` = fall back to the default name). Three invariants protect it:
 
 - The index self-heal inside `list_entries_locked()` only **drops** entries whose
   id is malformed or whose credential file is missing/corrupt; it writes the
@@ -196,6 +197,11 @@ button, default `""` = fall back to the default name). Two invariants protect it
   the named credential keys (`nickname`/`name`/`email`/`region`); anything
   outside that list (like `alias`) survives re-login by design. Do not "clean
   up" the dict wholesale there.
+- `reorder_accounts` / `rename_account` call the channel's `list_accounts()`
+  before touching the store: that is the single enumeration entry point where
+  legacy single-account migration and self-heal happen. `AccountStore` only
+  knows the generic index, so skipping it validates against a stale/empty list
+  and makes the first admin action after an upgrade fail (`当前 0 个`).
 
 `rename_account(account_id, alias)` (also keyword-safe, file-locked like every
 other index write) is the sole writer of `alias`; the HTTP surface is
@@ -699,4 +705,7 @@ quietly rotting into a list of rules that only *used* to be enforced.
 | I15 | Index self-heal only drops stale entries; every other field in an entry survives verbatim, so a new index field needs no matching change in the self-heal code. | `core/account_store.py` (`AccountStore.list_entries_locked`) | `tests/test_account_store.py::test_list_entries_self_heals_and_preserves_unknown_fields` |
 | I16 | Every index and per-account credential file is written 0600 atomically (temp file created with the mode, then renamed): the credential bytes never exist in a world-readable file, not even for the duration of a `write_text` + `chmod`. | `core/account_store.py` (`atomic_write_json`, `AccountStore.write_cred`) | `tests/test_account_store.py::test_atomic_write_is_0600_and_leaves_no_tmp` |
 | I17 | Index read-modify-write is one cross-process critical section (`threading.Lock` then `flock` on `index.lock`); two entry points (gateway + CLI/admin) cannot each write back a stale snapshot and lose the other's account. | `core/account_store.py` (`AccountStore.guard` / `FileLock`) | `tests/test_account_store.py::test_guard_serializes_writers_sharing_a_dir` |
+| I18 | Identity matching can be scoped to a subset of index entries: two accounts whose upstream uid/refresh_token collide across regions are never merged into one failover slot. | `core/account_store.py` (`AccountStore.upsert_locked` `identity_scope`) + `codebuddy_provider/credentials.py` | `tests/test_codebuddy_intl.py::test_cross_region_same_uid_not_merged` |
+| I19 | All six multi-account channels use the one shared index/credential store; a channel that grows its own atomic write, flock, or self-heal copy makes the test fail instead of silently forking the semantics. | `core/account_store.py` + each channel `credentials._STORE` | `tests/test_account_store.py::test_all_multi_account_channels_use_the_shared_store` |
+| I20 | Reorder and rename go through the channel's single enumeration entry point first, so legacy single-account migration and self-heal run before validation; the generic store does not know channel migrations. | `*/credentials.py` (`list_accounts()` before `AccountStore.reorder` / `rename`) | `tests/test_antigravity_login.py::test_reorder_accounts_runs_legacy_migration_first` |
 
