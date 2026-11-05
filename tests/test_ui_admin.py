@@ -30,6 +30,7 @@ from buddy_proxy.benefits import BenefitsManager, CheckinHistory
 from buddy_proxy.core.metrics import MetricsCollector, SSEUsageExtractor, normalize_usage
 from buddy_proxy.providers.base import BaseProvider
 from buddy_proxy.providers.zcode import _quota_items
+from buddy_proxy.web.ui import page as page_mod
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +193,7 @@ def test_ui_page_served(env):
 
 
 def test_ui_static_files_served(env):
-    """页面引用的全部静态 JS 和 CSS 都走白名单路由，且 no-cache。"""
+    """页面引用的全部静态 JS 和 CSS 都可 serve（白名单按目录派生），且 no-cache。"""
     html = env.client.get("/ui").text
     scripts = re.findall(r'<script src="/ui/([^"]+\.js)"></script>', html)
     assert scripts, "页面必须显式声明脚本及其加载顺序"
@@ -204,6 +205,63 @@ def test_ui_static_files_served(env):
         assert r.headers["content-type"].startswith(ctype)
         assert r.headers.get("cache-control") == "no-cache"
     assert env.client.get("/ui/nope.txt").status_code == 404
+
+
+def test_ui_serves_every_static_file(env):
+    """static/ 里的每个文件都能取到，且后缀决定 Content-Type。
+
+    这是「白名单按目录派生」的核心保证：以前 ``page.py`` 里手抄一份文件清单，
+    新增前端文件忘了登记就是 404——而 ``/ui`` 页面本身照常 200，只有浏览器控制台
+    里会看到那一段脚本没加载。现在名单就是目录本身，测试反过来兜住回归：真有人
+    把派生逻辑改回手抄清单，这里会立刻看到某个文件 404。
+    """
+    static = page_mod._STATIC
+    files = sorted(p for p in static.iterdir() if p.is_file())
+    assert files, "static/ 目录不应为空"
+    for path in files:
+        r = env.client.get(f"/ui/{path.name}")
+        assert r.status_code == 200, f"{path.name} 未 serve: {r.status_code}"
+        assert r.headers.get("cache-control") == "no-cache"
+        if path.suffix == ".svg":
+            assert r.headers["content-type"].startswith("image/svg+xml")
+            assert r.content == path.read_bytes()  # 二进制原样回传，不做文本解码
+        else:
+            assert r.text == path.read_text(encoding="utf-8")
+
+
+def test_every_frontend_script_is_referenced_by_index(env):
+    """反向检查：static/*.js 必须都被 index.html 引用。
+
+    无人引用的脚本不会执行，是纯粹的「写了但没接上」；没有构建工具的情况下，
+    唯一能发现它的地方就是这里。
+    """
+    html = env.client.get("/ui").text
+    referenced = set(re.findall(r'<script src="/ui/([^"]+\.js)"></script>', html))
+    on_disk = {p.name for p in page_mod._STATIC.iterdir() if p.suffix == ".js"}
+    assert not (on_disk - referenced), (
+        f"这些前端脚本没有被 index.html 引用（永远不执行）：{sorted(on_disk - referenced)}"
+    )
+    assert not (referenced - on_disk), (
+        f"index.html 引用了不存在的脚本：{sorted(referenced - on_disk)}"
+    )
+
+
+def test_ui_static_rejects_unknown_suffix_and_dotfiles(env, tmp_path, monkeypatch):
+    """只 serve 白名单后缀、非隐藏文件：目录派生不等于把整个目录暴露出去。
+
+    用临时目录替换 ``_STATIC`` 造样本，避免往源码树里写探针文件（wheel 安装时
+    ``static/`` 在 site-packages 里，未必可写）。
+    """
+    (tmp_path / "ok.js").write_text("// ok", encoding="utf-8")
+    (tmp_path / "probe.md").write_text("secret", encoding="utf-8")
+    (tmp_path / ".hidden.js").write_text("secret", encoding="utf-8")
+    monkeypatch.setattr(page_mod, "_STATIC", tmp_path)
+    assert env.client.get("/ui/ok.js").status_code == 200
+    assert env.client.get("/ui/probe.md").status_code == 404
+    assert env.client.get("/ui/.hidden.js").status_code == 404
+    assert env.client.get("/ui/missing.js").status_code == 404
+    # 路径分隔符不进入文件名分支（路由本来就不匹配，这里锁住语义）
+    assert env.client.get("/ui/a%2Fb.js").status_code == 404
 
 
 def test_root_redirects_to_ui(env):
