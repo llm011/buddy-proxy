@@ -24,7 +24,7 @@ from typing import Any, Optional
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 
-from buddy_proxy.core.credit_estimate import estimate_credit
+from buddy_proxy.core.credit_estimate import estimate_credit, remember_prompt
 from buddy_proxy.core.metrics import ACCOUNT_META, SSEErrorExtractor, SSEUsageExtractor, normalize_usage
 from buddy_proxy.core.state import (
     diagnostic,
@@ -45,9 +45,14 @@ def _exc_text(detail: Any) -> str:
     return str(detail)[:300]
 
 
-def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any]) -> tuple[Optional[float], bool]:
+def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any],
+                        account: str = "") -> tuple[Optional[float], bool]:
     """上游 usage 带实扣积分就用实扣；否则按 token 估算
-    （trae 按倍率表粗估，zcode 按 GLM Coding Plan 官方抵扣系数精算）。
+    （trae 按实测单价表算，zcode 按 GLM Coding Plan 官方抵扣系数精算）。
+
+    ``account`` 参与 Trae 的缓存命中估算：上游不上报缓存数时，用「同账号同模型
+    上一条 prompt」作会话基线算增量（见 ``credit_estimate._LAST_PROMPT``）。
+    没有账号信息时退回全价，不猜。
 
     返回 (credit, credit_estimated)；估算失败/无 token 数据时为 (None, False)。
     """
@@ -55,8 +60,23 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any]) -
         return norm["credit"], False
     est = estimate_credit(provider_id, model_id,
                           norm.get("prompt_tokens"), norm.get("completion_tokens"),
-                          norm.get("cached_tokens"))
+                          norm.get("cached_tokens"), account=account)
     return (est, True) if est is not None else (None, False)
+
+
+def _remember_baseline(provider_id: str, model_id: str, norm: dict[str, Any],
+                       account: str) -> None:
+    """把本次 prompt 记作该 (账号, 模型) 的会话基线，供下一条算缓存增量。
+
+    只在 Trae 生效（其余通道不需要，白占记忆表）；没有账号或 token 就不记。
+    放在 ``_credit_or_estimate`` **之后**调用：估算必须先读到「上一条」，再覆盖。
+    """
+    if provider_id != "trae" or not account:
+        return
+    prompt = int(norm.get("prompt_tokens") or 0)
+    if prompt <= 0:
+        return
+    remember_prompt(account, model_id, prompt)
 
 
 # 客户端来源标签（由 routes 层在每个请求开始时设置，_instrument 落 metrics 时读取）。
@@ -186,7 +206,9 @@ async def _instrument(
         pass
     norm = normalize_usage(usage) if usage else {
         "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "credit": None}
-    credit, credit_estimated = _credit_or_estimate(provider_id, model_id, norm)
+    credit, credit_estimated = _credit_or_estimate(
+        provider_id, model_id, norm, account=account_meta.get("account", ""))
+    _remember_baseline(provider_id, model_id, norm, account_meta.get("account", ""))
     metrics.record(
         provider=provider_id, model=model_id, protocol=protocol,
         status=resp.status_code, duration_ms=_elapsed_ms(started),
@@ -230,7 +252,9 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
         u = extractor.usage
         if not error and err_extractor.message:
             error = f"in-band error: {err_extractor.message}"
-        credit, credit_estimated = _credit_or_estimate(provider_id, model_id, u)
+        credit, credit_estimated = _credit_or_estimate(
+            provider_id, model_id, u, account=(account_meta or {}).get("account", ""))
+        _remember_baseline(provider_id, model_id, u, (account_meta or {}).get("account", ""))
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=500 if error else 200, duration_ms=_elapsed_ms(started),
                        stream=True, chunk_count=chunk_count, error=error,

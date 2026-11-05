@@ -205,7 +205,7 @@ def test_refresh_keeps_rate_activities_out_of_static_table(monkeypatch, trae_env
     monkeypatch.setattr(TraeProvider, "_probe_model", lambda self, m: True)
     p = TraeProvider()
     models = asyncio.run(p.refresh_models(force=True))
-    assert next(m for m in models if m["id"] == "glm-5.3")["credits"] == "x0.39"
+    assert next(m for m in models if m["id"] == "glm-5.3")["credits"] == "x0.58"
     assert trae_config.DISCOVERED_CREDITS == {}
 
 
@@ -283,7 +283,7 @@ def test_credit_multiplier_prefers_discovered_then_static(monkeypatch):
                         {"brand-new": "x0.33", "glm-5.3": "x9.99"})
     assert trae_config.credit_multiplier("cn", "brand-new") == "x0.33"
     # 静态底表优先：人工核过的值不被运行时抄回值顶掉
-    assert trae_config.credit_multiplier("cn", "glm-5.3") == "x0.39"
+    assert trae_config.credit_multiplier("cn", "glm-5.3") == "x0.58"
     # 别名按映射到内部名取同一倍率（-Official 是闲时折扣价，见 MODEL_CREDITS）
     assert trae_config.credit_multiplier("cn", "deepseek-v4-pro-official") == "x0.36"
     # 海外没有倍率概念

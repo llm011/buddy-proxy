@@ -103,15 +103,19 @@ def test_v41_flash_credit_multiplier():
     2026-11-01 用目录 consumption_rate 重核：基价 0.16→0.12、会员 5 折后仍
     是当前实付 0.06（旧值 x0.08 是 2026-09-30 面板的 0.16 五折）。注意与本表
     ``DeepSeek-V4-Flash`` 的历史 x0.08 数值撞车但来源不同（旧值出自 2026-09-05
-    知识库）。估算走 ``MEASURED_CREDIT_RATES``，单价按「当前倍率/校准倍率」
-    （0.06/0.08）等比缩放：(30000,100) ≈ (30000×3.41e-5 + 100×1.39e-4) × 0.75
-    ≈ 0.78。
+    知识库）。
+
+    2026-11-05 按官方账单 12 条样本重解单价，并**把校准倍率改回 0.06**（原先
+    误写 0.08，会让结果被多乘 0.75）：现为 miss 39.93 / out 158.73 / hit 0.835
+    积分每 M。这里不带账号调用，走「无基线=全价」分支，故
+    (30000,100) ≈ 30000×39.93e-6 + 100×158.73e-6 ≈ 1.21。
+    增量（带账号）与缓存口径见 tests/test_trae_cache_credit.py。
     """
     assert MODEL_CREDITS["deepseek-v4.1-flash"] == "x0.06"
     entry = next(m for m in TraeProvider().models()
                  if m["id"] == "deepseek-v4.1-flash")
     assert entry["credits"] == "x0.06"
-    assert estimate_credit("trae", "deepseek-v4.1-flash", 30000, 100) == 0.78
+    assert estimate_credit("trae", "deepseek-v4.1-flash", 30000, 100) == 1.21
 
 
 def test_v41_flash_needs_no_function_override():

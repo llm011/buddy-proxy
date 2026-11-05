@@ -1599,7 +1599,7 @@ def test_trae_models_carry_credits():
     """Trae 模型应带积分倍率（知识库《模型及成本整理》2026-09-05 版）。"""
     from buddy_proxy.trae_provider import TraeProvider
     models = {m["id"]: m for m in TraeProvider().models()}
-    assert models["glm-5.3"]["credits"] == "x0.39"  # 2026-10-12 面板跟价（会员5折徽章）
+    assert models["glm-5.3"]["credits"] == "x0.58"  # 2026-11-05 面板跟价（会员 7.5 折徽章）
     # 2026-11-01 按目录 consumption_rate 当前值重核：flash 0.06→0.08、
     # deepseek-v4.1-flash 0.08→0.06（基价 0.16→0.12 五折）、Seed 两条促销
     # 「限时 1 折」2026-10-15 23:59 到期回到原价 0.8

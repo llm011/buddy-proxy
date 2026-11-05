@@ -23,6 +23,7 @@ zcode（GLM Coding Plan）的 /api/monitor/usage/quota/limit 计数器批量聚�
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 # 积分 / 1M token / 倍率单位。校准：glm-5.3-flash（x0.06）实测 ≈6.0~6.2
@@ -93,10 +94,12 @@ def _multiplier(provider: str, model: str) -> float | None:
         return None
 
 
-def _load_trae_measured_rates() -> dict[str, tuple[float, float, float]]:
+def _load_trae_measured_rates() -> dict[str, tuple[float, ...]]:
     """惰性加载 trae 实测计价表（避免模块级循环导入）。
 
-    元组为 (输入单价, 输出单价, 校准倍率)，单价是校准时刻的绝对值。
+    元组两种形状（按长度分派，见 ``trae.config.MEASURED_CREDIT_RATES``）：
+    ``(输入价, 输出价, 校准倍率)`` 或
+    ``(未命中输入价, 输出价, 校准倍率, 命中输入价)``。
     """
     try:
         from ..trae.config import MEASURED_CREDIT_RATES
@@ -105,12 +108,53 @@ def _load_trae_measured_rates() -> dict[str, tuple[float, float, float]]:
         return {}
 
 
+#: 「上一次 prompt 大小」的记忆：key 为 ``(account, model)``，值是 (prompt_tokens, ts)。
+#: Trae 的 chat 流不回缓存命中数（``cache_read_input_tokens`` 实测恒 0，见
+#: ``MEASURED_CREDIT_RATES`` 注释），但**账单侧确实按缓存计费**——于是用「同账号
+#: 同模型上一条 prompt」近似上下文基线：本次比它多出来的部分算未命中、其余算命中。
+#:
+#: 用模块级 dict 而非请求上下文：流式落库发生在读线程/收尾 finally，没有可穿透
+#: 的请求作用域，且基线本身就是跨请求状态（「上一条」天然是全局最近一条）。
+_LAST_PROMPT: dict[tuple[str, str], tuple[int, float]] = {}
+#: 基线有效期（秒）。Trae 的缓存池按会话长期驻留（实测隔十几小时仍命中），但
+#: 过久之前的 prompt 与当前会话大概率无关，留着只会把命中算多（低估积分）。
+_BASELINE_TTL_S = 6 * 3600
+#: 记忆表上限：多账号 × 多模型，正常几个条目；异常增长时按时间裁掉最旧的。
+_LAST_PROMPT_MAX = 256
+
+
+def _baseline_prompt(account: str, model: str) -> int | None:
+    """取该 (账号, 模型) 的上一条 prompt 大小；过期或没有返回 None。"""
+    entry = _LAST_PROMPT.get((account, model))
+    if entry is None:
+        return None
+    prompt, ts = entry
+    if time.time() - ts > _BASELINE_TTL_S:
+        _LAST_PROMPT.pop((account, model), None)
+        return None
+    return prompt
+
+
+def remember_prompt(account: str, model: str, prompt_tokens: int) -> None:
+    """记下本次 prompt 大小，供下一条算增量；超上限时裁掉最旧的。"""
+    _LAST_PROMPT[(account, model)] = (prompt_tokens, time.time())
+    if len(_LAST_PROMPT) > _LAST_PROMPT_MAX:
+        oldest = min(_LAST_PROMPT, key=lambda k: _LAST_PROMPT[k][1])
+        _LAST_PROMPT.pop(oldest, None)
+
+
+def reset_baselines() -> None:
+    """清空会话基线（测试隔离用；生产不调用）。"""
+    _LAST_PROMPT.clear()
+
+
 def estimate_credit(
     provider: str,
     model: str,
     prompt_tokens: int | None,
     completion_tokens: int | None,
     cached_tokens: int | None = 0,
+    account: str = "",
 ) -> float | None:
     """按 token 估算单次积分消耗；无系数/倍率表或无 token 数据时返回 None。
 
@@ -120,6 +164,10 @@ def estimate_credit(
     粗估。实测单价按「当前倍率/校准倍率」等比缩放：官方调倍率时照常更新
     ``MODEL_CREDITS`` 即可自动跟价，不必重跑对账。返回值统一 round 到 2 位
     （与 Trae 网页使用记录的展示粒度一致）。
+
+    缓存命中口径：上游给了 ``cached_tokens`` 就用它；没给（Trae 实测恒 0）则
+    退化为「本账号本模型上一条 prompt」作基线算增量（见 ``_LAST_PROMPT``）。
+    没配命中价的模型（老三元组）忽略该分支，行为与改动前一致。
     """
     if provider in ("zcode", "glm"):
         # glm 是 zcode 的子类通道（同上游同套餐计价），官方系数原样复用；
@@ -132,6 +180,8 @@ def estimate_credit(
         # 抛出会把上游已成功的请求变成客户端 500。
         in_rate, out_rate = rates[0], rates[1]
         calib_mult = rates[2] if len(rates) > 2 else 0.0
+        # 命中价只在四元组里出现；没有就全部输入按全价（旧行为）。
+        hit_rate = rates[3] if len(rates) > 3 else None
         mult = _multiplier(provider, model)
         # 拿不到当前倍率（表里无此模型、被删/改名）时不缩放：退回校准绝对值。
         # mult 为 0（x0.00 免费档，如促销期）是**有效倍率**，应正常清零估算。
@@ -144,7 +194,26 @@ def estimate_credit(
         completion = max(0, int(completion_tokens or 0))
         if prompt == 0 and completion == 0:
             return None  # 无 token 数据（错误响应/解析失败）不记估算
-        total = (in_rate * prompt + out_rate * completion) * scale
+        if hit_rate is None:
+            total = (in_rate * prompt + out_rate * completion) * scale
+            return round(max(0.0, total), 2)
+        # ---- 缓存感知：拆出「未命中输入」与「命中输入」 ----
+        upstream_cached = max(0, int(cached_tokens or 0))
+        if upstream_cached > 0:
+            # 上游真给了缓存数（OpenAI 口径：prompt 含缓存），直接照用。
+            cached = min(prompt, upstream_cached)
+            miss = prompt - cached
+        elif account:
+            # Trae 实测不上报：按同账号同模型的上一条 prompt 近似会话基线。
+            base = _baseline_prompt(account, model)
+            miss = prompt if base is None else max(prompt - base, 0)
+            miss = min(miss, prompt)
+            cached = prompt - miss
+        else:
+            # 没有账号标识（离线/测试/异常路径）就退回全价，不去猜。
+            cached = 0
+            miss = prompt
+        total = (in_rate * miss + hit_rate * cached + out_rate * completion) * scale
         return round(max(0.0, total), 2)
     mult = _multiplier(provider, model)
     if mult is None:

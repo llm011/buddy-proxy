@@ -77,8 +77,12 @@ def test_multiplier_scales_across_models():
     """
     flash_mult = trae_config.MODEL_CREDITS["glm-5.3-flash"]
     big_mult = trae_config.MODEL_CREDITS["glm-5.3"]
-    flash = estimate_credit("trae", "glm-5.3-flash", 30000, 100)
-    big = estimate_credit("trae", "glm-5.3", 30000, 100)
+    # token 量取大一点：estimate_credit 结果 round 到 2 位，小额度下这点舍入
+    # 会被放大成几个百分点的比值误差（glm-5.3 跟到 0.58 后就这么撞上过——
+    # 30000 token 只有 0.24 量级，±0.005 的舍入就是 2%）。加大分母让这条
+    # 断言只盯「线性」这个不变式，不被展示精度带偏。
+    flash = estimate_credit("trae", "glm-5.3-flash", 3_000_000, 100)
+    big = estimate_credit("trae", "glm-5.3", 3_000_000, 100)
     assert flash is not None and big is not None
     assert abs(big / flash - float(big_mult[1:]) / float(flash_mult[1:])) < 0.02
 
