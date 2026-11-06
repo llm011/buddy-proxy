@@ -307,13 +307,24 @@ def _exc_is_channel_block(exc: HTTPException) -> bool:
 
 
 def _mark_channel_block(provider_id: str) -> None:
-    """把整条通道标成「暂时被风控挡」。见 ``_CHANNEL_BLOCK_MODEL`` 的说明。"""
+    """把整条通道标成「暂时被风控挡」。见 ``_CHANNEL_BLOCK_MODEL`` 的说明。
+
+    刻意用 ``status=400``：``core.cooldown.mark_failed`` 只把 ``None``/``≥500``
+    记进机器级突发窗口，400 走普通短冷却（5 分钟、3 次升 1 小时）——渠道风控是
+    上游对**这个客户端**的判定，不是网络抖动，不该参与「多通道同时失败 = 机器级」
+    的统计。改 ``mark_failed`` 时别顺手把 4xx 也算进突发。
+    """
     cooldown_mod.mark_failed(provider_id, _CHANNEL_BLOCK_MODEL, status=400)
 
 
 def _target_blocked(provider_id: str, model: str) -> bool:
     """候选目标是否整条通道处于渠道封禁冷却中（:func:`_forward_with_order` 据此跳过）。"""
     return cooldown_mod.is_marked(provider_id, _CHANNEL_BLOCK_MODEL)
+
+
+def _channel_block_remaining(provider_id: str) -> int:
+    """该通道渠道封禁的剩余秒数（0 = 未被封）；供 UI 把封禁与普通冷却区分开。"""
+    return cooldown_mod.remaining(provider_id, _CHANNEL_BLOCK_MODEL)
 
 
 def _error_frame_to_exception(frame: bytes, protocol: str) -> HTTPException | None:

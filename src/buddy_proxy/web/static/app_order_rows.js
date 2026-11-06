@@ -28,9 +28,12 @@ function disabledProviderSet() {
   return new Set(((MODELS && MODELS.groups) || []).filter(g => g.disabled).map(g => g.id));
 }
 
-function orderRow(item, idx, marks, scope) {
+function orderRow(item, idx, marks, scope, blocked) {
   const id = `order-p-${String(scope).replace(/[^a-zA-Z0-9]/g, '_')}-${idx}`;
   const marksMap = marks || {};
+  // 渠道封禁（400+11128）挂在通道上而不是模型上：整条通道被风控挡时，点掉某一行
+  // 的冷却也没用，徽标必须说清是「渠道封禁」。点击清除的是 <provider>/* 那条。
+  const blockedS = (blocked || {})[String(item.provider || '').toLowerCase()] || 0;
   const provOff = disabledProviderSet().has(item.provider);
   const models = (ORDER_OPTIONS && ORDER_OPTIONS[item.provider]) || [];
   // 自由文本 + <datalist>：既能点选（用户要的「可以选」），又保留手输
@@ -60,7 +63,8 @@ function orderRow(item, idx, marks, scope) {
       ${multTxt ? `<span class="tag mult" title="积分倍率：${esc(mult)}（估算参考，非实际扣费）">${esc(multTxt)}</span>` : ''}
       ${provOff ? '<span class="tag bad" title="该通道已在模型页停用：这一档转发时会被跳过">通道已停用</span>' : ''}
       ${sup ? `<span class="tag" title="受账号限制，仅支持：${esc((sup.accounts || []).join('、'))}">部分账号</span>` : ''}
-      ${left ? `<span class="tag bad" style="cursor:pointer" title="冷却中，剩余 ${left}s；点击清除冷却，立即重试" onclick="clearOneMark('${esc(item.provider)}/${esc(item.model)}')">⏸ ${left}s</span>` : ''}
+      ${blockedS ? `<span class="tag bad" style="cursor:pointer" title="该通道被上游风控整条拦截（如 codebuddy 11128 unapproved channel），与模型无关，剩余 ${blockedS}s；点击清除，立即重试" onclick="clearOneMark('${esc(item.provider)}/*')">⛔ 渠道封禁 ${blockedS}s</span>` : ''}
+      ${left && !blockedS ? `<span class="tag bad" style="cursor:pointer" title="冷却中，剩余 ${left}s；点击清除冷却，立即重试" onclick="clearOneMark('${esc(item.provider)}/${esc(item.model)}')">⏸ ${left}s</span>` : ''}
       ${known ? '' : '<span class="tag bad" title="该通道目录里没有这个名字；保存时后端会报错">?</span>'}
     </span>
     <span class="order-btns">

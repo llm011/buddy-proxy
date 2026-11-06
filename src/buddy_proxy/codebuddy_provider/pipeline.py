@@ -135,6 +135,10 @@ def _build_dsml_tool_call_deltas(
 #: 放宽到与总时长上限同口径：慢启动交给总时长管，读超时只防「卡死不动」。
 #:
 #: 环境变量 ``BUDDY_UPSTREAM_READ_TIMEOUT`` 可覆盖（秒，>0），用于按需调回。
+#: **import 时求值一次**：改了环境变量要重启网关才生效（与其它 ``BUDDY_*`` 一致）。
+#: 别担心「卡死不动」：只挂着连接、一个字节都不来的情况由下面的空闲超时
+#: （``MAX_IDLE_DURATION``，默认 60 秒）兜住，读超时只负责「TCP 还活着但彻底没动静」
+#: 这一层兜底；两者同时存在，读超时调大不会让死连接拖满 30 分钟。
 def _env_read_timeout() -> float:
     """读 ``BUDDY_UPSTREAM_READ_TIMEOUT``；缺省/非法/非正数一律回落到 1800 秒。"""
     try:

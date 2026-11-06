@@ -422,6 +422,10 @@ async def _forward_with_order(
     """
     last_exc: HTTPException | None = None
     last_note = ""
+    # 本模型的候选里有几条被渠道封禁跳过。全部候选都因封禁被跳过时（last_exc 仍是
+    # None），末尾要报「渠道封禁」而不是笼统的「均处于冷却或时段限制」——后者会让
+    # 用户以为等冷却就好，而实际是客户端身份被上游拒了，得换通道/改客户端。
+    channel_skipped = 0
     for target in targets:
         provider_id, model = _split_target(target)
         if cooldown_mod.is_marked(provider_id, model):
@@ -433,6 +437,7 @@ async def _forward_with_order(
         if _target_blocked(provider_id, model):
             diagnostic("model_order_skip", model=key, target=target,
                        reason="channel_blocked")
+            channel_skipped += 1
             continue
         try:
             resp = await _dispatch_once(state, provider_id, model, body, protocol, original)
@@ -490,6 +495,20 @@ async def _forward_with_order(
 
     if last_exc is not None:
         raise last_exc
+    if channel_skipped:
+        # 不落回被挡的通道硬撞（那只会再吃一次 400），直接把这个事实报出来。
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": {
+                    "message": (f"模型 {key} 的候选里有 {channel_skipped} 条通道"
+                                "被上游风控整条拦截（如 400+11128 unapproved "
+                                "channel），且其余候选均不可用。请换一条通道，"
+                                "或调整客户端的请求特征后重试。"),
+                    "type": "channel_blocked",
+                }
+            },
+        )
     raise HTTPException(
         status_code=502,
         detail={

@@ -400,7 +400,11 @@ benefits, and unrelated model routes in the same process.
   refuses the client outright, so the router fails over and marks the whole
   channel (`_mark_channel_block`, cooldown key `<provider>/*`, independent of
   the model) so later requests skip it instead of bumping into the same 400
-  every time (2026-11-07, dsh).
+  every time (2026-11-07, dsh). The block is surfaced separately: the admin UI
+  reads `_channel_block_remaining` and renders `<provider>/*` marks as a
+  **channel blocked** badge rather than an ordinary cooldown, and when every
+  candidate is skipped for this reason the request fails fast as
+  `channel_blocked` instead of probing a blocked channel once more.
   Conversely, **programming errors are not failover material**: a `TypeError`
   escaping a provider is re-raised, not treated as an upstream outage, so a real
   bug surfaces as a 500 instead of being masked by a working fallback channel.

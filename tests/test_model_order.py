@@ -320,6 +320,22 @@ def test_400_channel_block_skips_blocked_channel_afterwards(tmp_path, monkeypatc
     assert len(b.calls) == 2
 
 
+def test_all_candidates_channel_blocked_reports_channel_blocked(tmp_path, monkeypatch):
+    """候选全被渠道封禁跳过时，报 ``channel_blocked`` 而不是笼统的「全部不可用」。"""
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="raise400_channel_block")
+    cooldown_mod._reset_for_tests()
+    cooldown_mod.mark_failed("pa", "*", status=400)
+    cooldown_mod.mark_failed("pb", "*", status=400)
+    r = _post(client)
+    assert r.status_code == 502, r.text
+    body = r.json()
+    detail = body.get("detail") or body.get("error") or body
+    assert detail["error"]["type"] == "channel_blocked", body
+    # 被挡的通道一次都不该再被派发
+    assert a.calls == [] and b.calls == []
+
+
 class _CodeBuddyishProvider(_Provider):
     """带首事件闸门的假通道：复刻 codebuddy ``_forward_once`` 的流式语义。
 

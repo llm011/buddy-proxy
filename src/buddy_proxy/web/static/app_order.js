@@ -112,6 +112,7 @@ function allModelOptions() {
 let ORDER_OPEN = new Set();     // 已展开的模型名
 let ORDER_DRAFT = {};           // 模型名 → [{provider, model}] 编辑中的草稿（未保存）
 let ORDER_PAGE_MARKS = {};      // 模型名 → {targetKey: 剩余秒数}
+let ORDER_PAGE_BLOCKED = {};    // 模型名 → {providerId: 渠道封禁剩余秒数}
 
 // 服务端下发的 targets（"p/m" 字符串数组）→ 行对象数组
 function orderTargetsToItems(targets) {
@@ -182,7 +183,8 @@ function orderPageCard(r) {
   // 草稿优先：用户正在编辑时不要被新拉到的数据覆盖
   const items = ORDER_DRAFT[key] || orderTargetsToItems(r.order.targets);
   const marks = ORDER_PAGE_MARKS[key] || {};
-  const markCount = Object.keys(marks).length;
+  // 渠道封禁挂在通道上、每个候选行都带一份，标题计数按「通道」去重，不按行累加
+  const markCount = Object.keys(marks).length + Object.keys(ORDER_PAGE_BLOCKED[key] || {}).length;
   // 标题里展示**通道的顺序**（`qoder → codebuddy`），这是这张卡片真正要回答的
   // 问题：请求这个模型时，依次找哪些上游。用草稿优先的 items 而不是服务端
   // targets，编辑中就能立刻看到改动后的样子。
@@ -254,10 +256,20 @@ function renderOrderRows(key) {
       const i = String(k.target).indexOf('/');
       if (i > 0) marks[orderKey(k.target.slice(0, i), k.target.slice(i + 1))] = k.cooldown_s;
     });
+    // 渠道封禁另存一张表：后端下发的是 `<provider>/*` 那条，与具体模型无关，
+    // 整张卡片每一档都要看到（orderRow 里据此把徽标写成「渠道封禁」）。
+    const blocked = {};
+    (row.marks || []).forEach(k => {
+      if (k.reason === 'channel_block') {
+        blocked[String(k.target.split('/')[0] || '').toLowerCase()] = k.cooldown_s;
+      }
+    });
     ORDER_PAGE_MARKS[key] = marks;
+    ORDER_PAGE_BLOCKED[key] = blocked;
   }
   el.innerHTML = items.length
-    ? items.map((it, i) => orderRow(it, i, ORDER_PAGE_MARKS[key] || {}, key)).join('')
+    ? items.map((it, i) => orderRow(it, i, ORDER_PAGE_MARKS[key] || {}, key,
+                                    ORDER_PAGE_BLOCKED[key] || {})).join('')
     : '<div class="muted" style="font-size:13px;padding:6px 0">暂无目标 —— 保存后恢复历史路由（按模型 id 自动匹配）。</div>';
   // 只补绑新产生的容器，绝不回头调 bindOrderPage（那会再触发本函数 → 递归）
   bindOrderRowEvents(el);
@@ -402,6 +414,7 @@ async function orderPageSave(key) {
       : `${key} 已恢复历史路由`);
     delete ORDER_DRAFT[key];
     delete ORDER_PAGE_MARKS[key];
+    delete ORDER_PAGE_BLOCKED[key];
     await refreshAll();
     renderOrderPage();
   } catch (e) { toast('保存失败: ' + e.message, true); }

@@ -958,6 +958,31 @@ def test_model_order_exposes_cooldown_marks(env):
         cooldown_mod._reset_for_tests()
 
 
+def test_model_order_reports_channel_block_separately(env):
+    """渠道封禁（mark (provider, "*")）要在 marks 里单列一条 ``reason=channel_block``。
+
+    与模型级冷却共用一份 ``marks`` 列表，但 ``reason`` 不同——前端据此把徽标写成
+    「渠道封禁」而不是普通冷却，免得用户以为是模型额度/上游抖动。
+    """
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    try:
+        env.client.post("/ui/api/model-order",
+                        json={"model": "fake-model",
+                              "targets": [{"provider": "fakestream",
+                                           "model": "fake-stream-model"}]})
+        cooldown_mod.mark_failed("fakestream", "*", status=400)
+        it = env.client.get("/ui/api/model-order").json()["items"][0]
+        blocked = [m for m in it["marks"] if m.get("reason") == "channel_block"]
+        assert [m["target"] for m in blocked] == ["fakestream/*"]
+        assert blocked[0]["cooldown_s"] > 0
+        # 不冒充模型级冷却：真实模型键上没有标记
+        assert all(m["target"] != "fakestream/fake-stream-model" for m in it["marks"])
+    finally:
+        cooldown_mod._reset_for_tests()
+
+
 def test_model_order_clear_removes_key_and_marks(env):
     """targets 为空 → 删键 + 清该模型的冷却标记。"""
     from buddy_proxy.core import cooldown as cooldown_mod
