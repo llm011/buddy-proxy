@@ -9,9 +9,10 @@
 ``docs/architecture.md`` 的结论是「必须 ``to_thread`` / ``wrap_future``」，但纪律
 靠人守就一定会漏。本测试把纪律变成 CI 可检查项：
 
-- 扫描 ``src/buddy_proxy/**/*.py`` 的 AST，找**最近的外层函数全部是 ``async def``**
-  的调用点（嵌套的同步 ``def`` 不算——它在自己的线程里跑，是否被 async 直接调用
-  静态看不出来，误报率高）；
+- 扫描 ``src/buddy_proxy/**/*.py`` 的 AST，找**最近的外层函数是 ``async def``**
+  的调用点。``async def`` 无论词法上嵌在哪（包括嵌在同步 ``def`` 里、随后被
+  ``asyncio.run`` 或注册成 ``on_startup`` 的），协程体都跑在主循环上，一样扫；
+  只把**同步 ``def`` 的函数体**排除掉——它是否被 async 直接调用静态看不出来；
 - 调用包在 ``to_thread`` / ``run_in_executor`` / ``run_sync`` / ``wrap_future`` 的
   实参里（含里面的 lambda）→ 合法，正是推荐写法；
 - 确实需要在 async 里阻塞的少数场景，在该行写 ``# async-ok: <理由>``。理由必填：
@@ -71,6 +72,12 @@ _WRAPPERS = frozenset({"to_thread", "run_in_executor", "run_sync", "wrap_future"
 _EXEMPT_MARKER = "# async-ok:"
 
 
+def _has_inline_exemption(line: str) -> bool:
+    """当前行是否带了**带理由**的 ``# async-ok:`` 豁免。"""
+    _, marker, reason = line.partition(_EXEMPT_MARKER)
+    return bool(marker) and bool(reason.strip())
+
+
 @dataclass(frozen=True)
 class Violation:
     path: str
@@ -125,7 +132,12 @@ def _scan(source: str, filename: str) -> list[Violation]:
     def walk(node: ast.AST, stack: tuple[bool, ...]) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, ast.AsyncFunctionDef):
-                walk(child, stack + (True,))
+                # async def 嵌在同步 def 里时也照样被 ``asyncio.run`` / 注册到
+                # ``on_startup`` 之类的地方跑在主循环上（``__main__`` 的
+                # ``_install_qoder_model_warmup``、doubao/mimo 的 ``_ready`` /
+                # ``_fetch`` 都是这个形状）。协程体在哪个循环里执行与词法嵌套
+                # 无关，所以这里新起一段全 true 的上下文，而不是继承外层。
+                walk(child, (True,))
             elif isinstance(child, ast.FunctionDef):
                 # 同步函数：它是否被 async 直接调用静态看不出来，不在这里判。
                 walk(child, stack + (False,))
@@ -144,7 +156,7 @@ def _scan(source: str, filename: str) -> list[Violation]:
                     if reason is not None:
                         lineno = child.lineno
                         line = lines[lineno - 1] if lineno <= len(lines) else ""
-                        if _EXEMPT_MARKER not in line:
+                        if not _has_inline_exemption(line):
                             found.append(Violation(filename, lineno, name, reason))
                 walk(child, stack)
 
@@ -222,6 +234,20 @@ def wait():
     assert _scan(good, "sample.py") == []
 
 
+def test_checker_catches_blocking_call_in_async_nested_in_sync_function():
+    """嵌在同步函数里的 ``async def`` 一样跑在主循环上（``asyncio.run`` /
+    ``on_startup``），不能因为词法嵌套就漏掉。"""
+    bad = """
+import time
+
+def make_handler():
+    async def handler():
+        time.sleep(1)
+    return handler
+"""
+    assert [v.call for v in _scan(bad, "sample.py")] == ["time.sleep"]
+
+
 def test_checker_requires_reason_for_inline_exemption():
     """``# async-ok:`` 豁免可以写，但必须真的在**同一行**、带上理由。"""
     marked = """
@@ -240,3 +266,12 @@ async def handler():
     time.sleep(1)
 """
     assert [v.call for v in _scan(wrong_line, "sample.py")] == ["time.sleep"]
+
+    empty_reason = """
+import time
+
+async def handler():
+    time.sleep(1)  # async-ok:
+"""
+    assert [v.call for v in _scan(empty_reason, "sample.py")] == ["time.sleep"]
+
