@@ -714,36 +714,45 @@ def convert_nonstream(data: dict[str, Any], protocol: str, original: dict[str, A
         return chat_completion_to_anthropic_message(data, original)
 
     elif protocol == "responses":
-        # 构建 content 数组（文本 + 工具调用）
-        content_parts = []
-        if content:
-            content_parts.append({"type": "output_text", "text": content})
+        # Responses 的 output 是**顶层 item 列表**：文本进 message item 的
+        # ``output_text`` 内容块，工具调用是独立的 ``function_call`` item。
+        # 此前把 function_call 塞进 message 的 content 里，既不是合法 content
+        # part 类型，也和流式路径（``ResponsesStreamConverter.finish``）的形状
+        # 对不上——严格客户端会整条 item 解析失败，和 output_text 那次回归同类。
+        response_id = "resp_" + uuid.uuid4().hex
+        output: list[dict[str, Any]] = []
 
-        # 处理工具调用
+        if content:
+            output.append({
+                "id": response_id + "_msg",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": content, "annotations": []}],
+            })
+
         for call in message.get("tool_calls") or []:
             fn = call.get("function") or {}
-            try:
-                arguments = json.loads(fn.get("arguments", "{}"))
-            except json.JSONDecodeError:
-                arguments = fn.get("arguments", "")
-
-            content_parts.append({
+            # 规范里 arguments 是 JSON **字符串**；聚合阶段可能已经是 dict，
+            # 这里统一序列化，与流式路径发出的增量字符串保持一致。
+            arguments = fn.get("arguments", "")
+            if not isinstance(arguments, str):
+                arguments = json.dumps(arguments, ensure_ascii=False)
+            item_id = str(call.get("id") or "") or f"fc_{uuid.uuid4().hex[:12]}"
+            output.append({
                 "type": "function_call",
-                "id": call.get("id", ""),
+                "id": item_id,
+                "call_id": item_id,
                 "name": fn.get("name", ""),
-                "arguments": arguments
+                "arguments": arguments,
             })
 
         return {
-            "id": "resp_" + uuid.uuid4().hex,
+            "id": response_id,
             "object": "response",
             "created_at": now_s(),
             "status": "completed",
-            "output": [{
-                "type": "message",
-                "role": "assistant",
-                "content": content_parts
-            }]
+            "output": output,
         }
 
     return data
