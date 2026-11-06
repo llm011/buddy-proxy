@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from typing import Any
@@ -125,6 +126,34 @@ def _build_dsml_tool_call_deltas(
     return deltas, start_index + len(chunk_tool_calls)
 
 
+#: 上游读超时（秒）。``httpx.Timeout(read=...)`` 是**两次读之间**的最大间隔，
+#: 不是总时长上限；总时长另有 ``MAX_TOTAL_DURATION``（默认 30 分钟）兜住。
+#:
+#: 2026-11-07 实测：dsh TUI 一条长上下文请求（28 个工具定义 + 几十条消息）从
+#: 发出到上游吐出**首个**字节可超过 300 秒，而这里读超时是 300 秒 → ``ReadTimeout``
+#: 被当成传输层失败，错误直接冒到客户端（形态与渠道拦截的 400 相似，但根因不同）。
+#: 放宽到与总时长上限同口径：慢启动交给总时长管，读超时只防「卡死不动」。
+#:
+#: 环境变量 ``BUDDY_UPSTREAM_READ_TIMEOUT`` 可覆盖（秒，>0），用于按需调回。
+def _env_read_timeout() -> float:
+    """读 ``BUDDY_UPSTREAM_READ_TIMEOUT``；缺省/非法/非正数一律回落到 1800 秒。"""
+    try:
+        value = float(os.environ.get("BUDDY_UPSTREAM_READ_TIMEOUT") or 1800)
+    except ValueError:
+        return 1800.0
+    return value if value > 0 else 1800.0
+
+
+UPSTREAM_READ_TIMEOUT_S = _env_read_timeout()
+#: 建连超时，保持不变（连不上是另一类故障，尽快暴露更能提示换档）。
+UPSTREAM_CONNECT_TIMEOUT_S = 30.0
+
+
+def _upstream_timeout() -> httpx.Timeout:
+    """上游 httpx 超时配置（流式与聚合共用，见 ``UPSTREAM_READ_TIMEOUT_S``）。"""
+    return httpx.Timeout(UPSTREAM_CONNECT_TIMEOUT_S, read=UPSTREAM_READ_TIMEOUT_S)
+
+
 async def stream_upstream(
     url: str,
     headers: dict[str, str],
@@ -180,8 +209,7 @@ async def stream_upstream(
     last_chunk_model: str = ""
     try:
         # 异步HTTP客户端：timeout=None 依赖TCP超时
-        # 使用合理的超时配置：连接超时30s，读取超时300s
-        timeout_config = httpx.Timeout(30.0, read=300.0)
+        timeout_config = _upstream_timeout()
         async with httpx.AsyncClient(timeout=timeout_config) as client:
             async with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code != 200:
@@ -590,8 +618,7 @@ async def collect_upstream(
     dsml_buffer = DSMLStreamBuffer()
 
     try:
-        # 使用合理的超时配置：连接超时30s，读取超时300s
-        timeout_config = httpx.Timeout(30.0, read=300.0)
+        timeout_config = _upstream_timeout()
         async with httpx.AsyncClient(timeout=timeout_config) as client:
             async with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code != 200:

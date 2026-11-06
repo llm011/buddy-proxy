@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import json
 import socket
 import time
 from types import SimpleNamespace
@@ -126,6 +127,33 @@ class _Provider(BaseProvider):
             raise exc
         if self.behavior == "raise400":
             raise HTTPException(status_code=400, detail="bad params")
+        if self.behavior == "raise400_channel_block":
+            # codebuddy 11128 在**流式**请求下的真实形态：首个 yield 是带内错误帧 →
+            # 首事件闸门还原成 HTTPException(400)，detail 里带着上游原文（业务码
+            # 11128 嵌在转义过的 details 字符串里，见 _error_frame_to_exception）。
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {
+                    "message": "Upstream API error (HTTP 400)",
+                    "type": "upstream_error",
+                    "details": ('{"detail":{"error":{"code":11128,"msg":"Illegal API '
+                                'invocation from an unapproved channel"}}}')}})
+        if self.behavior == "stream_channel_block":
+            # 完整链路：codebuddy 的 stream_upstream 撞非 200 时首个 yield 就是这个
+            # 错误块（pipeline.stream_upstream），首事件闸门必须在建
+            # StreamingResponse 之前把它还原成异常。
+            async def gen_blocked():
+                details = json.dumps(
+                    {"code": 11128,
+                     "msg": "Illegal API invocation from an unapproved channel"})
+                error_chunk = {
+                    "error": {"message": "Upstream API error (HTTP 400)",
+                              "type": "upstream_error",
+                              "code": 400,
+                              "details": details},
+                }
+                yield f"data: {json.dumps(error_chunk)}\n\n".encode()
+            return StreamingResponse(gen_blocked(), media_type="text/event-stream")
         if self.behavior == "json429":
             return JSONResponse(status_code=429,
                                 content={"error": {"message": "rate limited"}})
@@ -261,6 +289,83 @@ def test_non_retryable_http_exception_propagates(tmp_path, monkeypatch):
     assert r.status_code == 400
     assert b.calls == []
     assert cooldown_mod.is_marked("pa", "m1") is False, "确定性错误不该打冷却标记"
+
+
+def test_failover_on_400_channel_block(tmp_path, monkeypatch):
+    """**承重测试**：``400 + 11128``（渠道风控拦截）必须换档，而不是当确定性错误上抛。
+
+    2026-11-07 dsh 事故：codebuddy 从 02:05 起对 dsh 的**每条**请求回
+    ``400 {"code":11128,"msg":"Illegal API invocation from an unapproved channel"}``，
+    model_order 里配的六档候选一次都没试过——400 属"确定性错误"，第一档挡死即整模型
+    不可用，用户只看到 ``turn error · 400``。换账号/换模型都没用，换通道才是解法。
+    """
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="raise400_channel_block")
+    r = _post(client, stream=True)
+    assert r.status_code == 200, r.text
+    assert "from-pb" in r.text
+    assert len(a.calls) == 1 and len(b.calls) == 1
+
+
+def test_400_channel_block_skips_blocked_channel_afterwards(tmp_path, monkeypatch):
+    """一次渠道封禁后，同一条通道的其它模型也要跳过（拦截与模型无关）。"""
+    client, _, a, b = _client_env(tmp_path, monkeypatch,
+                                  ["pa/m1", "pb/m1"], a_behavior="raise400_channel_block")
+    assert _post(client).status_code == 200
+    assert cooldown_mod.is_marked("pa", "*"), "渠道封禁必须打标记"
+    assert cooldown_mod.is_marked("pa", "m1") is False, "不是模型级的冷却"
+    # 第二次请求：pa 整条通道被跳过，直接落到 pb，不再白撞一次 400
+    assert _post(client).status_code == 200
+    assert len(a.calls) == 1
+    assert len(b.calls) == 2
+
+
+class _CodeBuddyishProvider(_Provider):
+    """带首事件闸门的假通道：复刻 codebuddy ``_forward_once`` 的流式语义。
+
+    模型列表不含 ``m1``，请求因此走「兜底通道」（与线上的 codebuddy 一致）；
+    ``behavior`` 为 ``stream_channel_block`` 时，首个 yield 是错误帧 → 闸门在
+    建 ``StreamingResponse`` 之前把它还原成 ``HTTPException(400, 11128)``。
+    其它 behavior 照 ``_Provider`` 的 JSON 返回。
+    """
+
+    def __init__(self, pid, behavior="ok"):
+        super().__init__(pid, [], behavior)
+
+    async def forward(self, body, protocol, original=None):
+        self.calls.append(dict(body))
+        if self.behavior == "stream_channel_block":
+            from buddy_proxy.codebuddy_provider.provider import _error_frame_to_exception
+
+            details = json.dumps(
+                {"code": 11128,
+                 "msg": "Illegal API invocation from an unapproved channel"})
+            frame = (f"data: {json.dumps({'error': {'message': 'Upstream API error (HTTP 400)', 'type': 'upstream_error', 'code': 400, 'details': details}})}\n\n").encode()
+            exc = _error_frame_to_exception(frame, protocol)
+            assert exc is not None
+            raise exc
+        return await super().forward(body, protocol, original)
+
+
+def test_streaming_error_frame_triggers_failover(tmp_path, monkeypatch):
+    """流式请求下，首事件闸门还原出来的错误帧同样参与换档。
+
+    ``stream_upstream`` 撞非 200 时把错误做成**首个 yield**；provider 在返回
+    ``StreamingResponse`` 之前就把它还原成 ``HTTPException``（见
+    ``_error_frame_to_exception``），所以路由器看到的是「未提交即失败」，与抛异常
+    同一条路径——这是 dsh 事故那类「200 SSE 假成功」不会发生的根本原因。
+    """
+    cb = _CodeBuddyishProvider("codebuddy", "stream_channel_block")
+    pb = _Provider("pb", ["m1"], "ok")
+    state = _make_state({"pb": pb}, tmp_path, model_order={"m1": ["codebuddy/m1", "pb/m1"]})
+    monkeypatch.setattr(st, "proxy_state", state)
+    monkeypatch.setattr(
+        "buddy_proxy.codebuddy_provider.forward._default_codebuddy", cb)
+    client = TestClient(m.app)
+    r = _post(client, stream=True)
+    assert r.status_code == 200, r.text
+    assert "from-pb" in r.text
+    assert len(cb.calls) == 1 and len(pb.calls) == 1
 
 
 def test_programming_error_is_not_masked_as_failover(tmp_path, monkeypatch):

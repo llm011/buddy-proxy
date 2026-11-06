@@ -385,12 +385,22 @@ benefits, and unrelated model routes in the same process.
   to the client** — a retryable `HTTPException`, a transport-level exception
   (`_RETRYABLE_EXC`: `httpx.HTTPError` / `OSError`), or a non-2xx
   `JSONResponse`. A `StreamingResponse` is never replayed (double-billing risk;
-  same invariant as `trae/pat/chat.py`). Known blind spot: codebuddy reports
-  upstream stream errors as an *in-band* error chunk, so its stream failures
-  never fail over. `metrics.SSEErrorExtractor` now spots that chunk in
-  `observability._metrics_stream` and records the request as failed, so the
-  metrics no longer show a false green — but the *routing* behaviour is
-  unchanged (a stream that already started is still never replayed).
+  same invariant as `trae/pat/chat.py`). CodeBuddy reports upstream stream
+  errors as an *in-band* error chunk, but `CodeBuddyProvider._forward_once`
+  has a first-event gate: it drives the generator to its first yield and
+  unwraps an error frame (`_error_frame_to_exception`) into an `HTTPException`
+  **before** building the `StreamingResponse`, so such failures are ordinary
+  pre-commit failures and do fail over. Only errors arriving after a real first
+  chunk are never retried (same invariant as `trae/pat/chat.py`);
+  `metrics.SSEErrorExtractor` still records that chunk as a failed request in
+  `observability._metrics_stream`, so metrics never show a false green.
+  A 400 is deterministic and re-raised, with one exception: a **channel block**
+  — `400` whose body carries business code `11128`
+  (`Illegal API invocation from an unapproved channel`) means this channel
+  refuses the client outright, so the router fails over and marks the whole
+  channel (`_mark_channel_block`, cooldown key `<provider>/*`, independent of
+  the model) so later requests skip it instead of bumping into the same 400
+  every time (2026-11-07, dsh).
   Conversely, **programming errors are not failover material**: a `TypeError`
   escaping a provider is re-raised, not treated as an upstream outage, so a real
   bug surfaces as a 500 instead of being masked by a working fallback channel.
@@ -715,4 +725,6 @@ quietly rotting into a list of rules that only *used* to be enforced.
 | I20 | Reorder and rename go through the channel's single enumeration entry point first, so legacy single-account migration and self-heal run before validation; the generic store does not know channel migrations. | `*/credentials.py` (`list_accounts()` before `AccountStore.reorder` / `rename`) | `tests/test_antigravity_login.py::test_reorder_accounts_runs_legacy_migration_first` |
 | I21 | `settings.json` lives in the state root: moving `BUDDY_PROXY_STATE_DIR` moves settings with accounts, metrics and logs, so an isolated instance never reads or writes the primary profile's settings. An explicit `BUDDY_PROXY_SETTINGS` still wins, and a state-dir-only setup copies the legacy file in on first access. | `core/settings.py` (`settings_path`) | `tests/test_settings_path.py::test_settings_follow_state_dir` |
 | I22 | The legacy `settings.json` migration is atomic: a failed or concurrent copy never leaves a half-written target that `target.exists()` would later trust — otherwise the next `load_settings()` reads `{}` and the following `save_settings()` overwrites the whole profile with one key. | `core/settings.py` (`_migrate_settings`) | `tests/test_settings_path.py::test_failed_migration_leaves_no_partial_target` |
+| I23 | A `400` carrying channel-block business code `11128` fails over and cools the whole channel (model-independent `*` key), while any other `400` is still returned unchanged: the first is "this channel refuses the client", the second is "this request is wrong". | `codebuddy_provider/forward.py` (`_exc_is_channel_block`, `_mark_channel_block`, `_target_blocked`) | `tests/test_model_order.py::test_failover_on_400_channel_block` |
+| I24 | The upstream read timeout is a stall detector, never the slow-start budget: it must stay well above realistic time-to-first-byte for long contexts, and total duration is capped separately. | `codebuddy_provider/pipeline.py` (`UPSTREAM_READ_TIMEOUT_S`) | `tests/test_codebuddy_failover.py::test_upstream_read_timeout_is_long_enough_for_slow_first_token` |
 
