@@ -25,22 +25,25 @@ device token（``dt-``）有效期约 30 天，配 ``drt-`` refresh token 可续
 from __future__ import annotations
 
 import base64
-import fcntl
 import hashlib
 import json
 import logging
 import os
-import re
 import secrets
 import threading
 import time
 import urllib.parse
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import httpx
 
+from buddy_proxy.core.account_store import (
+    AccountStore,
+    atomic_write_json,
+    is_valid_account_id,
+)
 from buddy_proxy.core.paths import state_dir
 
 from .config import CLIENT_ID, Region, resolve_region, with_cached_endpoints
@@ -66,8 +69,8 @@ POLL_TIMEOUT_S = 600.0
 #: 账号数上限（与 kimi/antigravity 同值：手动授权/导入的操作，8 个远超正常用量）。
 _MAX_ACCOUNTS = 8
 
-#: account_id 形状：既是文件名（无 ``/``，天然防路径穿越）也是 UI 账号坐标。
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._@-]{0,63}$")
+#: 这份凭据还能不能用的判据字段（读 / 自愈 / upsert 共用同一个）。
+_CRED_REQUIRED_FIELD = "token"
 
 
 class AuthError(RuntimeError):
@@ -134,14 +137,12 @@ def qoder_state_dir() -> Path:
 
 
 def index_path() -> Path:
-    return qoder_state_dir() / "index.json"
+    return _STORE.index_path()
 
 
 def account_cred_path(account_id: str) -> Path:
     """单账号 cred 文件路径。id 形状在生成处已校验，这里再防一道手滑。"""
-    if not _ID_RE.fullmatch(account_id):
-        raise ValueError(f"非法账号 id: {account_id!r}")
-    return qoder_state_dir() / f"{account_id}.json"
+    return _STORE.cred_path(account_id)
 
 
 def legacy_auth_state_path() -> Path:
@@ -155,74 +156,25 @@ def legacy_auth_state_path() -> Path:
 # ---------------------------------------------------------------------------
 # 索引读写（全部在 _index_lock + 跨进程 flock 下进行）
 # ---------------------------------------------------------------------------
+#
+# 这层已下沉到 ``core/account_store``（trae/qoder/codex 三处逐字重复）：0600 原子
+# 写、进程内锁 + flock、自愈、priority 排序与重排校验只有一份实现。下面这些名
+# 字是旧内部调用点（``provider.py`` 回填套餐名、测试）的兼容入口。
 
-_index_lock = threading.Lock()
+#: 账号索引 + 每账号 0600 凭据文件的共同底座。
+_STORE = AccountStore(
+    label=STATE_DIR_NAME,
+    state_dir_fn=qoder_state_dir,
+    max_accounts=_MAX_ACCOUNTS,
+)
 
-
-class _FileLock:
-    """跨进程文件锁（fcntl.flock，包在 index.lock 上）。
-
-    与 kimi 同理由：网关进程和 CLI（``buddy login qoder`` / 面板操作是另一
-    个进程入口）会同时读-改-写同一个 index.json，各自拿旧快照写回就会丢更新。
-    flock 让读-改-写整体成为一个跨进程临界区；flock 与进程内锁可组合（同一
-    进程重复 flock 同一文件会被内核拒绝，故必须先拿进程内锁再拿文件锁）。
-    """
-
-    def __init__(self, path: Path):
-        self._path = path
-        self._fh = None
-
-    def __enter__(self) -> "_FileLock":
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = open(self._path, "a+")  # noqa: SIM115 - 句柄在 __exit__ 关
-        fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
-        return self
-
-    def __exit__(self, *exc: object) -> bool:
-        if self._fh is not None:
-            try:
-                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
-            finally:
-                self._fh.close()
-        return False
-
-
-def _index_file_lock() -> _FileLock:
-    return _FileLock(qoder_state_dir() / "index.lock")
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
-    """0600 原子写（临时文件 + rename，与 antigravity/kimi 同款）。
-
-    先建 tmp 再写内容：``write_text`` 会以默认 0644 创建文件，内容（token）
-    在 ``chmod`` 之前就已落盘，同机其它用户在那个窗口里读得到。
-    ``os.open`` 直接带 0600 建文件，窗口就不存在了。
-    """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
-        tmp.replace(path)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+_index_lock = _STORE.lock
+_index_file_lock = _STORE.file_lock
+_atomic_write_json = atomic_write_json
 
 
 def _read_index() -> dict[str, Any]:
-    try:
-        data = json.loads(index_path().read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def _index_payload(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    return {"version": 1, "accounts": entries}
+    return _STORE.read_index()
 
 
 # ---------------------------------------------------------------------------
@@ -283,13 +235,13 @@ def derive_account_id(cred: dict[str, Any]) -> str:
     退 uid；再退 ``acct-<sha256(token)[:12]>``——保证任何导入路径都落得了盘。
     """
     existing = str(cred.get("account_id") or "").strip()
-    if existing and _ID_RE.fullmatch(existing):
+    if existing and is_valid_account_id(existing):
         return existing
     email = str(cred.get("email") or "").strip()
-    if email and _ID_RE.fullmatch(email):
+    if email and is_valid_account_id(email):
         return email
     uid = str(cred.get("uid") or "").strip()
-    if uid and _ID_RE.fullmatch(uid):
+    if uid and is_valid_account_id(uid):
         return uid
     digest = hashlib.sha256(str(cred.get("token") or "").encode()).hexdigest()[:12]
     return f"acct-{digest}"
@@ -344,48 +296,30 @@ def list_accounts() -> list[AccountRef]:
     唯一的账号枚举入口：历史单账号迁移 + 索引自愈（cred 文件被删/损坏的
     条目剔除——删文件即退出该账号）挂在这里，login/forward/quota/UI 走同一个口。
     """
-    with _index_lock, _index_file_lock():
+    with _STORE.guard():
         _migrate_legacy_unlocked()
-        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
-        kept: list[AccountRef] = []
-        changed = False
-        for e in entries:
-            aid = str(e.get("id") or "")
-            if not _ID_RE.fullmatch(aid):
-                changed = True
-                continue
-            if load_account_cred(aid) is None:
-                changed = True
-                log.warning("qoder: 账号 %s 的凭据文件缺失或损坏，已从账号清单剔除", aid)
-                continue
-            kept.append(AccountRef(
-                id=aid,
-                email=str(e.get("email") or ""),
-                name=str(e.get("name") or ""),
-                region=str(e.get("region") or "") or "cn",
-                priority=int(e.get("priority") or 0),
-                added_at=int(e.get("added_at") or 0),
-                alias=str(e.get("alias") or ""),
-            ))
-        if changed:
-            _atomic_write_json(index_path(), _index_payload([asdict(a) for a in kept]))
-        kept.sort(key=lambda a: (a.priority, a.added_at, a.id))
-        return kept
+        entries = _STORE.list_entries_locked(
+            required_field=_CRED_REQUIRED_FIELD, logger=log
+        )
+    return [_account_ref(entry) for entry in entries]
+
+
+def _account_ref(entry: dict[str, Any]) -> AccountRef:
+    """索引条目 → 只含非秘密字段的 ``AccountRef``（UI/health 直接用）。"""
+    return AccountRef(
+        id=str(entry.get("id") or ""),
+        email=str(entry.get("email") or ""),
+        name=str(entry.get("name") or ""),
+        region=str(entry.get("region") or "") or "cn",
+        priority=int(entry.get("priority") or 0),
+        added_at=int(entry.get("added_at") or 0),
+        alias=str(entry.get("alias") or ""),
+    )
 
 
 def load_account_cred(account_id: str) -> dict[str, Any] | None:
     """读单账号 cred；没有/损坏/缺 token 返回 None。"""
-    if not _ID_RE.fullmatch(account_id):
-        return None
-    try:
-        data = json.loads(account_cred_path(account_id).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    if not str(data.get("token") or "").strip():
-        return None
-    return data
+    return _STORE.load_cred(account_id, required_field=_CRED_REQUIRED_FIELD)
 
 
 def save_account_cred(cred: dict[str, Any]) -> AccountRef:
@@ -395,85 +329,43 @@ def save_account_cred(cred: dict[str, Any]) -> AccountRef:
     （priority/added_at 不变——重新登录不改变 failover 顺位），全不命中追加为
     新账号（priority 排到最后）。cred 缺 account_id 时现场生成并写回原 dict。
     """
-    with _index_lock, _index_file_lock():
-        return _save_account_cred_unlocked(cred)
+    with _STORE.guard():
+        return _account_ref(_save_account_cred_unlocked(cred))
 
 
-def _save_account_cred_unlocked(cred: dict[str, Any]) -> AccountRef:
-    entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
-    aid = str(cred.get("account_id") or "")
+def _save_account_cred_unlocked(cred: dict[str, Any]) -> dict[str, Any]:
+    """``save_account_cred`` 的锁内版本（历史迁移也走这里，返回索引条目）。"""
+    return _STORE.upsert_locked(
+        cred,
+        required_field=_CRED_REQUIRED_FIELD,
+        derive_id=derive_account_id,
+        identity_fields=("email", "refresh_token"),
+        entry_fields=_entry_fields,
+        error=AuthError,
+    )
 
-    def _find_existing() -> dict[str, Any] | None:
-        by_id = next((e for e in entries if str(e.get("id") or "") == aid), None)
-        if by_id is not None:
-            return by_id
-        email = str(cred.get("email") or "").strip()
-        rt = str(cred.get("refresh_token") or "")
-        if not email and not rt:
-            return None
-        for e in entries:
-            other = load_account_cred(str(e.get("id") or "")) or {}
-            if email and str(other.get("email") or "").strip() == email:
-                return e
-            if rt and other.get("refresh_token") == rt:
-                return e
-        return None
 
-    target = _find_existing()
-    if target is None and not _ID_RE.fullmatch(aid):
-        # cred 没带合法 account_id（device flow 首次落盘就是这种）时现场派生。
-        # 派生用的 email/uid 是稳定字段，可能得到与既有账号相同的 id——补一次
-        # 按派生 id 的查找，否则同一 account_id 会被追加成第二个顺位。
-        cred["account_id"] = derive_account_id(cred)  # 就地写回，调用方可见
-        aid = str(cred["account_id"])
-        target = next((e for e in entries if str(e.get("id") or "") == aid), None)
-    if target is not None:
-        aid = str(target["id"])
-        cred["account_id"] = aid
+def _entry_fields(cred: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
+    """upsert 时要写进索引条目的通道字段（``previous`` 为空表示新账号）。"""
+    prev = previous or {}
+    region = str(cred.get("region") or "")
+    if previous is None:
+        # 新账号：没带 region 就按当前解析出的默认区（与改造前一致）
+        region = region or resolve_region().key
     else:
-        if not _ID_RE.fullmatch(aid):
-            cred["account_id"] = derive_account_id(cred)
-            aid = str(cred["account_id"])
-        if len(entries) >= _MAX_ACCOUNTS:
-            raise AuthError(
-                f"qoder 账号数已达上限 {_MAX_ACCOUNTS}，"
-                f"请先在管理页删除不用的账号")
-        ref = AccountRef(
-            id=aid,
-            email=str(cred.get("email") or ""),
-            name=str(cred.get("name") or ""),
-            region=str(cred.get("region") or "") or resolve_region().key,
-            priority=max((int(e.get("priority") or 0) for e in entries), default=-1) + 1,
-            added_at=int(time.time()),
-        )
-        entries.append(asdict(ref))
-        target = asdict(ref)
-    target["email"] = str(cred.get("email") or target.get("email") or "")
-    target["name"] = str(cred.get("name") or target.get("name") or "")
-    target["region"] = str(cred.get("region") or target.get("region") or "") or "cn"
-    # alias 不在 upsert 覆写之列：它是用户手起的本地别名，重登不改
-    ref = AccountRef(id=aid, email=target["email"], name=target["name"],
-                     region=target["region"], priority=int(target.get("priority") or 0),
-                     added_at=int(target.get("added_at") or 0),
-                     alias=str(target.get("alias") or ""))
-    _atomic_write_json(account_cred_path(ref.id), dict(cred))
-    _atomic_write_json(index_path(), _index_payload(entries))
-    return ref
+        # 重登同号：已有账号的 region 优先，别让一次没带 region 的刷新把
+        # 海外账号改判成 CN
+        region = region or str(prev.get("region") or "") or "cn"
+    return {
+        "email": str(cred.get("email") or prev.get("email") or ""),
+        "name": str(cred.get("name") or prev.get("name") or ""),
+        "region": region,
+    }
 
 
 def delete_account(account_id: str) -> bool:
     """移除一个账号（索引条目 + cred 文件）；返回是否真的删了。"""
-    with _index_lock, _index_file_lock():
-        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
-        kept = [e for e in entries if str(e.get("id") or "") != account_id]
-        if len(kept) == len(entries):
-            return False
-        _atomic_write_json(index_path(), _index_payload(kept))
-    try:
-        account_cred_path(account_id).unlink()
-    except OSError:
-        pass
-    return True
+    return _STORE.delete(account_id)
 
 
 def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
@@ -482,18 +374,8 @@ def reorder_accounts(ordered_ids: list[str]) -> list[AccountRef]:
     入参必须是**完整**的当前账号 id 列表（少一个/多一个/重复即拒绝）；
     priority 重写为 0..n-1，added_at 原样保留。返回重排后的 list_accounts()。
     """
-    list_accounts()  # 先走唯一的枚举入口：自愈完再重排，别在残缺索引上动刀
-    with _index_lock, _index_file_lock():
-        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
-        current = [str(e.get("id") or "") for e in entries]
-        if sorted(ordered_ids) != sorted(current) or len(set(ordered_ids)) != len(ordered_ids):
-            raise ValueError(
-                f"重排必须提交完整的账号 id 列表（当前 {len(current)} 个，"
-                f"收到 {len(ordered_ids)} 个）")
-        rank = {aid: i for i, aid in enumerate(ordered_ids)}
-        for e in entries:
-            e["priority"] = rank[str(e.get("id") or "")]
-        _atomic_write_json(index_path(), _index_payload(entries))
+    list_accounts()  # 先走唯一的枚举入口：迁移/自愈完再重排，别在残缺索引上动刀
+    _STORE.reorder(ordered_ids)
     return list_accounts()
 
 
@@ -504,16 +386,8 @@ def rename_account(account_id: str, alias: str) -> list[AccountRef]:
     priority/added_at 都不动。``alias`` 去首尾空白；空串 = 清除别名，
     显示回退默认名。账号不存在抛 ``ValueError``。返回改后的 list_accounts()。
     """
-    aid = str(account_id or "")
-    text = str(alias or "").strip()
-    list_accounts()  # 先走唯一的枚举入口：自愈完再改，别在残缺索引上动刀
-    with _index_lock, _index_file_lock():
-        entries = [e for e in (_read_index().get("accounts") or []) if isinstance(e, dict)]
-        target = next((e for e in entries if str(e.get("id") or "") == aid), None)
-        if target is None:
-            raise ValueError(f"账号 {aid} 不存在")
-        target["alias"] = text
-        _atomic_write_json(index_path(), _index_payload(entries))
+    list_accounts()  # 先走唯一的枚举入口：迁移/自愈完再改，别在残缺索引上动刀
+    _STORE.rename(account_id, alias)
     return list_accounts()
 
 
@@ -542,7 +416,7 @@ def _decrypt_safestorage(blob: bytes) -> bytes | None:
     调用方需容忍（这正是 device flow 存在的意义）。
     """
     try:
-        from buddy_proxy.trae.aes_pure import aes_cbc_decrypt
+        from buddy_proxy.core.aes_pure import aes_cbc_decrypt
     except ImportError:  # pragma: no cover - 环境异常
         return None
     for password in _SAFESTORAGE_PASSWORDS:

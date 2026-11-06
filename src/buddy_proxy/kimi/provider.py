@@ -35,6 +35,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
+from ..core.account_store import quota_epoch_from
 from ..core.metrics import ACCOUNT_META
 from . import failover
 from .credentials import (
@@ -586,11 +587,7 @@ class KimiProvider(BaseProvider):
         后，旧的单账号快照还会在缓存里顶满 5 分钟（antigravity #71 实测过的
         bug）。键里带上账号指纹后，账号列表一变键就变，旧缓存自然失效。
         """
-        try:
-            accts = list_accounts()
-        except Exception:  # noqa: BLE001 - 拿不到就退回常量键，宁可多查不强撑旧值
-            return "unknown"
-        return ",".join(f"{a.id}#{a.priority}" for a in accts) or "empty"
+        return quota_epoch_from(list_accounts)
 
     def _quota_one(
         self, acct: Any, index: int, *, multi: bool

@@ -1,8 +1,9 @@
 """管理页设置持久化：默认启用模型、兜底通道覆盖等。
 
-存放在 ``~/.buddy-proxy/settings.json``（可用 ``BUDDY_PROXY_SETTINGS`` 覆盖），
-机器本地配置，不进仓库。启动时由 ``__main__`` 加载进 :class:`ProxyState`，
-管理页 POST /ui/api/settings 修改后立即写回并热更新到运行态。
+默认落在状态目录（``BUDDY_PROXY_STATE_DIR``，缺省 ``~/.buddy-proxy/``）下的
+``settings.json``，可用 ``BUDDY_PROXY_SETTINGS`` 单独指向别的文件，机器本地配置，
+不进仓库。启动时由 ``__main__`` 加载进 :class:`ProxyState`，管理页
+POST /ui/api/settings 修改后立即写回并热更新到运行态。
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import tempfile
 import threading
 import time
@@ -18,8 +20,12 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-_DEFAULT_PATH = "~/.buddy-proxy/settings.json"
+from buddy_proxy.core import paths
+
 _SETTINGS_LOCK = threading.Lock()
+#: 遗留设置迁移的锁：只包住「检查 + 原子复制」，不参与日常读写，
+#: 避免与 :data:`_SETTINGS_LOCK` 的获取顺序缠在一起（见 ``_migrate_settings``）。
+_MIGRATE_LOCK = threading.Lock()
 
 # 时段判定统一用上海时区，与 trae/pat/cooldown._next_day_timestamp 的日界一致。
 _SCHEDULE_TZ = ZoneInfo("Asia/Shanghai")
@@ -31,9 +37,68 @@ _MAX_ORDER_TARGETS = 8
 
 
 def settings_path() -> pathlib.Path:
-    return pathlib.Path(
-        os.getenv("BUDDY_PROXY_SETTINGS", _DEFAULT_PATH)
-    ).expanduser()
+    """设置文件路径：``BUDDY_PROXY_SETTINGS`` > 状态目录 > 默认 ``~/.buddy-proxy``。
+
+    状态目录是运行时的唯一根（与 ``paths.state_file("settings.json")`` 同一约定），
+    ``BUDDY_PROXY_STATE_DIR`` 挪走它时设置必须跟着走。这里曾经写死
+    ``~/.buddy-proxy/settings.json``：用状态目录起第二个实例（隔离/测试/多套配置）
+    时，设置仍读写主配置——隔离形同虚设，HOME 只读时连「改默认模型」都会 500。
+
+    迁移：只设了状态目录、旧位置已有 settings.json 而新位置没有时，首次访问复制
+    过去（copy 而非 move，与 ``paths.state_file`` 的遗留迁移语义一致）；复制失败
+    就退回旧路径，升级不会把设置弄丢。显式 ``BUDDY_PROXY_SETTINGS`` 永远优先。
+    复制本身是原子的（见 :func:`_migrate_settings`）：半份 JSON 会被
+    ``load_settings`` 读成 ``{}``，接着第一次保存就把旧配置整个覆盖掉。
+    """
+    override = os.getenv("BUDDY_PROXY_SETTINGS")
+    if override:
+        return pathlib.Path(override).expanduser()
+
+    target = paths.state_dir() / "settings.json"
+    if target.exists() or not os.environ.get("BUDDY_PROXY_STATE_DIR"):
+        return target
+
+    legacy = pathlib.Path.home() / ".buddy-proxy" / "settings.json"
+    if not legacy.exists():
+        return target
+    return _migrate_settings(legacy, target)
+
+
+def _migrate_settings(legacy: pathlib.Path, target: pathlib.Path) -> pathlib.Path:
+    """把旧位置的 settings.json 原子复制到状态目录，失败退回旧路径。
+
+    先写同目录临时文件、``chmod 0600``、再 ``os.replace`` 到目标：``os.replace``
+    同文件系统内是原子的，读者要么看到完整旧文件、要么看到完整新文件。直接
+    ``copy2`` 到目标会先截断再写，中途失败（磁盘满、SIGKILL、chmod 不生效）会
+    留下半份 JSON——而 ``settings_path()`` 的 ``target.exists()`` 闸门会让它
+    永久生效，``load_settings`` 读成 ``{}``，下一次 ``save_settings`` 的
+    ``{**previous, **update}`` 就把迁移过来的配置整个抹掉。
+
+    ``_MIGRATE_LOCK`` 挡住同进程并发首启（管理页多线程）；跨进程的并发复制
+    各自写自己的临时文件，最后 ``os.replace`` 谁后落盘都得到完整内容。
+    """
+    with _MIGRATE_LOCK:
+        if target.exists():  # 等锁期间别的线程已经迁完
+            return target
+        tmp_name = ""
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f".{target.name}.", suffix=".tmp", dir=target.parent
+            )
+            os.close(fd)
+            shutil.copy2(legacy, tmp_name)
+            os.chmod(tmp_name, 0o600)
+            os.replace(tmp_name, target)
+        except OSError:
+            # 失败不留半成品：清理临时文件，按老位置继续读写。
+            if tmp_name:
+                try:
+                    pathlib.Path(tmp_name).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return legacy
+    return target
 
 
 def load_settings() -> dict[str, Any]:

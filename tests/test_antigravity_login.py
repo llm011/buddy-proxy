@@ -139,6 +139,19 @@ def test_reorder_accounts_rewrites_priority(tmp_path, monkeypatch):
     assert [r.id for r in creds.list_accounts()] == ["u2@x.com", "u0@x.com", "u1@x.com"]
 
 
+def test_reorder_accounts_runs_legacy_migration_first(tmp_path, monkeypatch):
+    """重排前必须先走唯一枚举入口：否则升级后第一次操作会「看不见」迁移账号。
+
+    改造前 ``reorder_accounts`` 开头调 ``list_accounts()``，迁移 + 自愈都发生在
+    那里；只调底座 ``reorder`` 会对着空索引校验，报「当前 0 个」。
+    """
+    from buddy_proxy.antigravity import credentials as creds
+
+    (tmp_path / "antigravity_oauth.json").write_text(json.dumps(_cred()))
+    refs = creds.reorder_accounts(["u@x.com"])
+    assert [(r.id, r.priority) for r in refs] == [("u@x.com", 0)]
+
+
 def test_reorder_accounts_rejects_incomplete_or_duplicate(tmp_path, monkeypatch):
     from buddy_proxy.antigravity import credentials as creds
 

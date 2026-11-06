@@ -12,8 +12,10 @@ backward-compat shims — imports point at the new paths):
 src/buddy_proxy/
   __main__.py            # CLI entry + repo-root resolution (parents[2])
   trae_provider.py       # published trae-cli entrypoint + trae façade
-  core/                  # state, settings, paths, logging_setup,
-                         #   metrics (aggregation/persistence), metrics_protocol
+  core/                  # state, settings, paths, logging_setup, aes_pure (纯 Python
+                         #   AES, shared by trae + qoder), account_store (多账号索引 +
+                         #   0600 凭据文件 + flock 的共同底座), metrics
+                         #   (aggregation/persistence), metrics_protocol
                          #   (usage normalization + SSE extraction),
                          #   credit_estimate, desensitize, checkin, errors
   protocols/             # anthropic_adapter, responses_adapter,
@@ -35,9 +37,50 @@ src/buddy_proxy/
                          #   checkin = daily sign-in + points quota/usage-records, provider)
 ```
 
-`core.state` imports `CodeBuddyClient` / `BaseProvider` only under
-`TYPE_CHECKING` — importing them at runtime would recreate a
-`codebuddy_provider` package → `observability` → `core.state` import cycle.
+`core.state` imports `providers.base` at runtime (the contract only depends on the
+stdlib + fastapi, so no cycle) and types the CodeBuddy client as `Any`: importing
+`codebuddy_provider.client` would run the package `__init__` → `observability` →
+`core.state` and recreate the cycle. There is no `if TYPE_CHECKING:` fallback any
+more — that switch only moved the problem to whoever might move the import out of
+the block. The layering rule is enforced by `tests/test_module_boundaries.py`
+instead (see *Module boundaries*).
+
+## Module boundaries
+
+The layers are not just a diagram — `tests/test_module_boundaries.py` parses the AST
+of every module and fails the build when a boundary is crossed:
+
+- **Leaf modules** (`core/cooldown.py`, `core/account_failover.py`,
+  `core/account_store.py`, `core/aes_pure.py`, `core/paths.py`, `core/errors.py`,
+  `asyncutil.py`, …) may import only the standard library. Anything importable from
+  every layer must not depend back on any of them.
+- **`core`** must not import a channel package at module level. Reading channel
+  constants is done inside a function with a fallback (`core/credit_estimate.py` is
+  the only current case), so a missing channel can never take the core down at import.
+- **Channels** (`trae`, `qoder`, `gemini`, `codex`, `doubao`, …) must not import each
+  other at module level. Cross-channel coupling is allowed, but each pair must be
+  listed in `_DECLARED_COUPLING` with a reason and marked `module` or `lazy`; the test
+  compares the list to reality in both directions, so new coupling forces a decision
+  and deleted coupling removes the stale reason. Shared code with no channel meaning
+  is moved down into `core` instead (this is how `core/aes_pure.py` came to exist).
+- **`protocols`** depends only on `core` / `protocols`.
+- **`web`** is the entry layer: only `web` itself and `__main__.py` may import it.
+
+`providers.base` is the `BaseProvider` contract, not a channel, so every channel may
+import it without registering a coupling.
+
+## Event-loop discipline
+
+The proxy is one process with one asyncio loop shared by HTTP requests, streaming
+forwards and the admin UI. A synchronous `httpx` / `urllib` / `time.sleep` /
+`subprocess` call inside an `async def` does not raise — it freezes every in-flight
+request until it returns, which looks like "the proxy is up but wedged".
+`tests/test_event_loop_discipline.py` scans the AST for those calls; wrap them in
+`await asyncio.to_thread(...)` / `run_in_executor(...)`, or, when blocking is truly
+required, write `# async-ok: <reason>` on the same line. The check covers module-level
+verbs and known sync APIs; instance-method calls (`client.get(...)`) and indirect
+blocking through sync helpers remain review territory.
+
 
 ## Request path
 
@@ -129,22 +172,36 @@ workers, or explicit provider shutdown lifecycles.
 
 ## Multi-account state
 
-Each multi-account channel (trae / kimi / qoder / antigravity) keeps its own
-state dir `~/.buddy-proxy/<ch>/` with `index.json` (the account list) plus one
-0600 credential file per account. `AccountRef` in each `credentials.py` is the
-source of truth for index fields; **every** construction site must pass fields
-as keywords and carry `alias` (the display name edited via the admin ✎ button,
-default `""` = fall back to the default name). Two invariants protect it:
+Each multi-account channel (trae / kimi / qoder / antigravity / codex /
+codebuddy) keeps its own state dir `~/.buddy-proxy/<ch>/` with `index.json` (the
+account list) plus one 0600 credential file per account. The storage layer —
+0600 atomic write, in-process lock + `flock`, self-heal, priority ordering,
+reorder validation — lives in `core/account_store.AccountStore` and is used by
+**all six** channels. What stays in each `credentials.py` is only the channel's
+own semantics: `derive_id`, which fields mean "same account"
+(`identity_fields`), whether identity matching is scoped to a subset of entries
+(`identity_scope` — codebuddy keeps the CN and Global account systems apart even
+when their uids collide), and which extra fields the index entry stores
+(`entry_fields`). `AccountRef` in each `credentials.py` is the
+source of truth for what the UI/logs see; **every** construction site must pass
+fields as keywords and carry `alias` (the display name edited via the admin ✎
+button, default `""` = fall back to the default name). Three invariants protect it:
 
-- The index self-heal rewrite inside `list_accounts()` (which rebuilds
-  `AccountRef` from raw entries and rewrites the file) is the **only** place
-  that re-creates fields from an entry dict. Dropping a field there silently
-  erases it on the next enumeration — when adding an index field, that
-  `kept.append(AccountRef(...))` site is the one that gets missed.
+- The index self-heal inside `list_entries_locked()` only **drops** entries whose
+  id is malformed or whose credential file is missing/corrupt; it writes the
+  remaining raw entries back untouched. It deliberately does not rebuild entries
+  from `AccountRef` any more — that rewrite used to erase any index field the
+  dataclass did not know about, so adding a field meant also editing the
+  self-heal site in the same commit.
 - `save_account_cred` upsert (same credential → existing account) only rewrites
-  the named credential keys (`nickname`/`name`/`email`); anything outside that
-  list (like `alias`) survives re-login by design. Do not "clean up" the dict
-  wholesale there.
+  the named credential keys (`nickname`/`name`/`email`/`region`); anything
+  outside that list (like `alias`) survives re-login by design. Do not "clean
+  up" the dict wholesale there.
+- `reorder_accounts` / `rename_account` call the channel's `list_accounts()`
+  before touching the store: that is the single enumeration entry point where
+  legacy single-account migration and self-heal happen. `AccountStore` only
+  knows the generic index, so skipping it validates against a stale/empty list
+  and makes the first admin action after an upgrade fail (`当前 0 个`).
 
 `rename_account(account_id, alias)` (also keyword-safe, file-locked like every
 other index write) is the sole writer of `alias`; the HTTP surface is
@@ -311,7 +368,12 @@ benefits, and unrelated model routes in the same process.
   persistence. Callers must not open or write the settings JSON directly.
   Every overwrite keeps the previous version as `settings.json.bak` first, so a
   UI write is always reversible. Backing up is best-effort and must never make
-  a save fail.
+  a save fail. The file belongs to the state root: `BUDDY_PROXY_STATE_DIR`
+  moves it together with accounts/metrics/logs, while an explicit
+  `BUDDY_PROXY_SETTINGS` pins one file. A state-dir-only setup copies the
+  legacy `~/.buddy-proxy/settings.json` in on first access, so upgrading never
+  silently drops the user's defaults; writing the primary profile from an
+  isolated instance is a bug, not a convenience.
 - `model_order` (settings key) maps a **bare model name** to an ordered list of
   `provider/model` candidates, tried top-down by `forward._forward_with_order`.
   The key is the name the client asks for, not a channel-scoped pair: one entry
@@ -606,3 +668,51 @@ uv run pytest -q
 
 Keep provider changes small and add an offline regression test. Live upstream
 probes are billable and must never print credentials or request bodies.
+
+`uv run pytest -q` also runs the tests that encode rules which used to live only in
+review comments:
+
+- `tests/test_module_boundaries.py` — layer boundaries (see *Module boundaries*);
+- `tests/test_event_loop_discipline.py` — no blocking calls inside `async def`;
+- `tests/test_invariants_are_tested.py` — every row of the table below must cite a
+  test that still exists;
+- `tests/test_ui_admin.py` — the static-file whitelist is derived from
+  `web/static/`, so every file there is served and every `*.js` must be referenced by
+  `index.html` (a script nobody loads would otherwise fail silently).
+
+## Invariants and the tests that hold them
+
+The rules below are the load-bearing parts of the design: each one is a decision
+that is cheap to state and expensive to get wrong. The middle column is where the
+code enforces it; the right column is the test that fails when the rule breaks.
+
+This table is checked, not just documentation: `tests/test_invariants_are_tested.py`
+parses it and fails when a cited test no longer exists. Renaming or moving a test
+therefore forces this page to move with it, which is what keeps the map from
+quietly rotting into a list of rules that only *used* to be enforced.
+
+| # | Invariant | Enforced in | Test |
+|---|---|---|---|
+| I1 | Once a response object has been handed to ASGI, the router never switches to the next candidate — replaying a stream can bill the upstream twice and splice two streams together for the client. | `codebuddy_provider/forward.py` (`_forward_with_order` commit guard) | `tests/test_model_order.py::test_no_failover_after_streaming_committed` |
+| I2 | Deterministic 4xx (400/401/403/404) is returned to the client unchanged: another channel cannot fix a malformed request. | `codebuddy_provider/forward.py` (`_RETRYABLE_STATUS`, `_forward_with_order`) | `tests/test_model_order.py::test_non_retryable_http_exception_propagates` |
+| I3 | Programming errors (`TypeError`, `KeyError`, …) are never reclassified as upstream failure: a bug that has been "fixed" by failing over is a bug nobody will find. | `codebuddy_provider/forward.py` | `tests/test_model_order.py::test_programming_error_is_not_masked_as_failover` |
+| I4 | A local DNS failure fails over but leaves no cooldown mark: a machine-level network blip must not lock an entire model for minutes (2026-10-02 incident). | `core/errors.py` (`is_local_dns_failure`) + `core/cooldown.py` | `tests/test_model_order.py::test_dns_502_does_not_mark_cooldown` |
+| I5 | When several channels fail on the same model inside the burst window, all of them get the short cooldown: the fault is the machine, not the upstream. | `core/cooldown.py` (`mark_failed`, `_shorten_to_burst_locked`) | `tests/test_model_order.py::test_two_channels_failing_together_get_short_cooldown` |
+| I6 | A 429 starts a short cooldown and never escalates to the one-hour tier: rate limits are a sliding window, and long locks would take a model off the board for every concurrent session. | `core/cooldown.py` (`_RATE_LIMIT_COOLDOWN_S`) | `tests/test_model_order.py::test_429_short_cooldown_never_escalates` |
+| I7 | Model matching runs two rounds — all channels' exact ids first, aliases only afterwards — so a channel registered earlier cannot steal another channel's model through an alias. | `codebuddy_provider/forward.py` (auto-match) | `tests/test_model_routing.py::test_two_round_routing_prefers_exact_match_over_alias` |
+| I8 | Tool definitions are deduplicated by name before forwarding, first definition wins: upstreams reject duplicate function names, and it must not depend on the client. | `codebuddy_provider/forward.py` (`_dedupe_tools`) | `tests/test_tools_dedup.py::test_duplicate_names_collapse_to_first` |
+| I9 | Anthropic `thinking.budget_tokens` is translated into `reasoning_effort` buckets; an explicit `reasoning_effort` in the request wins over the budget. | `protocols/anthropic_adapter.py` | `tests/test_anthropic_reasoning_effort.py::test_thinking_becomes_reasoning_effort` |
+| I10 | Sensitive request/response data never reaches the log verbatim — only byte length and a short hash, applied by one last-line-of-defense function. | `core/state.py` (`safe_log_fields`) | `tests/test_endpoints_smoke.py::test_safe_log_fields_redacts_request_data` |
+| I11 | Account display names resolve through one chain (`alias > name/email/nickname > id`), and logs store the stable account id so renaming an account still relabels history. | `web/ui/queries.py` (`_account_name_map`) | `tests/test_log_account_name.py::test_account_name_map_resolves_alias_chain` |
+| I12 | Log rows keep the stable account id and resolve the display name only when rendering, so a rename does not require rewriting history. | `web/ui/queries.py` (`/ui/api/logs`) | `tests/test_log_account_name.py::test_trae_writes_stable_id_to_log` |
+| I13 | A quota item whose remaining amount cannot be determined is never folded away as "spent": unknown is not zero, and folding it would hide the one row that explains the failure. | `web/static/benefits_quota.js` (`quotaItemsHtml`) | `tests/test_quota_fold.py::test_unknown_items_stay_visible_not_folded` |
+| I14 | Account-level failover also honours the committed-stream rule: after the first real chunk, an account failure is surfaced instead of retried on the next account. | `codebuddy_provider/failover.py` + `codebuddy_provider/provider.py` | `tests/test_codebuddy_failover.py::test_forward_stream_committed_after_first_real_chunk` |
+| I15 | Index self-heal only drops stale entries; every other field in an entry survives verbatim, so a new index field needs no matching change in the self-heal code. | `core/account_store.py` (`AccountStore.list_entries_locked`) | `tests/test_account_store.py::test_list_entries_self_heals_and_preserves_unknown_fields` |
+| I16 | Every index and per-account credential file is written 0600 atomically (temp file created with the mode, then renamed): the credential bytes never exist in a world-readable file, not even for the duration of a `write_text` + `chmod`. | `core/account_store.py` (`atomic_write_json`, `AccountStore.write_cred`) | `tests/test_account_store.py::test_atomic_write_is_0600_and_leaves_no_tmp` |
+| I17 | Index read-modify-write is one cross-process critical section (`threading.Lock` then `flock` on `index.lock`); two entry points (gateway + CLI/admin) cannot each write back a stale snapshot and lose the other's account. | `core/account_store.py` (`AccountStore.guard` / `FileLock`) | `tests/test_account_store.py::test_guard_serializes_writers_sharing_a_dir` |
+| I18 | Identity matching can be scoped to a subset of index entries: two accounts whose upstream uid/refresh_token collide across regions are never merged into one failover slot. | `core/account_store.py` (`AccountStore.upsert_locked` `identity_scope`) + `codebuddy_provider/credentials.py` | `tests/test_codebuddy_intl.py::test_cross_region_same_uid_not_merged` |
+| I19 | All six multi-account channels use the one shared index/credential store; a channel that grows its own atomic write, flock, or self-heal copy makes the test fail instead of silently forking the semantics. | `core/account_store.py` + each channel `credentials._STORE` | `tests/test_account_store.py::test_all_multi_account_channels_use_the_shared_store` |
+| I20 | Reorder and rename go through the channel's single enumeration entry point first, so legacy single-account migration and self-heal run before validation; the generic store does not know channel migrations. | `*/credentials.py` (`list_accounts()` before `AccountStore.reorder` / `rename`) | `tests/test_antigravity_login.py::test_reorder_accounts_runs_legacy_migration_first` |
+| I21 | `settings.json` lives in the state root: moving `BUDDY_PROXY_STATE_DIR` moves settings with accounts, metrics and logs, so an isolated instance never reads or writes the primary profile's settings. An explicit `BUDDY_PROXY_SETTINGS` still wins, and a state-dir-only setup copies the legacy file in on first access. | `core/settings.py` (`settings_path`) | `tests/test_settings_path.py::test_settings_follow_state_dir` |
+| I22 | The legacy `settings.json` migration is atomic: a failed or concurrent copy never leaves a half-written target that `target.exists()` would later trust — otherwise the next `load_settings()` reads `{}` and the following `save_settings()` overwrites the whole profile with one key. | `core/settings.py` (`_migrate_settings`) | `tests/test_settings_path.py::test_failed_migration_leaves_no_partial_target` |
+

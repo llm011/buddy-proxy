@@ -1027,8 +1027,9 @@ Trae PAT 频控：部分扩展模型上游按「账号 × 模型」限频（队�
 `credentials`（凭证与请求头）、`leak_guard`（预设泄漏防护）、`text_protocol`（教学注入/请求改写，
 含文本协议解析兜底）、`native_tools`（原生 function calling）、`transport`（HTTP 发送）、
 `sse`（SSE 解析/Anthropic 包装）、`provider`（编排入口）、`cli`（`trae-cli` 账号工具）、
-`aes_pure`（零依赖 AES 兜底实现）、`pat_provider` + `pat/`（PAT 底层模型通道：多账号、撞码分级冷却、
-4031 快速失败）。
+`pat_provider` + `pat/`（PAT 底层模型通道：多账号、撞码分级冷却、
+4031 快速失败）。零依赖 AES 兜底实现已移到 `core/aes_pure`（与 Qoder 的 COSY 签名共用，
+通道子包之间不互相 import）。
 `trae_provider.py` 保留为兼容 shim，历史导入与 `python -m buddy_proxy.trae_provider` 不受影响。
 
 | 类别 | 接口 | 说明 |

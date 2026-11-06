@@ -199,6 +199,13 @@ def test_legacy_migration_is_once_only():
     assert load_account_cred("legacy-uid")["token"] == "first"
 
 
+def test_reorder_runs_legacy_migration_first():
+    """重排前要先走唯一枚举入口，否则升级后第一次操作「看不见」迁移账号。"""
+    _write_legacy_session()
+    refs = reorder_accounts(["legacy-uid"])
+    assert [(r.id, r.priority) for r in refs] == [("legacy-uid", 0)]
+
+
 def test_session_to_cred_flattens_shape():
     _write_legacy_session()
     cred = session_to_cred(json.loads(legacy_session_path().read_text(encoding="utf-8")))

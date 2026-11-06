@@ -1,7 +1,13 @@
-"""纯 Python AES-128-CBC 解密（零第三方依赖兜底）。
+"""纯 Python AES-128-CBC 加解密（零第三方依赖兜底）。
 
-仅用于 Trae tc 加密格式解密。优先使用 cryptography 库（更快），
-未安装时用本模块。实现参考公共领域 AES 算法。
+Trae 的 tc 加密格式（``auth_storage``）与 Qoder 的 COSY 签名（``qoder/cosy``）
+共用这份实现：两个通道各自在本机解/加密 AES-CBC，但算法本身与通道无关。放在
+``core/`` 而不是某个通道子包里，是为了让「通道之间不互相 import」这条边界成立
+（见 ``tests/test_module_boundaries.py``）——此前 ``qoder`` 直接从
+``trae.aes_pure`` 取，两个互不相关的逆向通道被一份加密代码钉在了一起。
+
+本模块是**叶子**：只 import 标准库，任何地方 import 都不会循环导入。
+优先使用 cryptography 库（更快），未安装时用本模块。实现参考公共领域 AES 算法。
 """
 
 from __future__ import annotations

@@ -4,7 +4,8 @@ Qoder 的 ``/algo/**`` 面要求 ``Authorization: Bearer COSY.<payload>.<sig>``
 外加一族 ``Cosy-*`` 头。网上能跑的第三方实现都得在运行时加载厂商的
 ``qoder_auth.wasm``（298KB）来算签名；本模块是**纯 Python 复刻**，不依赖
 任何厂商二进制，也不需要 ``cryptography`` / ``pycryptodome``——AES 复用
-``buddy_proxy.trae.aes_pure``，RSA 用 ``pow()`` 直接算（e=65537）。
+``buddy_proxy.core.aes_pure``（与 Trae 共用的纯 Python 实现），RSA 用 ``pow()``
+直接算（e=65537）。
 
 线缆形态（逐字段实测校准，2026-09）：
 
@@ -48,7 +49,7 @@ import uuid
 from typing import Any
 from urllib.parse import urlparse
 
-from buddy_proxy.trae.aes_pure import _encrypt_block, _key_expansion
+from buddy_proxy.core.aes_pure import _encrypt_block, _key_expansion
 
 from .config import (
     COSY_RSA_PUBLIC_KEY_PEM,

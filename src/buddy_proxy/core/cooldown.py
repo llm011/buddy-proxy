@@ -15,7 +15,8 @@
    不是用户意图。
 
 本模块是**叶子**模块：只 import 标准库，因此从任何地方 import 都不会造成循环导入
-（见 ``docs/architecture.md`` 与 ``core/state.py`` 里 TYPE_CHECKING 的警告）。
+（这条「叶子模块不得反向依赖」的约定由 ``tests/test_module_boundaries.py`` 守，
+见 ``docs/architecture.md`` 的 *Module boundaries*）。
 """
 
 from __future__ import annotations

@@ -32,6 +32,7 @@ import httpx
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from buddy_proxy.core.account_store import quota_epoch_from
 from buddy_proxy.core.checkin import SOURCE_UPSTREAM, next_from_window
 from buddy_proxy.core.metrics import ACCOUNT_META
 from buddy_proxy.providers.base import BaseProvider
@@ -631,11 +632,7 @@ class QoderProvider(BaseProvider):
 
     def quota_epoch(self) -> str:
         """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。"""
-        try:
-            accts = list_accounts()
-        except Exception:  # noqa: BLE001 - 拿不到就退回常量键
-            return "unknown"
-        return ",".join(f"{a.id}#{a.priority}" for a in accts) or "empty"
+        return quota_epoch_from(list_accounts)
 
     def _quota_one(self, acct: AccountRef, index: int, *, multi: bool
                    ) -> tuple[list[dict[str, Any]], bool]:

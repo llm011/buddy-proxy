@@ -339,7 +339,7 @@ class ResponsesStreamConverter:
                     self.content_part_added = True
                     events.append(("response.content_part.added", {
                         "type": "response.content_part.added",
-                        "part": {"type": "text", "text": ""},
+                        "part": {"type": "output_text", "text": "", "annotations": []},
                     }))
 
                 # 发出文本delta
@@ -411,7 +411,7 @@ class ResponsesStreamConverter:
             }))
             events.append(("response.content_part.done", {
                 "type": "response.content_part.done",
-                "part": {"type": "text", "text": self.text},
+                "part": {"type": "output_text", "text": self.text, "annotations": []},
             }))
 
         # 关闭消息item
@@ -422,7 +422,10 @@ class ResponsesStreamConverter:
                     "id": self.response_id + "_msg",
                     "type": "message",
                     "role": "assistant",
-                    "content": [{"type": "text", "text": self.text}] if self.text else [],
+                    "status": "completed",
+                    "content": (
+                        [{"type": "output_text", "text": self.text, "annotations": []}]
+                        if self.text else []),
                 },
             }))
 
@@ -455,7 +458,10 @@ class ResponsesStreamConverter:
                 "id": self.response_id + "_msg",
                 "type": "message",
                 "role": "assistant",
-                "content": [{"type": "text", "text": self.text}] if self.text else [],
+                "status": "completed",
+                "content": (
+                    [{"type": "output_text", "text": self.text, "annotations": []}]
+                    if self.text else []),
             })
         for index, call in sorted(self.function_calls.items()):
             output_items.append({

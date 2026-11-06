@@ -277,8 +277,13 @@ class CDPDoubaoClient:
         await asyncio.to_thread(self._kill_app_processes)
         await asyncio.sleep(2)
         cmd = [self.helper_bin, f"--remote-debugging-port={self.port}", *_STABLE_FLAGS]
-        self._proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        # Popen 要 fork/exec，macOS 上偶发几十毫秒；这里已经在 async 启动链路里，
+        # 直接调会把整个事件循环（含正在流式转发的请求）一起卡住，挪到线程。
+        self._proc = await asyncio.to_thread(
+            subprocess.Popen,
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         log.info("CDPDoubaoClient: Helper started pid=%s port=%d", self._proc.pid, self.port)
         await self._connect_chat()
