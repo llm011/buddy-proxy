@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 import stat
 
 from buddy_proxy.core import paths
@@ -62,3 +63,79 @@ def test_without_state_dir_settings_stay_in_state_root(monkeypatch, tmp_path):
     _no_explicit_settings(monkeypatch)
     monkeypatch.delenv("BUDDY_PROXY_STATE_DIR", raising=False)
     assert settings_mod.settings_path() == paths.state_dir() / "settings.json"
+
+
+def test_failed_migration_leaves_no_partial_target(monkeypatch, tmp_path):
+    """迁移复制失败不能留下半份 settings.json——``target.exists()`` 会把它当成已迁移。
+
+    回归背景：直接 ``copy2`` 到目标是先截断再写，中途失败会留下残缺 JSON；
+    下一次 ``load_settings`` 读成 ``{}``，接着第一次保存就把旧配置整个覆盖掉。
+    """
+    _no_explicit_settings(monkeypatch)
+    home = tmp_path / "home"
+    legacy = home / ".buddy-proxy" / "settings.json"
+    legacy.parent.mkdir(parents=True)
+    payload = '{"default_model": "legacy/model", "disabled_models": ["x"]}'
+    legacy.write_text(payload, encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    state = tmp_path / "state"
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(state))
+
+    real_copy = settings_mod.shutil.copy2
+
+    def broken_copy(src, dst, *args, **kwargs):
+        # 模拟写到一半断掉：临时文件里有残片，然后抛错
+        pathlib.Path(dst).write_text('{"default_model": "leg', encoding="utf-8")
+        raise OSError("ENOSPC")
+
+    monkeypatch.setattr(settings_mod.shutil, "copy2", broken_copy)
+    assert settings_mod.settings_path() == legacy
+    assert not (state / "settings.json").exists()
+    assert list(state.glob("*.tmp")) == []
+    assert settings_mod.load_settings()["default_model"] == "legacy/model"
+
+    # 失败不留痕：恢复正常后下一次访问仍能完成迁移
+    monkeypatch.setattr(settings_mod.shutil, "copy2", real_copy)
+    assert settings_mod.settings_path() == state / "settings.json"
+    data = json.loads((state / "settings.json").read_text(encoding="utf-8"))
+    assert data["disabled_models"] == ["x"]
+    assert stat.S_IMODE((state / "settings.json").stat().st_mode) == 0o600
+
+
+def test_migration_never_exposes_a_half_written_target(monkeypatch, tmp_path):
+    """复制进行中，目标文件要么不存在、要么完整——不能让读者看到半份。"""
+    import threading
+
+    _no_explicit_settings(monkeypatch)
+    home = tmp_path / "home"
+    legacy = home / ".buddy-proxy" / "settings.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text('{"default_model": "legacy/model"}', encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    state = tmp_path / "state"
+    monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(state))
+
+    started = threading.Event()
+    release = threading.Event()
+    real_copy = settings_mod.shutil.copy2
+
+    def slow_copy(src, dst, *args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        real_copy(src, dst)
+
+    monkeypatch.setattr(settings_mod.shutil, "copy2", slow_copy)
+
+    def migrate():
+        settings_mod.settings_path()
+
+    worker = threading.Thread(target=migrate)
+    worker.start()
+    assert started.wait(5)
+    # 复制还没完成：目标要么不存在，要么已经是完整内容；绝不能是半份
+    target = state / "settings.json"
+    if target.exists():
+        assert json.loads(target.read_text(encoding="utf-8"))["default_model"] == "legacy/model"
+    release.set()
+    worker.join(5)
+    assert json.loads(target.read_text(encoding="utf-8"))["default_model"] == "legacy/model"
