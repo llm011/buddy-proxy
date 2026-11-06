@@ -4,11 +4,20 @@
 
 **候选顺序（``state.model_order``）的重试规则**：一个模型的候选上游按序尝试，但
 **只有**当一次尝试在**向客户端提交任何字节之前**失败时才换下一档——即抛
-``HTTPException(可换档状态码)``、抛传输层异常（``_RETRYABLE_EXC``），或拿到非 2xx 的
+``HTTPException``、抛传输层异常（``_RETRYABLE_EXC``），或拿到非 2xx 的
 ``JSONResponse``。一旦返回的是 ``StreamingResponse``，字节即将/已经开始流向客户端，
 重放有重复计费风险，绝不换档（同 ``trae/pat/chat.py`` 的「首个语义事件提交后绝不重放」
-不变量）。已知盲区：codebuddy 流式把上游错误做成了**带内错误 chunk**
-（``pipeline.stream_upstream``），路由器无从察觉，故第一档为 codebuddy 时流式失败不换档。
+不变量）。
+
+codebuddy 流式把上游非 200 做成**带内错误 chunk**（``pipeline.stream_upstream``），
+但 ``CodeBuddyProvider._forward_once`` 的首事件闸门会在建 ``StreamingResponse``、向客户端
+吐任何字节**之前**把错误帧还原成 ``HTTPException``（见 ``_error_frame_to_exception``），
+所以这类失败在路由器眼里与「抛异常」无异，照常参与换档。
+
+**400 里的例外：渠道风控拦截**。普通 400 是确定性错误（参数错、模型不存在），换谁
+都不会成功；但上游以 ``400 + 业务码``表达「这类调用整条通道都不收」（codebuddy 的
+``11128 Illegal API invocation from an unapproved channel``，2026-11-07 dsh 事故）时，
+换通道正是解法——见 :func:`_exc_is_channel_block` / :func:`_mark_channel_block`。
 
 反过来，**编程错误不换档**：``TypeError`` / ``KeyError`` 这类 bug 若被当成上游故障，
 就会被冷却标记掩盖、客户端反而拿到 200，真因极难发现。
@@ -34,7 +43,12 @@ from buddy_proxy.core import cooldown as cooldown_mod
 from buddy_proxy.core.errors import is_local_dns_failure
 
 from .observability import _instrument
-from .provider import _default_codebuddy
+from .provider import (
+    _default_codebuddy,
+    _exc_is_channel_block,
+    _mark_channel_block,
+    _target_blocked,
+)
 
 #: 允许换档的 HTTP 状态码：上游不可用/过载，换个通道有意义。
 #:
@@ -408,6 +422,10 @@ async def _forward_with_order(
     """
     last_exc: HTTPException | None = None
     last_note = ""
+    # 本模型的候选里有几条被渠道封禁跳过。全部候选都因封禁被跳过时（last_exc 仍是
+    # None），末尾要报「渠道封禁」而不是笼统的「均处于冷却或时段限制」——后者会让
+    # 用户以为等冷却就好，而实际是客户端身份被上游拒了，得换通道/改客户端。
+    channel_skipped = 0
     for target in targets:
         provider_id, model = _split_target(target)
         if cooldown_mod.is_marked(provider_id, model):
@@ -416,11 +434,30 @@ async def _forward_with_order(
         if _target_gated_out(state, provider_id, model):
             diagnostic("model_order_skip", model=key, target=target, reason="gated")
             continue
+        if _target_blocked(provider_id, model):
+            diagnostic("model_order_skip", model=key, target=target,
+                       reason="channel_blocked")
+            channel_skipped += 1
+            continue
         try:
             resp = await _dispatch_once(state, provider_id, model, body, protocol, original)
         except HTTPException as exc:
             if exc.status_code not in _RETRYABLE_STATUS:
-                raise  # 确定性错误（400/401/403/404）：换谁都没用，原样上抛
+                # 渠道风控拦截（400 + 业务码，如 codebuddy 11128「unapproved
+                # channel」）：换账号、换模型都没用，但**换通道**正是解法——
+                # 与 405 同理。不标记的话，被风控挡死的那一档会一直排在首位，
+                # 每个请求都白撞一次（dsh 2026-11-07 事故：02:05 之后每条请求
+                # 都先 400，model_order 里配的另外 5 档一次都没试过）。
+                if not _exc_is_channel_block(exc):
+                    raise  # 确定性错误（参数/模型不存在等）：换谁都没用，原样上抛
+                last_exc = exc
+                last_note = f"HTTP {exc.status_code} channel_block"
+                _mark_channel_block(provider_id)
+                diagnostic("channel_blocked", model=key, target=target,
+                           status=exc.status_code)
+                diagnostic("model_order_failover", model=key, target=target,
+                           status=exc.status_code, reason="channel_block")
+                continue
             last_exc = exc
             last_note = f"HTTP {exc.status_code}"
             # 本机 DNS 解析失败是**机器级**故障（对所有通道同时生效、通常秒级自愈），
@@ -458,6 +495,20 @@ async def _forward_with_order(
 
     if last_exc is not None:
         raise last_exc
+    if channel_skipped:
+        # 不落回被挡的通道硬撞（那只会再吃一次 400），直接把这个事实报出来。
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": {
+                    "message": (f"模型 {key} 的候选里有 {channel_skipped} 条通道"
+                                "被上游风控整条拦截（如 400+11128 unapproved "
+                                "channel），且其余候选均不可用。请换一条通道，"
+                                "或调整客户端的请求特征后重试。"),
+                    "type": "channel_blocked",
+                }
+            },
+        )
     raise HTTPException(
         status_code=502,
         detail={

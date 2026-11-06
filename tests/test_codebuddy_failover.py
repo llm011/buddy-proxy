@@ -328,3 +328,87 @@ def test_quota_epoch_changes_with_accounts(monkeypatch):
     monkeypatch.setattr(creds, "list_accounts",
                         lambda: [_acct("a")])
     assert p.quota_epoch() != e1, "账号列表一变 epoch 必须变（旧额度快照作废）"
+
+
+# ---------------------------------------------------------------------------
+# 渠道风控拦截（400 + 11128）与上游读超时（2026-11-07 dsh 事故）
+# ---------------------------------------------------------------------------
+
+async def _agen(frames: list[bytes]):
+    """把帧列表包装成 ``stream_upstream`` 那样的异步生成器。"""
+    for frame in frames:
+        yield frame
+
+
+def _channel_block_frames(details: str) -> list[bytes]:
+    """``pipeline.stream_upstream`` 撞非 200 时吐的那个错误块（openai 协议）。"""
+    chunk = {"error": {"message": "Upstream API error (HTTP 400)",
+                       "type": "upstream_error", "code": 400,
+                       "details": details}}
+    return [f"data: {json.dumps(chunk)}\n\n".encode()]
+
+
+def test_forward_stream_channel_block_marks_channel(monkeypatch):
+    """流式请求撞 400 + 11128：抛 HTTPException(400) 且整条通道被打上渠道封禁标记。
+
+    首事件闸门（``_forward_once``）负责把错误帧还原成异常；本测试锁住「还原出来的
+    异常要能被识别成渠道拦截并标记」——model_order 靠这个标记跳过整条通道。
+    """
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    _setup_two_accounts(monkeypatch)
+    details = json.dumps({"detail": {"error": {
+        "code": 11128, "msg": "Illegal API invocation from an unapproved channel"}}})
+    monkeypatch.setattr(cbp, "stream_upstream",
+                        lambda *a, **k: _agen(_channel_block_frames(details)))
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(CodeBuddyProvider().forward(
+            {"model": "deepseek-v4.1-flash", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]}, "openai", None))
+    assert ei.value.status_code == 400
+    assert cooldown_mod.is_marked("codebuddy", "*"), "渠道封禁必须打整通道标记"
+    assert cooldown_mod.is_marked("codebuddy", "deepseek-v4.1-flash") is False
+    cooldown_mod._reset_for_tests()
+
+
+def test_forward_plain_400_does_not_mark_channel(monkeypatch):
+    """普通 400（没有 11128 业务码）不得打渠道封禁标记——那是参数错，不关通道的事。"""
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    _setup_two_accounts(monkeypatch)
+    monkeypatch.setattr(cbp, "stream_upstream",
+                        lambda *a, **k: _agen(_channel_block_frames('{"code":11152}')))
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(CodeBuddyProvider().forward(
+            {"model": "deepseek-v4.1-flash", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]}, "openai", None))
+    assert ei.value.status_code == 400
+    assert cooldown_mod.is_marked("codebuddy", "*") is False
+    cooldown_mod._reset_for_tests()
+
+
+def test_upstream_read_timeout_is_long_enough_for_slow_first_token():
+    """读超时不再卡在 300 秒：dsh 长上下文的首 token 可以更久，慢启动归总时长管。"""
+    from buddy_proxy.codebuddy_provider.pipeline import (
+        UPSTREAM_CONNECT_TIMEOUT_S, _upstream_timeout,
+    )
+
+    timeout = _upstream_timeout()
+    assert timeout.read == pytest.approx(1800)
+    assert timeout.read > 300
+    assert timeout.connect == pytest.approx(UPSTREAM_CONNECT_TIMEOUT_S)
+    assert timeout.connect == pytest.approx(30)
+
+
+def test_upstream_read_timeout_env_override(monkeypatch):
+    """``BUDDY_UPSTREAM_READ_TIMEOUT`` 可覆盖；非法/非正数回落到 1800。"""
+    from buddy_proxy.codebuddy_provider import pipeline
+
+    monkeypatch.setenv("BUDDY_UPSTREAM_READ_TIMEOUT", "600")
+    assert pipeline._env_read_timeout() == 600
+    monkeypatch.setenv("BUDDY_UPSTREAM_READ_TIMEOUT", "abc")
+    assert pipeline._env_read_timeout() == 1800
+    monkeypatch.setenv("BUDDY_UPSTREAM_READ_TIMEOUT", "0")
+    assert pipeline._env_read_timeout() == 1800

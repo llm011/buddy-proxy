@@ -25,6 +25,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.providers.base import BaseProvider
+from buddy_proxy.core import cooldown as cooldown_mod
 from buddy_proxy.core.account_store import quota_epoch_from
 from buddy_proxy.core.checkin import (
     SOURCE_INFERRED,
@@ -231,6 +232,99 @@ def _is_account_error(e: HTTPException) -> bool:
     其余业务 4xx（模型名不合法等）换号也无意义。
     """
     return e.status_code in (401, 429)
+
+
+#: 上游 400 里「换账号/换请求都没用，整条通道都被挡」的风控码（响应体里的
+#: ``code``）。目前只有 ``11128 Illegal API invocation from an unapproved channel``
+#: （2026-11-02 起 system prompt 签名校验、2026-11-07 起 dsh 的**任意**会话都会
+#: 中招，见文档）。命中它的请求即便内容被 ``core/desensitize`` 改到 200，也不是
+#: 账号或参数问题，而是「这个客户端现在不被这条通道接受」。
+_CHANNEL_BLOCK_CODES = frozenset({11128})
+
+#: 标记命中 ``_CHANNEL_BLOCK_CODES`` 的通道时使用的模型键。冷却按
+#: ``(provider, model)`` 记，而渠道拦截与具体模型无关——用固定键占位，
+#: :func:`_target_blocked` 只查这一个键，命中即整条通道跳过。
+_CHANNEL_BLOCK_MODEL = "*"
+
+#: :func:`_upstream_error_code` 向内解 JSON 的最大层数。
+_ERROR_CODE_UNESCAPE_DEPTH = 4
+
+
+def _upstream_error_code(text: str, *, _depth: int = 0) -> int | None:
+    """从上游错误体里抠出业务错误码（``{"code":11128,...}``）。
+
+    ``pipeline.stream_upstream`` 把上游 400 原文塞进错误帧的 ``details``（openai）
+    / ``message``（anthropic），那是**已转义的 JSON 字符串**——外层序列化后引号
+    变成 ``\\"``，直接在原文上搜 ``"code":`` 是搜不到的。所以按层解 JSON：解出来
+    就继续往里找（字符串再解一次），直到找到 ``code`` 字段或解不动为止，最多
+    ``_ERROR_CODE_UNESCAPE_DEPTH`` 层（防止恶意构造的深嵌套）。
+    """
+    text = (text or "").strip()
+    if not text:
+        return None
+    payload: Any = None
+    if text[:1] in "{[":
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+    if isinstance(payload, dict):
+        code = payload.get("code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code
+        if isinstance(code, str) and code.strip().isdigit():
+            return int(code)
+        if _depth < _ERROR_CODE_UNESCAPE_DEPTH:
+            for key in ("error", "detail", "details", "message", "msg"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    found = _upstream_error_code(value, _depth=_depth + 1)
+                elif isinstance(value, (dict, list)):
+                    found = _upstream_error_code(json.dumps(value), _depth=_depth + 1)
+                else:
+                    continue
+                if found is not None:
+                    return found
+    if _depth == 0:
+        # 兜底：没解成 JSON 的自由文本（部分通道直接透传上游原文）仍按字面找。
+        m = re.search(r'"code"\s*:\s*(\d+)', text)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+def _exc_is_channel_block(exc: HTTPException) -> bool:
+    """该 HTTPException 是否「上游整条通道拒绝这类调用」（见 ``_CHANNEL_BLOCK_CODES``）。
+
+    只看 400：上游风控以 400 + 业务码表达；401/403/429 有各自的账号级处理路径，
+    不该被这里抢走。
+    """
+    if exc.status_code != 400:
+        return False
+    detail = exc.detail
+    text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+    return _upstream_error_code(text) in _CHANNEL_BLOCK_CODES
+
+
+def _mark_channel_block(provider_id: str) -> None:
+    """把整条通道标成「暂时被风控挡」。见 ``_CHANNEL_BLOCK_MODEL`` 的说明。
+
+    刻意用 ``status=400``：``core.cooldown.mark_failed`` 只把 ``None``/``≥500``
+    记进机器级突发窗口，400 走普通短冷却（5 分钟、3 次升 1 小时）——渠道风控是
+    上游对**这个客户端**的判定，不是网络抖动，不该参与「多通道同时失败 = 机器级」
+    的统计。改 ``mark_failed`` 时别顺手把 4xx 也算进突发。
+    """
+    cooldown_mod.mark_failed(provider_id, _CHANNEL_BLOCK_MODEL, status=400)
+
+
+def _target_blocked(provider_id: str, model: str) -> bool:
+    """候选目标是否整条通道处于渠道封禁冷却中（:func:`_forward_with_order` 据此跳过）。"""
+    return cooldown_mod.is_marked(provider_id, _CHANNEL_BLOCK_MODEL)
+
+
+def _channel_block_remaining(provider_id: str) -> int:
+    """该通道渠道封禁的剩余秒数（0 = 未被封）；供 UI 把封禁与普通冷却区分开。"""
+    return cooldown_mod.remaining(provider_id, _CHANNEL_BLOCK_MODEL)
 
 
 def _error_frame_to_exception(frame: bytes, protocol: str) -> HTTPException | None:
@@ -854,6 +948,12 @@ class CodeBuddyProvider(BaseProvider):
                         continue
                     raise
         except HTTPException as e:
+            # 渠道级风控拦截（400 + 11128）：换账号没用，但**整条通道**该歇一会。
+            # 流式的那条路在首事件闸门里已标过（见 ``_forward_once``），这里是
+            # 非流式聚合路径对应的一笔；两者都标记是幂等的。
+            if _exc_is_channel_block(e):
+                _mark_channel_block(self.id)
+                diagnostic("channel_blocked", provider=self.id, status=e.status_code)
             # 走到这是「最后一个账号也失败」或「非账号级错误透传」。anthropic 协议
             # 的错误体用标准形状（Claude Code 等 SDK 靠它渲染错误）；openai 协议
             # 维持「抛 HTTPException → 外层 exception handler 转 JSON」不变。

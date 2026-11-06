@@ -18,6 +18,7 @@ from buddy_proxy.core import settings as settings_mod
 from buddy_proxy.core.state import app, get_state
 from buddy_proxy.web.model_list import load_models_from_local_config
 from buddy_proxy.codebuddy_provider import forward_chat
+from buddy_proxy.codebuddy_provider.provider import _channel_block_remaining
 
 from .common import TEST_MAX_TOKENS, TEST_PROMPT, TEST_TIMEOUT_S, _ensure_local, _err_text, _ms
 
@@ -389,6 +390,14 @@ async def ui_models(request: Request):
                     left = cooldown_mod.remaining(t_provider, t_model)
                     if left:
                         marks.append({"target": target, "cooldown_s": left})
+                    # 渠道封禁（400+11128）标在 (provider, "*") 上，与具体模型无关；
+                    # 每个候选行都带一份，前端据此把徽标写成「渠道封禁」而非普通冷却，
+                    # 免得用户以为是模型额度/上游抖动、跑去清冷却却不改客户端身份。
+                    blocked = _channel_block_remaining(t_provider)
+                    if blocked:
+                        marks.append({"target": f"{t_provider}/*",
+                                      "cooldown_s": blocked,
+                                      "reason": "channel_block"})
                 m["order"] = {"targets": order_targets, "marks": marks}
             # 限时窗口：有配置则附窗口列表 + 当前是否在开放时段，供前端渲染徽标/编辑器
             windows = schedules.get(key) if isinstance(schedules, dict) else None
@@ -774,6 +783,12 @@ async def ui_model_order_get(request: Request):
             left = cooldown_mod.remaining(t_provider, t_model)
             if left:
                 marks.append({"target": target, "cooldown_s": left})
+            # 同上面的模型目录接口：渠道封禁单列一条，前端区分「渠道封禁」徽标。
+            blocked = _channel_block_remaining(t_provider)
+            if blocked:
+                marks.append({"target": f"{t_provider}/*",
+                              "cooldown_s": blocked,
+                              "reason": "channel_block"})
         items.append({"model": key, "targets": targets, "marks": marks})
     return {"items": items}
 
