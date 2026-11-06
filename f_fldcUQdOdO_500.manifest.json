@@ -1,0 +1,39 @@
+{
+  "manifest_version": "v1",
+  "format": "ndjson",
+  "base_token": "DOV5bct2FaR1SZsDA1qcJy4On4b",
+  "table_id": "tblIygqXUXvg9v5x",
+  "rev": 8379,
+  "timezone": "Asia/Shanghai",
+  "query_context": {
+    "field_scope": "selected_fields",
+    "record_scope": "all_records"
+  },
+  "offset": 500,
+  "requested_limit": 500,
+  "records_count": 82,
+  "page_count": 1,
+  "has_more": false,
+  "record_file": "/Volumes/SSDExt/code/life/buddy-proxy/f_fldcUQdOdO_500.ndjson",
+  "record_file_size_bytes": 4662,
+  "manifest_file": "/Volumes/SSDExt/code/life/buddy-proxy/f_fldcUQdOdO_500.manifest.json",
+  "columns": {
+    "record_id": {
+      "physical_type": "string",
+      "stats": {
+        "max_length": 16
+      },
+      "example": "recXuej8VA"
+    },
+    "出版时间": {
+      "field_id": "fldcUQdOdO",
+      "field_type": "text",
+      "physical_type": "string|null",
+      "stats": {
+        "null_count": 2,
+        "max_length": 10
+      },
+      "example": "2012"
+    }
+  }
+}

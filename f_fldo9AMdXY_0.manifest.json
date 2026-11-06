@@ -1,0 +1,41 @@
+{
+  "manifest_version": "v1",
+  "format": "ndjson",
+  "base_token": "DOV5bct2FaR1SZsDA1qcJy4On4b",
+  "table_id": "tblIygqXUXvg9v5x",
+  "rev": 8379,
+  "timezone": "Asia/Shanghai",
+  "query_context": {
+    "field_scope": "selected_fields",
+    "record_scope": "all_records"
+  },
+  "requested_limit": 500,
+  "records_count": 500,
+  "page_count": 1,
+  "has_more": true,
+  "next_offset": 500,
+  "record_file": "/Volumes/SSDExt/code/life/buddy-proxy/f_fldo9AMdXY_0.ndjson",
+  "record_file_size_bytes": 23200,
+  "manifest_file": "/Volumes/SSDExt/code/life/buddy-proxy/f_fldo9AMdXY_0.manifest.json",
+  "columns": {
+    "record_id": {
+      "physical_type": "string",
+      "stats": {
+        "max_length": 14
+      },
+      "example": "recG8LZ4aT"
+    },
+    "点评人数": {
+      "field_id": "fldo9AMdXY",
+      "field_type": "number",
+      "physical_type": "number|null",
+      "stats": {
+        "null_count": 78,
+        "min": 0,
+        "max": 288498,
+        "avg": 4927.971563981043
+      },
+      "example": 2
+    }
+  }
+}
