@@ -405,6 +405,19 @@ benefits, and unrelated model routes in the same process.
   **channel blocked** badge rather than an ordinary cooldown, and when every
   candidate is skipped for this reason the request fails fast as
   `channel_blocked` instead of probing a blocked channel once more.
+  The business code is recovered by `_upstream_error_code`, which walks the
+  wrapper fields (`error`, `details`, `message`, …) **before** reading any
+  `code` at the same level — the outer `code: 400` in a stream error frame is
+  the HTTP status and would otherwise mask the `11128` inside `details`. Each
+  wrapper value is itself unescaped one level (the frame stores the upstream
+  body as a JSON **string**), key names are matched case-insensitively, and a
+  truncated body (`stream_upstream` keeps `error_text[:500]`) is still parsed
+  via `_json_loads_tolerant`, which re-closes unterminated strings/brackets.
+  Every block writes one `channel_blocked` diagnostic carrying
+  `upstream_code`, so the log alone distinguishes a risk-control block from a
+  plain 400 being re-raised. The mark is recorded both in the failover loop
+  and inside `_forward_once`'s first-event gate, because the gate's exception
+  bypasses the loop's handler; recording twice is idempotent.
   Conversely, **programming errors are not failover material**: a `TypeError`
   escaping a provider is re-raised, not treated as an upstream outage, so a real
   bug surfaces as a 500 instead of being masked by a working fallback channel.
@@ -729,6 +742,6 @@ quietly rotting into a list of rules that only *used* to be enforced.
 | I20 | Reorder and rename go through the channel's single enumeration entry point first, so legacy single-account migration and self-heal run before validation; the generic store does not know channel migrations. | `*/credentials.py` (`list_accounts()` before `AccountStore.reorder` / `rename`) | `tests/test_antigravity_login.py::test_reorder_accounts_runs_legacy_migration_first` |
 | I21 | `settings.json` lives in the state root: moving `BUDDY_PROXY_STATE_DIR` moves settings with accounts, metrics and logs, so an isolated instance never reads or writes the primary profile's settings. An explicit `BUDDY_PROXY_SETTINGS` still wins, and a state-dir-only setup copies the legacy file in on first access. | `core/settings.py` (`settings_path`) | `tests/test_settings_path.py::test_settings_follow_state_dir` |
 | I22 | The legacy `settings.json` migration is atomic: a failed or concurrent copy never leaves a half-written target that `target.exists()` would later trust — otherwise the next `load_settings()` reads `{}` and the following `save_settings()` overwrites the whole profile with one key. | `core/settings.py` (`_migrate_settings`) | `tests/test_settings_path.py::test_failed_migration_leaves_no_partial_target` |
-| I23 | A `400` carrying channel-block business code `11128` fails over and cools the whole channel (model-independent `*` key), while any other `400` is still returned unchanged: the first is "this channel refuses the client", the second is "this request is wrong". | `codebuddy_provider/forward.py` (`_exc_is_channel_block`, `_mark_channel_block`, `_target_blocked`) | `tests/test_model_order.py::test_failover_on_400_channel_block` |
+| I23 | A `400` carrying channel-block business code `11128` fails over and cools the whole channel (model-independent `*` key), while any other `400` is still returned unchanged: the first is "this channel refuses the client", the second is "this request is wrong". The code is found through escaped-string `details`, case-varied keys and a truncated body, and never confused with the wrapper's `code: 400`. | `codebuddy_provider/forward.py` (`_exc_is_channel_block`, `_note_channel_block`, `_target_blocked`), `provider.py` (`_upstream_error_code`, `_json_loads_tolerant`) | `tests/test_codebuddy_failover.py::test_forward_stream_channel_block_with_escaped_string_details` |
 | I24 | The upstream read timeout is a stall detector, never the slow-start budget: it must stay well above realistic time-to-first-byte for long contexts, and total duration is capped separately. | `codebuddy_provider/pipeline.py` (`UPSTREAM_READ_TIMEOUT_S`) | `tests/test_codebuddy_failover.py::test_upstream_read_timeout_is_long_enough_for_slow_first_token` |
 
