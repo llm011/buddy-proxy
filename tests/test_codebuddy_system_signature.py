@@ -93,14 +93,84 @@ def test_later_paragraph_is_exempt(prefix):
     assert _neutralize_system_signature(src) is src
 
 
-def test_signature_in_second_system_block_is_exempt():
-    """messages 里后面的 system 块不受首段锚定约束（实测放行），不碰。"""
+def test_signature_in_second_system_block_is_masked():
+    """messages 里**后面**的 system 块同样会被上游拦（2026-11-08 复测）。
+
+    2026-11-02 那版结论是「后面的 system 块放行」，实测已不再成立：上游把
+    扫描面扩到了所有 system / assistant 消息。旧实现只查第一条，导致屏蔽
+    完全失效、codebuddy 通道被反复判死（日志里「已中性化」一次都没出现过）。
+    """
     body = {"messages": [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "system", "content": DSH},
         {"role": "user", "content": "hi"},
     ]}
+    out = _neutralize_leading_system(body)
+    assert out is not body
+    assert out["messages"][1]["content"] == MASK
+    # 没命中的那条 system 不能动
+    assert out["messages"][0]["content"] == "You are a helpful assistant."
+
+
+def test_signature_in_assistant_message_is_masked():
+    """assistant 消息同样被扫（实测 400），必须中和。"""
+    body = {"messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": DSH},
+    ]}
+    out = _neutralize_leading_system(body)
+    assert out["messages"][2]["content"] == MASK
+
+
+def test_signature_in_block_array_is_masked():
+    """分块数组的每个 text 块都要查（实测第 2 块命中同样 400）。"""
+    body = {"messages": [
+        {"role": "system", "content": [
+            {"type": "text", "text": "clean intro"},
+            {"type": "text", "text": DSH},
+        ]},
+        {"role": "user", "content": "hi"},
+    ]}
+    out = _neutralize_leading_system(body)
+    blocks = out["messages"][0]["content"]
+    assert blocks[0]["text"] == "clean intro"
+    assert blocks[1]["text"] == MASK
+
+
+def test_signature_in_late_system_block_is_masked():
+    """对话中途再插一条 system（实测 400）也要中和。"""
+    body = {"messages": [
+        {"role": "system", "content": "clean"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "q"},
+        {"role": "system", "content": DSH},
+    ]}
+    out = _neutralize_leading_system(body)
+    assert out["messages"][4]["content"] == MASK
+
+
+def test_signature_in_tool_message_untouched():
+    """tool 消息不被扫（实测 200），不能篡改工具结果。"""
+    body = {"messages": [
+        {"role": "system", "content": "clean"},
+        {"role": "user", "content": "hi"},
+        {"role": "tool", "tool_call_id": "c1", "content": DSH},
+    ]}
     assert _neutralize_leading_system(body) is body
+
+
+def test_non_text_blocks_preserved():
+    """分块数组里的非 text 块（图片等）原样保留。"""
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}
+    body = {"messages": [
+        {"role": "system", "content": [image, {"type": "text", "text": DSH}]},
+        {"role": "user", "content": "hi"},
+    ]}
+    out = _neutralize_leading_system(body)
+    assert out["messages"][0]["content"][0] == image
+    assert out["messages"][0]["content"][1]["text"] == MASK
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +236,7 @@ def test_no_messages_key_is_noop():
 @pytest.mark.parametrize("messages", [
     [],                              # 空
     "not-a-list",
-    [{"role": "user", "content": DSH}],                 # 首条不是 system
-    [{"role": "system", "content": [{"type": "text", "text": DSH}]}],  # 分块数组
+    [{"role": "user", "content": DSH}],                 # 首条是 user：上游不扫
     [{"role": "system", "content": None}],
     [{"role": "system"}],
     ["not-a-dict"],
@@ -176,6 +245,15 @@ def test_odd_shapes_are_noop(messages):
     """没法安全处理的一律原样返回——绝不把能通的请求改成 400。"""
     body = {"model": "m", "messages": messages}
     assert _neutralize_leading_system(body) is body
+
+
+def test_block_array_with_signature_is_now_patched():
+    """分块数组**不再**是 noop：实测这种形态同样 400（见上面的专门用例）。"""
+    body = {"model": "m", "messages": [
+        {"role": "system", "content": [{"type": "text", "text": DSH}]}]}
+    out = _neutralize_leading_system(body)
+    assert out is not body
+    assert out["messages"][0]["content"][0]["text"] == MASK
 
 
 def test_original_body_not_mutated():

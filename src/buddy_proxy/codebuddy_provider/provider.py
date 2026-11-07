@@ -201,28 +201,75 @@ def _neutralize_system_signature(content: str) -> str:
     return content
 
 
+#: 上游会扫签名扫的角色。**user / tool 不在内**（2026-11-08 实测：签名放进
+#: user 消息、tool 消息都返回 200；放进 assistant 消息则 400）。
+#:
+#: 历史上这里只查**第一条** system 的**首段**——那是 2026-11-02 的实测结论，
+#: 当时「后面的 system 块」确实放行。2026-11-08 复测发现上游把扫描面扩大了：
+#: 第 2 条、第 3 条 system，以及 assistant 消息，只要**首段**命中签名就整单
+#: 11128。旧实现因此完全失效（日志里「已中性化」一次都没出现过），表现为
+#: codebuddy 通道被反复判死、冷却 5 分钟→60 分钟，看起来像「账号废了」。
+_NEUTRALIZED_ROLES = frozenset({"system", "assistant"})
+
+
+def _neutralize_text_blocks(content: Any) -> Any:
+    """对一个 message 的 ``content`` 做签名中和，返回新值或原值（未命中）。
+
+    支持两种上游真实形态：
+    - 字符串：整体按「首段」规则判；
+    - 分块数组（``[{"type":"text","text":...}]``）：**逐块**按同样规则判——
+      实测 ``[{"text":"clean intro"},{"text":<签名>}]`` 也会 400，所以不能
+      只看第一块；非 text 块（图片等）原样保留。
+    """
+    if isinstance(content, str):
+        return _neutralize_system_signature(content)
+    if not isinstance(content, list):
+        return content
+    changed = False
+    blocks = []
+    for block in content:
+        if isinstance(block, dict) and isinstance(block.get("text"), str):
+            patched = _neutralize_system_signature(block["text"])
+            if patched is not block["text"]:
+                changed = True
+                blocks.append({**block, "text": patched})
+                continue
+        blocks.append(block)
+    return blocks if changed else content
+
+
 def _neutralize_leading_system(body: dict[str, Any]) -> dict[str, Any]:
-    """对 ``body["messages"]`` 的首条 system 做签名中和（见上）。
+    """中和 ``body["messages"]`` 里所有会被上游扫描的客户端签名。
 
-    只处理**第一条** message：上游只读首段，后面的 system 块不受锚定规则约束
-    （实测后面再出现完整签名也放行），不碰。
+    扫描范围（2026-11-08 实测，见 :data:`_NEUTRALIZED_ROLES`）：
+    - **所有** system 消息，不只是第一条；
+    - assistant 消息；
+    - 消息 content 是分块数组时，**每个** text 块都算。
 
-    不是 list / 首条不是 system / content 是分块数组时一律原样返回——分块数组
-    的上游行为未测，宁可不动也不能把本来能通的请求改成 400。
+    不碰 user / tool 消息：上游实测不扫这两个角色，改了只会平白篡改用户输入
+    或工具结果。
+
+    没有命中时返回**原对象**（调用方靠 ``is`` 判断是否改动，见测试
+    ``test_original_body_not_mutated``）；命中才浅拷贝一层，不改入参。
     """
     messages = body.get("messages")
     if not isinstance(messages, list) or not messages:
         return body
-    first = messages[0]
-    if not isinstance(first, dict) or first.get("role") != "system":
+    patched_messages: list[Any] = []
+    changed = False
+    for message in messages:
+        if (isinstance(message, dict)
+                and message.get("role") in _NEUTRALIZED_ROLES):
+            content = message.get("content")
+            patched = _neutralize_text_blocks(content)
+            if patched is not content:
+                changed = True
+                patched_messages.append({**message, "content": patched})
+                continue
+        patched_messages.append(message)
+    if not changed:
         return body
-    content = first.get("content")
-    if not isinstance(content, str):
-        return body
-    patched = _neutralize_system_signature(content)
-    if patched is content:
-        return body
-    return {**body, "messages": [{**first, "content": patched}, *messages[1:]]}
+    return {**body, "messages": patched_messages}
 
 
 def _is_account_error(e: HTTPException) -> bool:
@@ -240,6 +287,13 @@ def _is_account_error(e: HTTPException) -> bool:
 #: （2026-11-02 起 system prompt 签名校验、2026-11-07 起 dsh 的**任意**会话都会
 #: 中招，见文档）。命中它的请求即便内容被 ``core/desensitize`` 改到 200，也不是
 #: 账号或参数问题，而是「这个客户端现在不被这条通道接受」。
+#:
+#: ⚠ 2026-11-08：这一层是**兜底**，第一道防线是
+#: :func:`_neutralize_leading_system`。当天实测发现上游把签名扫描面从「第一条
+#: system 的首段」扩大到了「所有 system / assistant 消息的每个 text 块首段」，
+#: 旧实现完全漏扫 → 11128 一路打到这里 → 通道被判死、冷却 5→60 分钟。修好
+#: 扫描面后，正常请求不该再落到这个码上；它仍然保留，因为未识别的新客户端
+#: 签名还会从这里透出来。
 _CHANNEL_BLOCK_CODES = frozenset({11128})
 
 #: 标记命中 ``_CHANNEL_BLOCK_CODES`` 的通道时使用的模型键。冷却按
