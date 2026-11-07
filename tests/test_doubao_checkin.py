@@ -498,3 +498,49 @@ def test_provider_failure_message_uses_probe_result(monkeypatch, fake_page):
     provider, client = _provider_with(monkeypatch, {"POST /chat/completion": (0, "")})
     assert "登录态未确认" in provider.checkin_status()["message"]
     assert client._login_state is None
+
+
+# ---- pc_version 动态化（2026-11-08）-----------------------------------------
+#
+# 原先 `_PAGE_QUERY` 把 `pc_version=2.34.12` 写死。App 升级后真实客户端带的是
+# 新版本号（实测 2.35.19），写死值等于让上游一直把我们当旧客户端——哪天版本
+# 变成硬门槛就会整条签到链路失效。现在改为从页面 UA 读实时版本覆盖。
+
+def test_live_version_replaces_hardcoded_pc_version():
+    """UA 里有版本 → 兜底 query 的 pc_version 被换成实时值，其余参数不动。"""
+    client = FakeClient()
+    page = doubao_checkin.CheckinPage(client)
+    page.evaluate = lambda expr, timeout=20.0: (
+        "2.35.19" if "SamanthaDoubaoWork" in expr else None)
+
+    query = page._query_with_live_version()
+    assert "pc_version=2.35.19" in query
+    assert "pc_version=2.34.12" not in query
+    # 渠道标识不能跟着版本一起改
+    assert "aid=497858" in query and "version_code=20800" in query
+    assert "web_platform=work_desktop" in query
+
+
+def test_live_version_falls_back_when_ua_has_no_version():
+    """UA 里读不到版本（非桌面端 UA / 页面还没就绪）→ 原样用兜底 query。"""
+    client = FakeClient()
+    page = doubao_checkin.CheckinPage(client)
+    for bogus in ("", None, "not-a-version", "2", {"ERROR": "boom"}):
+        page.evaluate = lambda expr, timeout=20.0, _v=bogus: _v
+        assert page._query_with_live_version() == doubao_checkin._PAGE_QUERY
+
+
+def test_live_version_never_returns_malformed_query():
+    """替换后仍必须以 ? 开头且不含残留占位——request() 直接拼这个串。"""
+    client = FakeClient()
+    page = doubao_checkin.CheckinPage(client)
+    page.evaluate = lambda expr, timeout=20.0: "3.0.0"
+    query = page._query_with_live_version()
+    assert query.startswith("?")
+    assert query.count("pc_version=") == 1
+    assert " " not in query
+
+
+def test_page_query_has_single_pc_version_placeholder():
+    """兜底值里只能有一个 pc_version，否则正则只会替换掉第一个。"""
+    assert doubao_checkin._PAGE_QUERY.count("pc_version=") == 1
