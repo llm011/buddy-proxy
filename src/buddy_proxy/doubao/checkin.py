@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 from typing import Any
@@ -38,13 +39,34 @@ _TASK = "daily_signin"
 #: session 的页面加载 / 请求 / 关闭交叉。RLock 允许领取入口先查状态再领取。
 _PAGE_LOCK = threading.RLock()
 
-#: 页面还没有留下 detail 资源时的已验证参数集。不能用聊天通道的 aid=1044603。
+#: 页面还没有留下 detail 资源时的兜底参数集。不能用聊天通道的 aid=1044603。
+#:
+#: ⚠ ``pc_version`` 曾经写死成 ``2.34.12``，是个迟早要炸的隐患：客户端升级后
+#: 真实请求带的是新版本号，写死的值会让上游按「旧客户端」对待（实测官方 2.35.19
+#: 与写死值并存时，接口仍能通，但谁也不敢保证哪天按版本卡功能）。
+#: 现在 :meth:`CheckinPage._open` 会从页面 UA 里读实时版本覆盖它（见
+#: :data:`_UA_VERSION_JS`），这里的值只在读不到 UA 时兜底。
+#:
+#: 另外实测过：``pc_version`` 对 ``v3/detail/`` **不是必需**——去掉它、甚至写成
+#: ``9.99.99`` 都返回 ``code: 0``，只有整串 query 为空才失败（``code: 1``）。
+#: 所以这里的目标不是「值必须精确」，而是「别落后于客户端」，避免某天版本校验
+#: 变成硬门槛。
 _PAGE_QUERY = (
     "?version_code=20800&language=zh&device_platform=web"
     "&doubao_device_platform=web&aid=497858&real_aid=497858"
     "&pkg_type=release_version&pc_version=2.34.12&region=CN&sys_region=CN"
     "&samantha_web=1&web_platform=work_desktop&use-olympus-account=1&runtime=web"
 )
+
+#: 从页面 UA 取客户端版本。豆包桌面端的 UA 尾巴形如
+#: ``... Chrome/147.0.0.0 Safari/537.36 SamanthaDoubaoWork/2.35.19``；
+#: 取不到就返回空串（调用方保留兜底值，绝不因此失败）。
+_UA_VERSION_JS = """
+(() => {
+  const m = /SamanthaDoubaoWork\\/([0-9]+(?:\\.[0-9]+)+)/.exec(navigator.userAgent || '');
+  return m ? m[1] : '';
+})()
+"""
 
 _DETAIL_QUERY_JS = """
 (() => {
@@ -156,9 +178,25 @@ class CheckinPage:
                 query = self.evaluate(_DETAIL_QUERY_JS)
                 if isinstance(query, str) and query.startswith("?"):
                     self.query = query
+                else:
+                    # 页面还没发过 detail 资源：退回兜底参数集，但先把
+                    # ``pc_version`` 换成**当前客户端真实版本**（从 UA 读），
+                    # 免得写死值随着 App 升级慢慢过期。读不到 UA 就原样用兜底值。
+                    self.query = self._query_with_live_version()
                 return
             time.sleep(0.3)
         raise RuntimeError("checkin page did not finish loading")
+
+    def _query_with_live_version(self) -> str:
+        """兜底 query + 页面 UA 里的实时版本；取不到版本就返回兜底 query。
+
+        只替换 ``pc_version`` 这一个参数：其余（aid / version_code /
+        web_platform 等）是渠道标识，与版本无关，跟着 UA 猜反而更危险。
+        """
+        version = self.evaluate(_UA_VERSION_JS)
+        if not isinstance(version, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)+", version):
+            return _PAGE_QUERY
+        return re.sub(r"pc_version=[^&]*", f"pc_version={version}", _PAGE_QUERY)
 
     def evaluate(self, expr: str, timeout: float = 20.0) -> Any:
         if self._ws is None:
