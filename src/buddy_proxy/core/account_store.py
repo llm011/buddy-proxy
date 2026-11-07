@@ -139,11 +139,12 @@ class AccountStore:
         *,
         label: str,
         state_dir_fn: Callable[[], Path],
-        max_accounts: int = 8,
+        max_accounts: int | None = None,
         lock_name: str = "index.lock",
     ) -> None:
         #: 通道名，只用于错误/告警文案（如 ``trae 账号数已达上限 8``）。
         self.label = label
+        #: 账号数上限；``None`` / ``0`` = 不限制（各通道默认放开）。
         self.max_accounts = max_accounts
         #: 进程内锁。持有顺序固定：先它，再 :meth:`file_lock`。
         self.lock = threading.Lock()
@@ -319,7 +320,7 @@ class AccountStore:
             if not is_valid_account_id(account_id):
                 cred["account_id"] = derive_id(cred)
                 account_id = str(cred["account_id"])
-            if len(entries) >= self.max_accounts:
+            if self.max_accounts and len(entries) >= self.max_accounts:
                 raise error(
                     f"{self.label} 账号数已达上限 {self.max_accounts}，"
                     f"请先在管理页删除不用的账号"

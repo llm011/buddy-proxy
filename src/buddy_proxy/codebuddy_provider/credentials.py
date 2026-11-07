@@ -68,8 +68,8 @@ DEFAULT_TTL_MS = 30 * 24 * 3600 * 1000
 #: 提前多久刷新（5 分钟），与 client.ensure_authenticated 的 60s 余量相比更宽。
 REFRESH_MARGIN_MS = 5 * 60 * 1000
 
-#: 账号数上限（与 kimi/qoder/antigravity 同值）。
-_MAX_ACCOUNTS = 8
+#: 账号数上限：``None`` = 不限制（历史值 8，2026-11 按用户要求放开）。
+_MAX_ACCOUNTS: int | None = None
 
 #: 这份凭据还能不能用的判据字段（读 / 自愈 / upsert 共用同一个）。
 _CRED_REQUIRED_FIELD = "token"

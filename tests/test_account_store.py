@@ -175,6 +175,22 @@ def test_upsert_enforces_max_accounts_with_caller_error_type(tmp_path):
         _upsert(store, _cred("c"), error=QuotaError)
 
 
+def test_upsert_without_max_accounts_is_unbounded(tmp_path):
+    """上限为 ``None``（各通道默认值）时不限制账号数——历史 8 个上限已放开。"""
+    store = _store(tmp_path, max_accounts=None)
+    for i in range(20):
+        _upsert(store, _cred(f"u{i}"))
+    assert len(store.entries_locked()) == 20
+
+
+def test_upsert_zero_max_accounts_means_unlimited(tmp_path):
+    """``0`` 与 ``None`` 同义：都是不限制。"""
+    store = _store(tmp_path, max_accounts=0)
+    for i in range(12):
+        _upsert(store, _cred(f"z{i}"))
+    assert len(store.entries_locked()) == 12
+
+
 def test_upsert_entry_fields_can_prefer_existing_value(tmp_path):
     """``previous`` 让通道实现「已有值优先」（region/name 这类合并语义）。"""
     store = _store(tmp_path)

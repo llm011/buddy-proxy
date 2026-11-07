@@ -86,16 +86,13 @@ def test_import_rejects_empty():
         login.import_cred_payload("   ")
 
 
-def test_import_account_limit_surfaces_as_login_error():
-    """账号数到上限：面板入口只认 LoginError（AuthError 会漏成 HTTP 500）。"""
-    for i in range(credentials._MAX_ACCOUNTS):
+def test_import_has_no_account_limit():
+    """历史 8 个账号上限已放开：导入不再受数量限制。"""
+    for i in range(20):
         login.import_cred_payload(
             {"access_token": "at", "refresh_token": f"rt-{i}",
              "chatgpt_account_id": f"acc-limit-{i}"})
-    with pytest.raises(login.LoginError):
-        login.import_cred_payload(
-            {"access_token": "at", "refresh_token": "rt-overflow",
-             "chatgpt_account_id": "acc-limit-overflow"})
+    assert len(credentials.list_accounts()) == 20
 
 
 def test_cred_from_token_response():

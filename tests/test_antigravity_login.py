@@ -98,13 +98,13 @@ def test_account_id_falls_back_to_token_hash(tmp_path, monkeypatch):
     assert ref.id == "acct-" + hashlib.sha256(b"rt").hexdigest()[:12]
 
 
-def test_max_accounts_cap(tmp_path, monkeypatch):
+def test_no_account_cap_by_default(tmp_path, monkeypatch):
+    """历史 8 个账号上限已放开：默认不限制。"""
     from buddy_proxy.antigravity import credentials as creds
 
-    for i in range(8):
+    for i in range(11):
         creds.save_account_cred(_cred(email=f"u{i}@x.com", refresh_token=f"rt{i}"))
-    with pytest.raises(creds.AuthError, match="上限"):
-        creds.save_account_cred(_cred(email="u9@x.com", refresh_token="rt9"))
+    assert len(creds.list_accounts()) == 11
 
 
 def test_index_self_heals_when_cred_file_removed(tmp_path, monkeypatch):
