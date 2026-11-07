@@ -201,15 +201,97 @@ def _neutralize_system_signature(content: str) -> str:
     return content
 
 
-#: 上游会扫签名扫的角色。**user / tool 不在内**（2026-11-08 实测：签名放进
-#: user 消息、tool 消息都返回 200；放进 assistant 消息则 400）。
+# ============================================================================
+# 11128 渠道校验：踩坑档案（改这里之前请先读完）
+# ============================================================================
+#
+# 【现象】codebuddy 通道请求全部 400，日志里：
+#     channel_blocked: {"provider": "codebuddy", "status": 400, "upstream_code": 11128}
+#     目标 codebuddy/* 换档失败，冷却 5 分钟（首次）→ 冷却 60 分钟（已升级）
+#   之后所有走 codebuddy 的请求都被跳过。**从用户视角就是「这个账号的模型全废了」**，
+#   但账号 token、额度、模型权限全都正常——别去查账号。
+#
+# 【上游真身】
+#     {"code":11128,"msg":"Illegal API invocation from an unapproved channel",
+#      "displayTips":{"zh":"这次调用没通过渠道校验，可能不是官方客户端发出的。"}}
+#
+# 【误判史（两次都栽在「只覆盖了当时实测到的那一种形态」）】
+#
+#   1. 2026-11-02：只查**第一条 system 的 首段**。当时实测「后面的 system 块
+#      放行」，于是代码只处理 messages[0]，且 content 必须是 str。
+#   2. 2026-11-08：复测发现扫描面早就扩大了，旧实现**完全漏扫**（日志里
+#      「已中性化」一次都没出现过）。现在的规则是：**所有 system / assistant /
+#      developer 消息，每个 text 块的首段**都要扫；user / tool 不扫。
+#      同一天还发现第二个独立原因：**上游根本不认 `developer` 角色**——哪怕
+#      content 是干净的 "hi" 也 400。dsh 0.2.2 起把 system prompt 发成
+#      developer，于是任意会话都失败。
+#
+# 【教训】
+#   - 「某形态放行」不等于「所有形态放行」。新增客户端/新角色名时，**必须重跑
+#     下面的实测矩阵**，不要凭旧结论推理。
+#   - 两个修法互相依赖：`developer → system` 的降级必须排在签名中和**之前**，
+#     否则降级后的那条 system 不会被扫到，照样 400。
+#   - 排查手段：临时在 400 分支打印每条消息的 role + content 首段（只打前几十
+#     字符，别落用户正文），一眼就能看出是「哪个角色」还是「哪段内容」。
+#     这次就是靠它看到首条 role 是 developer、而 system 列表为空。
+#
+# 【实测矩阵（2026-11-08，CN 账号逐条对过真实上游）】
+#   role=developer + 干净内容        → 400   ← 角色本身被拒
+#   role=developer + 签名            → 400
+#   role=system    + 干净内容        → 200
+#   role=system    + 签名(首段)      → 400
+#   role=system    + 签名(段中)      → 200   ← 只认首段
+#   role=system    + 分块数组第2块签名 → 400  ← 每个 text 块都扫
+#   role=assistant + 签名            → 400
+#   role=user      + 签名            → 200   ← 不扫
+#   role=tool      + 签名            → 200   ← 不扫
+#
+# 相关测试：tests/test_codebuddy_system_signature.py
+# ============================================================================
+
+#: 上游会扫签名的角色。**user / tool 不在内**（实测放行；扫它们只会平白篡改
+#: 用户输入与工具结果）。
 #:
-#: 历史上这里只查**第一条** system 的**首段**——那是 2026-11-02 的实测结论，
-#: 当时「后面的 system 块」确实放行。2026-11-08 复测发现上游把扫描面扩大了：
-#: 第 2 条、第 3 条 system，以及 assistant 消息，只要**首段**命中签名就整单
-#: 11128。旧实现因此完全失效（日志里「已中性化」一次都没出现过），表现为
-#: codebuddy 通道被反复判死、冷却 5 分钟→60 分钟，看起来像「账号废了」。
-_NEUTRALIZED_ROLES = frozenset({"system", "assistant"})
+#: ⚠ ``developer`` 同时出现在这里和 :data:`_ROLE_ALIASES`：它会先被降级成
+#: system（角色本身就不被接受），降级后仍要参与签名扫描。
+_NEUTRALIZED_ROLES = frozenset({"system", "assistant", "developer"})
+
+#: 上游只认 OpenAI 的经典角色，``developer`` 会被判成非法渠道调用（11128）。
+#: 语义上 developer 与 system 等价（OpenAI 文档：developer 是 system 的新名字），
+#: 直接降级不改变模型行为。
+_ROLE_ALIASES = {"developer": "system"}
+
+
+def _demote_developer_role(body: dict[str, Any]) -> dict[str, Any]:
+    """把 ``developer`` 角色降级成 ``system``（上游不认 developer）。
+
+    实测（2026-11-08）：``[{"role":"developer","content":"hi"}]`` 也返回
+    400/11128——与 content 无关，是**角色本身**被拒。同样的内容换成
+    ``role: "system"`` 就是 200。
+
+    dsh 0.2.2 起把 system prompt 发成 developer，所以它的**任意会话**在
+    codebuddy 上都会失败。用户看到的是「这个账号的模型全废了」，实际账号没问题。
+
+    调用顺序：必须在 :func:`_neutralize_leading_system` **之前**——降级成
+    system 之后，那条消息才会被签名扫描覆盖到。
+
+    只在确有 developer 消息时才浅拷贝；没有则返回原对象（调用方靠 ``is``
+    判断是否改动）。
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return body
+    changed = False
+    out = []
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") in _ROLE_ALIASES:
+            changed = True
+            out.append({**message, "role": _ROLE_ALIASES[message["role"]]})
+        else:
+            out.append(message)
+    if not changed:
+        return body
+    return {**body, "messages": out}
 
 
 def _neutralize_text_blocks(content: Any) -> Any:
@@ -1136,9 +1218,13 @@ class CodeBuddyProvider(BaseProvider):
         if self._region == "global" and "messages" in upstream_body:
             upstream_body["messages"] = _ensure_leading_system(upstream_body["messages"])
 
-        # 渠道指纹校验：system prompt 首段里出现别的 Agent 客户端的开场白（dsh /
-        # Claude Code），CN + 海外两边都会整单拒 11128。见
-        # ``_SYSTEM_PROMPT_SIGNATURES`` 的实测矩阵；两边同等对待。
+        # ⚠ 以下两步的顺序**不能调换**（踩过一次）：
+        #   1) 先把 developer 降级成 system —— 上游不认 developer，连干净内容
+        #      都 400/11128（dsh 0.2.2 起的默认角色）；
+        #   2) 再扫签名 —— 降级后的那条 system 才在扫描范围内。
+        # 反过来写的话，降级前它是 developer（不在扫描名单里）、降级后又没人扫，
+        # 签名照样漏过去。详见文件上方「11128 渠道校验：踩坑档案」。
+        upstream_body = _demote_developer_role(upstream_body)
         upstream_body = _neutralize_leading_system(upstream_body)
 
         # 应用脱敏处理（脱敏开关是全局 state 的，与账号无关，循环外做一次）
