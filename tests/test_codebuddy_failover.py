@@ -372,6 +372,92 @@ def test_forward_stream_channel_block_marks_channel(monkeypatch):
     cooldown_mod._reset_for_tests()
 
 
+def test_forward_stream_channel_block_with_escaped_string_details(monkeypatch):
+    """线上真实形状：11128 被序列化成**转义字符串**塞进 ``details``，也要认出来。
+
+    ``stream_upstream`` 的 ``details`` 是 ``error_text[:500]``，外层再 ``json.dumps``
+    一次 → 引号变成 ``\\"``。第一版修复只解了外层，把 ``code=400``（HTTP 状态本身）
+    当成业务码，于是流式路径既不认封禁、也没给整条通道打标记（线上 08:26:53 那次
+    codebuddy 仍然每请求白撞一次、客户端拿到原样 400）。
+    """
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    _setup_two_accounts(monkeypatch)
+    details = json.dumps({"code": 11128,
+                          "msg": "Illegal API invocation from an unapproved channel"})
+    monkeypatch.setattr(cbp, "stream_upstream",
+                        lambda *a, **k: _agen(_channel_block_frames(details)))
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(CodeBuddyProvider().forward(
+            {"model": "deepseek-v4.1-flash", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]}, "openai", None))
+    assert ei.value.status_code == 400
+    assert cooldown_mod.is_marked("codebuddy", "*"), "整条通道必须进冷却"
+    cooldown_mod._reset_for_tests()
+
+
+def test_forward_stream_channel_block_truncated_details_still_detected(monkeypatch):
+    """上游错误体被 500 字节截断（没有闭合括号）时仍要认出 11128。"""
+    from buddy_proxy.core import cooldown as cooldown_mod
+
+    cooldown_mod._reset_for_tests()
+    _setup_two_accounts(monkeypatch)
+    raw = ('{"code":11128,"msg":"Illegal API invocation from an unapproved '
+           'channel","extra":"' + "x" * 600)
+    details = raw[:500]  # 与 stream_upstream 的 error_text[:500] 一致：尾部被截断
+    monkeypatch.setattr(cbp, "stream_upstream",
+                        lambda *a, **k: _agen(_channel_block_frames(details)))
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(CodeBuddyProvider().forward(
+            {"model": "deepseek-v4.1-flash", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]}, "openai", None))
+    assert ei.value.status_code == 400
+    assert cooldown_mod.is_marked("codebuddy", "*")
+    cooldown_mod._reset_for_tests()
+
+
+def test_forward_stream_channel_block_logs_upstream_code(monkeypatch):
+    """命中封禁时 ``channel_blocked`` 诊断里带 ``upstream_code=11128``，便于排查。"""
+    from types import SimpleNamespace
+    from buddy_proxy.core import cooldown as cooldown_mod
+    from buddy_proxy.core import state as st
+
+    cooldown_mod._reset_for_tests()
+    _setup_two_accounts(monkeypatch)
+    lines: list[str] = []
+    monkeypatch.setattr(st, "proxy_state", SimpleNamespace(
+        enable_desensitize=False,
+        logger=SimpleNamespace(info=lines.append),
+        write_log=lambda *a, **k: None))
+    details = json.dumps({"code": 11128, "msg": "Illegal API invocation"})
+    monkeypatch.setattr(cbp, "stream_upstream",
+                        lambda *a, **k: _agen(_channel_block_frames(details)))
+    with pytest.raises(HTTPException):
+        asyncio.run(CodeBuddyProvider().forward(
+            {"model": "deepseek-v4.1-flash", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]}, "openai", None))
+    hits = [ln for ln in lines if ln.startswith("channel_blocked")]
+    assert hits, lines
+    assert "11128" in hits[0]
+    cooldown_mod._reset_for_tests()
+
+
+def test_upstream_error_code_unwraps_nested_and_lowercase():
+    """错误码提取：多层转义字符串、键名大小写、截断 JSON 都要认。"""
+    from buddy_proxy.codebuddy_provider.provider import _upstream_error_code
+
+    inner = json.dumps({"code": 11128, "msg": "x"})
+    assert _upstream_error_code(json.dumps({"details": inner})) == 11128
+    assert _upstream_error_code(json.dumps({"details": inner}, ensure_ascii=False)) == 11128
+    assert _upstream_error_code('{"Code": 11128}') == 11128
+    assert _upstream_error_code('{"code":11128,"msg":"' + "y" * 700) == 11128
+    assert _upstream_error_code("bad request") is None
+    # 错误帧外壳的 code=400 是 HTTP 状态码，不能遮住 details 里的业务码 11128
+    assert _upstream_error_code(
+        json.dumps({"error": {"code": 400, "details": inner}})) == 11128
+
+
 def test_forward_plain_400_does_not_mark_channel(monkeypatch):
     """普通 400（没有 11128 业务码）不得打渠道封禁标记——那是参数错，不关通道的事。"""
     from buddy_proxy.core import cooldown as cooldown_mod

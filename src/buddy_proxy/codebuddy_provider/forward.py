@@ -17,7 +17,7 @@ codebuddy 流式把上游非 200 做成**带内错误 chunk**（``pipeline.strea
 **400 里的例外：渠道风控拦截**。普通 400 是确定性错误（参数错、模型不存在），换谁
 都不会成功；但上游以 ``400 + 业务码``表达「这类调用整条通道都不收」（codebuddy 的
 ``11128 Illegal API invocation from an unapproved channel``，2026-11-07 dsh 事故）时，
-换通道正是解法——见 :func:`_exc_is_channel_block` / :func:`_mark_channel_block`。
+换通道正是解法——见 :func:`_exc_is_channel_block` / :func:`_note_channel_block`。
 
 反过来，**编程错误不换档**：``TypeError`` / ``KeyError`` 这类 bug 若被当成上游故障，
 就会被冷却标记掩盖、客户端反而拿到 200，真因极难发现。
@@ -46,7 +46,7 @@ from .observability import _instrument
 from .provider import (
     _default_codebuddy,
     _exc_is_channel_block,
-    _mark_channel_block,
+    _note_channel_block,
     _target_blocked,
 )
 
@@ -436,7 +436,8 @@ async def _forward_with_order(
             continue
         if _target_blocked(provider_id, model):
             diagnostic("model_order_skip", model=key, target=target,
-                       reason="channel_blocked")
+                       reason="channel_blocked",
+                       remaining_s=cooldown_mod.remaining(provider_id, "*"))
             channel_skipped += 1
             continue
         try:
@@ -452,9 +453,8 @@ async def _forward_with_order(
                     raise  # 确定性错误（参数/模型不存在等）：换谁都没用，原样上抛
                 last_exc = exc
                 last_note = f"HTTP {exc.status_code} channel_block"
-                _mark_channel_block(provider_id)
-                diagnostic("channel_blocked", model=key, target=target,
-                           status=exc.status_code)
+                # 标记 + 记 channel_blocked（provider 自身已经记过一笔，幂等）。
+                _note_channel_block(provider_id, exc)
                 diagnostic("model_order_failover", model=key, target=target,
                            status=exc.status_code, reason="channel_block")
                 continue

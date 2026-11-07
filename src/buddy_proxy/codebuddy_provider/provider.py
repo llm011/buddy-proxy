@@ -250,6 +250,84 @@ _CHANNEL_BLOCK_MODEL = "*"
 _ERROR_CODE_UNESCAPE_DEPTH = 4
 
 
+def _json_loads_tolerant(text: str) -> Any:
+    """尽量把（可能被截断的）JSON 文本解成对象；解不动返回 ``None``。
+
+    上游错误体要判断「是不是渠道风控」，而日志这条线索上的错误体常被截断
+    （``stream_upstream`` 只留前 500 字节），``json.loads`` 直接抛
+    ``JSONDecodeError``。渠道封禁的 code 在错误体**靠前**位置，丢掉尾巴仍能解出
+    ``{"code":11128,...}`` 就够了，所以这里做**括号配平**再解一次，解不动才放弃。
+    只用于错误体这种小文本，不做通用 JSON 修复。
+    """
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    text = text.strip()
+    # 截断点落在字符串值的中间时，这一段的首引号是某个字段值的**开引号**
+    # （不是字符串字面量），扫描会把它当成字符串起点、把后面的结构全吞掉。
+    # 直接按「对象从首键名开始」重建：补开头的 ``{"``，剩下的交给扫描补尾部。
+    if text[:1] in "\"'":
+        inner = _json_loads_tolerant('{"' + text)
+        if isinstance(inner, dict):
+            return inner
+    quote: str | None = None
+    escape = False
+    stack: list[str] = []
+    # 顶层已闭合时最近一个 ``}`` 的位置——**不立即返回**，继续扫完拿到真实的
+    # 「未闭合栈」（截断文本里可能夹着成对的、无关的 ``{}``）。
+    top_closed_at: int | None = None
+    for idx, ch in enumerate(text):
+        if quote:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == quote:
+                quote = None
+            continue
+        if ch in "\"'":
+            quote = ch
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]" and stack:
+            stack.pop()
+            if not stack and ch == "}":
+                top_closed_at = idx
+    # 1) 先补闭合符：截断掉的尾部大多是自由文本（``Msg: …``），补完通常就能解；
+    #    截断点落在字符串里时先补上结束引号，再补括号（截断处是 \" 之类的
+    #    半个转义时，该引号本身是转义出来的，不能当结束引号，所以都试一遍）。
+    close_options = [""]
+    if quote:
+        close_options.append(quote)
+    if stack:
+        closers = "".join(reversed(stack))
+        close_options = [opt + closers for opt in close_options]
+    else:
+        close_options = [opt for opt in close_options if opt]
+    for suffix in close_options:
+        try:
+            payload = json.loads(text + suffix)
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            continue
+    # 2) 再按顶层闭合位置截到花括号：截断点落在字符串里（补闭合符救不回来）。
+    if top_closed_at is not None:
+        closed = text[: top_closed_at + 1]
+        try:
+            payload = json.loads(closed)
+            if isinstance(payload, dict):
+                return payload
+        except json.JSONDecodeError:
+            pass
+        if closed[:1] in "\"'":
+            # 闭合位置落在「引号残片」里时，截出来的是一整段字符串——它的内容
+            # 才是最初的对象文本，交给第一段再解。
+            return _json.loads_tolerant(closed)
+    return None
+
+
 def _upstream_error_code(text: str, *, _depth: int = 0) -> int | None:
     """从上游错误体里抠出业务错误码（``{"code":11128,...}``）。
 
@@ -264,30 +342,46 @@ def _upstream_error_code(text: str, *, _depth: int = 0) -> int | None:
         return None
     payload: Any = None
     if text[:1] in "{[":
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            payload = None
+        payload = _json_loads_tolerant(text)
     if isinstance(payload, dict):
-        code = payload.get("code")
-        if isinstance(code, int) and not isinstance(code, bool):
-            return code
-        if isinstance(code, str) and code.strip().isdigit():
-            return int(code)
+        # 键名统一小写后再查：错误体里最常见的是 ``error``（dict）与 ``message``，
+        # 但 codebuddy 一类通道也可能写 ``Code`` / ``Msg``。不归一的话，
+        # ``{"Code":11128}`` 会一路漏到底、被当成普通 400 直接上抛（2026-11-07
+        # dsh 事故第一版修复就栽在这：线上 400 日志里只有 ``error`` 一条线索）。
+        lowered = {str(k).lower(): v for k, v in payload.items()}
+        # 先看有没有可**继续向内**的包裹字段（``error``/``details`` 等）：有就说明
+        # 这一层只是外壳，里面的业务错误体比外壳的 code 更具体——错误帧外层的
+        # ``code=400`` 是 HTTP 状态码，先读它就会把 ``details`` 里的 11128 遮掉。
         if _depth < _ERROR_CODE_UNESCAPE_DEPTH:
-            for key in ("error", "detail", "details", "message", "msg"):
-                value = payload.get(key)
+            for key in ("error", "detail", "details", "cause", "data", "message", "msg"):
+                value = lowered.get(key)
                 if isinstance(value, str):
-                    found = _upstream_error_code(value, _depth=_depth + 1)
+                    # 内层本身可能又是「已转义 JSON + 尾部被截断」的字符串：
+                    # 先按容错 JSON 解一层，解出对象再往里找；解不出（自由文本）
+                    # 才交给字面正则兜底。
+                    nested = _json_loads_tolerant(value)
+                    if isinstance(nested, str):
+                        nested = _json_loads_tolerant(nested)
+                    if isinstance(nested, dict):
+                        found = _upstream_error_code(json.dumps(nested),
+                                                     _depth=_depth + 1)
+                    else:
+                        found = _upstream_error_code(value, _depth=_depth + 1)
                 elif isinstance(value, (dict, list)):
                     found = _upstream_error_code(json.dumps(value), _depth=_depth + 1)
                 else:
                     continue
                 if found is not None:
                     return found
+        code = lowered.get("code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code
+        if isinstance(code, str) and code.strip().isdigit():
+            return int(code)
     if _depth == 0:
-        # 兜底：没解成 JSON 的自由文本（部分通道直接透传上游原文）仍按字面找。
-        m = re.search(r'"code"\s*:\s*(\d+)', text)
+        # 兜底：没解成 JSON 的自由文本（部分通道直接透传上游原文）仍按字面找，
+        # 大小写不敏感（``"Code"`` / ``"code"`` 都认）。
+        m = re.search(r'"code"\s*:\s*(\d+)', text, re.IGNORECASE)
         if m:
             return int(m.group(1))
     return None
@@ -315,6 +409,19 @@ def _mark_channel_block(provider_id: str) -> None:
     的统计。改 ``mark_failed`` 时别顺手把 4xx 也算进突发。
     """
     cooldown_mod.mark_failed(provider_id, _CHANNEL_BLOCK_MODEL, status=400)
+
+
+def _note_channel_block(provider_id: str, exc: HTTPException) -> None:
+    """判定为渠道封禁时的统一落点：标冷却 + 记一条 ``channel_blocked`` 诊断。
+
+    日志里带 ``upstream_code``：下次再怀疑「是不是又被风控挡了」，看这一行就能
+    分清「命中封禁码」与「普通 400 被上抛」，不用再去反推错误体。
+    """
+    _mark_channel_block(provider_id)
+    detail = exc.detail
+    text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+    diagnostic("channel_blocked", provider=provider_id, status=exc.status_code,
+               upstream_code=_upstream_error_code(text))
 
 
 def _target_blocked(provider_id: str, model: str) -> bool:
@@ -949,11 +1056,12 @@ class CodeBuddyProvider(BaseProvider):
                     raise
         except HTTPException as e:
             # 渠道级风控拦截（400 + 11128）：换账号没用，但**整条通道**该歇一会。
-            # 流式的那条路在首事件闸门里已标过（见 ``_forward_once``），这里是
-            # 非流式聚合路径对应的一笔；两者都标记是幂等的。
+            # 流式路径的异常在 ``_forward_once`` 的首事件闸门里抛出、绕过了上面
+            # 内层循环的 ``except HTTPException``，**到不了这里**——所以它由
+            # ``_forward_once`` → ``_note_channel_block`` 自己记一笔（两处都标记
+            # 是幂等的）。
             if _exc_is_channel_block(e):
-                _mark_channel_block(self.id)
-                diagnostic("channel_blocked", provider=self.id, status=e.status_code)
+                _note_channel_block(self.id, e)
             # 走到这是「最后一个账号也失败」或「非账号级错误透传」。anthropic 协议
             # 的错误体用标准形状（Claude Code 等 SDK 靠它渲染错误）；openai 协议
             # 维持「抛 HTTPException → 外层 exception handler 转 JSON」不变。
@@ -1029,6 +1137,11 @@ class CodeBuddyProvider(BaseProvider):
                 err_exc = _error_frame_to_exception(first, protocol)
                 if err_exc is not None:
                     await raw_gen.aclose()
+                    # 这里抛出的异常绕过 failover 内层循环的 except，直接到
+                    # ``forward`` 的外层；渠道封禁必须在此标记，否则整条通道
+                    # 不会进冷却、model_order 每次都白撞第一档（2026-11-07）。
+                    if _exc_is_channel_block(err_exc):
+                        _note_channel_block(self.id, err_exc)
                     raise err_exc
 
             async def _replay():
