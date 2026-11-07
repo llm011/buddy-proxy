@@ -10,18 +10,11 @@ function renderBenefitsNav() {
   const nav = document.getElementById('benefits-sidenav');
   if (!nav) return;
   const page = document.getElementById('page-benefits');
+  if (!page) { nav.innerHTML = ''; _navDisconnect(); return; }
   const labels = [];
   const cards = [];
-  // 打卡日历：页首第一张卡（grid2.top 里左栏那张）。选择器只匹配得到它
-  // ——后面的面板卡都是动态 innerHTML 填充、不带 .chart-card 属性节点。
-  const cal = page && page.querySelector('.grid2.top > .chart-card');
-  if (cal) { labels.push(['打卡日历', 'cal']); cards.push(cal); }
-  // 「各通道签到」全宽卡（DOM 位置在日历 grid 与通道面板之间）：也是页面
-  // 主区块之一，滚过去要能一键回来看签到状态
-  const ck = page && page.querySelector('.rows-card');
-  if (ck && ck.querySelector('#checkin-rows')) {
-    labels.push(['各通道签到', 'checkin']); cards.push(ck);
-  }
+  // 2026-11-07 起签到（含日历）已独立成页，额度页导航只剩各通道额度卡。
+  // 原先这里还会挂「打卡日历」「各通道签到」两条，现在滚过去只会是空的。
   page.querySelectorAll('[id$="-panel"]').forEach(p => {
     if (!p.innerHTML.trim()) return;      // 未注册/停用的通道面板：整块空
     const pid = p.id.replace(/-panel$/, '');

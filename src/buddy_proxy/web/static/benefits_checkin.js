@@ -90,11 +90,13 @@ async function refreshCheckin(pid, btn) {
     // 旧服务不回 providers 时才回退——也只强刷 benefits 一个键，不带 stats。
     if (snapshot && Array.isArray(snapshot.providers)) {
       BENEFITS = snapshot;
-      renderBenefits({quiet: true});
+      // 签到已独立成页：重绘签到页即可，别去碰额度页的各通道面板
+      // （renderBenefits 会重建十来张卡、各拉一发 accounts）
+      renderCheckin({quiet: true});
     } else {
       await loadData(['benefits'], true);
     }
-    toast(`✓ ${pid} 签到状态已强刷`);
+    toast(`✓ ${pid} 签到状态已刷新`);
   } catch (e) { toast('刷新失败: ' + e.message, true); }
   finally {
     CKREFRESH[pid] = false;
@@ -106,7 +108,7 @@ async function claimNow(pid, btn) {
   // 多账号通道（trae）的 claim 是串行节流的（账号间 sleep + 限流退避），
   // 一次点击最坏 20s+ 才返回——期间必须给反馈，否则看起来像「点了没反应」。
   if (btn) { btn.disabled = true; btn.textContent = '打卡中…'; }
-  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '立即打卡'; } };
+  const restore = () => { if (btn) { btn.disabled = false; btn.textContent = '打卡'; } };
   try {
     const r = await api('/ui/api/checkin', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -114,19 +116,23 @@ async function claimNow(pid, btn) {
     if (!r.ok) {
       toast(`打卡失败: ${r.message || r.error || '未知原因'}`, true);
     } else if (Array.isArray(r.accounts) && r.accounts.length > 1) {
-      // 多账号通道（trae）：逐账号报结果——「成功」两个字盖不住个别账号的失败
+      // 多账号通道：逐账号报结果——「成功」两个字盖不住个别账号的失败。
+      // 已签到被跳过的号不算失败，也不该混进「成功 +X」里（它们没领到东西）。
       const bad = r.accounts.filter(a => a.ok === false);
-      const got = r.accounts.filter(a => a.ok && a.credits != null)
+      const got = r.accounts.filter(a => a.ok && a.credits != null && !a.skipped)
         .map(a => `${a.name || '#' + a.index} +${fmtCredit(a.credits)}`).join('、');
+      const skipped = r.accounts.filter(a => a.skipped).length;
       if (bad.length) {
         toast(`✓ ${pid} 部分失败：${got ? got + '；' : ''}${bad.map(a => `${a.name || '#' + a.index} ${a.message || '失败'}`).join('、')}`, true);
       } else {
-        toast(`✓ ${pid} 全部签到成功${got ? '：' + got : ''}`);
+        toast(`✓ ${pid} 已领取${got ? '：' + got : ''}${skipped ? `（${skipped} 个号今日已签，已跳过）` : ''}`);
       }
     } else {
       toast(`✓ ${pid} 打卡成功`);
     }
-    refreshAll();
+    // 打卡后只需要签到区的新状态：重拉快照、原地重绘签到页。
+    // 以前这里调 refreshAll()，会连带强刷 stats/overview 与所有通道面板。
+    await refreshCheckinOnly();
   } catch (e) { toast('打卡失败: ' + e.message, true); }
   finally { restore(); }
 }
@@ -139,6 +145,7 @@ async function saveCheckinSettings() {
         auto_checkin: document.getElementById('auto-checkin').checked,
         checkin_time: document.getElementById('checkin-time').value})});
     toast('自动打卡设置已保存');
-    refreshAll();
+    // 只影响签到页的自动打卡配置：重拉快照并重绘签到页，不动额度页
+    await refreshCheckinOnly();
   } catch (e) { toast('保存失败: ' + e.message, true); }
 }

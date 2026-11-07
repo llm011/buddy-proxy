@@ -49,7 +49,7 @@ let ELS = [];
 const PAGE = { classList: { contains: () => true } };
 globalThis.document = {
   addEventListener() {}, visibilityState: 'visible',
-  getElementById: id => (id === 'page-benefits' ? PAGE : null),
+  getElementById: id => (id === 'page-checkin' ? PAGE : null),
   querySelector: sel => (sel === '[data-next-ts]' ? (ELS[0] || null) : null),
   querySelectorAll: sel => (sel === '[data-next-ts]' ? ELS : []),
 };
@@ -306,14 +306,19 @@ def test_narrow_layout_keeps_button_off_the_meta_row():
     )
 
 
-def test_rows_card_declares_a_container():
-    """``.rows-card`` 必须声明 container-type，否则那条 @container 永不生效。
+def test_checkin_grid_is_self_adapting():
+    """签到区改成自适应卡片网格，不再依赖容器查询。
 
-    （不声明的话窄栏仍走三列布局，按钮又会被挤走——即最初那个 bug 复发。）
+    2026-11-07 卡片化：行式列表靠 ``.rows-card`` 的 container query 在窄栏折行；
+    改成 ``auto-fill`` 网格后列数自己随宽度变，折行逻辑不再需要（原 bug
+    「窄栏把按钮挤走」从结构上消失）。这里锁住「网格按最小卡宽自适应」，
+    以及窄屏兜底成单列。
     """
     css = STYLE_CSS.read_text(encoding="utf-8")
-    assert re.search(r"\.rows-card\s*\{[^}]*container-type:\s*inline-size", css), \
-        ".rows-card 没声明 container-type: inline-size，容器查询不会生效"
-    # 卡片上真的挂了这个类，否则声明了也没用（DOM 在 index.html）
+    assert re.search(r"\.ck-grid\s*\{[^}]*grid-template-columns:\s*repeat\(auto-fill,\s*minmax\(330px,\s*1fr\)\)",
+                     css), ".ck-grid 要按最小卡宽自适应列数"
+    assert re.search(r"@media \(max-width: 640px\)\s*\{.*?\.ck-grid\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)",
+                     css, re.S), "窄屏要兜底成单列，否则卡片被压扁"
     html = INDEX.read_text(encoding="utf-8")
-    assert 'class="chart-card rows-card"' in html, "打卡行卡片没挂 .rows-card"
+    assert 'class="ck-grid" id="checkin-rows"' in html, "签到区没挂 .ck-grid"
+    assert 'id="page-checkin"' in html, "签到没独立成页"

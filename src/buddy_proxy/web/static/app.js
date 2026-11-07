@@ -79,6 +79,9 @@ function dataForTab(name) {
   // 的下拉候选，二者互不干扰。
   if (name === 'order') return ['stats', 'order', 'models'];
   if (name === 'log') return ['stats'];
+  // 签到页与额度页共用同一份 /ui/api/benefits 快照（签到状态和额度都在里面），
+  // 分页只是展示层的拆分，不多打一次上游。
+  if (name === 'checkin') return ['stats', 'benefits'];
   if (name === 'benefits') return ['stats', 'benefits'];
   return ['stats'];  // overview：概览卡片与图表都来自 stats
 }
@@ -210,6 +213,8 @@ function render() {
   // 打卡角标挪进 benefits.js（refreshBenefitsBadge）：签到强刷走静默重绘、
   // 不再整页 render，得能单独刷新这一个角标
   if (BENEFITS && typeof refreshBenefitsBadge === 'function') refreshBenefitsBadge();
+  // 签到角标单独算（未签 N），与额度页解耦
+  if (BENEFITS && typeof refreshCheckinBadge === 'function') refreshCheckinBadge();
 
   // 只渲染当前页的区块：模型页/日志页的重活不再随总览页一起跑
   if (tab === 'overview') {
@@ -221,6 +226,8 @@ function render() {
     if (MODELS) renderGroups();
   } else if (tab === 'order') {
     renderOrderPage();
+  } else if (tab === 'checkin') {
+    if (BENEFITS) renderCheckin();
   } else if (tab === 'benefits') {
     if (BENEFITS) renderBenefits();
   } else if (tab === 'log') {
@@ -240,7 +247,7 @@ function refreshStickyVars() {
 window.addEventListener('resize', refreshStickyVars);
 
 // ---- 页签 ----
-const TABS = ['overview', 'log', 'models', 'order', 'benefits'];
+const TABS = ['overview', 'log', 'models', 'order', 'checkin', 'benefits'];
 // 范围选择器仅在总览/请求日志页有意义
 const RANGE_TABS = new Set(['overview', 'log']);
 function switchTab(name) {

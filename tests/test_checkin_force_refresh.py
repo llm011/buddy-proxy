@@ -93,16 +93,16 @@ def test_refresh_api_without_flag_keeps_checkin_cache(monkeypatch):
 # --- 前端契约 ---------------------------------------------------------------
 
 
-def test_checkin_card_has_force_refresh_button_before_claim():
+def test_checkin_card_has_refresh_button_before_claim():
+    """每张签到卡上「刷新」在「打卡」左边（卡片化后按钮收在 .ck-actions）。"""
     js = (STATIC / "benefits.js").read_text(encoding="utf-8")
-    # Trae 海外版的不支持行也有一个空 .br-act；以普通签到行的 claim 按钮反向
-    # 定位，避免误切到那个明确不提供操作的分支。
     claim_at = js.index('onclick="claimNow(')
-    start = js.rindex('<div class="br-act">', 0, claim_at)
-    br_act = js[start:js.index("</div>", claim_at)]
-    assert 'onclick="refreshCheckin(' in br_act, "强刷按钮缺失"
-    assert ">强刷<" in br_act
-    assert br_act.index("refreshCheckin") < br_act.index("claimNow"), "强刷要在「立即打卡」前面"
+    start = js.rindex('<div class="ck-actions">', 0, claim_at)
+    actions = js[start:js.index("</div>", claim_at)]
+    assert 'onclick="refreshCheckin(' in actions, "刷新按钮缺失"
+    assert ">刷新<" in actions
+    assert actions.index("refreshCheckin") < actions.index("claimNow"), \
+        "刷新要在「打卡」前面"
 
 
 def test_refresh_checkin_posts_checkin_flag():
