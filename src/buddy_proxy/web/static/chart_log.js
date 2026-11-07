@@ -234,7 +234,6 @@ async function renderRecent() {
     pager.innerHTML = '';
     return;
   }
-  const cmap = (STATS || {}).credits_map || {};
   el.innerHTML = rows.map(r => {
     const bad = (r.status >= 400 || r.error);
     const ttft = r.ttft_ms != null ? fmtMs(r.ttft_ms) : '—';
@@ -245,9 +244,13 @@ async function renderRecent() {
       tok = `↑${fmtNum(r.prompt_tokens)} ↓${fmtNum(r.completion_tokens)}`;
       tokTitle = `输入 ${r.prompt_tokens}（↑ 含缓存命中）· 输出 ${r.completion_tokens}${cacheTxt}`;
     }
-    // 实扣积分留 2 位展示；credits_map 那档本来就是 "×1.62" 这种字符串，原样带过
-    const creditTxt = r.credit != null ? fmtCredit(r.credit)
-                    : cmap[r.provider + '/' + r.model] || null;
+    // 积分列**只展示本次请求的真实消耗**（上游实扣或本地估算）。
+    //
+    // 2026-11-08 用户反馈：没有实扣时会回退去显示 credits_map 里的倍率字符串
+    // （``x0.11 credits``），那个值是「每 1M token 的计价倍率」，不是本次消耗，
+    // 放在这一列没有意义——同一模型每一行都一样，还容易被误读成「这次花了
+    // 0.11 积分」。现在拿不到真实消耗就留空（—），倍率只在「模型顺序」页展示。
+    const creditTxt = r.credit != null ? fmtCredit(r.credit) : null;
     // 多账号通道：括号内展示账号名。日志落库的是稳定 id，后端在 /ui/api/logs
     // 按各通道当前 alias 链解析成 account_name（改名后历史行跟着变）。解析不到
     // （trae 旧行存的当时 alias、或已删号）原样显示：UUID 形态截前 6 位、其余
@@ -264,12 +267,12 @@ async function renderRecent() {
       <td class="num mono">${r.ttft_ms != null ? ttft : '—'}</td>
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
-      <td class="num mono">${r.credit != null ? (r.credit_estimated
+      <td class="num mono">${creditTxt == null ? '<span class="muted" title="该上游未提供单次积分消耗">—</span>'
+        : r.credit_estimated
           ? `<b style="color:var(--ok)" title="本地估算，非上游实扣：trae 已实测模型按官方账单校准的输入/输出单价×token（随倍率面板调价自动缩放；会话首请求实测偏高约 2~3 倍），未实测模型按倍率粗估；zcode 按 GLM Coding Plan 官方抵扣系数（含时段折扣）">≈${creditTxt}</b>`
           : r.credit_source === 'dumate_usage_records'
           ? `<b style="color:var(--ok)" title="账号真实消耗流水：dumate 的 chat 响应不带单次积分，这里按时间戳把账号逐笔消耗账单（records/usage）认领到本行（最近邻 ≤5s）——是真实扣减、不是估算；时间戳对不上的行显示 —">${creditTxt}</b>`
-          : `<b style="color:var(--ok)" title="上游实扣积分（原始值 ${esc(r.credit)}）">${creditTxt}</b>`)
-        : (creditTxt ? `<span class="tag" title="仅倍率参考（×基准单价），非本次实际消耗；${esc(r.provider)} 不提供单次消耗">${esc(creditTxt)}</span>` : '<span class="muted" title="该上游未提供单次积分消耗">—</span>')}</td>
+          : `<b style="color:var(--ok)" title="上游实扣积分（原始值 ${esc(r.credit)}）">${creditTxt}</b>`}</td>
       <td>${bad ? `<span class="tag bad" title="${esc(r.error || '')}">${r.status || 'ERR'}</span>` : '<span class="tag ok">OK</span>'}</td>
     </tr>`;
   }).join('');
