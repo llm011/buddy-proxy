@@ -28,10 +28,12 @@ function nextTimeHtml(c) {
     `<span class="lbl">${verb}</span>` +
     `<b class="at" data-next-clock>${esc(fmtNextClock(c.next_ts))}</b></span>`;
 }
-// 时钟每秒对一次表（纯本地计算，不打上游）；只在打卡页可见且真有元素时跑。
+// 时钟每秒对一次表（纯本地计算，不打上游）；只在签到页可见且真有元素时跑。
 let NEXT_TIME_TIMER = null;
 function nextTimeWanted() {
-  const page = document.getElementById('page-benefits');
+  // 签到已独立成页（2026-11-07）：判 page-checkin，不是 page-benefits。
+  // 判错页的后果是「进了签到页倒计时不刷新、停在页面加载那一刻」。
+  const page = document.getElementById('page-checkin');
   return !!page && page.classList.contains('active')
     && document.visibilityState === 'visible'
     && !!document.querySelector('[data-next-ts]');
@@ -374,145 +376,228 @@ function checkinDetailToggle(btn) {
   if (body) body.hidden = !open;
   if (btn) {
     btn.setAttribute('aria-expanded', String(open));
-    btn.textContent = open ? '收起明细 ▴' : '账号明细 ▾';
+    btn.textContent = open ? '收起账号 ▴' : '账号明细 ▾';
   }
+}
+
+// ---- 签到页：今日概览 + 通道卡片 + 日历 ----
+// 2026-11-07 从「打卡 & 额度」拆出来独立成页。原先签到被压在十来张额度卡上面，
+// 滚两屏就看不见；而签到是每天都要看一眼的动作，额度只是偶尔查。拆开后这一页
+// 只回答三件事：今天签了没、谁还没签、点一下全领。
+//
+// 数据仍来自同一份 /ui/api/benefits 快照——拆页是展示层的事，不多打一次上游。
+
+/** 单通道今日状态归一：卡片配色、概览计数、页签角标共用这一套口径。 */
+function checkinChannelState(p) {
+  const c = p.checkin || {};
+  if (c.error || c.query_failed) return 'unknown';
+  if (c.inactive) return 'inactive';
+  if (c.unavailable) return 'unavailable';
+  const accounts = c.accounts || [];
+  if (accounts.length) {
+    const pending = accounts.filter(a => a.claimable && !a.checked_in && a.ok !== false);
+    if (pending.length) return 'pending';
+    const failed = accounts.filter(a => a.ok === false || a.error);
+    if (failed.length === accounts.length) return 'failed';
+    return 'done';
+  }
+  if (c.done_today) return 'done';
+  if (c.claimable) return 'pending';
+  return 'unknown';
+}
+
+const CK_STATE_LABEL = {
+  done: '已签到', pending: '待签到', unknown: '状态未知',
+  inactive: '无活动', unavailable: '无可领奖励', failed: '领取失败',
+};
+
+/** 今日仍可领取的账号数（多账号通道按号算，而不是按通道算）。 */
+function checkinPendingAccounts(p) {
+  const c = p.checkin || {};
+  const accounts = c.accounts || [];
+  if (accounts.length) {
+    return accounts.filter(a => a.claimable && !a.checked_in && a.ok !== false).length;
+  }
+  return (!c.done_today && c.claimable) ? 1 : 0;
+}
+
+function renderCheckin(opts) {
+  if (!BENEFITS) return;
+  const quiet = !!(opts && opts.quiet);
+  const page = document.getElementById('page-checkin');
+  if (!page) return;
+
+  // 自动打卡设置（元素在签到页，渲染前先同步值）
+  const autoEl = document.getElementById('auto-checkin');
+  if (autoEl) autoEl.checked = !!BENEFITS.auto_checkin;
+  const timeEl = document.getElementById('checkin-time');
+  if (timeEl) timeEl.value = BENEFITS.checkin_time || '09:30';
+  const enabled = BENEFITS.checkin_enabled_providers || [];
+  const hintEl = document.getElementById('checkin-hint');
+  if (hintEl) {
+    hintEl.textContent = enabled.length
+      ? '每天自动为: ' + enabled.join(', ') : '暂无支持打卡的通道';
+  }
+
+  // 只列「支持签到且当前有活动」的通道（traeintl 无端点、codebuddyintl 档期
+  // 未开时整行隐藏，理由见原实现）。
+  const rows = (BENEFITS.providers || []).filter(p =>
+    p.checkin.supported && !p.checkin.inactive);
+
+  // ---- 今日概览 ----
+  let pendingChannels = 0, pendingAccounts = 0, doneChannels = 0, dailyTotal = 0;
+  rows.forEach(p => {
+    const st = checkinChannelState(p);
+    const n = checkinPendingAccounts(p);
+    if (n > 0) { pendingChannels++; pendingAccounts += n; }
+    else if (st === 'done') doneChannels++;
+    if (p.checkin.daily_credit > 0 && !p.checkin.inactive) {
+      dailyTotal += Number(p.checkin.daily_credit) || 0;
+    }
+  });
+  const valueEl = document.getElementById('ck-hero-value');
+  const subEl = document.getElementById('ck-hero-sub');
+  if (valueEl) {
+    valueEl.textContent = pendingAccounts > 0
+      ? `${pendingAccounts} 个账号待领` : '今日已全部签到';
+  }
+  if (subEl) {
+    subEl.textContent = pendingAccounts > 0
+      ? `${pendingChannels} 个通道还有可领奖励，点右侧「一键领取」`
+      : `共 ${rows.length} 个通道有签到活动${dailyTotal ? ` · 每日合计 +${fmtCredit(dailyTotal)}` : ''}`;
+  }
+  const kpis = document.getElementById('ck-kpis');
+  if (kpis) {
+    kpis.innerHTML = [
+      ['通道', `${doneChannels}/${rows.length}`, '已完成'],
+      ['待领', String(pendingAccounts), '账号'],
+      ['每日', dailyTotal ? `+${fmtCredit(dailyTotal)}` : '—', '合计'],
+    ].map(([k, v, u]) => `<div class="ck-kpi"><span class="ck-kpi-k">${esc(k)}</span>` +
+      `<span class="ck-kpi-v">${esc(v)}</span><span class="ck-kpi-u">${esc(u)}</span></div>`).join('');
+  }
+  const allBtn = document.getElementById('ck-claim-all');
+  if (allBtn && !allBtn.dataset.busy) {
+    allBtn.disabled = pendingAccounts === 0;
+    allBtn.textContent = pendingAccounts === 0 ? '今日已完成' : '一键领取';
+  }
+
+  // ---- 通道卡片网格 ----
+  const grid = document.getElementById('checkin-rows');
+  if (grid) {
+    grid.innerHTML = rows.length ? rows.map(p => checkinCardHtml(p)).join('')
+      : '<div class="empty" style="grid-column:1/-1;padding:14px 0">当前没有支持打卡的通道</div>';
+  }
+  syncNextTimeAuto();
+
+  // ---- 打卡日历 ----
+  const cal = document.getElementById('cal');
+  if (cal) {
+    const days = BENEFITS.calendar || [];
+    window._calTips = {};
+    const DOW = ['一', '二', '三', '四', '五', '六', '日'];
+    const DOW_FULL = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    const now = new Date();
+    const pad2 = n => String(n).padStart(2, '0');
+    const todayStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+    // 起点补齐到周一，让列与星期对齐
+    const first = new Date(now); first.setDate(now.getDate() - (days.length - 1 || 34));
+    const padN = (first.getDay() + 6) % 7;
+    const cellCount = Math.ceil((days.length + padN) / 7) * 7;
+    let html = DOW.map(w => `<div class="dow">${w}</div>`).join('');
+    for (let i = 0; i < cellCount; i++) {
+      if (i < padN) { html += '<div class="day blank"></div>'; continue; }
+      const d = days[i - padN];
+      if (!d) { html += '<div class="day blank"></div>'; continue; }
+      const hit = (d.providers || []).length > 0;
+      html += `<div class="day${hit ? ' hit' : ''}${d.date === todayStr ? ' today' : ''}" data-date="${d.date}">${Number(d.date.slice(8))}</div>`;
+    }
+    cal.innerHTML = html;
+    // 悬停 tooltip 数据：日期 + 星期 + 各通道当日领取
+    const dowOf = ds => DOW_FULL[(new Date(ds + 'T12:00:00').getDay() + 6) % 7];
+    days.forEach(d => {
+      const lines = (d.providers || []).map(pid => {
+        const credit = fmtCredit((d.credits || {})[pid]);
+        return `<div class="t-p"><i style="background:${pcolor(pid)}"></i>${esc(pid)}${credit != null ? ` <b style="color:var(--ok)">+${esc(credit)}</b>` : ''}</div>`;
+      });
+      window._calTips[d.date] =
+        `<div class="t-date">${d.date} ${dowOf(d.date)}${d.date === todayStr ? ' · 今天' : ''}</div>` +
+        (lines.length ? lines.join('') : '<div class="t-p muted">当天未打卡</div>');
+    });
+  }
+
+  // 到期/余额告警横幅挂在额度页，这里不渲染（避免两页各挂一份）
+  if (typeof refreshCheckinBadge === 'function') refreshCheckinBadge();
+  if (quiet) return;
+}
+
+/** 单通道卡片：状态一眼可辨，账号胶囊在中间，操作沉底。 */
+function checkinCardHtml(p) {
+  const c = p.checkin || {};
+  const state = checkinChannelState(p);
+  const label = CK_STATE_LABEL[state] || '状态未知';
+  const accounts = c.accounts || [];
+  const pending = checkinPendingAccounts(p);
+
+  // 账号胶囊：状态由配色 + 字形表达（✓ 已签 / ＋ 可领 / ✕ 失败）
+  const pills = accounts.map(a => {
+    const st = checkinAccountState(a);
+    const name = a.name || ('#' + a.index);
+    const tip = [name, st.label, a.error || a.message].filter(Boolean).join(' · ');
+    return `<span class="ck-pill${st.cls ? ' ' + st.cls : ''}" title="${esc(tip)}">` +
+      `<span class="sr-only">${esc(st.label)}</span>` +
+      `<span class="ck-pill-name">${esc(name)}</span>` +
+      `${a.id ? acctRenameButton(p.id, a) : ''}</span>`;
+  }).join('');
+
+  const reward = (c.daily_credit > 0 && !c.inactive)
+    ? `每日 +${fmtCredit(c.daily_credit)}${accounts.length > 1 ? `（${accounts.length} 账号）` : ''}`
+    : '';
+  const streak = c.streak_days >= 2 ? `连续 ${c.streak_days} 天` : '';
+
+  // 明细折叠状态存 CHECKIN_DETAIL_FOLD：整页 30s 重建，挂 DOM 会被刷回去
+  const multi = accounts.length > 1;
+  const open = multi && !!CHECKIN_DETAIL_FOLD.open[p.id];
+  const toggle = multi
+    ? `<button class="ghost ck-detail-toggle" data-checkin-fold="${esc(p.id)}" ` +
+      `aria-expanded="${open}" aria-controls="checkin-details-${esc(p.id)}" ` +
+      `onclick="checkinDetailToggle(this)">${open ? '收起账号 ▴' : '账号明细 ▾'}</button>` : '';
+  const details = multi
+    ? `<div class="ck-account-grid" id="checkin-details-${esc(p.id)}"${open ? '' : ' hidden'}>` +
+      checkinAccountDetails(c) + '</div>' : '';
+
+  const unknown = state === 'unknown';
+  const disabled = unknown || pending === 0;
+
+  return `<article class="ck-card ck-${state}">
+    <div class="ck-card-top">
+      <span class="ck-badge" style="--c:${pcolor(p.id)}">${esc((p.name || p.id).slice(0, 1).toUpperCase())}</span>
+      <div class="ck-card-title">
+        <h3>${esc(p.name || p.id)}</h3>
+        <div class="ck-card-meta">${reward ? `<span>${esc(reward)}</span>` : ''}${streak ? `<span>${esc(streak)}</span>` : ''}</div>
+      </div>
+      <span class="ck-status ck-${state}"${(c.error || c.message) ? ` title="${esc(c.error || c.message)}"` : ''}>${esc(label)}</span>
+    </div>
+    ${pills ? `<div class="ck-card-accounts">${pills}</div>` : ''}
+    <div class="ck-card-foot">
+      ${nextTimeHtml(c) || '<span class="ck-next-empty">—</span>'}
+      <div class="ck-actions">
+        ${toggle}
+        <button class="ghost" onclick="refreshCheckin('${esc(p.id)}', this)"
+                title="绕过缓存，真打上游重查该通道签到状态">刷新</button>
+        <button class="primary" ${disabled ? 'disabled' : ''}
+                onclick="claimNow('${esc(p.id)}', this)"
+                ${unknown ? 'title="状态未知，先点「刷新」重查"' : ''}>
+          ${pending > 0 ? `打卡${pending > 1 ? ` (${pending})` : ''}` : '已签'}</button>
+      </div>
+    </div>
+    ${details}
+  </article>`;
 }
 
 function renderBenefits(opts) {
   if (!BENEFITS) return;
   const quiet = !!(opts && opts.quiet);
   renderExpiryBanner();
-  document.getElementById('auto-checkin').checked = !!BENEFITS.auto_checkin;
-  document.getElementById('checkin-time').value = BENEFITS.checkin_time || '09:30';
-  const enabled = BENEFITS.checkin_enabled_providers || [];
-  document.getElementById('checkin-hint').textContent =
-    enabled.length ? '每天自动为: ' + enabled.join(', ') : '暂无支持打卡的通道';
-
-  const cal = document.getElementById('cal');
-  const days = BENEFITS.calendar || [];
-  window._calTips = {};
-  const DOW = ['一', '二', '三', '四', '五', '六', '日'];
-  const DOW_FULL = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
-  const now = new Date();
-  const pad2 = n => String(n).padStart(2, '0');
-  const todayStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
-  // 起点补齐到周一，让列与星期对齐
-  const first = new Date(now); first.setDate(now.getDate() - (days.length - 1 || 34));
-  const padN = (first.getDay() + 6) % 7;
-  const cellCount = Math.ceil((days.length + padN) / 7) * 7;
-  let html = DOW.map(w => `<div class="dow">${w}</div>`).join('');
-  for (let i = 0; i < cellCount; i++) {
-    if (i < padN) { html += '<div class="day blank"></div>'; continue; }
-    const d = days[i - padN];
-    if (!d) { html += '<div class="day blank"></div>'; continue; }
-    const hit = (d.providers || []).length > 0;
-    html += `<div class="day${hit ? ' hit' : ''}${d.date === todayStr ? ' today' : ''}" data-date="${d.date}">${Number(d.date.slice(8))}</div>`;
-  }
-  cal.innerHTML = html;
-  // 悬停 tooltip 数据：日期 + 星期 + 各通道当日领取
-  const dowOf = ds => DOW_FULL[(new Date(ds + 'T12:00:00').getDay() + 6) % 7];
-  days.forEach(d => {
-    const lines = (d.providers || []).map(pid => {
-      const credit = fmtCredit((d.credits || {})[pid]);
-      return `<div class="t-p"><i style="background:${pcolor(pid)}"></i>${esc(pid)}${credit != null ? ` <b style="color:var(--ok)">+${esc(credit)}</b>` : ''}</div>`;
-    });
-    window._calTips[d.date] =
-      `<div class="t-date">${d.date} ${dowOf(d.date)}${d.date === todayStr ? ' · 今天' : ''}</div>` +
-      (lines.length ? lines.join('') : '<div class="t-p muted">当天未打卡</div>');
-  });
-
-  // 只列「支持签到且当前有活动」的通道，两类整行隐藏：
-  // - traeintl：上游无每日签到端点（supports_checkin=False），列出来只会
-  //   永远挂着一行「无签到」，奇怪（2026-10-12 用户反馈）；
-  // - codebuddyintl：渠道存在但海外站当前没开签到活动（inactive，上游
-  //   status 报 active:false、claim 直接拒「签到活动未开启或已过期」，2026-10-12
-  //   实测），挂着一行「暂无签到活动」+ 名义上的「每日 +300」纯属误导。
-  // 按状态而非通道 id 判：哪天海外开了活动 inactive 翻 false，行自动回来，
-  // 不用改代码。它们的额度仍由下方通用渠道卡正常展示。
-  const rows = (BENEFITS.providers || []).filter(p =>
-    p.checkin.supported && !p.checkin.inactive);
-  document.getElementById('checkin-rows').innerHTML = rows.length ? rows.map(p => {
-    const c = p.checkin;
-    // 签到态做成带状态点的徽标；「连续 N 天 / 每日 +X」降级成旁边的小 chip，
-    // 别和状态挤在同一个 tag 里（那行本来就长，挤一起更难扫）
-    // 查询失败（error / query_failed）→「状态未知」，绝不画成「未签到」：
-    // 声明支持打卡却拿不到状态时，显示可点的「立即打卡」会让用户以为今天还没打
-    // （dumate 在无本机登录态时就是这条路径——别处已打过卡，本机显示未打卡）。
-    const unknown = c.error || c.query_failed;
-    const st = unknown ? `<span class="br-state bad" title="${esc(c.error || c.message || '')}">状态未知</span>`
-      : c.unavailable ? `<span class="br-state" title="${esc(c.message || '')}">有活动，暂无可领签到奖励</span>`
-      : c.inactive ? `<span class="br-state"${c.message && c.message !== 'OK' ? ` title="${esc(c.message)}"` : ''}>${c.activity_name ? '活动未开始' : '暂无签到活动'}</span>`
-      : c.done_today ? '<span class="br-state ok">已签到</span>'
-      : '<span class="br-state pending">未签到</span>';
-    // 有逐账号明细行时第一行不再放状态徽标：第二行一号一个状态，顶上再放
-    // 一个聚合态既重复又挤（用户反馈）。整体查询失败（状态未知）仍保留——
-    // 那种情况明细行也全是「查询失败」，徽标的 error title 是唯一线索。
-    const badge = (c.accounts && c.accounts.length && !c.error) ? '' : st;
-    const chips = [];
-    // daily_credit 是多账号总和（后端聚合），带（N账号）说明口径，免得和
-    // 单账号通道并排时看着数字莫名翻倍
-    // inactive 时 daily_credit 是上游照报的名义奖励额（活动没开也带 100/账号），
-    // 显示「每日 +N」会让人以为能领——虽然 inactive 行已被上面过滤，这里
-    // 再拦一道（行过滤逻辑将来改动时这层兜底别跟着丢）
-    if (c.daily_credit > 0 && !c.inactive) {
-      const n = (c.accounts || []).length;
-      chips.push(`每日 +${fmtCredit(c.daily_credit)}${n > 1 ? `（${n}账号）` : ''}`);
-    }
-    if (c.streak_days >= 2) chips.push(`连续 ${c.streak_days} 天`);
-    // activity_name（上游 campaign key，如 act-20260930-551）不再展示：对用户
-    // 纯粹是噪音，用户反馈「看得更迷糊」；字段后端仍下发，排查日志时有用。
-    const meta = chips.map(t => `<span class="br-chip">${esc(t)}</span>`).join('');
-    // 多账号通道的 per-account 明细（Trae/Qoder 下发的 accounts 列表）：整体聚合态
-    // 说不清「哪个号没签上」，所以逐号都要露出名字——但**同行**压成小胶囊，不再
-    // 另起一行。另起一行会让带明细的卡比不带的高出一截，原先两列并排时同行的两张
-    // 卡被拉到同高、内容少的那张空一大块（2026-11-01 实测 doubao 空 88px、dumate
-    // 60px、qoder 42px，卡本身才 129px 高）。状态由胶囊配色 + 状态字形（CSS
-    // 的 .ck-pill::before：✓ 已签到 / ＋ 可领 / ✕ 失败）双重表达，长句子
-    // （如「有活动，但当前没有可领取的签到奖励」）不铺在卡面上。
-    const acctsHtml = (c.accounts || []).map(a => {
-      const st = checkinAccountState(a);
-      const cls = st.cls;
-      const label = st.label;
-      const name = a.name || ('#' + a.index);
-      // 名字也进 title：胶囊里名字超 230px 会被省略号收掉，不带上名字就再没有
-      // 地方能看全（2026-11-01 反馈）。状态文字另外用 .sr-only 交给读屏——
-      // 字形解决「看得见但分不清颜色」，听的人只能靠这句。
-      const tip = [name, label, a.error || a.message].filter(Boolean).join(' · ');
-      return `<span class="ck-pill${cls ? ' ' + cls : ''}" title="${esc(tip)}">` +
-        `<span class="sr-only">${esc(label)}</span>` +
-        `<span class="ck-pill-name">${esc(name)}</span>` +
-        `${a.id ? acctRenameButton(p.id, a) : ''}</span>`;
-    }).join('');
-    // 照 antigravity 面板的卡中卡（pat-pkg）包一层：每通道一张子卡，横向分隔一眼
-    // 能看出来；行内四列（标识 ｜ 状态/奖励/账号 ｜ 下次时间 ｜ 按钮），下次时间
-    // 与按钮成组靠右，各行的右边缘因此能对齐。
-    const multiAccounts = (c.accounts || []).length > 1;
-    const detailOpen = multiAccounts && !!CHECKIN_DETAIL_FOLD.open[p.id];
-    const detailToggle = multiAccounts
-      ? `<button class="ghost ck-detail-toggle" data-checkin-fold="${esc(p.id)}" ` +
-        `aria-expanded="${detailOpen}" aria-controls="checkin-details-${esc(p.id)}" ` +
-        `onclick="checkinDetailToggle(this)">${detailOpen ? '收起明细 ▴' : '账号明细 ▾'}</button>` : '';
-    const details = multiAccounts
-      ? `<div class="ck-account-grid" id="checkin-details-${esc(p.id)}"${detailOpen ? '' : ' hidden'}>` +
-        checkinAccountDetails(c) + '</div>' : '';
-    return `<div class="pat-pkg ck-pkg">
-      <div class="benefit-row">
-        <div class="br-id">
-          <i class="br-dot" style="background:${pcolor(p.id)}"></i>
-          <span class="br-name">${esc(p.id)}</span>
-        </div>
-        <div class="br-meta">${badge}${meta}${acctsHtml ? `<span class="ck-pills">${acctsHtml}</span>` : ''}${detailToggle}</div>
-        ${nextTimeHtml(c)}
-        <div class="br-act">
-          <button onclick="refreshCheckin('${esc(p.id)}', this)" title="绕过缓存，真打上游重查该通道签到状态">强刷</button>
-          <button class="primary" ${(unknown || c.done_today || c.inactive || c.unavailable) ? 'disabled' : ''} onclick="claimNow('${esc(p.id)}', this)" ${unknown ? 'title="状态未知，先点「强刷」重查"' : ''}>立即打卡</button>
-        </div>
-      </div>
-      ${details}
-    </div>`;
-  }).join('') : '<div class="empty" style="grid-column:1/-1;padding:14px 0">当前没有支持打卡的通道</div>';
-  // 数据换了新的一批 data-next-ts，重算一次并决定要不要起 ticker
-  syncNextTimeAuto();
 
   // traepat 的日包/周包挪到底部 PAT 面板内展示，这里排除，避免重复且缩短页面
   // traepat/antigravity/kimi/codex/qoder/qoderintl/trae/traeintl/codebuddy/dumate 的额度
@@ -562,17 +647,73 @@ function renderBenefits(opts) {
   renderBenefitsNav();
 }
 
-// 打卡页签角标（「✓ 已签」/「未签 N」）。原先内联在 app.js 的 render() 里，
-// 静默重绘不整页 render 时也得跟着快照更新，挪过来单独一个函数。
+// 签到页签角标（「✓ 已签」/「待签 N」）。按**账号**算，不是按通道算：
+// 多账号通道里 4 个号只差 1 个时，按通道算会显示「未签 1」，用户点进去却看到
+// 一整行账号、不知道该领谁；按账号算与「一键领取」实际会打的数量一致。
+function refreshCheckinBadge() {
+  if (!BENEFITS) return;
+  const el = document.getElementById('cnt-checkin');
+  if (!el) return;
+  const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
+  if (!ck.length) { el.textContent = ''; el.className = 'cnt'; return; }
+  const pending = ck.filter(p => !p.checkin.inactive)
+    .reduce((n, p) => n + checkinPendingAccounts(p), 0);
+  if (!pending) { el.textContent = '✓ 已签'; el.className = 'cnt ok'; }
+  else { el.textContent = `待签 ${pending}`; el.className = 'cnt warn'; }
+}
+
+// 额度页签角标：只关心「有没有通道有额度」，不再兼职签到角标（拆页后各算各的）
 function refreshBenefitsBadge() {
   if (!BENEFITS) return;
   const el = document.getElementById('cnt-benefits');
   if (!el) return;
-  const ck = (BENEFITS.providers || []).filter(p => p.checkin.supported);
-  if (!ck.length) { el.textContent = ''; return; }
-  const pending = ck.filter(p => !p.checkin.done_today && !p.checkin.inactive && !p.checkin.error);
-  if (!pending.length) { el.textContent = '✓ 已签'; el.className = 'cnt ok'; }
-  else { el.textContent = `未签 ${pending.length}`; el.className = 'cnt warn'; }
+  const q = (BENEFITS.providers || []).filter(p => p.quota && p.quota.supported);
+  el.textContent = q.length ? String(q.length) : '';
+  el.className = 'cnt';
+}
+
+// 「一键领取」：把所有可领账号的通道依次打完。
+// 后端 claim 已按通道聚合（多账号通道内部会先探状态、只领该领的），所以这里
+// 按通道串行调用即可；单个通道失败不影响后续通道，最后统一报结果。
+// 与逐卡按钮共用 claimNow 的后端路径，不另开接口。
+async function claimAllCheckin(btn) {
+  const rows = (BENEFITS && BENEFITS.providers || []).filter(p =>
+    p.checkin && p.checkin.supported && !p.checkin.inactive
+    && checkinPendingAccounts(p) > 0);
+  if (!rows.length) { toast('今天已经没有可领的签到了'); return; }
+  if (btn) { btn.dataset.busy = '1'; btn.disabled = true; btn.textContent = '领取中…'; }
+  const done = [], failed = [];
+  try {
+    for (const p of rows) {
+      try {
+        const r = await api('/ui/api/checkin', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({provider: p.id})});
+        if (r && r.ok) done.push(p.id);
+        else failed.push(`${p.id} ${(r && (r.message || r.error)) || '失败'}`);
+      } catch (e) {
+        failed.push(`${p.id} ${e.message}`);
+      }
+    }
+  } finally {
+    if (btn) { delete btn.dataset.busy; btn.disabled = false; btn.textContent = '一键领取'; }
+  }
+  if (failed.length) toast(`✓ ${done.length} 个通道已领；失败：${failed.join('、')}`, true);
+  else toast(`✓ 已领取 ${done.length} 个通道`);
+  // 领完只重拉快照并重绘签到页，不整页重建（额度面板/账号面板都不必跟着动）
+  await refreshCheckinOnly();
+}
+
+/** 重新拉 /ui/api/benefits 并只重绘签到页（打卡/刷新后的统一收尾）。 */
+async function refreshCheckinOnly() {
+  try {
+    const snap = await api('/ui/api/benefits');
+    if (snap && Array.isArray(snap.providers)) {
+      BENEFITS = snap;
+      if (typeof renderCheckin === 'function') renderCheckin({quiet: true});
+      if (typeof refreshCheckinBadge === 'function') refreshCheckinBadge();
+    }
+  } catch (e) { /* 静默：下一轮轮询会补上 */ }
 }
 
 // 各通道账号快照加载器登记表（键 = 通道 pid）。loadAllAccounts 只对「当前

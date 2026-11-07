@@ -21,11 +21,15 @@ BENEFITS_JS = (pathlib.Path(__file__).resolve().parents[1]
                / "src/buddy_proxy/web/static/benefits.js")
 
 
-def test_top_level_badge_hidden_when_account_rows_exist():
+def test_status_badge_is_single_source_of_truth():
+    """卡片化后每通道只有**一个**状态徽标（不再有「聚合徽标 + 逐账号徽标」两套）。
+
+    2026-11-07 重构：行式列表里「有明细行就藏掉顶层徽标」那套补丁不再需要——
+    卡片把通道状态收进右上角一枚 ``.ck-status``，逐账号状态只在胶囊/明细里。
+    """
     text = BENEFITS_JS.read_text(encoding="utf-8")
-    assert "const badge = (c.accounts && c.accounts.length && !c.error) ? '' : st;" in text, \
-        "有明细行时第一行徽标要去掉（顶层查询失败除外）"
-    assert "${badge}${meta}" in text, "br-meta 应渲染 badge 而非裸 st"
+    assert 'class="ck-status ck-${state}"' in text, "卡片右上角要有唯一状态徽标"
+    assert text.count('class="ck-status') == 1, "状态徽标只能渲染一处，避免两套口径"
 
 
 def test_activity_name_chip_is_gone():
@@ -35,9 +39,9 @@ def test_activity_name_chip_is_gone():
 
 
 def test_daily_credit_chip_carries_account_count():
-    """多账号的「每日 +X」是总和，带（N账号）说明口径（用户 2026-10-07 要求）。"""
+    """多账号的「每日 +X」是总和，带（N 账号）说明口径（用户 2026-10-07 要求）。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
-    assert "（${n}账号）" in text, "总和 chip 要带账号数后缀"
+    assert "（${accounts.length} 账号）" in text, "总和 chip 要带账号数后缀"
 
 
 def _fn(text: str, name: str) -> str:
@@ -91,15 +95,15 @@ console.log(JSON.stringify({opened, redrawHidden: newBody.hidden,
     assert proc.returncode == 0, proc.stderr
     import json
     result = json.loads(proc.stdout)
-    assert result["opened"] == {"hidden": False, "aria": "true", "text": "收起明细 ▴"}
+    assert result["opened"] == {"hidden": False, "aria": "true", "text": "收起账号 ▴"}
     assert result["redrawHidden"] is False
     assert result["closed"] is True and result["aria"] == "false"
 
 
 def test_only_multiple_accounts_get_detail_controls():
     text = BENEFITS_JS.read_text(encoding="utf-8")
-    assert "const multiAccounts = (c.accounts || []).length > 1;" in text
-    assert "const detailToggle = multiAccounts" in text
+    assert "const multi = accounts.length > 1;" in text
+    assert "const toggle = multi" in text
     assert "checkinAccountDetails(c)" in text
     assert 'class="ck-account-grid"' in text
     # 折叠入口是独立按钮，不包住改名/强刷/打卡，也不需要事件冒泡补丁。

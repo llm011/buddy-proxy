@@ -30,15 +30,24 @@ def test_query_failed_renders_unknown_badge():
 
 
 def test_unknown_state_disables_claim_button():
-    """状态未知时「立即打卡」按钮禁用（不能显示成可领）。"""
+    """状态未知时打卡按钮禁用（不能显示成可领）。
+
+    2026-11-07 卡片化重构后，禁用条件收敛成一条 ``disabled``：
+    ``unknown || pending === 0``——状态未知与「今天已无可领」同属不可点。
+    """
     text = BENEFITS_JS.read_text(encoding="utf-8")
-    assert "unknown || c.done_today || c.inactive || c.unavailable" in text, \
+    assert "const disabled = unknown || pending === 0;" in text, \
         "unknown 要并进 disabled 条件，否则状态未知时按钮仍可点"
+    assert "${disabled ? 'disabled' : ''}" in text, "disabled 条件要真作用到按钮上"
 
 
 def test_unknown_badge_not_pending():
-    """兜底：pending「未签到」只在不 unknown 时才出现。"""
+    """状态未知绝不能画成「待签到」。"""
     text = BENEFITS_JS.read_text(encoding="utf-8")
-    # 徽标三元的最后一档才是 pending；它前面必须有 unknown 分支拦住
-    assert "unknown ?" in text
-    assert "pending\">未签到" in text
+    # 状态归一函数里 unknown 分支必须先于 pending 判定返回
+    fn = text[text.index("function checkinChannelState"):]
+    fn = fn[:fn.index("\n}")]
+    assert "if (c.error || c.query_failed) return 'unknown';" in fn
+    assert fn.index("return 'unknown'") < fn.index("return 'pending'"), \
+        "unknown 必须在 pending 之前判掉"
+    assert "unknown: '状态未知'" in text

@@ -69,10 +69,13 @@ globalThis.quotaProviderFold = () => ({badge: '', toggle: '', bodyStart: '', bod
 globalThis.BENEFITS = {providers: []};
 globalThis.__RENDERED = 0;
 globalThis.__QUIET = null;
-globalThis.renderBenefits = (opts) => {
+globalThis.__QUOTA_RENDERED = 0;
+// 签到已独立成页：刷新签到只该重绘签到页，额度页一次都不该动
+globalThis.renderCheckin = (opts) => {
   globalThis.__RENDERED++;
   globalThis.__QUIET = opts && opts.quiet === true;
 };
+globalThis.renderBenefits = () => { globalThis.__QUOTA_RENDERED++; };
 globalThis.__LOADS = [];
 globalThis.loadData = async (keys, manual) => { globalThis.__LOADS.push([keys, !!manual]); };
 globalThis.__RERENDERS = 0;
@@ -106,6 +109,7 @@ def test_strong_refresh_redraws_from_snapshot_without_refetching_stats():
     calls: globalThis.__CALLS,
     loads: globalThis.__LOADS,
     rendered: globalThis.__RENDERED,
+    quotaRendered: globalThis.__QUOTA_RENDERED,
     quiet: globalThis.__QUIET,
     adopted: globalThis.BENEFITS === snapshot,
   }));
@@ -116,6 +120,7 @@ def test_strong_refresh_redraws_from_snapshot_without_refetching_stats():
     assert r["loads"] == [], "强刷后不该再 loadData（会连带 stats/overview）"
     assert r["rendered"] == 1 and r["adopted"] is True, "快照必须直接采用并重绘"
     assert r["quiet"] is True, "必须走静默重绘：不重建各通道面板（否则又刷一串 accounts）"
+    assert r["quotaRendered"] == 0, "签到刷新不该去重建额度页（会连带一串 accounts）"
 
 
 def test_strong_refresh_falls_back_to_benefits_only_on_old_server():

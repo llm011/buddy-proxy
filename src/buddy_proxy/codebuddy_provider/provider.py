@@ -19,6 +19,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from fastapi import HTTPException
@@ -683,17 +684,63 @@ class CodeBuddyProvider(BaseProvider):
         return status
 
     def checkin_claim(self) -> dict[str, Any] | None:
-        """领取今日签到积分。多账号**每个都领**（用户决策），逐个尝试、
-        各自容错：单个账号失败（网络/token/已领过）不阻塞其它账号。汇总
-        ``extra_credits`` 为各账号实领之和，``message`` 据实说明每个账号结果。
-        多账号之间强制间隔 ``_CHECKIN_THROTTLE_S``（上游活动接口对短窗口连打
-        有频控，照 trae 同款）。本方法经 benefits 层 ``asyncio.to_thread`` 跑，
-        sleep 不阻塞事件循环。
+        """领取今日签到积分。多账号**每个都领**，但先问一句谁真的可领。
+
+        2026-11-07 用户实报：4 个号里只有 1 个没打，点一下等了一分钟。原因是
+        这里对着**全部**账号无脑 claim：已签的号各吃一次 400（「今天已签到」），
+        而多账号之间又有 ``_CHECKIN_THROTTLE_S`` 的串行间隔——4 个号就是 3 次
+        4 秒的等待，加上逐个上游往返，点一次要一分钟。可领与否本来就在
+        ``checkin_status`` 里查得到（管理页正显示着），没必要拿 claim 去试错。
+
+        所以先逐号查状态、**只对可领的号**发 claim；已签/无活动的号直接跳过，
+        不占一次上游请求、也不占一个节流间隔。节流间隔只在真正要 claim 的账号
+        之间生效（连续两个「该打的号」之间才需要像人一样歇一拍）。
+
+        单个账号失败（网络/token）不阻塞其它账号，各自容错；汇总
+        ``extra_credits`` 为各账号实领之和。本方法经 benefits 层
+        ``asyncio.to_thread`` 跑，sleep 不阻塞事件循环。
         """
         accounts = self._accounts_for_benefits()
         if not accounts:
             # 枚举不剔除冷却，空列表=真没有账号，别把用户往冷却排查上带
             raise RuntimeError("暂无已登录账号；先在账号面板登录再打卡")
+
+        didx = failover.display_index(self._region)
+        # 先探明「谁可领」。查不到状态的号按「可领」处理（宁可多打一次也不
+        # 漏签）：状态查询失败通常是网络抖动，直接跳过会让用户以为签过了。
+        #
+        # 并发探测：这是**只读**查询，各账号互不相干，串行等于把 4 个往返叠成
+        # 4 倍延迟；串行节流的理由（上游对短窗口连打有频控）针对的是 claim
+        # 这种会改状态的写操作，不该拖累读。线程池上限按账号数取，别开大。
+        claimable: list[Any] = []
+        if len(accounts) == 1:
+            st = None
+            try:
+                st, _err = self._checkin_status_for_account(
+                    accounts[0], index=didx.get(accounts[0].id, 1), multi=False)
+            except Exception:  # noqa: BLE001 — 查询失败按可领处理
+                st = None
+            if st is None or st.get("claimable") or not (
+                    st.get("checked_in") or st.get("inactive")):
+                claimable.append(accounts[0])
+        else:
+            with ThreadPoolExecutor(max_workers=min(len(accounts), 8)) as pool:
+                futs = {pool.submit(self._checkin_status_for_account, acct,
+                                    index=didx.get(acct.id, 1), multi=False): acct
+                        for acct in accounts}
+                for fut in futs:
+                    acct = futs[fut]
+                    try:
+                        st, _err = fut.result()
+                    except Exception:  # noqa: BLE001 — 查询失败按可领处理
+                        st = None
+                    if st is None or st.get("claimable") or not (
+                            st.get("checked_in") or st.get("inactive")):
+                        claimable.append(acct)
+            # 保持账号原顺序，明细与节流节奏才可预期
+            order = {a.id: n for n, a in enumerate(accounts)}
+            claimable.sort(key=lambda a: order.get(a.id, 0))
+
         if len(accounts) == 1:
             # 单账号直通：不带 accounts 明细（与 checkin_status 的单账号分支对称）
             acct = accounts[0]
@@ -708,18 +755,26 @@ class CodeBuddyProvider(BaseProvider):
                 "message": payload.get("msg", ""),
             }
 
-        didx = failover.display_index(self._region)
         total_credits: float = 0.0
         any_claimed = False
         messages: list[str] = []
         acct_details: list[dict[str, Any]] = []
-        for pos, acct in enumerate(accounts, 1):
-            i = didx.get(acct.id, pos)
+        skipped = [a for a in accounts if a not in claimable]
+        # 被跳过的号也进明细：前端逐号渲染，不能让它们凭空消失
+        for acct in skipped:
+            i = didx.get(acct.id, 1)
+            name = acct.alias or acct.nickname or acct.uid or acct.id
+            acct_details.append({"index": i, "id": acct.id, "name": name,
+                                 "ok": True, "skipped": True,
+                                 "message": "今日已签到"})
+        # 只有真正要 claim 的账号之间才需要节流
+        for pos, acct in enumerate(claimable, 1):
+            i = didx.get(acct.id, 1)
             name = acct.alias or acct.nickname or acct.uid or acct.id
             tag = f"#{i}"
-            # 串行节流：从第 2 个账号起先等一段再打（照 trae 同款——上游活动
-            # 接口对短窗口连打有频控）。异常路径同样等：哪怕上一个账号失败，
-            # 下一个也照常歇一拍，节奏一致才像「人在操作」。
+            # 串行节流：从第 2 个**可领**账号起先等一段再打（上游活动接口对
+            # 短窗口连打有频控）。异常路径同样等：哪怕上一个账号失败，下一个
+            # 也照常歇一拍，节奏一致才像「人在操作」。
             if pos > 1:
                 time.sleep(_CHECKIN_THROTTLE_S)
             try:
@@ -748,8 +803,12 @@ class CodeBuddyProvider(BaseProvider):
             acct_details.append({"index": i, "id": acct.id, "name": name,
                                  "ok": True, "credits": granted,
                                  "message": str(payload.get("msg") or "")[:60]})
+        # 明细按展示序号排回去，与 checkin_status 的口径一致
+        acct_details.sort(key=lambda d: d["index"])
+        if not claimable:
+            messages.append("今日均已签到")
         return {
-            "checked_in": any_claimed,
+            "checked_in": any_claimed or not claimable,
             "extra_credits": total_credits if any_claimed else None,
             "message": "；".join(messages) or "没有可领取的账号",
             "accounts": acct_details,

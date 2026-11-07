@@ -299,21 +299,93 @@ def test_next_ts_survives_benefits_snapshot(tmp_path, monkeypatch):
 
 
 def test_codebuddy_claim_throttles_between_accounts(monkeypatch):
-    """多账号领取串行节流（照 trae 同款）：第 2 个账号起必须先 sleep 再打
-    （上游活动接口对短窗口连打有频控）；单账号直通不 sleep。"""
+    """多账号领取串行节流（照 trae 同款）：第 2 个**可领**账号起必须先 sleep
+    再打（上游活动接口对短窗口连打有频控）；单账号直通不 sleep。
+
+    2026-11-07 起「可领」是先查状态得出的：两个号都可领 → 都打、中间睡一拍。
+    """
     accts = [cbp.creds.AccountRef(id=f"uid-{n}", uid=f"uid-{n}", nickname=n,
                                   priority=i, added_at=1000 + i)
              for i, n in enumerate(("u1", "u2"))]
     monkeypatch.setattr(cbp.creds, "list_accounts", lambda: accts)
     calls: list[str] = []
-    monkeypatch.setattr(cbp.creds, "api_post_as",
-                        lambda aid, path, body=None, **kw:
-                        calls.append(aid) or {"code": 0, "msg": "OK",
-                                              "data": {"credit": 5}})
+    # 状态查询与领取都走 api_post_as，按 path 分流：状态一律「可领」
+    monkeypatch.setattr(
+        cbp.creds, "api_post_as",
+        lambda aid, path, body=None, **kw:
+        (calls.append(f"status:{aid}") if path.endswith("checkin-activity-status")
+         else calls.append(aid)) or
+        ({"code": 0, "data": {"active": True, "today_checked_in": False}}
+         if path.endswith("checkin-activity-status")
+         else {"code": 0, "msg": "OK", "data": {"credit": 5}}))
     sleeps: list[float] = []
     monkeypatch.setattr(cbp.provider.time, "sleep",
                         lambda s: sleeps.append(s))
     st = cbp.CodeBuddyProvider().checkin_claim()
-    assert calls == ["uid-u1", "uid-u2"], "按 failover 顺位串行打"
+    claims = [c for c in calls if not c.startswith("status:")]
+    assert claims == ["uid-u1", "uid-u2"], "按 failover 顺位串行打"
     assert sleeps == [cbp.provider._CHECKIN_THROTTLE_S], "#1 前不等，#2 前等一次"
     assert st["accounts"][1]["ok"] is True
+
+
+def test_codebuddy_claim_skips_already_signed_accounts(monkeypatch):
+    """已签到的号不参与 claim，也不占节流间隔（用户 2026-11-07 实报一分钟）。
+
+    4 个号只有 1 个可领时，应该只发 1 次 claim、0 次 sleep——而不是对 4 个号
+    各打一次（3 个吃 400）再等 3 拍。
+    """
+    accts = [cbp.creds.AccountRef(id=f"uid-{n}", uid=f"uid-{n}", nickname=n,
+                                  priority=i, added_at=1000 + i)
+             for i, n in enumerate(("u1", "u2", "u3", "u4"))]
+    monkeypatch.setattr(cbp.creds, "list_accounts", lambda: accts)
+    claims: list[str] = []
+    status_calls: list[str] = []
+
+    def fake_post(aid, path, body=None, **kw):
+        if path.endswith("checkin-activity-status"):
+            status_calls.append(aid)
+            return {"code": 0, "data": {
+                "active": True,
+                "today_checked_in": aid != "uid-u3",  # 只有 u3 没签
+            }}
+        claims.append(aid)
+        return {"code": 0, "msg": "OK", "data": {"credit": 100}}
+
+    monkeypatch.setattr(cbp.creds, "api_post_as", fake_post)
+    sleeps: list[float] = []
+    monkeypatch.setattr(cbp.provider.time, "sleep",
+                        lambda s: sleeps.append(s))
+
+    st = cbp.CodeBuddyProvider().checkin_claim()
+
+    assert claims == ["uid-u3"], "只有可领的那个号才该打 claim"
+    assert sleeps == [], "只有一个号要打，不该有任何节流等待"
+    assert sorted(status_calls) == ["uid-u1", "uid-u2", "uid-u3", "uid-u4"]
+    # 已签的号仍要在明细里出现（前端逐号渲染，不能凭空消失）
+    rows = {r["id"]: r for r in st["accounts"]}
+    assert set(rows) == {"uid-u1", "uid-u2", "uid-u3", "uid-u4"}
+    assert rows["uid-u3"]["ok"] is True and not rows["uid-u3"].get("skipped")
+    assert rows["uid-u1"]["skipped"] is True
+    assert st["extra_credits"] == 100
+
+
+def test_codebuddy_claim_treats_unknown_status_as_claimable(monkeypatch):
+    """状态查不通的号按可领处理：宁可多打一次，也不能因为网络抖动漏签。"""
+    accts = [cbp.creds.AccountRef(id=f"uid-{n}", uid=f"uid-{n}", nickname=n,
+                                  priority=i, added_at=1000 + i)
+             for i, n in enumerate(("u1", "u2"))]
+    monkeypatch.setattr(cbp.creds, "list_accounts", lambda: accts)
+    claims: list[str] = []
+
+    def fake_post(aid, path, body=None, **kw):
+        if path.endswith("checkin-activity-status"):
+            raise RuntimeError("network down")
+        claims.append(aid)
+        return {"code": 0, "msg": "OK", "data": {"credit": 5}}
+
+    monkeypatch.setattr(cbp.creds, "api_post_as", fake_post)
+    monkeypatch.setattr(cbp.provider.time, "sleep", lambda s: None)
+
+    cbp.CodeBuddyProvider().checkin_claim()
+    assert claims == ["uid-u1", "uid-u2"]
+

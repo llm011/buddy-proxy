@@ -23,7 +23,8 @@
       <button class="tab" data-tab="log">📜 请求日志</button>
       <button class="tab" data-tab="models">🧩 模型<span class="cnt" id="cnt-models"></span></button>
       <button class="tab" data-tab="order">🔀 模型顺序<span class="cnt" id="cnt-order"></span></button>
-      <button class="tab" data-tab="benefits">✅ 打卡 &amp; 额度<span class="cnt" id="cnt-benefits"></span></button>
+      <button class="tab" data-tab="checkin">✅ 每日签到<span class="cnt" id="cnt-checkin"></span></button>
+      <button class="tab" data-tab="benefits">💳 额度<span class="cnt" id="cnt-benefits"></span></button>
     </nav>
   </div>
 </div>
@@ -140,6 +141,50 @@
     <div id="order-list"><div class="empty">加载中…</div></div>
   </section>
 
+  <section class="page" id="page-checkin">
+    <!-- 签到独立成页（2026-11-07 用户要求）：原先与额度挤在「打卡 & 额度」，
+         十来张额度卡把签到区压到最上面、滚两屏就看不见了。签到是**每天都要
+         看一眼**的动作，额度是**偶尔查一次**的信息，拆开后各按自己的节奏排。 -->
+    <!-- 顶部主卡：今日签到概览 + 一键全领。数字由 renderCheckin() 按
+         /ui/api/benefits 的 providers 快照算，不额外请求。 -->
+    <div class="ck-hero" id="ck-hero">
+      <div class="ck-hero-main">
+        <div class="ck-hero-k">今日签到</div>
+        <div class="ck-hero-v" id="ck-hero-value">—</div>
+        <div class="ck-hero-sub" id="ck-hero-sub">加载中…</div>
+      </div>
+      <div class="ck-hero-side">
+        <div class="ck-kpis" id="ck-kpis"></div>
+        <button class="primary ck-claim-all" id="ck-claim-all"
+                onclick="claimAllCheckin(this)">一键领取</button>
+      </div>
+    </div>
+
+    <!-- 通道卡片网格：每个通道一张卡（自适应列宽），不再是长条列表。
+         账号胶囊、状态、下次时间、操作都收在卡内，多账号通道点「明细」展开
+         逐号小卡。 -->
+    <div class="ck-grid" id="checkin-rows">
+      <div class="empty" style="padding:14px 0">加载中…</div>
+    </div>
+
+    <!-- 打卡日历 + 自动打卡设置 -->
+    <div class="ck-cal-card">
+      <div class="ck-cal-head">
+        <div class="benefit-head" style="margin:0">
+          <span class="bh-title">打卡日历</span>
+          <span class="muted" style="font-size:12px">最近 35 天 · 悬停看当天明细</span>
+        </div>
+        <div class="cal-head" style="margin:0">
+          <label><input type="checkbox" id="auto-checkin"> 自动打卡</label>
+          <input type="time" id="checkin-time" value="09:30">
+          <button onclick="saveCheckinSettings()">保存</button>
+          <span class="muted" style="font-size:12px" id="checkin-hint"></span>
+        </div>
+      </div>
+      <div class="cal" id="cal"><div class="empty" style="grid-column:1/-1">加载中…</div></div>
+    </div>
+  </section>
+
   <section class="page" id="page-benefits">
     <!-- 权益到期/余额告急横幅：有告警时挂在 h2 上方。常驻 DOM、
          默认隐藏（.show 打开），内容由 renderExpiryBanner() 按 /ui/api/benefits
@@ -153,36 +198,8 @@
          条目由 renderBenefitsNav() 在每次额度数据渲染后重建（通道开关/
          登录状态变了导航也要跟着变）。 -->
     <nav class="sidenav" id="benefits-sidenav" aria-label="额度页通道导航"></nav>
-    <h2>打卡 &amp; 额度 <span class="sub">自动打卡 · 最近 35 天 · 按通道额度</span></h2>
-    <!-- 各通道签到：全宽卡（横跨两栏）。每通道一行、单列排布——行内四列
-         （标识 ｜ 状态/奖励/逐账号胶囊 ｜ 下次时间 ｜ 按钮），下次时间与按钮
-         成组靠右好跨行对齐；卡窄到 640px 以下折成两行。都按卡片实际宽度
-         判断（容器查询），见 style.css -->
-    <div class="chart-card rows-card" style="margin-bottom:12px">
-      <div class="benefit-head">
-        <span class="bh-title">各通道签到</span>
-        <span class="muted" style="font-size:12px">每天自动领取，也可手动打</span>
-      </div>
-      <div id="checkin-rows"></div>
-    </div>
-    <div class="grid2 top">
-      <!-- 左栏只有日历一张卡。各通道签到原本挤在这半栏里（宽度只剩一半），
-           后挪出做全宽卡置顶（标题下），grid2 里只剩日历 + 额度列表 -->
-      <div class="chart-card">
-        <div class="benefit-head">
-          <span class="bh-title">打卡日历</span>
-          <span class="muted" style="font-size:12px">最近 35 天</span>
-        </div>
-        <div class="cal-head">
-          <label><input type="checkbox" id="auto-checkin"> 自动打卡</label>
-          <input type="time" id="checkin-time" value="09:30">
-          <button onclick="saveCheckinSettings()">保存</button>
-          <span class="muted" style="font-size:12px" id="checkin-hint"></span>
-        </div>
-        <div class="cal" id="cal"><div class="empty" style="grid-column:1/-1">加载中…</div></div>
-      </div>
-      <div id="quota-list"><div class="chart-card"><div class="empty">加载中…</div></div></div>
-    </div>
+    <h2>额度 <span class="sub">按通道 · 资源包 / 余额 / 到期</span></h2>
+    <div id="quota-list"><div class="chart-card"><div class="empty">加载中…</div></div></div>
     <div id="codebuddy-panel"></div>
     <div id="codebuddyintl-panel"></div>
     <div id="trae-panel"></div>
