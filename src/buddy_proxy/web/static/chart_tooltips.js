@@ -18,6 +18,14 @@ document.getElementById('cal').addEventListener('mousemove', e => {
 document.getElementById('cal').addEventListener('mouseleave', () => {
   calTip.style.display = 'none';
 });
+// 点格子 → 右侧「当天明细」锁定这一天（悬停只是速览，点击才切换）。
+// 事件委托在容器上：日历每 30s 整块重建，逐格绑定会随重绘丢掉。
+document.getElementById('cal').addEventListener('click', e => {
+  const cell = e.target.closest('.day[data-date]');
+  if (!cell || typeof selectCalDay !== 'function') return;
+  selectCalDay(cell.dataset.date);
+  calTip.style.display = 'none';
+});
 
 // 请求趋势图表悬停 tooltip（与日历同款即时悬浮框）
 const chartTip = document.getElementById('chart-tip');

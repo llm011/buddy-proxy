@@ -260,7 +260,7 @@ async function renderRecent() {
       <td class="mono muted">${fmtTime(r.ts)}</td>
       <td><i style="display:inline-block;width:8px;height:8px;border-radius:2px;background:${pcolor(r.provider)};margin-right:6px"></i><span class="mono muted">${esc(r.provider)}</span>${acct}</td>
       <td class="mono">${esc(r.model)}</td>
-      <td class="mono muted" title="客户端来源：X-Client-Name 自声明 > UA 推断（旧记录无此字段）">${r.client ? esc(r.client) : '<span class="muted">—</span>'}</td>
+      <td class="mono muted" title="客户端来源：X-Client-Name 自声明 > UA 推断（旧记录无此字段）${r.client ? `\n原始值：${esc(r.client)}` : ''}">${r.client ? esc(fmtClient(r.client)) : '<span class="muted">—</span>'}</td>
       <td class="num mono">${r.ttft_ms != null ? ttft : '—'}</td>
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
       <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>

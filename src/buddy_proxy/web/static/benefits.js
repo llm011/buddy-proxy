@@ -523,9 +523,79 @@ function renderCheckin(opts) {
         `<div class="t-date">${d.date} ${dowOf(d.date)}${d.date === todayStr ? ' · 今天' : ''}</div>` +
         (lines.length ? lines.join('') : '<div class="t-p muted">当天未打卡</div>');
     });
+    // ---- 右侧「当天明细」：默认选中今天，点格子换日期 ----
+    // 整页每 30s 重建 innerHTML，选中的日期存在 CAL_SELECTED 里（不是在 DOM
+    // 上），重绘后仍在同一天上，不会把用户选好的日子弹回今天。
+    window._calDays = days;
+    window._calDowOf = dowOf;
+    window._calToday = todayStr;
+    const hasSel = days.some(d => d.date === CAL_SELECTED);
+    if (!hasSel) CAL_SELECTED = todayStr;
+    renderCalDetail();
+    cal.querySelectorAll('.day[data-date]').forEach(el => {
+      el.classList.toggle('sel', el.dataset.date === CAL_SELECTED);
+    });
   }
 
-  // 到期/余额告警横幅挂在额度页，这里不渲染（避免两页各挂一份）
+  // 打卡日历右侧明细当前选中的日期（YYYY-MM-DD）。放模块级而不是 DOM/闭包里：
+// renderCheckin() 每 30s 整块重建，选中态要跨重绘存活。
+let CAL_SELECTED = null;
+
+/** 右侧「当天明细」：选中日签了哪些通道、各领多少积分、合计多少。 */
+function renderCalDetail() {
+  const box = document.getElementById('cal-detail');
+  if (!box) return;
+  const days = window._calDays || [];
+  const todayStr = window._calToday || '';
+  const dowOf = window._calDowOf || (() => '');
+  const date = CAL_SELECTED;
+  const d = days.find(x => x.date === date);
+  const head = `<div class="ck-cal-d-head">
+      <span class="ck-cal-d-date mono">${esc(date || '—')}</span>
+      <span class="muted">${esc(date ? dowOf(date) : '')}${date === todayStr ? ' · 今天' : ''}</span>
+    </div>`;
+  if (!d) {
+    box.innerHTML = head + `<div class="empty" style="padding:16px 0">选一天看当天的签到明细</div>`;
+    return;
+  }
+  const providers = d.providers || [];
+  const credits = d.credits || {};
+  const total = providers.reduce((s, pid) => {
+    const v = Number(credits[pid]);
+    return s + (Number.isFinite(v) ? v : 0);
+  }, 0);
+  if (!providers.length) {
+    box.innerHTML = head +
+      `<div class="empty" style="padding:16px 0">当天未打卡${date === todayStr ? '，点上方「一键领取」' : ''}</div>`;
+    return;
+  }
+  const rows = providers.map(pid => {
+    const credit = fmtCredit(credits[pid]);
+    return `<div class="ck-cal-d-row">
+      <span class="ck-cal-d-name"><i style="background:${pcolor(pid)}"></i>${esc(pid)}</span>
+      <span class="mono ${credit != null ? '' : 'muted'}"
+            ${credit != null ? '' : 'title="上游签到历史合并进来的日子没有本地领取金额记录"'}>${credit != null ? '+' + esc(credit) : '—'}</span>
+    </div>`;
+  }).join('');
+  box.innerHTML = head + `<div class="ck-cal-d-list">${rows}</div>` +
+    `<div class="ck-cal-d-foot"><span class="muted">${providers.length} 个通道</span>` +
+    `<span class="grow"></span><span>当日合计 <b class="mono">+${fmtCredit(total) || 0}</b></span></div>`;
+}
+
+/** 点日历格子：锁定选中日期并刷新右侧明细（tooltip 仍可悬停速览）。 */
+function selectCalDay(date) {
+  if (!date) return;
+  CAL_SELECTED = date;
+  const cal = document.getElementById('cal');
+  if (cal) {
+    cal.querySelectorAll('.day[data-date]').forEach(el => {
+      el.classList.toggle('sel', el.dataset.date === date);
+    });
+  }
+  renderCalDetail();
+}
+
+// 到期/余额告警横幅挂在额度页，这里不渲染（避免两页各挂一份）
   if (typeof refreshCheckinBadge === 'function') refreshCheckinBadge();
   if (quiet) return;
 }

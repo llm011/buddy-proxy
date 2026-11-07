@@ -9,6 +9,18 @@ function esc(s) { return String(s ?? '').replace(/[&<>"']/g, c =>
 // 安全嵌进单引号 HTML 属性里的 JS 字符串字面量。模型 id 来自上游目录，
 // 不能假定不含引号；先 JSON 编码，再做 HTML entity 编码。
 function jsq(s) { return esc(JSON.stringify(String(s ?? ''))); }
+// 客户端标识（日志页「客户端」列）：去掉尾部预发布/构建后缀，只留主版本。
+// `deepseek-harness/0.2.1-rc.5` → `deepseek-harness/0.2.1`。保留主版本是因为
+// 跨大版本排查时那个数字有用，而 -rc.5/-beta.1/-alpha.2/-SNAPSHOT 这类后缀
+// 每几小时就变一次，撑宽列还看不出差别。原始值仍留在 title 里，复制得到全名。
+// 只削「尾部预发布段」，`0.2.1-rc.5+build.7` 这种前面的主版本一律不动。
+function fmtClient(s) {
+  const v = String(s ?? '').trim();
+  if (!v) return v;
+  // 兼容 name/version 与 name@version 两种写法（UA 推导出来的常见是后者）
+  const m = /^(.*[/@])(\d+(?:\.\d+)*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.exec(v);
+  return m ? m[1] + m[2] : v;
+}
 function fmtMs(ms) { return ms >= 1000 ? (ms/1000).toFixed(ms >= 10000 ? 0 : 1) + ' s' : ms + ' ms'; }
 function fmtUptime(s) {
   if (s < 90) return s + ' 秒';
