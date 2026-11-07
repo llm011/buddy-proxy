@@ -421,6 +421,12 @@ function checkinPendingAccounts(p) {
   return (!c.done_today && c.claimable) ? 1 : 0;
 }
 
+// 打卡日历右侧明细当前选中的日期（YYYY-MM-DD）。放模块级而不是 DOM/闭包里：
+// renderCheckin() 每 30s 整块重建，选中态要跨重绘存活。
+// 声明放在 renderCheckin 之前：它在 renderCheckin 内部被读写，写在函数后面虽然
+// 靠「调用发生在文件执行完之后」也能跑（不会踩 TDZ），但读起来像引用了未声明变量。
+let CAL_SELECTED = null;
+
 function renderCheckin(opts) {
   if (!BENEFITS) return;
   const quiet = !!(opts && opts.quiet);
@@ -537,10 +543,6 @@ function renderCheckin(opts) {
     });
   }
 
-  // 打卡日历右侧明细当前选中的日期（YYYY-MM-DD）。放模块级而不是 DOM/闭包里：
-// renderCheckin() 每 30s 整块重建，选中态要跨重绘存活。
-let CAL_SELECTED = null;
-
 /** 右侧「当天明细」：选中日签了哪些通道、各领多少积分、合计多少。 */
 function renderCalDetail() {
   const box = document.getElementById('cal-detail');
@@ -560,10 +562,19 @@ function renderCalDetail() {
   }
   const providers = d.providers || [];
   const credits = d.credits || {};
-  const total = providers.reduce((s, pid) => {
-    const v = Number(credits[pid]);
-    return s + (Number.isFinite(v) ? v : 0);
-  }, 0);
+  // 合计只累加**真实存在的**金额。`credits` 为空 / 缺某个通道时不能当 0 算：
+  // 上游签到历史合并进来的日子根本没有本地领取记录，显示「+0」会让人以为当天
+  // 真的只领到 0（与上面那些 `—` 行自相矛盾）。一个金额都没有时合计也显示 `—`。
+  let total = 0;
+  let hasAmount = false;
+  for (const pid of providers) {
+    const raw = credits[pid];
+    if (raw == null) continue;
+    const v = Number(raw);
+    if (!Number.isFinite(v)) continue;
+    total += v;
+    hasAmount = true;
+  }
   if (!providers.length) {
     box.innerHTML = head +
       `<div class="empty" style="padding:16px 0">当天未打卡${date === todayStr ? '，点上方「一键领取」' : ''}</div>`;
@@ -577,9 +588,12 @@ function renderCalDetail() {
             ${credit != null ? '' : 'title="上游签到历史合并进来的日子没有本地领取金额记录"'}>${credit != null ? '+' + esc(credit) : '—'}</span>
     </div>`;
   }).join('');
+  const totalTxt = hasAmount
+    ? `<b class="mono">+${esc(fmtCredit(total))}</b>`
+    : `<b class="mono muted" title="当天有签到记录，但没有本地领取金额（上游历史合并进来的日子）">—</b>`;
   box.innerHTML = head + `<div class="ck-cal-d-list">${rows}</div>` +
     `<div class="ck-cal-d-foot"><span class="muted">${providers.length} 个通道</span>` +
-    `<span class="grow"></span><span>当日合计 <b class="mono">+${fmtCredit(total) || 0}</b></span></div>`;
+    `<span class="grow"></span><span>当日合计 ${totalTxt}</span></div>`;
 }
 
 /** 点日历格子：锁定选中日期并刷新右侧明细（tooltip 仍可悬停速览）。 */
