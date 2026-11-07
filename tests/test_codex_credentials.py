@@ -165,13 +165,12 @@ def test_rename_unknown_account_raises():
         credentials.rename_account("ghost", "x")
 
 
-def test_account_limit():
-    for i in range(credentials._MAX_ACCOUNTS):
+def test_accounts_are_unbounded_by_default():
+    """历史 8 个账号上限已放开：不传 cap 时一直加."""
+    for i in range(20):
         credentials.save_account_cred(_cred(chatgpt_account_id=f"acc-{i}",
                                             refresh_token=f"rt-{i}"))
-    with pytest.raises(credentials.AuthError):
-        credentials.save_account_cred(_cred(chatgpt_account_id="acc-over",
-                                            refresh_token="rt-over"))
+    assert len(credentials.list_accounts()) == 20
 
 
 def test_access_token_valid_skew():

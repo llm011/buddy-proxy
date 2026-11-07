@@ -104,11 +104,11 @@ def test_relogin_same_refresh_token_updates():
     assert len(list_accounts()) == 1
 
 
-def test_save_enforces_max_accounts():
-    for i in range(creds._MAX_ACCOUNTS):
+def test_no_account_cap_by_default():
+    """历史 8 个账号上限已放开：默认不限制。"""
+    for i in range(11):
         save_account_cred(_cred(f"u{i}", f"N{i}"))
-    with pytest.raises(AuthError):
-        save_account_cred(_cred("overflow", "X"))
+    assert len(creds.list_accounts()) == 11
 
 
 def test_load_account_cred_rejects_bad_id():

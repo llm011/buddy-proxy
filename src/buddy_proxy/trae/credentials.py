@@ -63,8 +63,8 @@ LEGACY_WORK_CRED_NAME = "trae_work.json"
 #: 提前多久刷新 access_token（5 分钟）。
 REFRESH_MARGIN_S = 5 * 60
 
-#: 账号数上限（与 qoder/kimi 同值）。
-_MAX_ACCOUNTS = 8
+#: 账号数上限：``None`` = 不限制（历史值 8，2026-11 按用户要求放开）。
+_MAX_ACCOUNTS: int | None = None
 
 #: 这份凭据还能不能用的判据字段（读 / 自愈 / upsert 共用同一个）。
 _CRED_REQUIRED_FIELD = "access_token"

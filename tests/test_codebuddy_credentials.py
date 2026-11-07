@@ -125,12 +125,11 @@ def test_new_account_appends_with_next_priority():
     assert [r.priority for r in refs] == [0, 1]
 
 
-def test_account_cap():
-    from buddy_proxy.codebuddy_provider.credentials import _MAX_ACCOUNTS
-    for i in range(_MAX_ACCOUNTS):
+def test_no_account_cap_by_default():
+    """历史 8 个账号上限已放开：默认不限制，超过 8 个仍可继续登录。"""
+    for i in range(12):
         save_account_cred(_cred(f"u{i}"))
-    with pytest.raises(AuthError, match="上限"):
-        save_account_cred(_cred("overflow"))
+    assert len(list_accounts()) == 12
 
 
 # ---------------------------------------------------------------------------

@@ -84,8 +84,8 @@ SCOPES = [
 #: 提前这个量刷新 access_token，避免临界点请求带着过期票出门。
 _EXPIRY_SKEW = timedelta(minutes=2)
 
-#: 账号数上限（登录是一次次手动点浏览器授权的操作，8 个远超正常用量）。
-_MAX_ACCOUNTS = 8
+#: 账号数上限：``None`` = 不限制（历史值 8，2026-11 按用户要求放开）。
+_MAX_ACCOUNTS: int | None = None
 
 #: 这份凭据还能不能用的判据字段（读 / 自愈 / upsert 共用同一个）。
 _CRED_REQUIRED_FIELD = "refresh_token"

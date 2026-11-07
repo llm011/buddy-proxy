@@ -118,13 +118,12 @@ def test_new_account_appends_with_next_priority():
         ("a@example.com", 0), ("b@example.com", 1), ("c@example.com", 2)]
 
 
-def test_account_cap():
-    for i in range(8):
+def test_no_account_cap_by_default():
+    """历史 8 个账号上限已放开：默认不限制。"""
+    for i in range(11):
         save_account_cred({"email": f"u{i}@example.com", "token": f"dt-token-{i}",
                            "refresh_token": f"rt-{i}"})
-    with pytest.raises(AuthError, match="上限"):
-        save_account_cred({"email": "u8@example.com", "token": "dt-token-8",
-                           "refresh_token": "rt-8"})
+    assert len(list_accounts()) == 11
 
 
 def test_index_self_heals_when_cred_file_deleted():

@@ -65,8 +65,8 @@ log = logging.getLogger(__name__)
 #: 每个账号约 13 分钟刷一次，量级可忽略。
 _EXPIRY_SKEW = timedelta(minutes=2)
 
-#: 账号数上限（与 antigravity 同值：手动授权/导入的操作，8 个远超正常用量）。
-_MAX_ACCOUNTS = 8
+#: 账号数上限：``None`` = 不限制（历史值 8，2026-11 按用户要求放开）。
+_MAX_ACCOUNTS: int | None = None
 
 #: 这份凭据还能不能用的判据字段（读 / 自愈 / upsert 共用同一个）。
 _CRED_REQUIRED_FIELD = "refresh_token"

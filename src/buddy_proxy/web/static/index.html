@@ -167,12 +167,17 @@
       <div class="empty" style="padding:14px 0">加载中…</div>
     </div>
 
-    <!-- 打卡日历 + 自动打卡设置 -->
+    <!-- 打卡日历 + 自动打卡设置。
+         左右两栏（2026-11-07 用户要求）：原先日历 width 只有 460px 却独占整宽
+         卡片，右侧一大片空白。现在日历在左（固定 7 列方块），右侧改成「当天
+         明细」面板——点任意格子看那天签了哪些通道、各领多少积分，默认选中
+         今天。悬停 tooltip 保留，点击才锁定并展开明细，不点也能扫一眼。
+         窄屏（<900px）自动回退成上下堆叠。 -->
     <div class="ck-cal-card">
       <div class="ck-cal-head">
         <div class="benefit-head" style="margin:0">
           <span class="bh-title">打卡日历</span>
-          <span class="muted" style="font-size:12px">最近 35 天 · 悬停看当天明细</span>
+          <span class="muted" style="font-size:12px">最近 35 天 · 点格子看当天明细</span>
         </div>
         <div class="cal-head" style="margin:0">
           <label><input type="checkbox" id="auto-checkin"> 自动打卡</label>
@@ -181,7 +186,12 @@
           <span class="muted" style="font-size:12px" id="checkin-hint"></span>
         </div>
       </div>
-      <div class="cal" id="cal"><div class="empty" style="grid-column:1/-1">加载中…</div></div>
+      <div class="ck-cal-body">
+        <div class="cal" id="cal"><div class="empty" style="grid-column:1/-1">加载中…</div></div>
+        <div class="ck-cal-detail" id="cal-detail">
+          <div class="empty" style="padding:14px 0">加载中…</div>
+        </div>
+      </div>
     </div>
   </section>
 

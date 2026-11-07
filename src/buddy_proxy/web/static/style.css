@@ -388,7 +388,13 @@
   .cal .dow { display: flex; align-items: center; justify-content: center;
               font-size: 10.5px; color: var(--muted); }
   .cal .day { aspect-ratio: 1; border-radius: 6px; background: var(--bg); border: 1px solid var(--line);
-              display: flex; align-items: center; justify-content: center; font-size: 10.5px; color: var(--muted); }
+              display: flex; align-items: center; justify-content: center; font-size: 10.5px; color: var(--muted);
+              cursor: pointer; transition: background .12s, border-color .12s; }
+  .cal .day:hover { border-color: var(--accent); }
+  /* 选中态与 today 分开表达：today 是描边（自动跟随日期），选中是实心内圈，
+     两者可同时出现（选中今天时既描边又高亮）。 */
+  .cal .day.sel { background: rgba(77,107,254,.20); border-color: var(--accent); color: var(--text);
+                  box-shadow: inset 0 0 0 1.5px var(--accent); }
   .cal .day.blank { visibility: hidden; }
   .cal .day.hit { background: rgba(62,207,142,.16); border-color: rgba(62,207,142,.55); color: var(--ok); }
   .cal .day.today { box-shadow: 0 0 0 1.5px var(--accent); }
@@ -842,6 +848,31 @@
                border-radius: 12px; padding: 14px 16px; }
 .ck-cal-head { display: flex; align-items: center; justify-content: space-between;
                gap: 12px; flex-wrap: wrap; margin-bottom: 10px; }
+/* 左日历 / 右当天明细。日历固定 460px（7 列方块的本体宽度），剩下的全给
+   明细面板——原先日历独占整宽卡、右侧空一大片。明细用 minmax(0,1fr) 让长
+   通道名可压缩，不把卡片顶宽。窄屏回退成上下堆叠。 */
+.ck-cal-body { display: grid; grid-template-columns: 460px minmax(0, 1fr);
+               gap: 16px; align-items: start; }
+.ck-cal-body .cal { max-width: none; margin-top: 0; }
+.ck-cal-detail { background: var(--bg); border: 1px solid var(--line);
+                 border-radius: 10px; padding: 11px 13px; min-height: 100%; }
+.ck-cal-d-head { display: flex; align-items: baseline; gap: 8px; font-size: 13px;
+                 padding-bottom: 8px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.ck-cal-d-date { font-weight: 600; }
+.ck-cal-d-list { display: flex; flex-direction: column; gap: 5px;
+                 max-height: 240px; overflow-y: auto; }
+.ck-cal-d-row { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+                align-items: center; gap: 10px; font-size: 12.5px; }
+.ck-cal-d-name { display: inline-flex; align-items: center; gap: 7px;
+                 min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ck-cal-d-name i { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.ck-cal-d-foot { display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+                 margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line); }
+@media (max-width: 900px) {
+  .ck-cal-body { grid-template-columns: minmax(0, 1fr); }
+  .ck-cal-body .cal { max-width: 460px; }
+  .ck-cal-detail { min-height: 0; }
+}
 @media (max-width: 640px) {
   .ck-hero { padding: 14px 16px; }
   .ck-hero-v { font-size: 22px; }

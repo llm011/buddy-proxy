@@ -113,11 +113,11 @@ def test_new_account_appends_with_next_priority():
     assert [(r.id, r.priority) for r in refs] == [("u1", 0), ("u2", 1), ("u3", 2)]
 
 
-def test_account_cap():
-    for i in range(8):
+def test_no_account_cap_by_default():
+    """历史 8 个账号上限已放开：默认不限制。"""
+    for i in range(11):
         save_account_cred({"user_id": f"user{i}", "refresh_token": f"rt-{i}"})
-    with pytest.raises(AuthError, match="上限"):
-        save_account_cred({"user_id": "user8", "refresh_token": "rt-8"})
+    assert len(list_accounts()) == 11
 
 
 def test_index_self_heals_when_cred_file_deleted():
