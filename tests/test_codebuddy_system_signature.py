@@ -1,21 +1,25 @@
-"""CodeBuddy 上游「system prompt 渠道校验」中和（``provider._neutralize_leading_system``）。
+"""CodeBuddy 上游「渠道校验」中和（``provider._neutralize_leading_system``）。
 
-锁住 11128 的一个真实根因（2026-11-02 实测）：
+锁住 11128 的两个真实根因（都表现为「这个账号的模型全废了」，实际账号没事）：
 
-    turn error · 400 {"detail":{"error":{"message":"Upstream API error (HTTP 400)"…}}}   # 客户端只看到这句
+**根因 A：客户端签名出现在被扫描的位置**（2026-11-02 起，2026-11-08 扩大）
 
-上游真身是::
+    400 {"code":11128,"msg":"Illegal API invocation from an unapproved channel"}
 
-    {"code":11128,"msg":"Illegal API invocation from an unapproved channel",
-     "retry_policy":{"retry":false}, …}
+上游会扫 system / assistant / developer 消息的**每个 text 块首段**，命中
+别的 Agent 客户端开场白就整单拒。实测矩阵见 ``_SYSTEM_PROMPT_SIGNATURES``
+与文件上方「踩坑档案」。
 
-触发条件是 system prompt **首段**命中了别的 Agent 客户端的开场白
-（``You are an AI agent powered by DeepSeek Harness.`` —— dsh 的 harness:identity
-段；``You are Claude Code, Anthropic's official CLI for Claude.``）。400 属确定性
-错误，model_order 不换档，客户端只看到一句无信息的 upstream_error。
+**根因 B：``role: "developer"`` 上游根本不认**（2026-11-08，dsh 0.2.2 起）
 
-下面每条断言都对应一次真实上游往返，不是猜的（矩阵见 ``_SYSTEM_PROMPT_SIGNATURES``
-旁注释）。改匹配语义前请先复测，不要凭「看起来更宽松」调整。
+dsh 0.2.2 把 system prompt 发成 ``developer``（OpenAI 新角色名），而上游只认
+经典角色——**哪怕 content 是干净的 "hi" 也 400**。必须先降级成 ``system``，
+再走签名中和；两个修法的顺序不能调换（见
+``test_developer_with_signature_needs_both_fixes``）。
+
+⚠ 改动匹配语义或扫描范围前，**请先对真实上游重跑矩阵**，不要凭「看起来更
+宽松/更严格」推理——历史上两次都是「只覆盖了当时实测到的那一种形态」，
+第二次因此让保护静默失效了一整天。
 
 运行：
     .venv/bin/python -m pytest tests/test_codebuddy_system_signature.py -v
@@ -25,6 +29,8 @@ from __future__ import annotations
 import pytest
 
 from buddy_proxy.codebuddy_provider.provider import (
+    _NEUTRALIZED_ROLES,
+    _demote_developer_role,
     _neutralize_leading_system,
     _neutralize_system_signature,
 )
@@ -266,3 +272,73 @@ def test_repeated_calls_are_idempotent():
     once = _neutralize_leading_system(_body(DSH))
     twice = _neutralize_leading_system(once)
     assert twice == once
+
+
+# ---------------------------------------------------------------------------
+# developer 角色：上游根本不认（2026-11-08，dsh 0.2.2 起踩的坑）
+# ---------------------------------------------------------------------------
+#
+# 现象：codebuddy 通道全线 400/11128，看起来像「账号的模型全废了」。
+# 真因：dsh 0.2.2 把 system prompt 发成 role="developer"（OpenAI 新角色名），
+# 而上游只认经典角色——**哪怕 content 是干净的 "hi" 也 400**。
+#
+# 实测矩阵（CN 账号，真实上游）：
+#   developer + 干净内容 → 400   ← 角色本身被拒
+#   system    + 干净内容 → 200
+#   developer + 签名     → 400
+#   降级成 system + 签名 → 400（所以还得再走签名中和）
+#   降级成 system + 屏蔽 → 200
+#
+# ⚠ 两个修法的顺序不能调换：先降级、再扫签名。反过来写的话，降级前它不在
+# 扫描名单里、降级后又没人扫，签名照样漏过去。
+
+def test_developer_role_is_demoted_to_system():
+    """developer → system（语义等价，OpenAI 文档：developer 是 system 的新名）。"""
+    body = {"messages": [
+        {"role": "developer", "content": "clean"},
+        {"role": "user", "content": "hi"},
+    ]}
+    out = _demote_developer_role(body)
+    assert out is not body
+    assert out["messages"][0]["role"] == "system"
+    # 其余字段与消息原样保留
+    assert out["messages"][0]["content"] == "clean"
+    assert out["messages"][1] == {"role": "user", "content": "hi"}
+
+
+def test_developer_demotion_leaves_other_roles_alone():
+    body = {"messages": [
+        {"role": "system", "content": "a"},
+        {"role": "user", "content": "b"},
+        {"role": "assistant", "content": "c"},
+        {"role": "tool", "content": "d", "tool_call_id": "x"},
+    ]}
+    assert _demote_developer_role(body) is body
+
+
+def test_developer_demotion_is_noop_without_developer():
+    for messages in ([], [{"role": "system", "content": "x"}], "not-a-list"):
+        body = {"messages": messages}
+        assert _demote_developer_role(body) is body
+
+
+def test_developer_with_signature_needs_both_fixes():
+    """只降级不够：降级后的 system 里签名还在，必须再扫一遍。
+
+    这条钉住调用顺序——先 _demote_developer_role 再 _neutralize_leading_system。
+    """
+    body = {"messages": [
+        {"role": "developer", "content": DSH},
+        {"role": "user", "content": "hi"},
+    ]}
+    demoted = _demote_developer_role(body)
+    assert demoted["messages"][0]["role"] == "system"
+    assert demoted["messages"][0]["content"] == DSH, "降级本身不改内容"
+
+    neutralized = _neutralize_leading_system(demoted)
+    assert neutralized["messages"][0]["content"] == MASK
+
+
+def test_developer_is_in_neutralized_roles():
+    """developer 也要在扫描名单里：万一哪天降级被摘掉，这层还能兜住。"""
+    assert "developer" in _NEUTRALIZED_ROLES
