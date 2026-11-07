@@ -249,6 +249,12 @@ _CHANNEL_BLOCK_MODEL = "*"
 #: :func:`_upstream_error_code` 向内解 JSON 的最大层数。
 _ERROR_CODE_UNESCAPE_DEPTH = 4
 
+#: 错误体里可能「包着更具体错误」的字段名（均按小写匹配）。这些字段要先递归，
+#: 同层的 ``code`` 才有资格被读——错误帧外壳的 ``code`` 常是 HTTP 状态码。
+_ERROR_CODE_WRAPPER_KEYS = (
+    "error", "detail", "details", "cause", "data", "message", "msg",
+)
+
 
 def _json_loads_tolerant(text: str) -> Any:
     """尽量把（可能被截断的）JSON 文本解成对象；解不动返回 ``None``。
@@ -268,8 +274,12 @@ def _json_loads_tolerant(text: str) -> Any:
     # （不是字符串字面量），扫描会把它当成字符串起点、把后面的结构全吞掉。
     # 直接按「对象从首键名开始」重建：补开头的 ``{"``，剩下的交给扫描补尾部。
     if text[:1] in "\"'":
+        # 补出来的对象**必须带可用的键**才采信：否则「本身是字符串字面量片段」
+        # 的输入也会被硬包装成一个 dict，让调用方误以为解析成功。
         inner = _json_loads_tolerant('{"' + text)
-        if isinstance(inner, dict):
+        if isinstance(inner, dict) and any(
+                str(k).lower() in _ERROR_CODE_WRAPPER_KEYS or str(k).lower() == "code"
+                for k in inner):
             return inner
     quote: str | None = None
     escape = False
@@ -321,10 +331,6 @@ def _json_loads_tolerant(text: str) -> Any:
                 return payload
         except json.JSONDecodeError:
             pass
-        if closed[:1] in "\"'":
-            # 闭合位置落在「引号残片」里时，截出来的是一整段字符串——它的内容
-            # 才是最初的对象文本，交给第一段再解。
-            return _json.loads_tolerant(closed)
     return None
 
 
@@ -353,7 +359,7 @@ def _upstream_error_code(text: str, *, _depth: int = 0) -> int | None:
         # 这一层只是外壳，里面的业务错误体比外壳的 code 更具体——错误帧外层的
         # ``code=400`` 是 HTTP 状态码，先读它就会把 ``details`` 里的 11128 遮掉。
         if _depth < _ERROR_CODE_UNESCAPE_DEPTH:
-            for key in ("error", "detail", "details", "cause", "data", "message", "msg"):
+            for key in _ERROR_CODE_WRAPPER_KEYS:
                 value = lowered.get(key)
                 if isinstance(value, str):
                     # 内层本身可能又是「已转义 JSON + 尾部被截断」的字符串：
@@ -415,13 +421,17 @@ def _note_channel_block(provider_id: str, exc: HTTPException) -> None:
     """判定为渠道封禁时的统一落点：标冷却 + 记一条 ``channel_blocked`` 诊断。
 
     日志里带 ``upstream_code``：下次再怀疑「是不是又被风控挡了」，看这一行就能
-    分清「命中封禁码」与「普通 400 被上抛」，不用再去反推错误体。
+    分清「命中封禁码」与「普通 400 被上抛」，不用再去反推错误体。抠不出码时不写
+    这个字段（而不是写 ``None``），免得被读成「上游真的返回了一个 None 码」。
     """
     _mark_channel_block(provider_id)
     detail = exc.detail
     text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
-    diagnostic("channel_blocked", provider=provider_id, status=exc.status_code,
-               upstream_code=_upstream_error_code(text))
+    extra = {}
+    code = _upstream_error_code(text)
+    if code is not None:
+        extra["upstream_code"] = code
+    diagnostic("channel_blocked", provider=provider_id, status=exc.status_code, **extra)
 
 
 def _target_blocked(provider_id: str, model: str) -> bool:

@@ -458,6 +458,52 @@ def test_upstream_error_code_unwraps_nested_and_lowercase():
         json.dumps({"error": {"code": 400, "details": inner}})) == 11128
 
 
+def test_json_loads_tolerant_truncated_at_half_escape():
+    """截断点正好落在半个转义上（``\\"m`` 这种）仍能解出结构。
+
+    500 字节的截断边界是不可控的：末尾可能是 ``abc``、也可能是反斜杠 + 引号的
+    半截。补闭合符时「先补引号」会把被截断的转义引号当成字符串结束，这时
+    「不补引号、只补括号」那条路要能救回来。
+    """
+    from buddy_proxy.codebuddy_provider.provider import _upstream_error_code
+
+    raw = '{"code":11128,"msg":"Illegal API invocation \\"from an unapproved'
+    assert _upstream_error_code(raw) == 11128
+    assert _upstream_error_code(raw.replace("\\\"", "\\", 1)) == 11128
+    # 结尾是单个反斜杠（转义刚写一半）也不能崩
+    assert _upstream_error_code('{"code":11128,"msg":"abc\\') == 11128
+
+
+def test_json_loads_tolerant_does_not_invent_object_for_quote_leading_text():
+    """以引号开头但不含任何已知键的文本，不得被硬包装成对象。"""
+    from buddy_proxy.codebuddy_provider.provider import _json_loads_tolerant
+
+    assert _json_loads_tolerant('"just a quoted fragment') is None
+    assert _json_loads_tolerant('"codebutnotakey":1') is None
+
+
+def test_note_channel_block_omits_upstream_code_when_unknown(monkeypatch):
+    """抠不出业务码时不写 ``upstream_code``，别让日志读成「码是 None」。"""
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from buddy_proxy.core import cooldown as cooldown_mod
+    from buddy_proxy.core import state as st
+    from buddy_proxy.codebuddy_provider.provider import _note_channel_block
+
+    cooldown_mod._reset_for_tests()
+    lines: list[str] = []
+    monkeypatch.setattr(st, "proxy_state", SimpleNamespace(
+        enable_desensitize=False,
+        logger=SimpleNamespace(info=lines.append),
+        write_log=lambda *a, **k: None))
+    _note_channel_block("codebuddy", HTTPException(400, "plain bad request"))
+    assert cooldown_mod.is_marked("codebuddy", "*")
+    hits = [ln for ln in lines if ln.startswith("channel_blocked")]
+    assert hits, lines
+    assert "upstream_code" not in hits[0]
+    cooldown_mod._reset_for_tests()
+
+
 def test_forward_plain_400_does_not_mark_channel(monkeypatch):
     """普通 400（没有 11128 业务码）不得打渠道封禁标记——那是参数错，不关通道的事。"""
     from buddy_proxy.core import cooldown as cooldown_mod
