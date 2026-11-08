@@ -8,7 +8,7 @@
 
 ## 特性
 
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**火山方舟**（Volcengine Ark，模型/接入点走本地 `ark.json`、不进代码，Responses 优先自动降级 chat，三协议可直连 Claude Code）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态），统一经 `/v1/models` 列出、按模型名路由
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**火山方舟**（Volcengine Ark，模型/接入点走本地 `ark.json`、不进代码，Responses 优先自动降级 chat，三协议可直连 Claude Code）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态）、**DeepSeek 官方**（预付费余额，三协议原生直通）与 **yuntoken**（自建 OpenAI 兼容聚合网关，key + 基址全走本地配置、不进代码），统一经 `/v1/models` 列出、按模型名路由
 - **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / codex / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
 - **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、每个模型一键复制**带通道前缀**的全名（`trae/gpt-6`、`ark/ds-flash`——正是客户端 `model` 字段该填的值；「模型顺序」页每一档也可单独复制）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
@@ -38,7 +38,8 @@ buddy start                # 启动代理并打开管理页
 首次运行会自动创建状态目录 `~/.buddy-proxy/`（权限 `0700`，可用
 `BUDDY_PROXY_STATE_DIR` 整体覆盖）。机器本地的东西都在这里：`settings.json`
 （默认模型、已停用/隐藏模型、已停用通道、限时窗口）、Trae Work 凭证 `trae_work.json`、PAT token
-缓存 `trae_pat_token.json`、客户端名映射 `buddy_client_names.json`。目录内含凭证，
+缓存 `trae_pat_token.json`、yuntoken 网关的 key 与基址（`yuntoken_api_key` /
+`yuntoken.json`）、客户端名映射 `buddy_client_names.json`。目录内含凭证，
 注意别被备份或版本控制带走。启动时会以 `[State] ...` 打印实际路径。
 
 首次使用：按上文说明先安装 `buddy` 包装命令，然后启动代理并按需登录：
@@ -477,7 +478,38 @@ buddy login deepseek      # 打印去哪领 key、怎么配、怎么验证
 
 **裸名不抢既有流量。** `deepseek-v4-pro` 在本地 CodeBuddy 目录里也有，而官方 API 是**要花钱**的，所以加 `--deepseek` 绝不能把本来走别处的请求静默改道。本通道声明 `route_priority = 50`（低于 CodeBuddy 的 100），撞车的裸名**仍走它原本走的那条**——即已经在声明这个名字的那家通道，绝不会改道到付费官方。通常是 CodeBuddy 静态表，但**不一定**：开着 `--mimo` 时裸名 `deepseek-v4-pro` 实际归 `mimo`，因为那个通道也声明了它、且没设 `route_priority`（2026-11-01 实测）。要显式走官方就写 `deepseek/deepseek-v4-pro`。`deepseek-flash` 不撞车，自动路由。
 
-### 12. 联网检索 / 抓取（`web/tools_api.py`，固定走 DeepSeek 官方）
+### 12. yuntoken 网关 Provider（`providers/yuntoken.py`，可选）
+
+接一个**自建的 OpenAI 兼容聚合网关**（多账号池 + 负载均衡，账号轮转与配额都由
+网关自己管）。对本仓库来说它就是「Bearer key + 模型目录」的直通型上游：
+
+```bash
+buddy login yuntoken      # 打印要配哪两样、怎么验证
+```
+
+凭据是**两样**：网关签发的 key 与网关基址。
+
+- `YUNTOKEN_API_KEY` 或 `~/.buddy-proxy/yuntoken_api_key`（首行裸 key，0600）
+- `YUNTOKEN_BASE_URL` 或 `~/.buddy-proxy/yuntoken.json` 的 `base_url` 字段
+
+启动加 `--yuntoken`（或 `YUNTOKEN_ENABLED=1`）。
+
+| 方面 | 行为 |
+| --- | --- |
+| 协议 | `openai` → `/v1/chat/completions`，`anthropic` → `/v1/messages`。两者上游原生支持，**全部直通零转换**（anthropic 连 `thinking` 块都是原生形状） |
+| `responses` | **不支持**。上游没有该端点，本通道直接回 `501` 并提示换协议，而不是把 chat 请求打过去换一个语焉不详的 404 |
+| 基址 | **没有内置默认值**。网关是你自己的基础设施，写死进开源代码等于把某个人的部署钉进去；没配时 `ensure_auth` 给一条带具体操作步骤的 `401` |
+| 模型 | 目录全部来自 `GET /v1/models`，代码里**没有任何默认模型表**。上游条目只有 `id`/`description`，**没有能力元数据**（上下文窗口、工具、读图），所以这些字段一律不填——填 `images: true` 会让客户端把图片发给可能不认图的上游，填 `false` 会把能读图的当纯文本，缺字段才诚实 |
+| 刷新失败 | 保留旧目录并报错，不把目录清空成空表（空表等于所有模型 404，比一句报错难查得多） |
+| 额度 | 不支持（网关侧自己的账号池才有额度概念） |
+
+**裸名不抢既有流量。** 网关目录里会出现 `glm-5`、`deepseek-3.2` 这类**公共模型名**，
+与本仓库其它通道的静态表撞车。本通道声明 `route_priority = 50`（低于 CodeBuddy 的
+100），撞车的裸名仍归**原本声明它**的那家通道；要显式走网关就写
+`yuntoken/<模型>`，例如 `yuntoken/claude-opus-4.6`。这样加一个 `--yuntoken` 不会
+把既有裸名流量静默改道到另一条计费链路上。
+
+### 13. 联网检索 / 抓取（`web/tools_api.py`，固定走 DeepSeek 官方）
 
 `POST /v1/tools/search` 与 `POST /v1/tools/fetch` 是 **DeepSeek 独有的私有接口**：不在
 OpenAI / Anthropic 任何标准里，本仓库其它通道（CodeBuddy / Trae / Qoder / Kimi…）也一律
@@ -959,6 +991,12 @@ providers:
                           /v1/tools/search 与 /v1/tools/fetch **不受本开关控制**——它们只要
                           同一把 key，网关一启动就在（见「API 端点」）。裸名与本地目录撞车
                           时仍归原本那条（不会走付费官方），显式走官方用 deepseek/<模型>
+--yuntoken                启用 yuntoken provider（自建 OpenAI 兼容聚合网关；openai /
+                          anthropic 两协议直通、responses 回 501；模型目录来自上游
+                          /v1/models，无内置模型表与默认基址。key 取 YUNTOKEN_API_KEY /
+                          ~/.buddy-proxy/yuntoken_api_key，基址取 YUNTOKEN_BASE_URL /
+                          ~/.buddy-proxy/yuntoken.json 的 base_url）。裸名撞车时仍归原本
+                          那条，显式走网关用 yuntoken/<模型>
 --doubao                  启用豆包 provider（经 CDP 驱动桌面 App）
 --dumate                  启用百度搭子 provider（DuMate 本地代理，需 App 在运行）
 --mimo                    启用 MiMo provider（API key 或复用 MiMo 桌面登录态）
@@ -1063,7 +1101,17 @@ Trae PAT 频控：部分扩展模型上游按「账号 × 模型」限频（队�
 | 错误 | `sse._trae_error_text()` | 14+ 个官方错误码 → 中文文案（4011 今日额度 / 1005 plan 权益不足等） |
 | 账号工具 | `cli`（`trae-cli status` / `claim` / `usage` / `chat`） | 命令行查询/领取签到、看权益、发测试对话 |
 
-### 4. ZCode Provider（`providers/zcode.py`）
+### 5. yuntoken 网关 Provider（`providers/yuntoken.py`）
+
+| 接口 | 说明 |
+| --- | --- |
+| 凭据 | `YUNTOKEN_API_KEY` → `~/.buddy-proxy/yuntoken_api_key`；基址 `YUNTOKEN_BASE_URL` → `~/.buddy-proxy/yuntoken.json` 的 `base_url`。基址无内置默认值 |
+| 端点 | 自建 OpenAI 兼容网关：`openai` → `/v1/chat/completions`，`anthropic` → `/v1/messages`，均直通；`responses` 回 `501`（上游无该端点） |
+| 模型 | 以 `yuntoken/<id>` 寻址，目录来自上游 `GET /v1/models`（无本地默认表、不猜能力字段）；裸名撞车时 `route_priority=50` 让位 |
+| 管理 | `buddy login yuntoken` 打印配置位置与 `GET /v1/models` 验证步骤（不回显完整 key） |
+| 错误 | 上游错误体原样透传（`{"error": {...}}` 与 `{"detail": ...}` 两种形状都照回） |
+
+### 6. ZCode Provider（`providers/zcode.py`）
 
 | 接口 | 说明 |
 | --- | --- |
@@ -1099,7 +1147,7 @@ coding-plan，然后 `buddy restart`。
 `glm-5.3-flashx` 仍 `1311 套餐暂未开放`，升级套餐后无需改代码即可用（预备接入）。
 
 
-### 5. MiMo Provider（`mimo/` 子包）
+### 7. MiMo Provider（`mimo/` 子包）
 
 小米 **MiMo**（platform.xiaomimimo.com），以 `mimo/<id>` 寻址（`mimo-auto`、`mimo-pro`）。
 
@@ -1152,7 +1200,7 @@ MiMo 桌面也能用**，装了桌面的老机器行为不变。API key 仍然�
 buddy start
 ```
 
-### 6. Qoder Provider（`qoder/` 子包）
+### 8. Qoder Provider（`qoder/` 子包）
 
 阿里 **Qoder** IDE（国际版 qoder.com / 国内版 qoder.com.cn），以 `qoder/<id>` 寻址。
 
@@ -1287,7 +1335,7 @@ Qoder 通道声明了 `supports_checkin`，因此会和 CodeBuddy 一起出现�
 - **别信顶层 `claimable`** 来判断能不能领：它把 `VIEW_DETAILS` 类活动也算进来了。
   真正的判据是**逐条**看 `actionType == "CLAIM_BENEFIT" && claimStatus == "CLAIMABLE"`。
 
-### 7. Gemini Provider（`gemini/` 子包）
+### 9. Gemini Provider（`gemini/` 子包）
 
 Google **Gemini CLI** 的免费额度（Code Assist individuals），挂 `gemini/` 前缀：
 
@@ -1331,7 +1379,7 @@ Anthropic 协议出口会把它转成 `cache_read_input_tokens` 并从 `input_to
 > `--gemini` 只在想用这条通道时才需要；不加则 provider 不注册，`gemini/...`
 > 模型名落到兜底通道。
 
-### 8. Antigravity Provider（`antigravity/` 子包）
+### 10. Antigravity Provider（`antigravity/` 子包）
 
 Google **Antigravity** 的额度（Gemini CLI 免费层的官方继任者；个人免费层与
 Google AI Pro 订阅层都走这里），挂 `antigravity/` 前缀。一次 OAuth 登录同时
@@ -1439,7 +1487,7 @@ JSON，上限 8 个）。旧的单账号文件 `~/.buddy-proxy/antigravity_oauth
 > `--antigravity` 只在想用这条通道时才需要；不加则 provider 不注册，
 > `antigravity/...` 模型名落到兜底通道。
 
-### 10. 火山方舟 Provider（`providers/ark.py`）
+### 11. 火山方舟 Provider（`providers/ark.py`）
 
 `ArkProvider` 只做三件事：**读本地配置 → 选上游端点 → 按客户端协议翻译**。它**不带任何
 默认模型表、不含任何 key**——方舟按自定义推理接入点（`ep-...`）计费，接入点 id 是账号私有

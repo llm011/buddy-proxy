@@ -8,7 +8,7 @@
 
 ## Features
 
-- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **GLM official** (BigModel Coding Plan key — same upstream as ZCode, independent credentials), **Volcengine Ark** (models/endpoints from a local `ark.json`, never in code; Responses first with automatic chat fallback; all three protocols, including Claude Code over `/v1/messages`), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state), plus **DeepSeek official** (the platform's own API — native OpenAI / Responses / Anthropic passthrough, live model catalog and account balance); all listed by `/v1/models` and routed by model name
+- **Multi-provider** — besides CodeBuddy, built-in **Trae** (decrypts the Trae IDE login, connects straight to the underlying models), **ZCode** (Zhipu GLM), **GLM official** (BigModel Coding Plan key — same upstream as ZCode, independent credentials), **Volcengine Ark** (models/endpoints from a local `ark.json`, never in code; Responses first with automatic chat fallback; all three protocols, including Claude Code over `/v1/messages`), **Doubao** (pure-stdlib CDP into the Doubao desktop app), **DuMate** (Baidu 千帆 desktop app's local proxy — GLM / Qwen / Kimi), **Xiaomi MiMo** (API key, or reuses the MiMo Desktop Xiaomi-account login), **Qoder** (COSY signing reimplemented in pure Python — Qwen3.8 / GLM / Kimi), **Gemini** (Google OAuth, Code Assist free quota — its login state is kept in sync with the local `gemini` CLI) and **Antigravity** (Google Antigravity free quota — Gemini 3.x / Claude / GPT-OSS via one OAuth login, imports the local `agy` CLI login state), plus **DeepSeek official** (the platform's own API — native OpenAI / Responses / Anthropic passthrough, live model catalog and account balance) and **yuntoken** (self-hosted OpenAI-compatible aggregation gateway — key and base URL come from local config, never from code); all listed by `/v1/models` and routed by model name
 - **Multi-account failover** — most subscription channels (codebuddy / trae / qoder / kimi / codex / antigravity…) support multiple accounts: rotated in login order as primary/backup; account-level errors (401 expired credentials / 429 quota exhausted) cool the current account down and switch to the next automatically. Per-account quota, check-in, rename / reorder / delete are all managed in the admin UI
 - **Protocol conversion** — `/v1/chat/completions` (OpenAI), `/v1/responses` (Codex CLI), `/v1/messages` (Anthropic / Claude Code)
 - **Web search & fetch tools** — `POST /v1/tools/search` (ranked web results) and `POST /v1/tools/fetch` (page → Markdown). These are **DeepSeek-only private endpoints** (no OpenAI/Anthropic equivalent, and no other channel implements them), so both are pinned to `https://api.deepseek.com/v1/tools/*` and reuse the same key as the DeepSeek channel. Billed per successful request ($0.75 / 1000), not per token — hence deliberately **not cached**
@@ -40,7 +40,8 @@ Python console command supplied by `uv sync`. `buddy start` uses the repository'
 The first run creates the state directory `~/.buddy-proxy/` (mode `0700`; override with
 `BUDDY_PROXY_STATE_DIR`). Everything machine-local lives there: `settings.json` (default
 model, disabled/hidden models, disabled providers, model time windows), the Trae Work credential `trae_work.json`,
-the PAT token cache `trae_pat_token.json`, the cached MiMo token/serviceToken state, and
+the PAT token cache `trae_pat_token.json`, the cached MiMo token/serviceToken state,
+the yuntoken gateway key/base URL (`yuntoken_api_key` / `yuntoken.json`), and
 the client-name map `buddy_client_names.json`. It holds credentials — keep it out of
 backups and version control. Startup prints the resolved path as `[State] ...`.
 
@@ -363,6 +364,32 @@ This flag controls the **chat channel only**. The two tool endpoints below share
 | Billing | Charged against the prepaid balance by token. There is **no credit-multiplier concept**, so the request log's Credit column deliberately shows `—` rather than an invented estimate |
 
 **Bare names do not hijack existing traffic.** `deepseek-v4-pro` also exists in the local CodeBuddy catalog, and the official API is **paid** — so adding `--deepseek` must not silently reroute requests that were already going elsewhere. The channel declares `route_priority = 50`, below CodeBuddy's 100, so a colliding bare name **keeps going exactly where it already went** — whichever enabled channel declares that name, never the paid official API. That is usually the CodeBuddy static table, but not always: with `--mimo` enabled, bare `deepseek-v4-pro` resolves to `mimo`, because that channel declares the name and sets no `route_priority` (verified 2026-11-01). Write `deepseek/deepseek-v4-pro` to pin the official API explicitly. `deepseek-flash` collides with nothing and routes automatically.
+
+### yuntoken provider (optional)
+
+Talks to a **self-hosted OpenAI-compatible aggregation gateway** (multi-account pool with load balancing; account rotation and quota live entirely on the gateway side). To this repo it is just a passthrough upstream: a bearer key plus a model catalog.
+
+```bash
+buddy login yuntoken      # prints the two things to configure and how to verify
+```
+
+Two pieces of configuration: the key the gateway issued, and the gateway's base URL.
+
+- `YUNTOKEN_API_KEY` or `~/.buddy-proxy/yuntoken_api_key` (first line, bare key, mode 0600)
+- `YUNTOKEN_BASE_URL` or the `base_url` field of `~/.buddy-proxy/yuntoken.json`
+
+Enable with `--yuntoken` (or `YUNTOKEN_ENABLED=1`).
+
+| Aspect | Behavior |
+| --- | --- |
+| Protocols | `openai` → `/v1/chat/completions`, `anthropic` → `/v1/messages`. Both are upstream-native, so they pass straight through with zero conversion (even `thinking` blocks keep their native shape) |
+| `responses` | **Not supported.** The gateway has no such endpoint, so the channel answers `501` and asks you to switch protocols instead of sending a chat request and handing back a vague 404 |
+| Base URL | **No built-in default.** The gateway is your own infrastructure; hard-coding one into an open-source repo would pin somebody's deployment. When it is missing, `ensure_auth` returns a `401` that spells out the concrete steps |
+| Models | The catalog comes entirely from `GET /v1/models`; there is **no default model table in code**. Upstream entries carry only `id`/`description` and **no capability metadata** (context window, tools, image input), so those fields are left unset — `images: true` would send images to an upstream that may not accept them, `false` would turn an image-capable model into text-only, and a missing field is the only honest answer |
+| Refresh failure | The old catalog is kept and the error is reported; it is never cleared to an empty table (empty means every model 404s, which is far harder to diagnose than one error line) |
+| Quota | Not supported (quota only exists on the gateway's own account pool) |
+
+**Bare names do not hijack existing traffic.** The gateway catalog carries **public model names** such as `glm-5` or `deepseek-3.2` that collide with other channels' static tables here. The channel declares `route_priority = 50` (below CodeBuddy's 100), so a colliding bare name still resolves to **the channel that already declares it**; write `yuntoken/<model>` — e.g. `yuntoken/claude-opus-4.6` — to pin the gateway explicitly. That way adding `--yuntoken` never silently reroutes existing bare-name traffic onto another billing path.
 
 ### Ark provider interface (`providers/ark.py`)
 
@@ -825,6 +852,14 @@ providers:
                           (see "API endpoints"). Colliding bare names stay with the channel
                           already declaring them (never the paid API) — use
                           deepseek/<model> to pin the official one
+--yuntoken                enable the yuntoken provider (self-hosted OpenAI-compatible
+                          aggregation gateway; openai/anthropic passthrough, responses
+                          answers 501; model catalog from upstream /v1/models, no built-in
+                          model table or default base URL. Key from YUNTOKEN_API_KEY /
+                          ~/.buddy-proxy/yuntoken_api_key, base URL from YUNTOKEN_BASE_URL /
+                          the base_url field of ~/.buddy-proxy/yuntoken.json). Colliding
+                          bare names stay with the channel already declaring them — use
+                          yuntoken/<model> to pin the gateway
 --doubao                  enable the Doubao provider (drives the desktop app over CDP)
 --mimo                    enable the MiMo provider (API key or MiMo Desktop login state)
 --qoder                   enable the Qoder provider (COSY-signed, Qwen3.8/GLM/Kimi)

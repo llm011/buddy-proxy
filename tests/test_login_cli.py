@@ -200,6 +200,43 @@ def test_every_alias_target_is_dispatchable():
 
 #: 仓库根（tests/ 的上一级）的 proxy.sh——shell 层白名单在这里维护。
 PROXY_SH = pathlib.Path(__file__).resolve().parents[1] / "proxy.sh"
+BUDDY_SH = pathlib.Path(__file__).resolve().parents[1] / "buddy"
+
+
+def _extra_args(path: pathlib.Path) -> list[str]:
+    """取出脚本里 ``EXTRA_ARGS="${PROXY_EXTRA_ARGS:-...}"`` 的默认值并拆词。"""
+    m = re.search(
+        r'^EXTRA_ARGS="\$\{PROXY_EXTRA_ARGS:-(.*)\}"$',
+        path.read_text(encoding="utf-8"),
+        re.M,
+    )
+    assert m, f"{path.name} 里找不到 EXTRA_ARGS 的默认值（结构改了？）"
+    return m.group(1).split()
+
+
+def test_buddy_and_proxy_sh_extra_args_identical():
+    """``buddy`` 与 ``proxy.sh`` 的默认启动参数必须**整串**相同。
+
+    这两份各存一份、谁都不会读对方：``buddy`` 那份会写进 launchd plist
+    （``service install``），``proxy.sh`` 那份是手跑脚本时用的。只比「集合
+    相等」挡不住真正踩过的事——两边 ``--default-provider`` 曾经一个 trae
+    一个 codebuddy，装成服务后兜底通道和手跑时是两个，profile 里毫无提示。
+    所以这里连顺序与取值一起比，并单独钉住兜底通道。
+
+    加通道 flag 忘同步是同一类错误的另一面（traeintl/qoderintl 当年都漏过），
+    同样由这条挡住。
+    """
+    buddy_args = _extra_args(BUDDY_SH)
+    proxy_args = _extra_args(PROXY_SH)
+    assert buddy_args == proxy_args, (
+        "buddy 与 proxy.sh 的 EXTRA_ARGS 不一致：\n"
+        f"  buddy   : {' '.join(buddy_args)}\n"
+        f"  proxy.sh: {' '.join(proxy_args)}"
+    )
+    # 兜底通道必须是恒在的 codebuddy：--default-provider 指向一个要靠 flag
+    # 才注册的通道时，该 flag 一被拿掉就没人接住「未命中任何目录」的请求。
+    i = buddy_args.index("--default-provider")
+    assert buddy_args[i + 1] == "codebuddy"
 
 
 def test_proxy_sh_login_whitelist_covers_python_side():
