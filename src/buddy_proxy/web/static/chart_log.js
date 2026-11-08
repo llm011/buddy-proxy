@@ -159,6 +159,47 @@ let RECENT_PAGE = 1, RECENT_SIZE = 20;
 let RECENT_SEQ = 0;  // 并发防抖：仅最后一次请求的结果生效（范围/翻页快速切换时）
 let RECENT_QS = null;  // 已渲染结果对应的查询串；相同则跳过（多次 render 不重复打请求）
 
+// ---- 积分合计（按需展示）----
+// RECENT_CREDIT：本次查询的筛选后全量合计（后端 credit_total）。
+// CREDIT_SHOWN：用户点了按钮才展开；CREDIT_QS：这份数字对应的查询串。
+// 三者缺一不可——没有 CREDIT_QS 的话，用户改了筛选，旧合计会继续挂在
+// 新筛选的表格上面，那是比不显示更糟的误导。
+let RECENT_CREDIT = null;
+let CREDIT_SHOWN = false;
+let CREDIT_QS = null;
+
+function fmtCreditTotal(n) {
+  // 合计常有小数长尾（0.1+0.2 这类浮点累加），固定两位；整数不补 .00
+  const v = Number(n) || 0;
+  return Number.isInteger(v) ? String(v) : v.toFixed(2);
+}
+
+/** 合计区域：未展开时只是一个按钮；展开后显示数字 + 收起按钮。 */
+function creditTotalHtml() {
+  if (!RECENT_CREDIT || !RECENT_CREDIT.count) return '';
+  if (!CREDIT_SHOWN) {
+    return `<button class="ghost" onclick="toggleCreditTotal()" ` +
+      `title="把当前筛选范围内的积分累加起来（全量，不是当前页）">Σ 积分合计</button>`;
+  }
+  const c = RECENT_CREDIT;
+  const parts = [`合计 <b style="color:var(--ok)">${esc(fmtCreditTotal(c.total))}</b>`];
+  if (c.estimated) {
+    parts.push(`<span class="muted">其中估算 ${esc(fmtCreditTotal(c.estimated))}</span>`);
+  }
+  parts.push(`<span class="muted">${c.count} 条</span>`);
+  return `<span class="credit-total" title="当前筛选范围内全量积分合计（与翻页无关）">` +
+    parts.join(' · ') +
+    `<button class="ghost" onclick="toggleCreditTotal()">收起</button></span>`;
+}
+
+function toggleCreditTotal() {
+  CREDIT_SHOWN = !CREDIT_SHOWN;
+  // 只更新合计那一个小容器，不重跑整表（合计与行数据无关，没必要再请求）
+  const slot = document.getElementById('recent-credit-total');
+  if (slot) slot.innerHTML = creditTotalHtml();
+  else renderRecent();  // 容器不在（分页条还没渲染）：退回整表重绘
+}
+
 function recentGo(p) { RECENT_PAGE = p; renderRecent(); }
 function recentSize(v) { RECENT_SIZE = +v; RECENT_PAGE = 1; renderRecent(); }
 
@@ -278,8 +319,19 @@ async function renderRecent() {
   }).join('');
   const nav = (label, page, disabled) =>
     `<button class="ghost" ${disabled ? 'disabled' : ''} onclick="recentGo(${page})">${label}</button>`;
+  // 积分合计：**按需展示**（用户 2026-11-08 要求）。
+  //
+  // 数字来自本次响应的 ``credit_total``——后端用**同一批筛选后的行**算的，
+  // 与表格不会对不上。它是「筛选范围内全量」，与翻页无关：翻到第 2 页数字
+  // 不变，所以不需要重新请求，按钮只是切换显示。
+  //
+  // 查询条件一变（改范围/通道/模型/客户端）旧数字就失效了，这里按 qs 比对
+  // 自动收起，避免把上一次筛选的合计当成这一次的。
+  if (qs !== CREDIT_QS) { CREDIT_QS = qs; CREDIT_SHOWN = false; }
+  RECENT_CREDIT = resp.credit_total || null;
   pager.innerHTML =
     `<span class="muted">共 ${total} 条</span>` +
+    `<span id="recent-credit-total">${creditTotalHtml()}</span>` +
     `<select title="每页条数" onchange="recentSize(this.value)">` +
       [20, 50, 100].map(n => `<option value="${n}" ${n === RECENT_SIZE ? 'selected' : ''}>${n} 条/页</option>`).join('') +
     `</select>` +
