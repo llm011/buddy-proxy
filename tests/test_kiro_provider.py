@@ -1,0 +1,287 @@
+"""kiro 通道：EventStream 解析、请求体翻译、凭证处理、双协议输出。
+
+## 为什么值得单独锁
+
+kiro 上游的两个「反直觉」约束都是实测踩出来的，很容易被后来者改回去：
+
+1. ``User-Agent`` 必须带 ``Kiro/<version>``，否则回 403「订阅不支持」——
+   看起来像 token 失效或没订阅，实际只是客户端身份没对上；
+2. 请求体**不能带** ``editorState``，带了回 400 ``REQUEST_BODY_INVALID``。
+
+以及响应是 **AWS EventStream 二进制帧**，不是 SSE——按文本行解析会得到乱码。
+
+本文件只做离线测试（合成帧），真实往返由开发时的手测覆盖。
+"""
+
+from __future__ import annotations
+
+import json
+import struct
+
+import pytest
+
+from buddy_proxy.kiro import credentials as creds
+from buddy_proxy.kiro import stream as kiro_stream
+from buddy_proxy.kiro.provider import (
+    _USER_AGENT,
+    _chat_to_kiro,
+    _messages_to_conversation,
+    auth_headers,
+)
+
+
+# ---------------------------------------------------------------------------
+# 合成 EventStream 帧
+# ---------------------------------------------------------------------------
+
+
+def _header_bytes(name: str, value: str) -> bytes:
+    """字符串型 header：``[1B 名字长][名字][1B 类型=7][2B 值长][值]``。"""
+    n = name.encode()
+    v = value.encode()
+    return bytes([len(n)]) + n + bytes([7]) + struct.pack(">H", len(v)) + v
+
+
+def make_frame(event_type: str, payload: dict) -> bytes:
+    headers = _header_bytes(":event-type", event_type)
+    headers += _header_bytes(":content-type", "application/json")
+    headers += _header_bytes(":message-type", "event")
+    body = json.dumps(payload).encode()
+    total = 12 + len(headers) + len(body) + 4
+    return (struct.pack(">I", total) + struct.pack(">I", len(headers))
+            + b"\x00" * 4  # prelude CRC（解析器不校验，占位即可）
+            + headers + body + b"\x00" * 4)  # message CRC
+
+
+def _stream_of(*frames: bytes) -> list[bytes]:
+    return list(frames)
+
+
+# ---------------------------------------------------------------------------
+# EventStream 解析
+# ---------------------------------------------------------------------------
+
+
+def test_parses_text_event():
+    raw = make_frame("assistantResponseEvent", {"content": "Hello"})
+    events = list(kiro_stream.iter_events([raw]))
+    assert events == [{"type": "text", "text": "Hello"}]
+
+
+def test_parses_metering_event_as_credit():
+    raw = make_frame("meteringEvent", {"unit": "credit", "usage": 0.0054})
+    events = list(kiro_stream.iter_events([raw]))
+    assert events == [{"type": "credit", "credit": 0.0054}]
+
+
+def test_parses_context_usage_event():
+    raw = make_frame("contextUsageEvent", {"contextUsagePercentage": 2.05})
+    events = list(kiro_stream.iter_events([raw]))
+    assert events[0]["type"] == "context"
+    assert events[0]["percent"] == 2.05
+
+
+def test_handles_arbitrary_chunk_boundaries():
+    """TCP 分包会任意切：一帧横跨多个 chunk、一个 chunk 含多帧，都要能解。"""
+    raw = (make_frame("assistantResponseEvent", {"content": "AB"})
+           + make_frame("assistantResponseEvent", {"content": "CD"}))
+    for size in (1, 3, 7, 13, 29):
+        chunks = [raw[i:i + size] for i in range(0, len(raw), size)]
+        texts = [e["text"] for e in kiro_stream.iter_events(chunks) if e["type"] == "text"]
+        assert texts == ["AB", "CD"], f"chunk size {size} 解出 {texts}"
+
+
+def test_unknown_event_types_are_ignored():
+    """上游会加新事件类型（如 codeReferenceEvent），不能因此报错。"""
+    raw = make_frame("codeReferenceEvent", {"foo": "bar"})
+    assert list(kiro_stream.iter_events([raw])) == []
+
+
+def test_empty_content_is_skipped():
+    raw = make_frame("assistantResponseEvent", {"content": ""})
+    assert list(kiro_stream.iter_events([raw])) == []
+
+
+def test_error_frame_raises():
+    raw = make_frame("error", {"message": "upstream boom"})
+    with pytest.raises(kiro_stream.StreamError, match="upstream boom"):
+        list(kiro_stream.iter_events([raw]))
+
+
+def test_garbage_bytes_do_not_hang():
+    """脏数据要能跳过并继续，不能卡死整条流。"""
+    raw = b"\xff\xff\xff\xff" + make_frame("assistantResponseEvent", {"content": "OK"})
+    events = list(kiro_stream.iter_events([raw]))
+    assert any(e.get("text") == "OK" for e in events)
+
+
+# ---------------------------------------------------------------------------
+# 请求体翻译
+# ---------------------------------------------------------------------------
+
+
+def test_chat_to_kiro_shape():
+    body = {"model": "claude-haiku-4.5",
+            "messages": [{"role": "user", "content": "hi"}]}
+    out = _chat_to_kiro(body)
+    state = out["conversationState"]
+    assert state["chatTriggerType"] == "MANUAL"
+    assert state["currentMessage"]["userInputMessage"]["modelId"] == "claude-haiku-4.5"
+    assert state["currentMessage"]["userInputMessage"]["origin"] == "AI_EDITOR"
+
+
+def test_chat_to_kiro_never_sends_editor_state():
+    """踩过的坑：带 editorState 上游回 400 REQUEST_BODY_INVALID。"""
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+    dumped = json.dumps(_chat_to_kiro(body))
+    assert "editorState" not in dumped
+    assert "editor_state" not in dumped
+
+
+def test_system_prompt_is_prepended_to_user_message():
+    """Kiro 没有独立 system 字段：system 要拼到当前用户消息前面。"""
+    body = {"model": "m", "messages": [
+        {"role": "system", "content": "You are terse."},
+        {"role": "user", "content": "hi"},
+    ]}
+    content, _ = _messages_to_conversation(body)
+    assert "You are terse." in content
+    assert content.index("You are terse.") < content.index("hi")
+
+
+def test_developer_role_treated_as_system():
+    """dsh 0.2.2 起用 developer 角色；Kiro 侧没有这个概念，按 system 处理。"""
+    body = {"model": "m", "messages": [
+        {"role": "developer", "content": "be brief"},
+        {"role": "user", "content": "hi"},
+    ]}
+    content, _ = _messages_to_conversation(body)
+    assert "be brief" in content
+
+
+def test_block_array_content_flattened_to_text():
+    body = {"model": "m", "messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "part1 "},
+            {"type": "image_url", "image_url": {"url": "x"}},
+            {"type": "text", "text": "part2"},
+        ]},
+    ]}
+    content, _ = _messages_to_conversation(body)
+    assert content == "part1 part2", "只拼 text 块，图片本通道暂不支持"
+
+
+def test_assistant_history_preserved():
+    body = {"model": "m", "messages": [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]}
+    content, _ = _messages_to_conversation(body)
+    # currentMessage 是最后一条 user
+    assert content == "q2"
+
+
+def test_tools_are_not_silently_dropped():
+    """本轮不支持工具：如实告警（日志），但请求本身不能炸。"""
+    body = {"model": "m", "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}]}
+    out = _chat_to_kiro(body)  # 不抛异常
+    assert out["conversationState"]["currentMessage"]["userInputMessage"]["content"] == "hi"
+
+
+# ---------------------------------------------------------------------------
+# 请求头
+# ---------------------------------------------------------------------------
+
+
+def test_auth_headers_carry_kiro_user_agent():
+    """这个头是必须的：少了它上游 403「订阅不支持」。"""
+    headers = auth_headers("tok")
+    assert "Kiro/" in headers["User-Agent"]
+    assert "Kiro/" in headers["X-Amz-User-Agent"]
+    assert headers["Authorization"] == "Bearer tok"
+    assert headers["Accept"] == "application/vnd.amazon.eventstream"
+
+
+def test_user_agent_version_constant_present():
+    assert "Kiro/" in _USER_AGENT
+
+
+# ---------------------------------------------------------------------------
+# 双协议输出
+# ---------------------------------------------------------------------------
+
+
+def test_openai_events_shape():
+    raw = [make_frame("assistantResponseEvent", {"content": "Hi"})]
+    out = list(kiro_stream.to_openai_events(
+        raw, model="m", request_id="r1", created=0))
+    assert out[0].startswith("data: ")
+    payload = json.loads(out[0][len("data: "):].strip())
+    assert payload["choices"][0]["delta"]["content"] == "Hi"
+    assert payload["choices"][0]["delta"]["role"] == "assistant"
+    # 收尾：finish_reason 与 [DONE] 都不能少
+    assert '"finish_reason": "stop"' in out[-2]
+    assert out[-1].strip() == "data: [DONE]"
+
+
+def test_anthropic_events_sequence():
+    """Anthropic 事件顺序是硬要求，缺一段客户端就断开。"""
+    raw = [make_frame("assistantResponseEvent", {"content": "Hi"})]
+    out = list(kiro_stream.to_anthropic_events(raw, model="m", message_id="msg1"))
+    names = [line.split("\n")[0].removeprefix("event: ") for line in out]
+    assert names == ["message_start", "content_block_start", "content_block_delta",
+                     "content_block_stop", "message_delta", "message_stop"]
+
+
+# ---------------------------------------------------------------------------
+# 凭证：坐标与刷新判定
+# ---------------------------------------------------------------------------
+
+
+def test_account_id_prefers_profile_arn():
+    """profileArn 稳定跨登录（clientIdHash 每次登录都变），优先用它。"""
+    aid = creds._account_id(profile_arn="arn:aws:codewhisperer:us-east-1:1:profile/KGVMAMAMGGDK",
+                            client_id_hash="abc123", access_token="t")
+    assert aid == "p-kgvmamamggdk"
+
+
+def test_account_id_falls_back_to_client_hash():
+    aid = creds._account_id(profile_arn="", client_id_hash="d5c7abe37885",
+                            access_token="t")
+    assert aid.startswith("c-") and "d5c7abe37885" in aid
+
+
+def test_needs_refresh_boundaries():
+    now = 1_000_000.0
+    assert creds.needs_refresh({"expires_at": now + 100}, now=now) is True
+    assert creds.needs_refresh({"expires_at": now + 3600}, now=now) is False
+    # 缺字段/坏值一律视为该刷新（宁可多刷一次，别等过期）
+    assert creds.needs_refresh({}, now=now) is True
+    assert creds.needs_refresh({"expires_at": "x"}, now=now) is True
+
+
+def test_parse_expiry_supports_both_shapes():
+    """上游给过 ``...Z`` 与 ``...+00:00`` 两种。"""
+    a = creds._parse_expiry("2026-11-08T19:57:49.063Z")
+    b = creds._parse_expiry("2026-11-08T19:57:49.063+00:00")
+    assert a == b and a > 0
+
+
+def test_parse_expiry_rejects_garbage():
+    for bad in (None, "", "not-a-date", 0, False):
+        assert creds._parse_expiry(bad) == 0.0
+
+
+def test_refresh_requires_client_registration(monkeypatch, tmp_path):
+    """缺 client 注册信息时给出「去登录一次」的可操作提示，而不是裸异常。"""
+    monkeypatch.setattr(creds, "SSO_CACHE_DIR", tmp_path)
+    with pytest.raises(RuntimeError, match="client 凭据"):
+        creds.refresh_tokens({"refresh_token": "rt", "client_id_hash": "nope",
+                              "region": "us-east-1"})
+
+
+def test_refresh_without_refresh_token_fails_clearly():
+    with pytest.raises(RuntimeError, match="refreshToken"):
+        creds.refresh_tokens({"region": "us-east-1"})
