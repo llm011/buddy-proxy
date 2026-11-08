@@ -112,3 +112,29 @@ def test_claim_when_already_checked_in_still_reports_credits(monkeypatch):
     assert res["checked_in"] is True
     # 两个号各 100，兜底之后不该是 None
     assert res["extra_credits"] == 200
+
+
+def test_claim_mixed_state_sums_claimed_and_already_signed(monkeypatch):
+    """混合场景：部分号刚可领、部分号今天已签，金额要全部计入。
+
+    `not claimable` 的兜底如果写成「total 为 0 才补」，这里就会漏——已领的
+    那个号让 total 变成 100，兜底整批跳过，最后只记 100 而不是 200。
+    """
+    a = cb_creds.save_account_cred(_cred("u1"))
+    b = cb_creds.save_account_cred(_cred("u2"))
+    monkeypatch.setattr(failover, "_cooldowns", {})
+
+    def fake_post(account_id, path, *args, **kwargs):
+        if path.endswith("checkin-activity-status"):
+            # u1 已签，u2 还可领
+            return _payload(account_id == a.id)
+        # u2 真正领取
+        return {"code": 0, "msg": "OK",
+                "data": {"credit": 100, "streak_days": 3}}
+
+    monkeypatch.setattr(cb_creds, "api_post_as", fake_post)
+    res = CodeBuddyProvider().checkin_claim()
+
+    assert res["checked_in"] is True
+    # u2 实领 100 + u1 已签按每日额 100 = 200
+    assert res["extra_credits"] == 200

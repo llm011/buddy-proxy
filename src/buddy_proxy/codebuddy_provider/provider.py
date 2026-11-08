@@ -950,24 +950,26 @@ class CodeBuddyProvider(BaseProvider):
         acct_details.sort(key=lambda d: d["index"])
         if not claimable:
             messages.append("今日均已签到")
-        # 今天（或今天启动后）别的入口已经签过：本次没有真正 claim，拿不到
-        # 上游回告的实领数。此时用签到状态里的每日额兜底——签到日领的就是
-        # 这个数（``daily_credit`` 在已签的账号上正是当日额度），比留 None
-        # 好：留 None 会让日历/明细显示「—」，看着像当天没签到（2026-11-08
-        # 用户实报：codebuddy 明明签了，日历却是空的）。
-        if total_credits <= 0:
-            for acct in skipped:
-                st = status_of.get(acct.id) or {}
-                per = st.get("daily_credit") or st.get("today_credit")
-                if not per:
-                    continue
-                try:
-                    total_credits += float(per)
-                except (TypeError, ValueError):
-                    pass
+        # 已签的号（本次没 claim）拿不到「实领数」，但它们在签到状态里带着
+        # ``daily_credit``——签到日领的就是这个数，用它补上，比留空准确：
+        # 留空会让日历/明细显示「—」，看着像当天没签到（2026-11-08 用户实报：
+        # codebuddy 明明签了，日历却是空的）。
+        #
+        # 必须**逐号**补，不能「total 为 0 才补」：混合场景下（partial claim，
+        # 比如 3 个号里 1 个刚可领、2 个已签）已领的部分让 total > 0，按 total
+        # 判断就会整批跳过，最后只记到那 1 个号的量、少算已签的那些。
+        for acct in skipped:
+            st = status_of.get(acct.id) or {}
+            per = st.get("daily_credit") or st.get("today_credit")
+            if not per:
+                continue
+            try:
+                total_credits += float(per)
+            except (TypeError, ValueError):
+                pass
         return {
             "checked_in": any_claimed or not claimable,
-            # 已签到时也要给出金额（见上）；真的一个数都拿不到才是 None
+            # 已签的号也计入（见上）；真的一个数都拿不到才是 None
             "extra_credits": total_credits or None,
             "message": "；".join(messages) or "没有可领取的账号",
             "accounts": acct_details,
