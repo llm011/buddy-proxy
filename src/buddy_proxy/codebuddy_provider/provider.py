@@ -849,6 +849,9 @@ class CodeBuddyProvider(BaseProvider):
         # 4 倍延迟；串行节流的理由（上游对短窗口连打有频控）针对的是 claim
         # 这种会改状态的写操作，不该拖累读。线程池上限按账号数取，别开大。
         claimable: list[Any] = []
+        # 记下每号的状态快照：已签的号后面要用它的 daily_credit 兜底金额
+        # （本次没 claim 就拿不到实领数），省掉再查一遍上游。
+        status_of: dict[str, dict[str, Any]] = {}
         if len(accounts) == 1:
             st = None
             try:
@@ -856,6 +859,8 @@ class CodeBuddyProvider(BaseProvider):
                     accounts[0], index=didx.get(accounts[0].id, 1), multi=False)
             except Exception:  # noqa: BLE001 — 查询失败按可领处理
                 st = None
+            if st:
+                status_of[accounts[0].id] = st
             if st is None or st.get("claimable") or not (
                     st.get("checked_in") or st.get("inactive")):
                 claimable.append(accounts[0])
@@ -870,6 +875,8 @@ class CodeBuddyProvider(BaseProvider):
                         st, _err = fut.result()
                     except Exception:  # noqa: BLE001 — 查询失败按可领处理
                         st = None
+                    if st:
+                        status_of[acct.id] = st
                     if st is None or st.get("claimable") or not (
                             st.get("checked_in") or st.get("inactive")):
                         claimable.append(acct)
@@ -943,9 +950,27 @@ class CodeBuddyProvider(BaseProvider):
         acct_details.sort(key=lambda d: d["index"])
         if not claimable:
             messages.append("今日均已签到")
+        # 已签的号（本次没 claim）拿不到「实领数」，但它们在签到状态里带着
+        # ``daily_credit``——签到日领的就是这个数，用它补上，比留空准确：
+        # 留空会让日历/明细显示「—」，看着像当天没签到（2026-11-08 用户实报：
+        # codebuddy 明明签了，日历却是空的）。
+        #
+        # 必须**逐号**补，不能「total 为 0 才补」：混合场景下（partial claim，
+        # 比如 3 个号里 1 个刚可领、2 个已签）已领的部分让 total > 0，按 total
+        # 判断就会整批跳过，最后只记到那 1 个号的量、少算已签的那些。
+        for acct in skipped:
+            st = status_of.get(acct.id) or {}
+            per = st.get("daily_credit") or st.get("today_credit")
+            if not per:
+                continue
+            try:
+                total_credits += float(per)
+            except (TypeError, ValueError):
+                pass
         return {
             "checked_in": any_claimed or not claimable,
-            "extra_credits": total_credits if any_claimed else None,
+            # 已签的号也计入（见上）；真的一个数都拿不到才是 None
+            "extra_credits": total_credits or None,
             "message": "；".join(messages) or "没有可领取的账号",
             "accounts": acct_details,
         }
