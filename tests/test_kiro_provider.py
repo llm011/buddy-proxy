@@ -285,3 +285,83 @@ def test_refresh_requires_client_registration(monkeypatch, tmp_path):
 def test_refresh_without_refresh_token_fails_clearly():
     with pytest.raises(RuntimeError, match="refreshToken"):
         creds.refresh_tokens({"region": "us-east-1"})
+
+
+# ---------------------------------------------------------------------------
+# 积分回传：日志的「积分」列靠这个
+# ---------------------------------------------------------------------------
+#
+# 上游 meteringEvent 给的是**真实计费**（精确到 1e-6）。要让日志显示它，
+# 必须把 credit 放进 **usage** 里——metrics 的非流式路径读 `payload["usage"]`
+# 再走 normalize_usage，顶层字段它看不到（踩过一次：响应体有 credit，
+# 日志却记成估算 0.0）。
+
+def test_usage_payload_carries_credit_for_metrics():
+    from buddy_proxy.kiro.provider import _usage_payload
+    from buddy_proxy.core.metrics_protocol import normalize_usage
+
+    usage = _usage_payload(40, 0.0054)
+    assert usage["credit"] == 0.0054
+    norm = normalize_usage(usage)
+    assert norm["credit"] == 0.0054, "metrics 必须能从 usage 里读到 credit"
+    assert norm["completion_tokens"] > 0
+
+
+def test_usage_payload_anthropic_shape():
+    from buddy_proxy.kiro.provider import _usage_payload
+    from buddy_proxy.core.metrics_protocol import normalize_usage
+
+    usage = _usage_payload(40, 0.0054, anthropic=True)
+    assert usage["input_tokens"] == 0
+    assert normalize_usage(usage)["credit"] == 0.0054
+
+
+def test_usage_payload_without_credit_is_none():
+    """上游没给 meteringEvent 时不能伪造 0——0 会被当成「真的没花钱」。"""
+    from buddy_proxy.kiro.provider import _usage_payload
+    from buddy_proxy.core.metrics_protocol import normalize_usage
+
+    usage = _usage_payload(40, None)
+    assert "credit" not in usage
+    assert normalize_usage(usage)["credit"] is None
+
+
+def test_openai_stream_emits_usage_chunk_with_credit():
+    """流式末尾必须有 usage chunk，否则日志的积分列永远是空的。
+
+    测的是 provider 实际用的 ``_stream_openai``（``stream.to_openai_events``
+    是早期同步版，已不在转发链路上；留它是为了单测解析，别拿它当实现）。
+    """
+    import asyncio
+    from buddy_proxy.kiro.provider import KiroProvider
+
+    raw = [make_frame("assistantResponseEvent", {"content": "Hi there"}),
+           make_frame("meteringEvent", {"unit": "credit", "usage": 0.007})]
+
+    async def source():
+        for chunk in raw:
+            yield chunk
+
+    async def collect():
+        provider = KiroProvider()
+        out = []
+        async for line in provider._stream_openai(
+                source(), "m", "r", 0):
+            out.append(line)
+        return out
+
+    out = asyncio.run(collect())
+    usage_lines = [json.loads(l[len("data: "):]) for l in out
+                   if l.startswith("data: {") and '"usage"' in l]
+    assert usage_lines, "缺少 usage chunk"
+    assert usage_lines[0]["usage"]["credit"] == 0.007
+    assert usage_lines[0]["choices"] == [], "OpenAI 规范：usage chunk 的 choices 为空"
+
+
+def test_kiro_rates_registered_for_estimation():
+    """拿不到实扣时（异常路径）按倍率粗估，不能整列为空。"""
+    from buddy_proxy.core.credit_estimate import _multiplier, register_kiro_rates
+
+    register_kiro_rates({"claude-haiku-4.5": 0.4})
+    assert _multiplier("kiro", "claude-haiku-4.5") == 0.4
+    register_kiro_rates({})  # 清空，避免污染其它用例

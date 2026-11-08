@@ -79,8 +79,32 @@ def _estimate_zcode(
     return round(base * discount_fn(ts), 2)
 
 
+#: kiro 的模型倍率：``ListAvailableModels`` 的 ``rateMultiplier`` 字段。
+#: 由 provider 在拉目录时登记（``{"claude-opus-5.5": 2.0, ...}``）。
+#: 用模块级 dict 而不是 import kiro 包：本模块被 metrics 在导入期依赖，
+#: 反向 import provider 会形成环（且估算路径不该触发网络/凭证逻辑）。
+_KIRO_RATES: dict[str, float] = {}
+
+
+def register_kiro_rates(rates: dict[str, float]) -> None:
+    """登记 kiro 模型倍率（由 kiro provider 拉完目录后调用）。
+
+    kiro 上游**不返回 token 数**，所以这里的倍率只能配合「按字符估 token」用，
+    精度远不如它自己的 meteringEvent 实扣——实扣拿得到时优先用它，
+    本表只是拿不到时的兜底。
+    """
+    if isinstance(rates, dict):
+        _KIRO_RATES.clear()
+        _KIRO_RATES.update({str(k): float(v) for k, v in rates.items()
+                            if isinstance(v, (int, float)) and not isinstance(v, bool)})
+
+
 def _multiplier(provider: str, model: str) -> float | None:
     """解析模型倍率（"x0.06" → 0.06）；无表/无该模型返回 None。"""
+    if provider == "kiro":
+        # kiro 的倍率来自上游 rateMultiplier（单位是「倍」），与 trae 的
+        # x0.06 是同一套语义：数值本身就是乘数。
+        return _KIRO_RATES.get(model)
     if provider != "trae":
         return None
     credits, model_map = _load_trae_tables()
