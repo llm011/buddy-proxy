@@ -175,7 +175,7 @@ def _ui_source(client) -> str:
     把两处拼起来，保持测试语义不变。
     """
     text = client.get("/ui").text
-    for name in re.findall(r'<script src="/ui/([^"]+\.js)"></script>', text):
+    for name in re.findall(r'<script src="/ui/([^"?]+\.js)(?:\?v=\d+)?"></script>', text):
         r = client.get(f"/ui/{name}")
         assert r.status_code == 200, f"{name} 未正常 serve: {r.status_code}"
         text += "\n" + r.text
@@ -195,7 +195,7 @@ def test_ui_page_served(env):
 def test_ui_static_files_served(env):
     """页面引用的全部静态 JS 和 CSS 都可 serve（白名单按目录派生），且 no-cache。"""
     html = env.client.get("/ui").text
-    scripts = re.findall(r'<script src="/ui/([^"]+\.js)"></script>', html)
+    scripts = re.findall(r'<script src="/ui/([^"?]+\.js)(?:\?v=\d+)?"></script>', html)
     assert scripts, "页面必须显式声明脚本及其加载顺序"
     for name, ctype in [(name, "text/javascript") for name in scripts] + [
         ("style.css", "text/css"),
@@ -236,7 +236,7 @@ def test_every_frontend_script_is_referenced_by_index(env):
     唯一能发现它的地方就是这里。
     """
     html = env.client.get("/ui").text
-    referenced = set(re.findall(r'<script src="/ui/([^"]+\.js)"></script>', html))
+    referenced = set(re.findall(r'<script src="/ui/([^"?]+\.js)(?:\?v=\d+)?"></script>', html))
     on_disk = {p.name for p in page_mod._STATIC.iterdir() if p.suffix == ".js"}
     assert not (on_disk - referenced), (
         f"这些前端脚本没有被 index.html 引用（永远不执行）：{sorted(on_disk - referenced)}"
@@ -2313,3 +2313,40 @@ def test_model_groups_pair_zcode_start_after_zcode(monkeypatch):
     monkeypatch.setattr(st, "proxy_state", state)  # diagnostic → get_state 要有归属
     ids = [g["id"] for g in _model_groups(state)]
     assert ids.index("zcode-start") == ids.index("zcode") + 1, f"组序: {ids}"
+
+
+# ---------------------------------------------------------------------------
+# 静态资源版本戳（2026-11-08）
+# ---------------------------------------------------------------------------
+
+def test_ui_page_stamps_assets_with_mtime():
+    """页面里的 js/css 引用都要带 ``?v=<mtime>``，否则改了代码浏览器还在用旧副本。
+
+    来由：`Cache-Control: no-cache` 只是「使用前协商」，而静态响应没有 ETag /
+    Last-Modified，协商无据可依，部分浏览器直接吃缓存——用户实报过「积分合计
+    按钮不出现，但服务端 JS 里明明有」。加版本戳后 URL 随文件变化，缓存键跟着变。
+    """
+    import re
+    from buddy_proxy.web.ui.page import _stamp_assets
+
+    # 用真实存在的资源（不存在的文件按设计原样返回）
+    html = _stamp_assets('<script src="/ui/chart_log.js"></script>'
+                         '<link href="/ui/style.css">')
+    assert re.search(r'src="/ui/chart_log\.js\?v=\d+"', html), html
+    assert re.search(r'href="/ui/style\.css\?v=\d+"', html), html
+
+
+def test_stamp_skips_missing_files():
+    """文件不存在时原样返回，不要伪造出一个版本号骗过 404。"""
+    from buddy_proxy.web.ui.page import _stamp_assets
+
+    html = _stamp_assets('<script src="/ui/__nope__.js"></script>')
+    assert html == '<script src="/ui/__nope__.js"></script>'
+
+
+def test_stamp_does_not_touch_other_urls():
+    """只改 /ui/*.js|css，别的 URL（外链、图片）不动。"""
+    from buddy_proxy.web.ui.page import _stamp_assets
+
+    src = '<script src="https://cdn.example.com/x.js"></script>'
+    assert _stamp_assets(src) == src

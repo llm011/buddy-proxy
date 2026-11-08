@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -69,10 +70,38 @@ def _static_path(name: str) -> Path:
 
 # 每次请求现读：CSS/JS 一直是这样，index.html 也照做——之前它只在 import 时读一次，
 # 改完页面不重启就永远 serve 旧骨架，和下面 no-cache 的意图正好相反。
+#
+# **资源版本戳**（2026-11-08 加）：光靠 ``Cache-Control: no-cache`` 不够。
+# 那个头只是「使用前先协商」，浏览器仍可拿本地副本发条件请求；而我们的静态
+# 响应既没有 ``ETag`` 也没有 ``Last-Modified``，协商时无据可依，部分浏览器就
+# 直接用缓存了——表现为「代码明明改了、界面还是旧的」，用户实报过一次
+# （积分合计按钮不出现，但服务端 JS 里明明有）。
+#
+# 所以在 HTML 里把每个 ``/ui/xxx.js|css`` 改写成 ``/ui/xxx.js?v=<mtime>``：
+# 文件一改，URL 就变，缓存键跟着变，浏览器不可能再命中旧副本。mtime 取整到秒，
+# 同一秒内的多次保存视为同一版本（够用，且不会让 URL 抖动）。
+_ASSET_TAG_RE = re.compile(r'(src|href)="(/ui/[A-Za-z0-9_.-]+\.(?:js|css))"')
+
+
+def _stamp_assets(html: str) -> str:
+    """给页面里的静态资源引用加 ``?v=<mtime>`` 版本戳。"""
+    def repl(match: "re.Match[str]") -> str:
+        attr, url = match.group(1), match.group(2)
+        try:
+            stamp = int((_STATIC / url[len("/ui/"):]).stat().st_mtime)
+        except OSError:
+            return match.group(0)  # 文件不在就别动，交给 404 暴露问题
+        return f'{attr}="{url}?v={stamp}"'
+    return _ASSET_TAG_RE.sub(repl, html)
+
+
 @app.get("/ui", response_class=HTMLResponse)
 async def ui_page():
     # no-cache：页面随代码更新，别让浏览器拿旧缓存（管理页无性能顾虑）
-    return HTMLResponse(content=_read_static("index.html"), headers={"Cache-Control": "no-cache"})
+    return HTMLResponse(
+        content=_stamp_assets(_read_static("index.html")),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/ui/{name}")
