@@ -9,7 +9,7 @@
 #   ./proxy.sh logs                              # 跟踪日志
 #   ./proxy.sh ui                                # 确保在跑并打开管理页 http://127.0.0.1:8787/ui
 #   ./proxy.sh login    [provider] [--no-browser] [--region cn|global] # 登录上游账号（默认 codebuddy；
-#                                                # provider: codebuddy(=workbuddy, =codebuddyintl 海外)/trae(=traeintl 海外)/zcode/glm/ark/deepseek/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/codex）
+#                                                # provider: codebuddy(=workbuddy, =codebuddyintl 海外)/trae(=traeintl 海外)/zcode/glm/ark/deepseek/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/codex/yuntoken）
 #                                                # --region 仅 trae/qoder/codebuddy 生效（两区账号不通用；交互终端不给会问一句）
 #                                                # 登录成功后若网关在运行，需 restart 生效
 #
@@ -39,7 +39,7 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # 某个 flag 被拿掉就失效。早先这里写的是 trae——但 settings.json 的
 # ``default_provider`` 会覆盖本参数（见 __main__.py「管理页设置优先于 CLI」），
 # 两处常年不一致却毫无提示，排查时极易被带偏。
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --ark --deepseek --zcode-start --mimo --qoder --antigravity --kimi --codex --default-provider codebuddy}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --ark --deepseek --yuntoken --zcode-start --mimo --qoder --antigravity --kimi --codex --default-provider codebuddy}"
 
 # 优先使用项目自带 .venv（uv 已装好依赖），否则退回系统 python
 if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
@@ -271,7 +271,7 @@ cmd_login() {
     # tests/test_login_cli.py 的白名单同步测试会盯住。
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi|codex|deepseek)
+            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi|codex|deepseek|yuntoken)
                 # 别名（workbuddy/cb/quoder 系、intl 系）原样透传，python 侧归一
                 provider="$1" ;;
             --no-browser)

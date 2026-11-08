@@ -258,6 +258,13 @@ def main():
                              "它们只认同一把 key，网关一启动就在（见 README「API 端点」）。"
                              "裸名与已有目录撞车时仍归原本那条通道（不会改道到付费官方），"
                              "显式走官方用 deepseek/<模型>")
+    parser.add_argument("--yuntoken", action="store_true", default=os.getenv("YUNTOKEN_ENABLED", "") == "1",
+                        help="启用 yuntoken 网关 provider（自建 OpenAI 兼容聚合网关，"
+                             "openai/anthropic 两协议直通、模型目录来自上游；凭据取 "
+                             "YUNTOKEN_API_KEY + YUNTOKEN_BASE_URL，或 "
+                             "~/.buddy-proxy/yuntoken_api_key + yuntoken.json 的 base_url）。"
+                             "裸名与已有目录撞车时仍归原本那条通道，显式走网关用 "
+                             "yuntoken/<模型>")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
                              "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
@@ -501,6 +508,25 @@ def main():
               f"余额可查)")
     else:
         print("[DeepSeek] Disabled (pass --deepseek or DEEPSEEK_ENABLED=1 to enable)")
+
+    # yuntoken 网关：与 deepseek 同款直通型通道，缺配置只告警不阻断启动——
+    # 用户可能刚装好、还没来得及填 key/基址，转发时 ensure_auth 会再报一次
+    # 可操作的 401。模型表来自上游，启动阶段不拉（拉失败不该拖慢启动）。
+    if args.yuntoken:
+        from buddy_proxy.providers.yuntoken import YuntokenProvider
+
+        yuntoken = YuntokenProvider()
+        try:
+            yuntoken.ensure_auth()
+        except HTTPException as exc:
+            logger.warning("yuntoken provider 认证未就绪: %s", exc.detail)
+        providers[yuntoken.id] = yuntoken
+        health = yuntoken.health()
+        logger.info("Yuntoken provider enabled (%s)", health.get("base_url") or "未配置基址")
+        print(f"[yuntoken] Enabled (网关 {health.get('base_url') or '未配置'}; "
+              f"模型目录来自上游)")
+    else:
+        print("[yuntoken] Disabled (pass --yuntoken or YUNTOKEN_ENABLED=1 to enable)")
 
     if args.trae:
         from buddy_proxy.trae.provider import TraeProvider

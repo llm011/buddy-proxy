@@ -53,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -436,6 +436,60 @@ def _login_deepseek(**_kwargs) -> int:
     print("          （`>` 是覆盖：重复配置时把旧 key 换掉，别用 `>>` 追加）")
     print("    ③ 让网关重新读取：buddy restart（启动参数里要有 --deepseek）")
     print("       配好这把 key，/v1/tools/search 与 /v1/tools/fetch 也就同时可用了。")
+    return 1
+
+
+def _login_yuntoken(**_kwargs) -> int:
+    """yuntoken 网关无交互登录：凭据是网关签发的 Bearer key + 网关基址。
+
+    与 glm/deepseek 同属「key 型」通道。比它们多一步：**基址也要配**，
+    且本仓库不内置默认地址（网关是部署方自己的基础设施，写死进开源代码
+    等于替别人钉一份配置）。所以提示里把两件事分开说。
+    """
+    from buddy_proxy.providers.yuntoken import (
+        _CONFIG_HINT,
+        YuntokenProvider,
+        config_file_path,
+        resolve_api_key,
+        resolve_base_url,
+        secret_file_path,
+    )
+
+    key = resolve_api_key()
+    base = resolve_base_url()
+    if key and base:
+        print(f"[OK] yuntoken 凭据已配置: key {key[:6]}***{key[-4:]}  base {base}")
+        provider = YuntokenProvider()
+        print(f"     网关：{provider.health().get('base_url')}")
+        print("     换 key / 换网关地址改下面任意一处即可：")
+        print("     1. 环境变量 YUNTOKEN_API_KEY 与 YUNTOKEN_BASE_URL")
+        print(f"     2. 文件 {secret_file_path()}（首行裸 key）与 "
+              f"{config_file_path()}（{{\"base_url\": ...}}）")
+        print("     改完 buddy restart（启动参数里要有 --yuntoken）")
+        print("     模型目录来自网关 GET /v1/models，启动后可在管理页「↻ 重新拉取」。")
+        return 0
+    missing = []
+    if not key:
+        missing.append("key")
+    if not base:
+        missing.append("base_url")
+    print(f"[!] yuntoken 未配置完整（缺 {', '.join(missing)}）。")
+    print("    它要的是网关签发的 Bearer key + 网关基址，不是账号密码。")
+    print()
+    print(f"    ① 问网关管理员领 API key 与基址（{_CONFIG_HINT}）")
+    print("    ② 配到本机，任选一种：")
+    print("       a) 环境变量（临时）：")
+    print("          export YUNTOKEN_API_KEY=<粘贴 key>")
+    print("          export YUNTOKEN_BASE_URL=<粘贴基址，如 http://<主机>:<端口>>")
+    secret = secret_file_path()
+    cfg = config_file_path()
+    print(f"       b) 写文件（长期）: mkdir -p {secret.parent} && "
+          f"echo '<粘贴 key>' > {secret}")
+    print(f"          echo '{{\"base_url\": \"<粘贴基址>\"}}' > {cfg}")
+    print("          然后 chmod 600 两个文件（key 是明文凭据）")
+    print("          （`>` 是覆盖：重复配置时把旧值换掉，别用 `>>` 追加）")
+    print("    ③ 确认网关可达：curl -H \"Authorization: Bearer <key>\" <基址>/v1/models")
+    print("    ④ 让网关重新读取：buddy restart（启动参数里要有 --yuntoken）")
     return 1
 
 
@@ -865,6 +919,7 @@ _DISPATCH = {
     "kimi": _login_kimi,
     "codex": _login_codex,
     "deepseek": _login_deepseek,
+    "yuntoken": _login_yuntoken,
 }
 
 
