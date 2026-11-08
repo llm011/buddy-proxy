@@ -53,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -905,6 +905,105 @@ def _login_codex(open_browser: bool = True, **_kwargs) -> int:
     return 0
 
 
+def _login_kiro(**_kwargs) -> int:
+    """kiro 登录：优先导入本机 auth 文件，否则走设备码。
+
+    Kiro 的官方登录要过 AWS SSO / IAM Identity Center，设备码流程需要企业
+    start URL——那个只有 Kiro 客户端自己知道。所以**优先检测本机已登录的
+    auth 文件**（IDE 登录过就有），一键导入；没有才引导走设备码。
+    """
+    from buddy_proxy.kiro import credentials as kiro_creds
+    from buddy_proxy.kiro import login as kiro_login
+
+    print("[kiro] 检查本机 auth 文件…")
+    files = kiro_login.detected_auth_files()
+    if files:
+        print(f"    找到 {len(files)} 份可导入的凭据：")
+        for i, item in enumerate(files, 1):
+            print(f"      {i}. {item['name']}  ({item['region']}, "
+                  f"{item['provider'] or '未知'})  {item['path']}")
+        # 非交互环境（CI/管道）直接导入最新那份
+        import sys
+        if not sys.stdin.isatty():
+            target = files[0]
+            print(f"    非交互环境，导入最新的一份: {target['name']}")
+            try:
+                acct = kiro_login.import_auth_file(target["path"])
+            except Exception as exc:  # noqa: BLE001
+                print(f"[!] 导入失败: {exc}")
+                return 1
+            print(f"[OK] 已导入 {acct.label}（{acct.id}）")
+            return 0
+        try:
+            raw = input("选择要导入的序号（回车=1，q=退出）: ").strip()
+        except EOFError:
+            raw = ""
+        if raw.lower() == "q":
+            print("已取消。")
+            return 1
+        index = 0
+        if raw:
+            try:
+                index = int(raw) - 1
+            except ValueError:
+                print("[!] 序号不合法")
+                return 1
+        if not (0 <= index < len(files)):
+            print("[!] 序号超出范围")
+            return 1
+        target = files[index]
+        try:
+            acct = kiro_login.import_auth_file(target["path"])
+        except Exception as exc:  # noqa: BLE001
+            print(f"[!] 导入失败: {exc}")
+            print("    若提示 refreshToken 失效，请在 Kiro IDE 里重新登录后再试。")
+            return 1
+        print(f"[OK] 已导入 {acct.label}（{acct.id}, {acct.region}）")
+        # 探活结果（额度 + 订阅名）
+        try:
+            probe = kiro_login.probe_account(acct.id)
+            print(f"    订阅: {probe.get('subscription') or '未知'}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    [!] 探活失败: {exc}")
+        print("    启用通道：在启动参数里加 --kiro（或设 KIRO_ENABLED=1）后 buddy restart")
+        return 0
+
+    print("[kiro] 本机没有可导入的 auth 文件。")
+    print("    推荐做法：先在 Kiro IDE 里登录一次，再回来执行 `buddy login kiro`。")
+    print("    IDE 登录后凭据会出现在 ~/.aws/sso/cache/kiro-auth-token.json。")
+    print()
+    print("    也可以走设备码授权（需要 IAM Identity Center 的 start URL）：")
+    try:
+        info = kiro_login.start_device_login()
+    except Exception as exc:  # noqa: BLE001
+        print(f"    [!] 设备码登录不可用: {exc}")
+        return 1
+    print(f"    1. 打开: {info.get('verification_uri')}")
+    print(f"    2. 输入验证码: {info.get('user_code')}")
+    print(f"    3. 有效期 {info.get('expires_in')} 秒")
+    import time
+    deadline = time.time() + float(info.get("expires_in") or 600)
+    interval = max(3, int(info.get("interval") or 5))
+    while time.time() < deadline:
+        time.sleep(interval)
+        try:
+            state = kiro_login.poll_device_login()
+        except Exception as exc:  # noqa: BLE001
+            print(f"[!] 轮询失败: {exc}")
+            return 1
+        status = state.get("status")
+        if status == "ok":
+            acct = state.get("account") or {}
+            print(f"[OK] 登录成功: {acct.get('label')}（{acct.get('id')}）")
+            print("    启用通道：在启动参数里加 --kiro 后 buddy restart")
+            return 0
+        if status == "expired":
+            print("[!] 验证码已过期，请重新执行 buddy login kiro")
+            return 1
+    print("[!] 等待超时")
+    return 1
+
+
 _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
@@ -920,6 +1019,7 @@ _DISPATCH = {
     "codex": _login_codex,
     "deepseek": _login_deepseek,
     "yuntoken": _login_yuntoken,
+    "kiro": _login_kiro,
 }
 
 

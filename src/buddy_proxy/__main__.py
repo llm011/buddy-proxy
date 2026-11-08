@@ -265,6 +265,12 @@ def main():
                              "~/.buddy-proxy/yuntoken_api_key + yuntoken.json 的 base_url）。"
                              "裸名与已有目录撞车时仍归原本那条通道，显式走网关用 "
                              "yuntoken/<模型>")
+    parser.add_argument("--kiro", action="store_true", default=os.getenv("KIRO_ENABLED", "") == "1",
+                        help="启用 kiro provider（AWS CodeWhisperer / Kiro IDE 直连，"
+                             "openai + anthropic 双协议、多账号、额度可查）。"
+                             "凭据来自 `buddy login kiro` 或管理页「导入 auth 文件」"
+                             "（读 ~/.aws/sso/cache/kiro-auth-token.json）。"
+                             "裸名撞车时让位给原生通道，显式走用 kiro/<模型>")
     parser.add_argument("--default-provider", default=os.getenv("PROXY_DEFAULT_PROVIDER", "codebuddy"),
                         help="兜底通道：模型名未命中任何 provider 时转发到哪个通道 "
                              "（codebuddy/zcode/trae/doubao/mimo/qoder，默认 codebuddy；可用 PROXY_DEFAULT_PROVIDER 覆盖）")
@@ -527,6 +533,24 @@ def main():
               f"模型目录来自上游)")
     else:
         print("[yuntoken] Disabled (pass --yuntoken or YUNTOKEN_ENABLED=1 to enable)")
+
+    # kiro：AWS CodeWhisperer 直连。与 yuntoken 同款——缺登录只告警不阻断启动
+    # （用户可能刚装好还没登录，转发时 ensure_auth 会再报一次可操作的 401）。
+    if args.kiro:
+        from buddy_proxy.kiro.provider import KiroProvider
+
+        kiro = KiroProvider()
+        try:
+            kiro.ensure_auth()
+        except HTTPException as exc:
+            logger.warning("kiro provider 认证未就绪: %s", exc.detail)
+        providers[kiro.id] = kiro
+        health = kiro.health()
+        logger.info("Kiro provider enabled (accounts=%s)", health.get("accounts"))
+        print(f"[kiro] Enabled ({health.get('accounts')} 个账号; "
+              f"模型目录需刷新后从上游拉取)")
+    else:
+        print("[kiro] Disabled (pass --kiro or KIRO_ENABLED=1 to enable)")
 
     if args.trae:
         from buddy_proxy.trae.provider import TraeProvider

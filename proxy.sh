@@ -40,7 +40,7 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # ``default_provider`` 会覆盖本参数（见 __main__.py「管理页设置优先于 CLI」）。
 # 这一行必须与 ``buddy`` 的 EXTRA_ARGS **整串**相同：tests/test_login_cli.py
 # 逐字比对，加通道 flag 只改一边 CI 就红。
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --ark --deepseek --yuntoken --zcode-start --mimo --qoder --antigravity --kimi --codex --default-provider codebuddy}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --ark --deepseek --yuntoken --zcode-start --mimo --qoder --antigravity --kimi --codex --kiro --default-provider codebuddy}"
 
 # 优先使用项目自带 .venv（uv 已装好依赖），否则退回系统 python
 if [[ -x "$SCRIPT_DIR/.venv/bin/python" ]]; then
@@ -272,7 +272,7 @@ cmd_login() {
     # tests/test_login_cli.py 的白名单同步测试会盯住。
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi|codex|deepseek|yuntoken)
+            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi|codex|deepseek|yuntoken|kiro)
                 # 别名（workbuddy/cb/quoder 系、intl 系）原样透传，python 侧归一
                 provider="$1" ;;
             --no-browser)

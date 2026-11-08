@@ -981,3 +981,128 @@ async def ui_codebuddy_usage_records(
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"error": {"message": str(exc)[:300]}})
+
+
+# ---------------------------------------------------------------------------
+# kiro：账号管理 + 导入 auth 文件 + 设备码登录
+# ---------------------------------------------------------------------------
+
+
+def _kiro_state_payload() -> dict[str, Any]:
+    """kiro 账号快照（纯本地，不触网）。"""
+    from ...kiro import credentials as kiro_creds
+
+    accounts = kiro_creds.list_accounts()
+    out = []
+    for index, acct in enumerate(accounts, 1):
+        cred = kiro_creds.load_account_cred(acct.id) or {}
+        expires_at = cred.get("expires_at")
+        out.append({
+            "id": acct.id,
+            "label": acct.label,
+            "region": acct.region,
+            "provider": acct.provider,
+            "index": index,
+            "has_refresh_token": bool(cred.get("refresh_token")),
+            "expires_at": expires_at,
+            "needs_refresh": kiro_creds.needs_refresh(cred) if cred else True,
+        })
+    return {"enabled": True, "accounts": out}
+
+
+@app.get("/ui/api/kiro/accounts")
+async def ui_kiro_accounts(request: Request):
+    """kiro 账号列表（本地凭据状态，不含秘密）。"""
+    _ensure_local(request)
+    return await asyncio.to_thread(_kiro_state_payload)
+
+
+@app.get("/ui/api/kiro/auth-files")
+async def ui_kiro_auth_files(request: Request):
+    """本机可导入的 auth 文件候选（Kiro IDE 的 sso cache）。"""
+    _ensure_local(request)
+    from ...kiro import login as kiro_login
+
+    return {"files": await asyncio.to_thread(kiro_login.detected_auth_files)}
+
+
+@app.post("/ui/api/kiro/import")
+async def ui_kiro_import(request: Request):
+    """导入 auth 文件（body: ``{path?, label?}``），并探活确认可用。"""
+    _ensure_local(request)
+    from ...kiro import login as kiro_login
+
+    body = await request.json() if await request.body() else {}
+    path = (body.get("path") or "").strip() or None
+    label = (body.get("label") or "").strip()
+    try:
+        account = await asyncio.to_thread(
+            kiro_login.import_auth_file, path, label=label)
+    except Exception as exc:  # noqa: BLE001 - 统一转成可读 400
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": str(exc)[:300], "type": "import_failed"}}) from exc
+    return {"ok": True, "account": {
+        "id": account.id, "label": account.label, "region": account.region}}
+
+
+@app.post("/ui/api/kiro/login/start")
+async def ui_kiro_login_start(request: Request):
+    """发起设备码登录，返回验证地址与用户码（前端展示后轮询 poll）。"""
+    _ensure_local(request)
+    from ...kiro import login as kiro_login
+
+    body = await request.json() if await request.body() else {}
+    region = (body.get("region") or "").strip() or None
+    try:
+        result = await asyncio.to_thread(kiro_login.start_device_login,
+                                         region or "us-east-1")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": str(exc)[:300], "type": "login_failed"}}) from exc
+    return {"ok": True, **result}
+
+
+@app.post("/ui/api/kiro/login/poll")
+async def ui_kiro_login_poll(request: Request):
+    """轮询设备码登录状态（``status``: pending/slow_down/expired/ok）。"""
+    _ensure_local(request)
+    from ...kiro import login as kiro_login
+
+    try:
+        return await asyncio.to_thread(kiro_login.poll_device_login)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": str(exc)[:300], "type": "login_failed"}}) from exc
+
+
+@app.post("/ui/api/kiro/accounts/order")
+async def ui_kiro_accounts_order(request: Request):
+    """调整 kiro 账号的 failover 顺位。"""
+    _ensure_local(request)
+    from ...kiro import credentials as kiro_creds
+
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "ids 必须是账号 id 的字符串数组"}})
+    try:
+        accounts = await asyncio.to_thread(kiro_creds.reorder_accounts, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": str(exc)}}) from exc
+    return {"ok": True, "accounts": [
+        {"id": a.id, "label": a.label} for a in accounts]}
+
+
+@app.delete("/ui/api/kiro/accounts/{account_id}")
+async def ui_kiro_account_delete(account_id: str, request: Request):
+    """删除 kiro 账号（不可逆：凭据文件一并删除，需重新登录）。"""
+    _ensure_local(request)
+    from ...kiro import credentials as kiro_creds
+
+    removed = await asyncio.to_thread(kiro_creds.delete_account, account_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail={"error": {
+            "message": f"账号不存在: {account_id}"}})
+    return {"ok": True}
