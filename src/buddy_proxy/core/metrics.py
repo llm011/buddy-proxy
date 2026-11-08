@@ -19,6 +19,46 @@ from .metrics_protocol import (
     normalize_usage,
 )
 
+def _sum_credits(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """把一批日志行的积分拆成「上游实扣」与「本地估算」两个合计。
+
+    口径与 :meth:`MetricsCollector._bucket_add` / ``credits_daily`` 完全一致：
+    按 ``credit_estimated`` 分流，可加，不可加的（None/非数字）跳过。两边口径
+    必须一样，否则「图表说 A、按钮说 B」会被当成 bug 反复查。
+
+    分开返回而不是合成一个数的理由：两者含义不同——实扣是上游真的扣了钱，
+    估算只是本地按单价×token 推出来的。合成一个总和会把「估的」当「真花的」，
+    用户做月度对账时会被误导。
+
+    返回::
+
+        {"count": N,          参与累加的行数（有有效积分值的）
+         "actual": x,         上游实扣合计
+         "estimated": y,      本地估算合计
+         "total": x + y}      两者之和（前端默认展示这个，并标明其中估算占多少
+    """
+    actual = 0.0
+    estimated = 0.0
+    counted = 0
+    for rec in rows:
+        if not isinstance(rec, dict):
+            continue
+        value = rec.get("credit")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        counted += 1
+        if rec.get("credit_estimated"):
+            estimated += float(value)
+        else:
+            actual += float(value)
+    return {
+        "count": counted,
+        "actual": round(actual, 4),
+        "estimated": round(estimated, 4),
+        "total": round(actual + estimated, 4),
+    }
+
+
 class MetricsCollector:
     """线程安全的请求指标收集器。"""
 
@@ -408,7 +448,19 @@ class MetricsCollector:
             "pages": pages,
             "clients": client_list,
             "from_disk": self.log_path is not None,
+            # 筛选后**全量**积分合计（不是当前页的）。放在这里而不是单独接口，
+            # 是因为它必须与 rows 用**同一批过滤后的行**算——两处各算一次，
+            # 一旦筛选口径漂移，用户会看到「列表和合计对不上」这种最难查的错。
+            #
+            # 为什么不在前端累加：本接口是服务端分页，前端只拿到当前页 20 条，
+            # 拿不到全量。真要在前端加就得把整页数据都传下去，那才是把开销
+            # 摊到每次翻页上（用户明确否决的方案）。
+            "credit_total": _sum_credits(rows),
         }
+
+    # ------------------------------------------------------------------
+    # 查询（积分累加按钮）
+    # ------------------------------------------------------------------
 
     # ------------------------------------------------------------------
     # 查询（请求日志页头部饼图）：按日期范围聚合各模型请求次数
