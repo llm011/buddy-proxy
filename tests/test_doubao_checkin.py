@@ -358,7 +358,7 @@ def test_reuses_user_webview_without_touching_chat_target():
 def test_creates_and_closes_only_its_background_page():
     client = FakeClient()
     # 已有页面是聊天页，不是签到页：新建独立后台页，最后只关闭 new-1。
-    client.target["url"] = "https://www.doubao.com/chat/"
+    client.target["url"] = "chrome://doubaowork-chat/chat"  # 宿主页，非同源
     with doubao_checkin.CheckinPage(client):
         pass
     assert client.commands == ["Target.createTarget", "Target.closeTarget"]
@@ -368,7 +368,7 @@ def test_creates_and_closes_only_its_background_page():
 
 def test_open_failure_closes_created_page_and_preserves_shared_socket(monkeypatch):
     client = FakeClient()
-    client.target["url"] = "https://www.doubao.com/chat/"
+    client.target["url"] = "chrome://doubaowork-chat/chat"  # 宿主页，非同源
     original = FakeSocket.cmd
     def _wrong_href(socket, method, params, timeout=20.0):
         if params.get("expression") == "location.href":
@@ -544,3 +544,109 @@ def test_live_version_never_returns_malformed_query():
 def test_page_query_has_single_pc_version_placeholder():
     """兜底值里只能有一个 pc_version，否则正则只会替换掉第一个。"""
     assert doubao_checkin._PAGE_QUERY.count("pc_version=") == 1
+
+
+def test_prefers_same_origin_subframe_over_landing_page():
+    """主 App 聊天界面里的 doubao.com 子 frame 要优先于活动落地页。
+
+    实测（2026-11-08）：落地页上的「立即签到」按钮自己就是坏的（真人点也回
+    710010702），在它里面跑求值必然失败；真正能签到的是主 App 内嵌的同源子
+    frame。两个 target 同时存在时必须选后者。
+    """
+    client = FakeClient()
+    sub = {
+        "id": "same-origin", "type": "iframe",
+        "url": "https://www.doubao.com/drive-iframe/drive/home/",
+        "webSocketDebuggerUrl": "ws://127.0.0.1:9223/devtools/page/same-origin",
+    }
+    client._targets = [client.target, sub]  # 落地页在前、子 frame 在后
+    client.target = sub  # _fetch_targets 之后选中它
+    with doubao_checkin.CheckinPage(client):
+        pass
+    # 选中的是同源 frame，就不该新建页面
+    assert client.created_targets == 0
+    assert client.closed_targets == []
+
+
+def test_claim_sends_report_before_checkin(monkeypatch):
+    """领取前先发 report 埋点，顺序必须早于 checkin。
+
+    主 App 的签到按钮每次都先 POST /alice/ug/campaign/landing/report
+    （event_type=user_operate, biz_event_name=check_in）再发 checkin；
+    落地页的按钮缺了这一步就恒回 710010702。这里锁住顺序。
+    """
+    sent: list[tuple[str, dict]] = []
+    detail_calls: list[int] = []
+
+    class Page:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, path, body, timeout, *, daily_task_only=False):
+            sent.append((path, body))
+            if path == doubao_checkin._DETAIL_PATH:
+                # 第二次查 detail 是领取后的复查，要返回「今天已签」
+                detail_calls.append(1)
+                checked = len(detail_calls) > 1
+                return 200, {"code": 0, "data": {"campaign_code": doubao_checkin._CAMPAIGN_GROUP,
+                        "tasks": [{"task_kind": "daily_signin",
+                                   "campaign_code": "daily_signin",
+                                   "campaign_group_code": doubao_checkin._CAMPAIGN_GROUP,
+                                   "task_status": 2 if checked else 1,
+                                   "daily_checkin": {"checked_in_today": checked,
+                                                     "last_checkin_date": "2026-11-05",
+                                                     "total_days": 5,
+                                                     "reward": {"reward_amount": 200,
+                                                                "reward_type": "quota_grant"}}}]}}, ""
+            if path == doubao_checkin._REPORT_PATH:
+                return 200, {"code": 0, "data": None}, ""
+            if path == doubao_checkin._CLAIM_PATH:
+                return 200, {"code": 0, "data": {"checked_in": True,
+                                                 "checkin_date": "2026-11-08",
+                                                 "reward_amount": 200}}, ""
+            return 200, {"code": 0}, ""
+
+    monkeypatch.setattr(doubao_checkin, "CheckinPage", lambda *a, **k: Page())
+    result = doubao_checkin.claim_checkin(object(), doubao_checkin._DETAIL_PATH, timeout=10)
+    assert result is not None and result["checked_in"] is True
+
+    paths = [p for p, _ in sent]
+    assert doubao_checkin._REPORT_PATH in paths, "必须发 report 埋点"
+    assert paths.index(doubao_checkin._REPORT_PATH) < paths.index(doubao_checkin._CLAIM_PATH), \
+        "report 必须早于 checkin"
+    report_body = dict(sent) [doubao_checkin._REPORT_PATH]
+    assert report_body == {"event_type": "user_operate", "biz_event_name": "check_in"}
+
+
+def test_report_failure_does_not_block_claim(monkeypatch):
+    """埋点失败不该让领取失败——它只是模拟用户操作痕迹。"""
+    detail_calls = []
+
+    class Page:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def request(self, path, body, timeout, *, daily_task_only=False):
+            if path == doubao_checkin._DETAIL_PATH:
+                # 第二次查 detail 是领取后的复查，要返回「今天已签」
+                detail_calls.append(1)
+                checked = len(detail_calls) > 1
+                return 200, {"code": 0, "data": {"campaign_code": doubao_checkin._CAMPAIGN_GROUP,
+                        "tasks": [{"task_kind": "daily_signin",
+                                   "campaign_code": "daily_signin",
+                                   "campaign_group_code": doubao_checkin._CAMPAIGN_GROUP,
+                                   "task_status": 2 if checked else 1,
+                                   "daily_checkin": {"checked_in_today": checked,
+                                                     "last_checkin_date": "2026-11-05",
+                                                     "total_days": 5,
+                                                     "reward": {"reward_amount": 200,
+                                                                "reward_type": "quota_grant"}}}]}}, ""
+            if path == doubao_checkin._REPORT_PATH:
+                raise RuntimeError("report 挂了")
+            if path == doubao_checkin._CLAIM_PATH:
+                return 200, {"code": 0, "data": {"checked_in": True,
+                                                 "checkin_date": "2026-11-08",
+                                                 "reward_amount": 200}}, ""
+            return 200, {"code": 0}, ""
+
+    monkeypatch.setattr(doubao_checkin, "CheckinPage", lambda *a, **k: Page())
+    result = doubao_checkin.claim_checkin(object(), doubao_checkin._DETAIL_PATH, timeout=10)
+    assert result is not None and result["checked_in"] is True
