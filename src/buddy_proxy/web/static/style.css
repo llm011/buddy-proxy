@@ -23,6 +23,10 @@
               border-radius: 999px; padding: 0 7px; margin-left: 5px; color: var(--muted); }
   .tab .cnt.ok { color: var(--ok); border-color: rgba(62,207,142,.4); }
   .tab .cnt.warn { color: var(--warn); border-color: rgba(240,180,41,.4); }
+  /* 空角标整块隐藏：:empty 只对**无子节点**成立，而 JS 用 textContent='' 留的是
+     零个文本节点刚好满足；但 padding/border 仍在，会渲染成一个空胶囊——远看
+     就是「模型」「模型顺序」后面各挂一个小圆点（数据未加载时尤其显眼）。 */
+  .tab .cnt:empty { display: none; }
   /* 日期范围组件：默认隐藏，随页签移动到当前页挂载点后显示为卡片行 */
   .rangebar { display: none; align-items: center; gap: 8px; flex-wrap: wrap;
               background: var(--card); border: 1px solid var(--line); border-radius: 12px;
