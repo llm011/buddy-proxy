@@ -360,8 +360,34 @@ def _is_account_error(e: HTTPException) -> bool:
     401 = 凭据失效（换号有意义）；429 = 额度/限流（如 code 14018 单账号额度
     耗尽，换号有意义）。502/504 是通道级（所有账号同网关，换号无意义）；
     其余业务 4xx（模型名不合法等）换号也无意义。
+
+    ⚠ 429 里还有一种是**单模型**限流（code 6004「您也可以切换其他模型继续使用」）：
+    换号确实有意义（别的号可能没被限），但**不能冷却账号**——见
+    :func:`_is_model_scoped_429`。
     """
     return e.status_code in (401, 429)
+
+
+#: 「只是这个模型限流，账号本身没问题」的上游错误码。
+#:
+#: 2026-11-08 实测：``code 6004`` 的提示原文是「您的使用量已超出频率限制，
+#: 将在 <时间> 重置，**您也可以切换其他模型继续使用**」——同账号的 deepseek /
+#: glm / kimi-k3 实测都照常 200，只有被限的那个模型不行。
+#:
+#: 对比 ``code 14018``（「额度已用尽，请购买加量包」）是**账号级**的，那种才该
+#: 冷却整个账号。
+#:
+#: 不做这个区分的后果（真实踩过）：一次 kimi-k3.1-pro 限流，把 6 个账号全部
+#: 冷却 5 分钟——期间这些账号连 deepseek 都用不了，看起来像「所有账号都坏了」。
+_MODEL_SCOPED_429_CODES = frozenset({6004})
+
+
+def _is_model_scoped_429(e: HTTPException) -> bool:
+    """这个 429 是不是「只有该模型被限流」（能换号、但不该冷却账号）。"""
+    if e.status_code != 429:
+        return False
+    code = _upstream_error_code(str(e.detail))
+    return code in _MODEL_SCOPED_429_CODES
 
 
 #: 上游 400 里「换账号/换请求都没用，整条通道都被挡」的风控码（响应体里的
@@ -1262,7 +1288,10 @@ class CodeBuddyProvider(BaseProvider):
         upstream_body.setdefault("stream_options", {"include_usage": True})
 
         # ---- 多账号 failover：按顺位试可用账号，账号级错误冷却换号 ----
-        accounts = failover.available_accounts(self._region)
+        # 带上 model：单模型限流（code 6004）的账号不该再被选中，但账号本身
+        # 仍可用于其它模型（见 failover.mark_model_cooldown）。
+        accounts = failover.available_accounts(
+            self._region, model=str(upstream_body.get("model") or "") or None)
         if not accounts:
             hint = "" if self._region == "cn" else "（海外版）"
             raise HTTPException(
@@ -1279,13 +1308,23 @@ class CodeBuddyProvider(BaseProvider):
                         upstream_body, protocol, original, acct.id, stream)
                 except HTTPException as e:
                     last_exc = e
-                    # 账号级错误（401 凭据失效 / 429 额度，如 code 14018）且还有
-                    # 下一个账号：冷却换号；其余错误（502 通道级/业务 4xx）换号
-                    # 无意义，直接透传。
+                    # 账号级错误（401 凭据失效 / 429 额度）且还有下一个账号：
+                    # 冷却换号；其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
+                    #
+                    # 429 要再细分一层：``6004`` 是**单模型**限流（提示原文
+                    # 「您也可以切换其他模型继续使用」），同账号换模型照常能用。
+                    # 对它只冷却 (账号, 模型) 这一格、**不冷却账号**，但照样换号
+                    # ——别的账号可能没被限。以前一律按账号级处理，导致一次 kimi
+                    # 限流把 6 个账号全冷却 5 分钟，连 deepseek 都用不了。
                     if _is_account_error(e) and i < len(accounts) - 1:
-                        failover.mark_cooldown(
-                            acct.id, quota=e.status_code == 429,
-                            reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
+                        if _is_model_scoped_429(e):
+                            failover.mark_model_cooldown(
+                                acct.id, str(upstream_body.get("model") or ""),
+                                reason=f"HTTP 429 单模型限流: {str(e.detail)[:100]}")
+                        else:
+                            failover.mark_cooldown(
+                                acct.id, quota=e.status_code == 429,
+                                reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
                         continue
                     raise
         except HTTPException as e:
