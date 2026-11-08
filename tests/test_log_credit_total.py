@@ -129,11 +129,19 @@ def test_button_only_shows_after_click():
     assert "fmtCreditTotal(c.total)" in shown
 
 
-def test_missing_credit_total_hides_button():
-    """没有可累加的积分（count=0）时整块不出现，避免点了没反应。"""
+def test_zero_credit_still_shows_button():
+    """有行但没积分（count=0）时**仍要显示按钮**，展开说明「无积分记录」。
+
+    2026-11-09 用户实报：加了筛选（yuntoken / claude-*）后按钮消失。原因是
+    这些通道不返回积分消耗、count=0，而旧实现是 `!count → return ''`。用户
+    的观感是「功能没了」——而筛完之后恰恰最想知道「这批请求花没花钱」。
+    """
     js = CHART_LOG.read_text(encoding="utf-8")
     fn = js[js.index("function creditTotalHtml()"):js.index("function toggleCreditTotal()")]
-    assert "!RECENT_CREDIT.count" in fn
+    # 有行但零积分 → 给说明，不是空字符串
+    assert "该范围内无积分记录" in fn
+    # 只有连行都没有才隐藏
+    assert "if (!c.count && !c.rows) return '';" in fn
 
 
 def test_query_change_collapses_stale_total():
@@ -180,3 +188,31 @@ def test_render_shows_button_and_toggles_to_number():
     assert "2" in out["after"], "展开后要有合计"
     assert "估算" in out["after"], "有估算时要标注"
     assert "credits" not in out["after"], "不该出现倍率字样的单位"
+
+
+def test_credit_total_carries_row_count(tmp_path):
+    """credit_total 要带 ``rows``，前端才能区分「有行无积分」与「没数据」。"""
+    import json
+
+    path = tmp_path / "m.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": 1794000000, "provider": "yuntoken",
+                            "model": "claude-opus-5-5", "status": 200}) + "\n")
+    m = MetricsCollector(path)
+    out = m.query_logs(providers=["yuntoken"])
+    ct = out["credit_total"]
+    assert ct["count"] == 0, "这条没有 credit 字段"
+    assert ct["rows"] == 1, "但要告诉前端「有一行」——否则按钮会被误判成无意义而隐藏"
+
+
+def test_credit_total_rows_zero_when_no_match(tmp_path):
+    """筛选后一行都没有时 rows=0，此时按钮隐藏才合理。"""
+    import json
+
+    path = tmp_path / "m.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps({"ts": 1794000000, "provider": "trae",
+                            "model": "x", "status": 200, "credit": 1.0}) + "\n")
+    m = MetricsCollector(path)
+    out = m.query_logs(providers=["yuntoken"])
+    assert out["credit_total"]["rows"] == 0
