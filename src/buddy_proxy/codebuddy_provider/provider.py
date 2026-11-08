@@ -50,6 +50,12 @@ log = logging.getLogger(__name__)
 #: 账号起先歇一拍，节奏像「人在操作」。
 _CHECKIN_THROTTLE_S = 4.0
 
+#: 「额度算耗尽」的阈值。与 ``benefits.EXPIRY_EMPTY_REMAINING`` 同口径：
+#: 界面显示精度是「保留一位小数」，剩 0.04 会渲染成「剩 0」——判空必须对齐
+#: 展示精度，否则用户看到「剩 0」的账号还排在第一位。
+#: 这里刻意不 import benefits 的常量：provider 层不该依赖 UI 聚合层。
+_EXHAUSTED_REMAINING = 0.05
+
 
 def get_state():
     """经包命名空间转发 ``state.get_state``。
@@ -1008,6 +1014,9 @@ class CodeBuddyProvider(BaseProvider):
         短缓存）。
 
         ⚠️ 资源汇总走无前缀路径（/v2 下反而 404），与签到接口的前缀规则相反。
+
+        查询过程中顺带做一件事：**把额度耗尽的账号自动调到顺位末尾**（用户
+        2026-11-08 要求）。判定见 :meth:`_exhausted_accounts`。
         """
         accounts = self._accounts_for_benefits()
         if not accounts:
@@ -1020,6 +1029,8 @@ class CodeBuddyProvider(BaseProvider):
         didx = failover.display_index(self._region)
         items: list[dict[str, Any]] = []
         failed: list[str] = []
+        # 账号 id -> 该账号所有包的剩余总量（只收查询成功的）
+        remaining_by_id: dict[str, float] = {}
         level = None
         for pos, acct in enumerate(accounts, 1):
             i = didx.get(acct.id, pos)
@@ -1031,9 +1042,14 @@ class CodeBuddyProvider(BaseProvider):
                 continue
             if level is None:
                 level = lv
+            remaining_by_id[acct.id] = sum(
+                float(p.get("remaining") or 0) for p in packs)
             prefix = f"{self._quota_tag} #{i} · " if multi else ""
             items.extend({"label": f"{prefix}{p['label']}", **{k: v for k, v in p.items() if k != "label"}}
                          for p in packs)
+        # 额度耗尽 → 自动排到顺位末尾。放在聚合之后、返回之前：此时一轮查询
+        # 已经完整，不会出现「查到一半就动顺位」导致序号错位。
+        self._demote_exhausted_accounts(accounts, remaining_by_id)
         if failed:
             items.insert(0, {
                 "label": f"{self._quota_tag} 额度查询失败",
@@ -1044,6 +1060,48 @@ class CodeBuddyProvider(BaseProvider):
                 "query_failed": True,
             })
         return {"items": items, "sum_items": True, "level": level}
+
+    def _demote_exhausted_accounts(self, accounts: list[Any],
+                                   remaining_by_id: dict[str, float]) -> None:
+        """把额度耗尽的账号挪到顺位末尾（写回 index.json 的 priority）。
+
+        判定：**所有包剩余合计 <= 0**（``_EXHAUSTED_REMAINING`` 同口径的
+        0.05 阈值——界面 ``fmtNum`` 会把它显示成「剩 0」，判空口径必须对齐
+        展示精度，否则用户看到「剩 0」却还排在第一位）。
+
+        - 只调**本次查询成功**的账号：查不到的账号 `remaining_by_id` 里没有
+          条目，绝不因为「没查到」就把它贬到最后（那会把网络抖动变成路由变化）。
+        - 保持其余账号的相对顺序不变，多个耗尽账号按原顺序追加到末尾。
+        - 只在**顺序真的会变**时才写盘，避免每次额度查询都重写 index.json
+          （额度查询是高频动作，无谓写盘会让 index.json 的 mtime 一直跳）。
+        - 写盘失败只记日志、不影响额度返回：调顺位是附带优化，不该让整页失败。
+        """
+        if len(accounts) < 2:
+            return
+        exhausted: list[str] = []
+        alive: list[str] = []
+        for acct in accounts:
+            if acct.id not in remaining_by_id:
+                alive.append(acct.id)   # 查询失败：不动它
+            elif remaining_by_id[acct.id] <= _EXHAUSTED_REMAINING:
+                exhausted.append(acct.id)
+            else:
+                alive.append(acct.id)
+        if not exhausted:
+            return
+        # 已经是「活的在前、死的在后」就不用动
+        current = [a.id for a in accounts]
+        desired = alive + exhausted
+        if current == desired:
+            return
+        try:
+            creds.reorder_accounts(desired, self._region)
+        except Exception as exc:  # noqa: BLE001 - 调序失败不影响额度展示
+            log.warning("codebuddy 额度耗尽自动调序失败: %s", type(exc).__name__)
+            return
+        log.info("codebuddy 额度耗尽，已自动调到顺位末尾: %s",
+                 "、".join(exhausted))
+
 
     def _quota_one_account(self, acct: Any) -> tuple[list[dict[str, Any]], str | None]:
         """单账号额度查询：``(packs, level)``。"""
