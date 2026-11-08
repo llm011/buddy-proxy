@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-10-19T18:07:13Z",
-  "updated_at": "2026-11-08T07:09:26Z",
+  "updated_at": "2026-11-08T11:17:58Z",
   "files": {
     ".gitattributes": {
       "role": "index",
@@ -46,9 +46,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "9c7febdcf90523d1b11c25a2150435936966adad03365d0aaba4b533378cc782",
-      "size": 103297,
-      "normalized_sha256": "9c7febdcf90523d1b11c25a2150435936966adad03365d0aaba4b533378cc782"
+      "sha256": "52fd8fb85d07c0843e0f9709c703e88f87b3582e18b7c16a9e72e37a3ef5450f",
+      "size": 103392,
+      "normalized_sha256": "52fd8fb85d07c0843e0f9709c703e88f87b3582e18b7c16a9e72e37a3ef5450f"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -1252,9 +1252,9 @@
     },
     "src/buddy_proxy/web/static/style.css": {
       "role": "index",
-      "sha256": "c6c8d2c4a8b5121b1fa5aa49345d4b8f7c2ac0b8cbd37d5e8d1bad918b7dc9b2",
-      "size": 64882,
-      "normalized_sha256": "c6c8d2c4a8b5121b1fa5aa49345d4b8f7c2ac0b8cbd37d5e8d1bad918b7dc9b2"
+      "sha256": "819166ce4d792dcad221e1c2c52e5ea488933409d4f6933b1993b5ada9425a72",
+      "size": 65239,
+      "normalized_sha256": "819166ce4d792dcad221e1c2c52e5ea488933409d4f6933b1993b5ada9425a72"
     },
     "src/buddy_proxy/web/static/ui_api.js": {
       "role": "index",
