@@ -31,8 +31,11 @@ _PAGE_PATH = "/pc/agent-explore"
 _PAGE_URL = _ORIGIN + _PAGE_PATH + "?scroll_to=tasks"
 _DETAIL_PATH = "/alice/ug/campaign/v3/detail/"
 _CLAIM_PATH = "/alice/ug/campaign/landing/checkin"
-#: 领取前的「用户点了签到」埋点。主 App 的签到按钮每次都会先发它，缺了它
-#: 领取会恒回 ``710010702 system error``（2026-11-08 抓包对比确认）。
+#: 领取前的「用户点了签到」埋点。主 App 的签到按钮每次都会先发它再发 checkin。
+#:
+#: ⚠ 2026-11-08 抓包里，落地页「没发 report 且恒回 ``710010702``」与主 App
+#: 「发了 report 且成功」是**同时变化**的两个差异（页面上下文也一起变了）。
+#: 所以这里照抄主 App 的两步顺序是求稳，并没有单独隔离验证 report 是否必需。
 _REPORT_PATH = "/alice/ug/campaign/landing/report"
 _LOGIN_PROBE = "/chat/completion"
 _CAMPAIGN_GROUP = "pc_incentive_task_mvp_v3"
@@ -496,10 +499,11 @@ def claim_checkin(client: Any, status_path: str, timeout: float = 20.0) -> dict[
                 return current
             if not current["claimable"]:
                 return None
-            # 领之前先补一条「用户点了签到」的埋点。主 App 界面的按钮每次都会
-            # 先发它、再发 checkin（2026-11-08 抓包确认），而落地页那边的按钮
-            # 缺了这一步就恒回 ``710010702 system error``。埋点失败不阻断领取
-            # ——它只是模拟用户操作痕迹，不该成为新的失败点。
+            # 领之前先补一条「用户点了签到」的埋点，照抄主 App 界面的两步顺序
+            # （先 report 再 checkin，2026-11-08 抓包）。落地页那边没有这一步，
+            # 但它同时也换了页面上下文，两者未单独隔离验证——见 _REPORT_PATH
+            # 的注释。埋点失败不阻断领取：它只是模拟用户操作痕迹，不该成为新的
+            # 失败点。
             _report_checkin(page, timeout)
             status, data, body = page.request(_CLAIM_PATH, {"scene": _CAMPAIGN_GROUP}, timeout)
             if not _is_business_ok(status, data):
