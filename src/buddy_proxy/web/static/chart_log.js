@@ -176,12 +176,29 @@ function fmtCreditTotal(n) {
 
 /** 合计区域：未展开时只是一个按钮；展开后显示数字 + 收起按钮。 */
 function creditTotalHtml() {
-  if (!RECENT_CREDIT || !RECENT_CREDIT.count) return '';
+  if (!RECENT_CREDIT) return '';
+  const c = RECENT_CREDIT;
+  // **有数据行但没有积分**（count=0）也要给出入口，不能整块消失。
+  //
+  // 2026-11-09 用户实报：加了筛选（如 channel=yuntoken / model=claude-*）后
+  // 按钮不见了。原因是这些通道不返回积分消耗，`count` 为 0，而当时的判断是
+  // `!count → return ''`。用户的观感却是「功能没了」——尤其筛完之后正是最想
+  // 知道「这批请求到底花没花钱」的时候。
+  //
+  // 现在的处理：**有行就显示按钮**；count=0 时展开显示「该范围内无积分记录」，
+  // 明确回答「不是没算，是这些请求本来就没报消耗」。只有连行都没有（total=0，
+  // 表格本身空着）才整块隐藏——那时按钮也没有意义。
+  if (!c.count && !c.rows) return '';
   if (!CREDIT_SHOWN) {
     return `<button class="ghost" onclick="toggleCreditTotal()" ` +
       `title="把当前筛选范围内的积分累加起来（全量，不是当前页）">Σ 积分合计</button>`;
   }
-  const c = RECENT_CREDIT;
+  if (!c.count) {
+    return `<span class="credit-total muted" ` +
+      `title="当前筛选范围内没有任何一行带积分消耗（上游未上报）">` +
+      `该范围内无积分记录` +
+      `<button class="ghost" onclick="toggleCreditTotal()">收起</button></span>`;
+  }
   const parts = [`合计 <b style="color:var(--ok)">${esc(fmtCreditTotal(c.total))}</b>`];
   if (c.estimated) {
     parts.push(`<span class="muted">其中估算 ${esc(fmtCreditTotal(c.estimated))}</span>`);
