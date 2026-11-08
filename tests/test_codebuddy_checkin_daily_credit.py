@@ -82,3 +82,33 @@ def test_status_all_zero_daily_credit_stays_absent(monkeypatch):
                             "active": True, "today_checked_in": True}})
     st = CodeBuddyProvider().checkin_status()
     assert "daily_credit" not in st, "上游没给金额就别造键，前端按 >0 判定"
+
+
+def test_claim_when_already_checked_in_still_reports_credits(monkeypatch):
+    """今天已签过再点「立即打卡」：本次没有真正 claim，但金额不能留空。
+
+    2026-11-08 用户实报：codebuddy 明明签了，日历里却是空的。根因是这条路径
+    走 ``not claimable`` 分支，``extra_credits`` 直接给 None，而 benefits 层的
+    取值链（extra_credits → credits → daily_credit）后两档在 claim 的返回里
+    根本不存在——回退是死代码，于是一整天都记成「已签到但金额未知」。
+
+    现在从未 claim 的账号的签到状态快照里取 ``daily_credit`` 兜底。
+    """
+    a = cb_creds.save_account_cred(_cred("u1"))
+    b = cb_creds.save_account_cred(_cred("u2"))
+    monkeypatch.setattr(failover, "_cooldowns", {})
+    # 两个号今天都已签：状态接口如实报告，claim 接口不该被调用
+    calls = []
+
+    def fake_post(account_id, path, *args, **kwargs):
+        calls.append(path)
+        assert path == "/v2/billing/meter/checkin-activity-status", \
+            "已签到的号不该再打 daily-checkin"
+        return _payload(True)
+
+    monkeypatch.setattr(cb_creds, "api_post_as", fake_post)
+    res = CodeBuddyProvider().checkin_claim()
+
+    assert res["checked_in"] is True
+    # 两个号各 100，兜底之后不该是 None
+    assert res["extra_credits"] == 200
