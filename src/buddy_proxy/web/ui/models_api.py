@@ -406,13 +406,30 @@ async def ui_models(request: Request):
                     "windows": windows,
                     "open": settings_mod.model_schedule_open(windows),
                 }
-    # 组内排序：**已停用（disabled_models）的排到最后**，其余保持目录原序。
-    # 用稳定排序（key 只取 0/1），因此同组内可用模型的相对顺序不变——那些顺序
-    # 是上游目录／MATRIX 表本身的意图（新代在前等），不该被这里打乱。
-    # 只按模型级 disabled 判定；整通道停用（group["disabled"]）不搬动组内位置，
-    # 因为那时整组都置灰，搬动只会让用户找不到刚停用的那个。
+    # 组内排序（2026-11-09 用户要求改成按模型 id）：
+    #   1. 已停用（disabled_models）的排到最后 —— 这条是原有的，保留：
+    #      停用的模型不该夹在可用模型中间打断视线；
+    #   2. 同状态内按**模型 id 字典序**排。
+    #
+    # 之前是「保持上游目录原序」，结果每个通道的顺序都跟着各自上游的目录走：
+    # codebuddy 是 kimi-k3、kimi-k3.1-pro…，trae 是 glm-5.3、glm-5.3-flash…，
+    # codex 是 gpt-6.1-sol、gpt-6-astra…——同一个模型页里十来个通道、每段顺序
+    # 都不一样，扫起来很乱（用户 2026-11-09 反馈「感觉有点乱」）。
+    #
+    # 排序键用**裸名**（去掉 ``<provider>/`` 前缀）：qoder 的条目 id 形如
+    # ``qoder/glm-5.3``，直接按全串排序会让同组里所有条目都以 provider 名开头，
+    # 等于只按后半段排、且前缀相同的相对顺序仍取决于原序，反而更乱。
+    #
+    # 按 **lower()** 排、再以原串做次级键：上游目录里同一族模型的大小写并不统一
+    # （traepat 同时有 ``Doubao-Seed-2.1-Pro`` 和 ``doubao-seed-evolving``）。
+    # 纯 ASCII 字典序会把所有大写开头的排到最前面（``D`` < ``d``），于是同一个
+    # doubao 族被拆成两段——比原来的乱序还难扫。
     for group in groups:
-        group["models"].sort(key=lambda m: 1 if m.get("disabled") else 0)
+        group["models"].sort(key=lambda m: (
+            1 if m.get("disabled") else 0,
+            _bare_model_id(str(m.get("id") or ""), str(group.get("id") or "")).lower(),
+            _bare_model_id(str(m.get("id") or ""), str(group.get("id") or "")),
+        ))
 
     return {"groups": groups, "default_model": default_model,
             "hidden_models": hidden_items}
