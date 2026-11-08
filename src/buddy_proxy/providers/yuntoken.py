@@ -230,6 +230,13 @@ class YuntokenProvider(BaseProvider):
         ``original`` 是协议转换前的请求体：``anthropic`` 必须用它——routes 层
         传进来的 ``body`` 已转成 chat 形态，拿它去打 ``/v1/messages`` 上游会
         直接 400。``openai`` 则相反，``body`` 才是要发的那份。
+
+        但 ``original`` 里**没被剥前缀**：``yuntoken/<模型>`` 的剥前缀只改了
+        ``body``（见 ``forward_chat`` 的「显式 provider 前缀」分支）。直接拿
+        ``original`` 发包，上游会收到 ``yuntoken/deepseek-3.2`` 整串，回
+        「分组 default 下模型 … 无可用渠道」。所以 ``model`` 一律以 ``body``
+        为准回填——与 deepseek 同一处同一种写法（``body`` 的 model 才是路由
+        解析后的真名）。
         """
         self.ensure_auth()
         path = _PROTOCOL_PATHS.get(protocol, _PROTOCOL_PATHS["openai"])
@@ -254,6 +261,11 @@ class YuntokenProvider(BaseProvider):
         else:
             source = original if isinstance(original, dict) and original else body
             upstream_body = {k: v for k, v in source.items() if not k.startswith("_")}
+        # model 一律对齐到 body（已剥 yuntoken/ 前缀）。original 里是客户端原话，
+        # 带前缀时整串漏给上游会报「无可用渠道」——见 forward 的说明。
+        upstream_model = str(body.get("model") or "").strip()
+        if upstream_model:
+            upstream_body["model"] = upstream_model
         upstream_body["stream"] = stream
 
         url = f"{self._base}{path}"
