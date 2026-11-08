@@ -73,6 +73,29 @@ def _num(value: Any) -> float | None:
         return None
 
 
+def _usage_payload(chars: int, credit: float | None, *,
+                   anthropic: bool = False) -> dict[str, Any]:
+    """构造 usage 对象（两种协议共用）。
+
+    kiro 不返回 token 数（EventStream 里只有 contextUsagePercentage 和 credit），
+    所以 token 是按字符数粗估的（≈4 字符/token）——**标注为估算**，别让用户
+    以为那是上游给的精确值。``credit`` 则是 ``meteringEvent`` 里的真实计费。
+
+    这个字段组合是给本仓库的 metrics 用的：``normalize_usage`` 会按
+    ``prompt_tokens`` / ``completion_tokens`` / ``credit`` 取值。
+    """
+    tokens = max(1, chars // 4)
+    base: dict[str, Any] = {"output_tokens": tokens, "completion_tokens": tokens,
+                            "total_tokens": tokens}
+    if anthropic:
+        base["input_tokens"] = 0
+    else:
+        base["prompt_tokens"] = 0
+    if credit is not None:
+        base["credit"] = credit
+    return base
+
+
 def _sse_json(payload: dict[str, Any]) -> str:
     """一帧 OpenAI SSE。"""
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
@@ -219,6 +242,18 @@ class KiroProvider(BaseProvider):
         if union:
             self._models_cache = list(union.values())
             self._models_error = ""
+            # 登记倍率：拿不到 meteringEvent 实扣时（非流式以外/异常路径），
+            # credit_estimate 用这个按 token 粗估，日志才不会整列为空。
+            try:
+                from ..core.credit_estimate import register_kiro_rates
+
+                register_kiro_rates({
+                    str(m.get("id")): float(m["credits"])
+                    for m in union.values()
+                    if isinstance(m.get("credits"), (int, float))
+                })
+            except Exception as exc:  # noqa: BLE001 - 估算登记失败不影响目录
+                log.debug("kiro 倍率登记失败: %s", type(exc).__name__)
         elif errors:
             self._models_error = "; ".join(errors)
         return list(self._models_cache)
@@ -490,26 +525,26 @@ class KiroProvider(BaseProvider):
             elif event["type"] == "credit":
                 credit = event["credit"]
         text = "".join(text_parts)
+        chars = len(text)
+        # ⚠ ``credit`` 必须放进 **usage 里面**，不能放响应顶层。
+        # metrics 的非流式路径读的是 ``payload["usage"]`` 再走 normalize_usage，
+        # 顶层字段它根本看不到——踩过一次：响应体里明明有 credit，
+        # 日志却记成 0.0/估算。（流式那条路走的是 usage chunk，同样的口径。）
         if protocol == "anthropic":
-            usage = {"input_tokens": 0, "output_tokens": max(1, len(text) // 4)}
             return JSONResponse(content={
                 "id": message_id, "type": "message", "role": "assistant",
                 "model": model,
                 "content": [{"type": "text", "text": text}] if text else [],
-                "stop_reason": "end_turn", "stop_sequence": None, "usage": usage,
+                "stop_reason": "end_turn", "stop_sequence": None,
+                "usage": _usage_payload(chars, credit, anthropic=True),
             })
-        chat: dict[str, Any] = {
+        return JSONResponse(content={
             "id": request_id, "object": "chat.completion", "created": created,
             "model": model,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                          "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 0, "completion_tokens": max(1, len(text) // 4),
-                      "total_tokens": max(1, len(text) // 4)},
-        }
-        if credit is not None:
-            # 上游 meteringEvent 给的真实计费：放进扩展字段（metrics 会认）
-            chat["credit"] = credit
-        return JSONResponse(content=chat)
+            "usage": _usage_payload(chars, credit),
+        })
 
     # -- 异步桥接：同步解析器 + 异步字节源 ---------------------------------
 
@@ -547,9 +582,15 @@ class KiroProvider(BaseProvider):
     async def _stream_openai(self, source: AsyncIterator[bytes], model: str,
                              request_id: str, created: int) -> AsyncIterator[str]:
         first = True
+        chars = 0
+        credit: float | None = None
         async for event in self._events(source):
+            if event["type"] == "credit":
+                credit = event["credit"]
+                continue
             if event["type"] != "text":
                 continue
+            chars += len(event["text"])
             delta: dict[str, Any] = {"content": event["text"]}
             if first:
                 delta["role"] = "assistant"
@@ -564,6 +605,19 @@ class KiroProvider(BaseProvider):
             "created": created, "model": model,
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         })
+        # usage 收尾 chunk：**日志从这里取本次消耗**。
+        #
+        # ``SSEUsageExtractor``（metrics_protocol）只认带 ``usage`` 字段的行，
+        # 而 kiro 的真实计费在 ``meteringEvent`` 里、跟正文是分开的事件。不补
+        # 这一帧的话日志的积分列永远是空的——上游明明给了精确到 1e-6 的数字。
+        # ``choices`` 必须为空数组（OpenAI 规范里 usage chunk 就是这样）。
+        if credit is not None or chars:
+            yield _sse_json({
+                "id": request_id, "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [],
+                "usage": _usage_payload(chars, credit),
+            })
         yield "data: [DONE]\n\n"
 
     async def _stream_anthropic(self, source: AsyncIterator[bytes], model: str,
@@ -579,7 +633,11 @@ class KiroProvider(BaseProvider):
         yield ev("content_block_start", {"type": "content_block_start", "index": 0,
                                          "content_block": {"type": "text", "text": ""}})
         chars = 0
+        credit: float | None = None
         async for event in self._events(source):
+            if event["type"] == "credit":
+                credit = event["credit"]
+                continue
             if event["type"] != "text":
                 continue
             chars += len(event["text"])
@@ -587,9 +645,12 @@ class KiroProvider(BaseProvider):
                 "type": "content_block_delta", "index": 0,
                 "delta": {"type": "text_delta", "text": event["text"]}})
         yield ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        # usage 里带 ``credit``：Anthropic 官方没有这个字段，但本仓库
+        # ``normalize_usage`` 会从 usage 里取它（见 metrics_protocol._credit_field），
+        # 日志因此能显示 kiro 的真实计费。客户端不认识这个键会忽略，无害。
         yield ev("message_delta", {"type": "message_delta", "delta": {
             "stop_reason": "end_turn", "stop_sequence": None},
-            "usage": {"output_tokens": max(1, chars // 4)}})
+            "usage": _usage_payload(chars, credit, anthropic=True)})
         yield ev("message_stop", {"type": "message_stop"})
 
     async def _get_client(self) -> httpx.AsyncClient:
