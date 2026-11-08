@@ -31,6 +31,12 @@ _PAGE_PATH = "/pc/agent-explore"
 _PAGE_URL = _ORIGIN + _PAGE_PATH + "?scroll_to=tasks"
 _DETAIL_PATH = "/alice/ug/campaign/v3/detail/"
 _CLAIM_PATH = "/alice/ug/campaign/landing/checkin"
+#: 领取前的「用户点了签到」埋点。主 App 的签到按钮每次都会先发它再发 checkin。
+#:
+#: ⚠ 2026-11-08 抓包里，落地页「没发 report 且恒回 ``710010702``」与主 App
+#: 「发了 report 且成功」是**同时变化**的两个差异（页面上下文也一起变了）。
+#: 所以这里照抄主 App 的两步顺序是求稳，并没有单独隔离验证 report 是否必需。
+_REPORT_PATH = "/alice/ug/campaign/landing/report"
 _LOGIN_PROBE = "/chat/completion"
 _CAMPAIGN_GROUP = "pc_incentive_task_mvp_v3"
 _TASK = "daily_signin"
@@ -150,7 +156,14 @@ class CheckinPage:
     def _open(self) -> None:
         targets = self._client._fetch_targets()
         target = None
+        # 优先级：主 App 聊天界面的同源子 frame > 活动落地页 > 新建落地页。
+        #
+        # 落地页排最后是有实测原因的：它上面的「立即签到」按钮本身是坏的
+        # （真人点也回 ``710010702``），在它里面跑求值必然失败。同源 frame
+        # 才是主 App 真正用的签到上下文（详见 :func:`_is_same_origin_target`）。
         if self._reuse_existing:
+            target = next((t for t in targets if _is_same_origin_target(t)), None)
+        if target is None and self._reuse_existing:
             target = next((t for t in targets if _is_checkin_target(t)), None)
         if target is None:
             result = self._shared_cmd(
@@ -170,11 +183,17 @@ class CheckinPage:
         if target is None:
             raise RuntimeError("new checkin page did not appear")
         self._connect(target)
+        # 同源 frame 是常驻的 App 页面，不用等它「加载完成」——它可能已经跑很久了，
+        # readyState 早就 complete，但也可能正忙。只等 href 能读出来即可。
+        same_origin = _is_same_origin_target(target)
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             href = self.evaluate("location.href")
             ready = self.evaluate("document.readyState")
-            if isinstance(href, str) and _is_checkin_url(href) and ready == "complete":
+            ok_href = isinstance(href, str) and (
+                _is_checkin_url(href) or (same_origin and href.startswith(_ORIGIN)))
+            ok_ready = ready == "complete" or same_origin
+            if ok_href and ok_ready:
                 query = self.evaluate(_DETAIL_QUERY_JS)
                 if isinstance(query, str) and query.startswith("?"):
                     self.query = query
@@ -253,6 +272,36 @@ def _is_checkin_url(url: Any) -> bool:
 def _is_checkin_target(target: Any) -> bool:
     return (isinstance(target, dict) and target.get("type") in ("page", "webview")
             and bool(target.get("webSocketDebuggerUrl")) and _is_checkin_url(target.get("url")))
+
+
+def _is_same_origin_target(target: Any) -> bool:
+    """主 App 聊天界面里内嵌的 ``https://www.doubao.com`` 子 frame。
+
+    为什么优先用它（2026-11-08 实测）：
+
+    - 活动落地页 ``/pc/agent-explore`` 上的「立即签到」按钮**本身就是坏的**，
+      真人点也一样回 ``710010702 system error``，页面自己弹「签到失败，请稍后重试」。
+      所以在那个页面里跑求值，注定拿不到成功结果。
+    - 真正能签到的是**主 App 聊天界面**里的签到入口。它虽然宿主是
+      ``chrome://doubaowork-chat``，但签到请求发自它内嵌的 ``doubao.com`` 子 frame
+      （``/drive-iframe/...``），那个上下文与接口同源，cookie 直接带上。
+    - 同源上下文里 ``fetch('/alice/...')`` 是相对路径，不用拼绝对 URL，也不会
+      因为宿主是 chrome:// 而落到 SPA 首页（返回 200 + HTML）。
+
+    只认 ``type=iframe`` 且 host 是 ``www.doubao.com`` 的 target；不看 path，
+    因为 App 升级可能换 iframe 路径，而「同源」这个性质才是我们要的。
+    """
+    if not isinstance(target, dict):
+        return False
+    if target.get("type") not in ("iframe", "page", "webview"):
+        return False
+    if not target.get("webSocketDebuggerUrl"):
+        return False
+    url = target.get("url")
+    if not isinstance(url, str):
+        return False
+    parsed = urlsplit(url)
+    return parsed.scheme == "https" and parsed.netloc == "www.doubao.com"
 
 
 def _as_bool(value: Any) -> bool | None:
@@ -413,6 +462,27 @@ def fetch_checkin_status(client: Any, timeout: float = 20.0) -> tuple[dict[str, 
     return parsed, _DETAIL_PATH
 
 
+def _report_checkin(page: "CheckinPage", timeout: float) -> None:
+    """补一条「用户点了签到」的埋点，失败只记日志。
+
+    主 App 聊天界面的签到按钮会先 ``POST /alice/ug/campaign/landing/report``
+    再发 checkin（2026-11-08 抓包），而活动落地页上的按钮没有这一步、恒回
+    ``710010702 system error``。所以这里照抄主 App 的两步顺序。
+
+    埋点本身不产生任何用户可见状态，失败不该让领取失败——它只是把「这次领取
+    是用户主动点的」这件事告诉上游。
+    """
+    try:
+        status, _data, body = page.request(
+            _REPORT_PATH,
+            {"event_type": "user_operate", "biz_event_name": "check_in"},
+            timeout, daily_task_only=False)
+        if status != 200:
+            log.info("doubao checkin: report 埋点未成功 http=%s body=%s", status, body[:200])
+    except Exception as exc:  # noqa: BLE001 - 埋点失败不影响领取
+        log.info("doubao checkin: report 埋点失败（忽略）: %s", type(exc).__name__)
+
+
 def claim_checkin(client: Any, status_path: str, timeout: float = 20.0) -> dict[str, Any] | None:
     """只领 ``daily_signin``，并以领取后的 detail 已签状态作为成功凭据。"""
     if status_path != _DETAIL_PATH:
@@ -429,6 +499,12 @@ def claim_checkin(client: Any, status_path: str, timeout: float = 20.0) -> dict[
                 return current
             if not current["claimable"]:
                 return None
+            # 领之前先补一条「用户点了签到」的埋点，照抄主 App 界面的两步顺序
+            # （先 report 再 checkin，2026-11-08 抓包）。落地页那边没有这一步，
+            # 但它同时也换了页面上下文，两者未单独隔离验证——见 _REPORT_PATH
+            # 的注释。埋点失败不阻断领取：它只是模拟用户操作痕迹，不该成为新的
+            # 失败点。
+            _report_checkin(page, timeout)
             status, data, body = page.request(_CLAIM_PATH, {"scene": _CAMPAIGN_GROUP}, timeout)
             if not _is_business_ok(status, data):
                 log.info("doubao checkin: claim failed: http=%s body=%s", status, body[:300])
