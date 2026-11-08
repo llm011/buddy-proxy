@@ -158,6 +158,31 @@ def test_anthropic_uses_original_body(_isolated_state):
     assert captured["body"]["model"] == "claude-opus-4.6"
 
 
+def test_anthropic_strips_provider_prefix_from_original(_isolated_state):
+    """``original`` 里的 model 带 ``yuntoken/`` 前缀时必须剥掉再发。
+
+    路由层剥前缀只改 ``body``：``original`` 仍是客户端的原话。直接把
+    ``original`` 打包发出去，上游会收到 ``yuntoken/deepseek-3.2`` 整串，回
+    「分组 default 下模型 yuntoken/deepseek-3.2 无可用渠道」——2026-11-08
+    实测踩过。所以 model 一律以 body 为准回填。
+    """
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"type": "message", "content": []})
+
+    p = _provider(handler)
+    original = {"model": "yuntoken/deepseek-3.2", "max_tokens": 16,
+                "messages": [{"role": "user", "content": "hi"}]}
+    chat_body = {"model": "deepseek-3.2", "stream": False,
+                 "messages": [{"role": "user", "content": "hi"}]}
+    asyncio.run(p.forward(chat_body, "anthropic", original))
+    assert captured["body"]["model"] == "deepseek-3.2"
+    # 其余字段仍取 original 的形状（max_tokens 是 anthropic 专有的）
+    assert captured["body"]["max_tokens"] == 16
+
+
 def test_upstream_error_passthrough(_isolated_state):
     """上游 401 的错误体原样回给客户端（网关用的是 {"detail": ...} 形状）。"""
 
