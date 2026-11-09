@@ -605,3 +605,110 @@ def test_messages_to_conversation_returns_history():
     out = _messages_to_conversation({"model": "m", "messages": [
         {"role": "user", "content": "a"}, {"role": "user", "content": "b"}]})
     assert len(out) == 3, "必须返回 (content, model_id, history)"
+
+
+# ---------------------------------------------------------------------------
+# 工具调用（agent 类客户端必需）
+# ---------------------------------------------------------------------------
+#
+# 用户实测：dsh TUI 接 kiro 后「跑一次就停」。日志给出根因——
+# `kiro 暂不支持工具调用（请求带 28 个 tools），本次按纯文本转发`。
+# 模型看不到工具就只回文本，agent 拿不到 tool_call，一轮就结束。
+#
+# 上游实测确认的格式（三处都踩过）：
+#   1. tools 放每一条 userInputMessage.userInputMessageContext，不是顶层 toolConfig
+#   2. toolUseEvent 是多帧增量：name/id 首帧、input 碎片中间、stop 末帧
+#   3. tool 消息的 result 不能被后续 user 合并掉，否则 TOOL_USE_RESULT_MISMATCH
+
+def test_tools_sent_to_upstream():
+    """tools 必须真的下发——之前是静默丢弃，导致 agent 跑一次就停。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "m", "messages": [{"role": "user", "content": "查天气"}],
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather", "description": "查天气",
+                "parameters": {"type": "object", "properties": {"city": {"type": "string"}}},
+            }}]}
+    out = _chat_to_kiro(body, {})
+    ctx = out["conversationState"]["currentMessage"]["userInputMessage"]["userInputMessageContext"]
+    specs = ctx["tools"]
+    assert len(specs) == 1
+    assert specs[0]["toolSpecification"]["name"] == "get_weather"
+    # inputSchema 外面必须套 json（Bedrock union 标签）
+    assert "json" in specs[0]["toolSpecification"]["inputSchema"]
+
+
+def test_max_tokens_does_not_clobber_tools():
+    """回归：给 context 整体赋值 maxTokens 会抹掉 tools（踩过）。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "m", "max_tokens": 100,
+            "messages": [{"role": "user", "content": "x"}],
+            "tools": [{"type": "function", "function": {"name": "f"}}]}
+    ctx = _chat_to_kiro(body, {})["conversationState"]["currentMessage"][
+        "userInputMessage"]["userInputMessageContext"]
+    assert "tools" in ctx and ctx.get("maxTokens") == 100
+
+
+def test_tool_role_becomes_tool_results_and_is_not_merged():
+    """tool 消息要独立成一个 user 轮次，不能被后续 user 合并掉。
+
+    合并了的话它会被 pop 成 currentMessage，tool_result 丢失 → 上游报
+    TOOL_USE_RESULT_MISMATCH。
+    """
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "m", "messages": [
+        {"role": "user", "content": "查天气"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "t1", "type": "function",
+             "function": {"name": "get_weather", "arguments": "{\"city\":\"北京\"}"}}]},
+        {"role": "tool", "tool_call_id": "t1", "content": "晴 25度"},
+        {"role": "user", "content": "所以呢？"},
+    ]}
+    hist = _chat_to_kiro(body, {})["conversationState"]["history"]
+    kinds = [list(h)[0] for h in hist]
+    assert kinds == ["userInputMessage", "assistantResponseMessage", "userInputMessage"]
+    # 第三条是 tool_result 容器
+    results = hist[2]["userInputMessage"]["userInputMessageContext"]["toolResults"]
+    assert results[0]["toolUseId"] == "t1"
+    assert results[0]["status"] == "success"
+
+
+def test_history_model_id_uses_upstream_name():
+    """history 里的 modelId 也要剥掉 kiro/ 前缀（构造早于解析，踩过）。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "kiro/claude-opus-5-5", "messages": [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]}
+    hist = _chat_to_kiro(body, {"claude-opus-5-5": "claude-opus-5.5"})[
+        "conversationState"]["history"]
+    assert hist[0]["userInputMessage"]["modelId"] == "claude-opus-5.5"
+
+
+def test_tool_use_event_parsing():
+    """toolUseEvent 是多帧增量，解析器要如实吐出碎片。"""
+    from buddy_proxy.kiro.stream import _tool_use_event
+
+    assert _tool_use_event({"name": "f", "toolUseId": "t1"}) == {
+        "type": "tool", "tool_id": "t1", "name": "f"}
+    assert _tool_use_event({"input": "{\"a\"", "toolUseId": "t1"}) == {
+        "type": "tool", "tool_id": "t1", "input": "{\"a\""}
+    assert _tool_use_event({"stop": True, "toolUseId": "t1"}) == {
+        "type": "tool", "tool_id": "t1", "stop": True}
+    # 缺 toolUseId 的帧丢弃
+    assert _tool_use_event({"name": "f"}) is None
+
+
+def test_openai_stream_emits_tool_calls():
+    """流式必须产出 tool_calls + finish_reason=tool_calls。"""
+    import asyncio
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "src" / "buddy_proxy" / "kiro"
+           / "provider.py").read_text(encoding="utf-8")
+    assert '"tool_calls"' in src and 'finish = "tool_calls"' in src
+    assert 'stop_reason": "tool_use"' in src or '"tool_use"' in src
