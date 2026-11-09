@@ -236,13 +236,24 @@ def auth_headers(token: str) -> dict[str, str]:
     }
 
 
-def _messages_to_conversation(body: dict[str, Any]) -> tuple[str, str]:
+def _messages_to_conversation(body: dict[str, Any]
+                              ) -> tuple[str, str, list[dict[str, Any]]]:
     """把 chat 的 messages 压成 Kiro 的 conversationState。
 
     Kiro 的形状是「历史 + 当前消息」，没有独立的 system 字段——system 内容
     拼到**当前用户消息**前面（这是社区实现的通行做法，实测可用）。
 
-    返回 ``(content, model_id)``。
+    返回 ``(content, model_id, history)``。
+
+    ⚠ **``history`` 必须真的发给上游**，否则模型完全失忆。踩过的坑：
+    这个函数一开始只返回 ``(content, model_id)``，把算好的 ``turns`` 直接丢掉，
+    于是每次请求都只有最后一条 user 消息——表现是「在 dsh 里聊了两句，第三句
+    就忘记前面说过什么」，而换别的通道（如 deepseek）正常，极易误判成上游问题。
+
+    ``history`` 的元素是 Kiro 的形状（实测可用，问它「我叫什么」能正确答出）::
+
+        {"userInputMessage": {"content": ..., "modelId": ..., "origin": "AI_EDITOR"}}
+        {"assistantResponseMessage": {"content": ...}}
 
     只取最后一条 user 作为 currentMessage，其余按序进 history。连续同角色
     的消息合并：Kiro 对角色交替没有严格校验，但合并能少掉「assistant 空串」
@@ -282,7 +293,19 @@ def _messages_to_conversation(body: dict[str, Any]) -> tuple[str, str]:
     if system_parts:
         prefix = "\n\n".join(system_parts)
         content = f"{prefix}\n\n{content}" if content else prefix
-    return content, model_id
+    # 转成 Kiro 的 history 形状。空内容的历史条目直接跳过——上游对空串不友好，
+    # 而且没有信息量。
+    history: list[dict[str, Any]] = []
+    for turn in turns:
+        text = str(turn.get("content") or "")
+        if not text.strip():
+            continue
+        if turn.get("role") == "assistant":
+            history.append({"assistantResponseMessage": {"content": text}})
+        else:
+            history.append({"userInputMessage": {
+                "content": text, "modelId": model_id, "origin": "AI_EDITOR"}})
+    return content, model_id, history
 
 
 def _resolve_upstream_model(model: str, id_map: dict[str, str]) -> str:
@@ -307,7 +330,7 @@ def _chat_to_kiro(body: dict[str, Any],
     ⚠ **不要带 ``editorState``**：实测带它回 ``400 REQUEST_BODY_INVALID``，
     去掉就 200。``profileArn`` 有就带、没有也能通（两种都验过）。
     """
-    content, model_id = _messages_to_conversation(body)
+    content, model_id, history = _messages_to_conversation(body)
     model_id = _resolve_upstream_model(model_id, id_map or {})
     user_message: dict[str, Any] = {
         "content": content,
@@ -318,6 +341,8 @@ def _chat_to_kiro(body: dict[str, Any],
         "conversationState": {
             "chatTriggerType": "MANUAL",
             "conversationId": str(uuid.uuid4()),
+            # 历史一定要带上（见 _messages_to_conversation 的 ⚠ 说明）
+            **({"history": history} if history else {}),
             "currentMessage": {"userInputMessage": user_message},
         },
     }

@@ -144,7 +144,7 @@ def test_system_prompt_is_prepended_to_user_message():
         {"role": "system", "content": "You are terse."},
         {"role": "user", "content": "hi"},
     ]}
-    content, _ = _messages_to_conversation(body)
+    content, _, _hist = _messages_to_conversation(body)
     assert "You are terse." in content
     assert content.index("You are terse.") < content.index("hi")
 
@@ -155,7 +155,7 @@ def test_developer_role_treated_as_system():
         {"role": "developer", "content": "be brief"},
         {"role": "user", "content": "hi"},
     ]}
-    content, _ = _messages_to_conversation(body)
+    content, _, _hist = _messages_to_conversation(body)
     assert "be brief" in content
 
 
@@ -167,7 +167,7 @@ def test_block_array_content_flattened_to_text():
             {"type": "text", "text": "part2"},
         ]},
     ]}
-    content, _ = _messages_to_conversation(body)
+    content, _, _hist = _messages_to_conversation(body)
     assert content == "part1 part2", "只拼 text 块，图片本通道暂不支持"
 
 
@@ -177,7 +177,7 @@ def test_assistant_history_preserved():
         {"role": "assistant", "content": "a1"},
         {"role": "user", "content": "q2"},
     ]}
-    content, _ = _messages_to_conversation(body)
+    content, _, _hist = _messages_to_conversation(body)
     # currentMessage 是最后一条 user
     assert content == "q2"
 
@@ -524,3 +524,84 @@ def test_system_overhead_constant_is_documented():
 
     assert 3_500 <= _KIRO_SYSTEM_OVERHEAD_TOKENS <= 5_000, \
         "标定值在 4214~4243 之间；超范围说明窗口假设变了，要重新标定"
+
+
+# ---------------------------------------------------------------------------
+# 多轮对话：history 必须真的发给上游
+# ---------------------------------------------------------------------------
+#
+# 踩过的坑（很严重）：``_messages_to_conversation`` 一开始只返回
+# ``(content, model_id)``，把算好的 turns 直接丢掉，于是**每次请求都只有最后
+# 一条 user 消息**。表现是「在 dsh TUI 里聊了两句，第三句就忘了前面说过什么」，
+# 换别的通道却正常——极易误判成上游或客户端问题。
+#
+# 上游的 history 形状（实测可用，问「我叫什么」能正确答出「小明」）：
+#   {"userInputMessage": {"content":..., "modelId":..., "origin": "AI_EDITOR"}}
+#   {"assistantResponseMessage": {"content": ...}}
+
+def test_history_is_included_in_payload():
+    """核心回归：多轮消息必须出现在 payload 的 history 里。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "claude-haiku-4-5", "messages": [
+        {"role": "user", "content": "我叫小明"},
+        {"role": "assistant", "content": "好的，记住了"},
+        {"role": "user", "content": "我叫什么？"},
+    ]}
+    out = _chat_to_kiro(body, {"claude-haiku-4-5": "claude-haiku-4.5"})
+    state = out["conversationState"]
+    assert "history" in state, "缺 history = 模型失忆"
+    assert len(state["history"]) == 2
+    assert state["history"][0]["userInputMessage"]["content"] == "我叫小明"
+    assert state["history"][1]["assistantResponseMessage"]["content"] == "好的，记住了"
+    # currentMessage 只是最后那条
+    assert state["currentMessage"]["userInputMessage"]["content"] == "我叫什么？"
+
+
+def test_history_entries_carry_model_and_origin():
+    """history 里的 user 条目也要带 modelId/origin，否则上游可能拒。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "m", "messages": [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]}
+    hist = _chat_to_kiro(body, {}).get("conversationState", {}).get("history") or []
+    assert hist and hist[0]["userInputMessage"]["modelId"] == "m"
+    assert hist[0]["userInputMessage"]["origin"] == "AI_EDITOR"
+
+
+def test_no_history_key_when_single_turn():
+    """单轮不带空 history：上游用不着，少发字段更干净。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    out = _chat_to_kiro({"model": "m", "messages": [
+        {"role": "user", "content": "只问一句"}]}, {})
+    assert "history" not in out["conversationState"]
+
+
+def test_empty_history_entries_skipped():
+    """空内容的轮次不发——没信息量，上游对空串也不友好。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "m", "messages": [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "q2"},
+    ]}
+    hist = _chat_to_kiro(body, {}).get("conversationState", {}).get("history") or []
+    assert all(
+        (h.get("assistantResponseMessage") or {}).get("content")
+        or (h.get("userInputMessage") or {}).get("content")
+        for h in hist
+    ), f"出现了空条目: {hist}"
+
+
+def test_messages_to_conversation_returns_history():
+    """函数签名必须是三元组（改回两元组就会重演失忆 bug）。"""
+    from buddy_proxy.kiro.provider import _messages_to_conversation
+
+    out = _messages_to_conversation({"model": "m", "messages": [
+        {"role": "user", "content": "a"}, {"role": "user", "content": "b"}]})
+    assert len(out) == 3, "必须返回 (content, model_id, history)"
