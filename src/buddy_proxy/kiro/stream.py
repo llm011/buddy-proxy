@@ -153,6 +153,10 @@ def iter_events(stream: Iterable[bytes]) -> Iterator[dict[str, Any]]:
             pct = data.get("contextUsagePercentage")
             if isinstance(pct, (int, float)) and not isinstance(pct, bool):
                 yield {"type": "context", "percent": float(pct)}
+        elif event_type == "toolUseEvent":
+            parsed = _tool_use_event(data)
+            if parsed is not None:
+                yield parsed
         elif event_type in ("error", "exception"):
             message = data.get("message") or data.get("reason") or "upstream stream error"
             raise StreamError(str(message)[:300])
@@ -261,6 +265,39 @@ def take_frame(buf: bytes, *, final: bool = False
     return total, headers, payload
 
 
+def _tool_use_event(data: dict[str, Any]) -> dict[str, Any] | None:
+    """``toolUseEvent`` → 中间事件。
+
+    上游把一次工具调用**拆成多帧**增量下发（实测）::
+
+        {"name":"get_weather","toolUseId":"tooluse_XXX"}
+        {"input":"","name":"get_weather","toolUseId":"tooluse_XXX"}
+        {"input":"{\\"city\\"",...}
+        {"input":": \\"北京\\"}",...}
+        {"name":"get_weather","stop":true,"toolUseId":"tooluse_XXX"}
+
+    首帧只给 name/id，中间帧按 ``input`` 拼参数（**是 JSON 字符串的碎片**，
+    不能逐帧 json.loads），末帧 ``stop: true`` 表示结束。
+
+    这里不拼装，只把碎片如实抛出——
+    拼装状态（累计 input 字符串）由调用方持有，因为它还要跨事件跟踪多个
+    并发工具调用。
+    """
+    tool_id = data.get("toolUseId")
+    if not isinstance(tool_id, str) or not tool_id:
+        return None
+    name = data.get("name")
+    event: dict[str, Any] = {"type": "tool", "tool_id": tool_id}
+    if isinstance(name, str) and name:
+        event["name"] = name
+    chunk = data.get("input")
+    if isinstance(chunk, str) and chunk:
+        event["input"] = chunk
+    if data.get("stop") is True:
+        event["stop"] = True
+    return event
+
+
 def frame_to_event(headers: dict[str, str], payload: bytes) -> dict[str, Any] | None:
     """单帧 → 中间事件形状；与本模块 :func:`iter_events` 同语义。
 
@@ -283,6 +320,8 @@ def frame_to_event(headers: dict[str, str], payload: bytes) -> dict[str, Any] | 
         if isinstance(pct, (int, float)) and not isinstance(pct, bool):
             return {"type": "context", "percent": float(pct)}
         return None
+    if event_type == "toolUseEvent":
+        return _tool_use_event(data)
     if event_type in ("error", "exception"):
         message = data.get("message") or data.get("reason") or "upstream stream error"
         raise StreamError(str(message)[:300])

@@ -16,11 +16,25 @@
 
 ## 工具调用
 
-Kiro 的 ``userInputMessageContext`` 支持 tools，但**格式与 OpenAI 不同**
-（``tools: [{toolSpecification: {...}}]``）。本轮先只做纯文本对话——工具调用
-需要额外的双向转换与流式 tool_use 事件拼装，值得单独一轮。请求里带了 tools
-时**如实降级**：不报错、不静默丢弃，而是打一条 warn 并只发文本部分。这样用户
-能立刻看出「工具没生效」而不是收到莫名的行为差异。
+Kiro 的 ``userInputMessageContext`` 支持 tools，格式与 OpenAI 不同
+（``tools: [{toolSpecification: {name, description, inputSchema: {json: ...}}}]``）。
+
+**必须放在每一条** ``userInputMessage.userInputMessageContext`` 里（含 history
+里的每一条），不能放 ``conversationState.toolConfig``——后者回
+``TOOL_CONFIG_MISSING``（Bedrock 说「用了 toolUse 却没说有哪些工具」）。
+
+响应侧 ``toolUseEvent`` 是**多帧增量**：``name``/``toolUseId`` 首帧、
+``input`` 碎片中间若干帧（是 JSON 字符串的碎片，不能逐帧解析）、
+``stop: true`` 末帧。三种协议各拼成对应形状：
+
+- OpenAI：``delta.tool_calls[].function.arguments``（JSON **字符串**）
+- Anthropic：``tool_use`` 内容块，``input`` 是**对象**
+- 非流式同理，``finish_reason`` / ``stop_reason`` 置 ``tool_calls`` / ``tool_use``
+
+历史侧：assistant 的 ``tool_calls`` → ``assistantResponseMessage.toolUses``；
+tool 角色的结果 → 紧随其后一个 user 轮次的 ``toolResults``（**不能与其他
+user 消息合并**，否则最后一条被 pop 成 currentMessage、结果丢失，上游报
+``TOOL_USE_RESULT_MISMATCH``）。
 """
 
 from __future__ import annotations
@@ -236,7 +250,8 @@ def auth_headers(token: str) -> dict[str, str]:
     }
 
 
-def _messages_to_conversation(body: dict[str, Any]
+def _messages_to_conversation(body: dict[str, Any],
+                              id_map: dict[str, str] | None = None
                               ) -> tuple[str, str, list[dict[str, Any]]]:
     """把 chat 的 messages 压成 Kiro 的 conversationState。
 
@@ -268,22 +283,86 @@ def _messages_to_conversation(body: dict[str, Any]
         role = str(msg.get("role") or "")
         content = msg.get("content")
         if isinstance(content, list):
-            # 分块数组：只拼 text 块（图片需要额外的 image 字段，本轮不做）
-            content = "".join(
-                str(b.get("text") or "") for b in content
-                if isinstance(b, dict) and b.get("type") == "text")
+            # 分块数组：拼 text 块；tool_result 块单独收（Anthropic 风格客户端
+            # 会把工具结果放在 user 消息的 content 数组里）
+            texts: list[str] = []
+            tool_results: list[dict[str, Any]] = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    texts.append(str(block.get("text") or ""))
+                elif block.get("type") == "tool_result":
+                    tool_results.append(block)
+            content = "".join(texts)
+            if tool_results:
+                text = str(content or "")
+                if turns and turns[-1]["role"] == "user":
+                    turns[-1].setdefault("tool_results", []).extend(tool_results)
+                    if text.strip():
+                        turns[-1]["content"] += "\n\n" + text
+                else:
+                    turns.append({"role": "user", "content": text,
+                                  "tool_results": tool_results})
+                continue
         text = str(content or "")
         if role in ("system", "developer"):
             if text.strip():
                 system_parts.append(text)
             continue
         if role == "tool":
-            # 工具结果在纯文本模式下当普通上下文
-            text = f"[tool result] {text}"
-            role = "user"
+            # OpenAI 风格：工具结果在独立的 tool 角色消息里，靠 tool_call_id 关联
+            tool_result = {
+                "tool_use_id": str(msg.get("tool_call_id") or ""),
+                "text": text,
+            }
+            if turns and turns[-1]["role"] == "user":
+                turns[-1].setdefault("tool_results", []).append(tool_result)
+            else:
+                turns.append({"role": "user", "content": "",
+                              "tool_results": [tool_result]})
+            continue
+        if role == "assistant":
+            # assistant 可能带 tool_calls（OpenAI 用法）
+            calls = msg.get("tool_calls")
+            tool_uses: list[dict[str, Any]] = []
+            if isinstance(calls, list):
+                for call in calls:
+                    if not isinstance(call, dict):
+                        continue
+                    fn = call.get("function") or {}
+                    raw_args = fn.get("arguments")
+                    if isinstance(raw_args, str):
+                        try:
+                            parsed_args = json.loads(raw_args)
+                        except ValueError:
+                            parsed_args = {}
+                    elif isinstance(raw_args, dict):
+                        parsed_args = raw_args
+                    else:
+                        parsed_args = {}
+                    tool_uses.append({
+                        "toolUseId": str(call.get("id") or ""),
+                        "name": str(fn.get("name") or ""),
+                        "input": parsed_args if isinstance(parsed_args, dict) else {},
+                    })
+            if turns and turns[-1]["role"] == "assistant":
+                turns[-1]["content"] += ("\n\n" + text) if text.strip() else ""
+                if tool_uses:
+                    turns[-1].setdefault("tool_uses", []).extend(tool_uses)
+            else:
+                turns.append({"role": "assistant", "content": text,
+                              **({"tool_uses": tool_uses} if tool_uses else {})})
+            continue
         if role not in ("user", "assistant"):
             continue
-        if turns and turns[-1]["role"] == role and role == "user":
+        # ⚠ 带 tool_results 的 turn **不能**被后续 user 消息合并：
+        # 它必须独立成一个 user 轮次，紧跟在 assistant 的 toolUses 之后，
+        # 否则最后一条会被 pop 成 currentMessage，tool_result 随之丢失，
+        # 上游报 TOOL_USE_RESULT_MISMATCH（踩过一次）。
+        can_merge = (turns and turns[-1]["role"] == role and role == "user"
+                     and not turns[-1].get("tool_results"))
+        if can_merge:
             turns[-1]["content"] += "\n\n" + text
         else:
             turns.append({"role": role, "content": text})
@@ -293,19 +372,120 @@ def _messages_to_conversation(body: dict[str, Any]
     if system_parts:
         prefix = "\n\n".join(system_parts)
         content = f"{prefix}\n\n{content}" if content else prefix
-    # 转成 Kiro 的 history 形状。空内容的历史条目直接跳过——上游对空串不友好，
-    # 而且没有信息量。
+    # 转成 Kiro 的 history 形状。
+    #
+    # 空内容的历史条目一般跳过，但**带工具结果的不能跳**——那是模型上一轮
+    # 行动的产出，丢了它模型就不知道工具跑过。
+    tool_specs = _tools_to_kiro(body.get("tools"))
     history: list[dict[str, Any]] = []
     for turn in turns:
         text = str(turn.get("content") or "")
-        if not text.strip():
-            continue
         if turn.get("role") == "assistant":
-            history.append({"assistantResponseMessage": {"content": text}})
+            uses = turn.get("tool_uses") or []
+            if not text.strip() and not uses:
+                continue
+            entry: dict[str, Any] = {"content": text}
+            if uses:
+                entry["toolUses"] = uses
+            history.append({"assistantResponseMessage": entry})
         else:
-            history.append({"userInputMessage": {
-                "content": text, "modelId": model_id, "origin": "AI_EDITOR"}})
+            results = turn.get("tool_results") or []
+            if not text.strip() and not results:
+                continue
+            msg: dict[str, Any] = {
+                "content": text, "modelId": model_id, "origin": "AI_EDITOR"}
+            if results:
+                msg["userInputMessageContext"] = {"toolResults": [
+                    _tool_result_to_kiro(r) for r in results]}
+            history.append({"userInputMessage": msg})
+    # history 里的 modelId 也要换成上游名。
+    # _messages_to_conversation 拿到的 model 是客户端原话（可能带 ``kiro/``
+    # 前缀），而 history 条目是在 _chat_to_kiro 解析之前构造的——不在这里统一
+    # 覆盖，历史条目会漏前缀给上游（踩过一次）。
+    upstream_model = _resolve_upstream_model(model_id, id_map or {})
+    for entry in history:
+        user_msg = entry.get("userInputMessage")
+        if user_msg is not None and "modelId" in user_msg:
+            user_msg["modelId"] = upstream_model
+    # 把工具定义铺到**每一条** user 历史里。上游要求：用了 toolUse/toolResult
+    # 内容块时，那一段上下文必须自己声明 tools，否则 TOOL_CONFIG_MISSING。
+    if tool_specs:
+        for entry in history:
+            user_msg = entry.get("userInputMessage")
+            if user_msg is None:
+                continue
+            ctx = user_msg.setdefault("userInputMessageContext", {})
+            ctx.setdefault("tools", tool_specs)
     return content, model_id, history
+
+
+def _tool_result_to_kiro(result: dict[str, Any]) -> dict[str, Any]:
+    """工具结果 → Kiro 形状。
+
+    两种输入都收：
+
+    - OpenAI 风格（本函数内部统一后的）：``{"tool_use_id": ..., "text": ...}``
+    - Anthropic 风格（客户端直接给的分块）：``{"type": "tool_result",
+      "tool_use_id": ..., "content": ...}``
+    """
+    use_id = str(result.get("tool_use_id") or result.get("toolUseId") or "")
+    text = result.get("text")
+    if text is None:
+        content = result.get("content")
+        if isinstance(content, list):
+            text = "".join(
+                str(b.get("text") or "") for b in content if isinstance(b, dict))
+        else:
+            text = str(content or "")
+    is_error = bool(result.get("is_error"))
+    return {
+        "toolUseId": use_id,
+        "content": [{"text": str(text or "")}],
+        "status": "error" if is_error else "success",
+    }
+
+
+def _tools_to_kiro(tools: Any) -> list[dict[str, Any]]:
+    """OpenAI ``tools`` → Kiro 的 ``toolSpecification`` 列表。
+
+    OpenAI 形状::
+
+        {"type": "function", "function": {"name": ..., "description": ...,
+                                          "parameters": {...JSON Schema...}}}
+
+    Kiro 形状::
+
+        {"toolSpecification": {"name": ..., "description": ...,
+                               "inputSchema": {"json": {...}}}}
+
+    注意 ``inputSchema`` 外面套了一层 ``json`` —— 这是 Bedrock 的 union 标签，
+    直接放 JSON Schema 上去上游不认。
+
+    **调用位置很关键**：实测 ``tools`` 必须放在**每一条** userInputMessage 的
+    ``userInputMessageContext`` 里，不是 conversationState 顶层的 ``toolConfig``
+    （那样会回 ``TOOL_CONFIG_MISSING``：Bedrock 说「用了 toolUse 却没说有哪些
+    工具」）。见 :func:`_history_to_kiro` 与 :func:`_chat_to_kiro`。
+    """
+    out: list[dict[str, Any]] = []
+    for item in tools or []:
+        if not isinstance(item, dict):
+            continue
+        fn = item.get("function") if item.get("type") == "function" else item
+        if not isinstance(fn, dict):
+            continue
+        name = str(fn.get("name") or "").strip()
+        if not name:
+            continue
+        spec: dict[str, Any] = {"name": name}
+        desc = str(fn.get("description") or "").strip()
+        if desc:
+            spec["description"] = desc
+        params = fn.get("parameters")
+        # 没有参数的工具也要给个空 object schema——缺 inputSchema 上游会拒
+        spec["inputSchema"] = {"json": params if isinstance(params, dict) else {
+            "type": "object", "properties": {}}}
+        out.append({"toolSpecification": spec})
+    return out
 
 
 def _resolve_upstream_model(model: str, id_map: dict[str, str]) -> str:
@@ -330,7 +510,7 @@ def _chat_to_kiro(body: dict[str, Any],
     ⚠ **不要带 ``editorState``**：实测带它回 ``400 REQUEST_BODY_INVALID``，
     去掉就 200。``profileArn`` 有就带、没有也能通（两种都验过）。
     """
-    content, model_id, history = _messages_to_conversation(body)
+    content, model_id, history = _messages_to_conversation(body, id_map)
     model_id = _resolve_upstream_model(model_id, id_map or {})
     user_message: dict[str, Any] = {
         "content": content,
@@ -346,15 +526,25 @@ def _chat_to_kiro(body: dict[str, Any],
             "currentMessage": {"userInputMessage": user_message},
         },
     }
-    if body.get("tools"):
-        # 见模块头：本轮只做纯文本，如实告警而不是静默丢
-        log.warning("kiro 暂不支持工具调用（请求带 %d 个 tools），本次按纯文本转发",
-                    len(body["tools"]))
+    # 工具定义：必须挂在**每一条** userInputMessage 的 userInputMessageContext
+    # 上（含 history 里的），不是 conversationState 顶层的 toolConfig——后者会
+    # 回 TOOL_CONFIG_MISSING（实测）。所以这里把 spec 交给调用方去铺到每条上。
+    tool_specs = _tools_to_kiro(body.get("tools"))
+    if tool_specs:
+        payload["conversationState"]["currentMessage"]["userInputMessage"][
+            "userInputMessageContext"] = {
+            **(payload["conversationState"]["currentMessage"]["userInputMessage"]
+               .get("userInputMessageContext") or {}),
+            "tools": tool_specs,
+        }
     max_tokens = body.get("max_tokens") or body.get("max_completion_tokens")
     if isinstance(max_tokens, int) and max_tokens > 0:
-        # 上游字段名就叫 maxTokens，放在 conversationState 下
-        payload["conversationState"]["currentMessage"]["userInputMessage"][
-            "userInputMessageContext"] = {"maxTokens": max_tokens}
+        # ⚠ 必须 **merge** 进已有的 userInputMessageContext，不能整体赋值——
+        # 上面刚把 tools 放进去了，直接 `= {"maxTokens": ...}` 会把工具定义
+        # 抹掉（踩过一次：模型因此走了自己的 web search 而不是调用指定工具）。
+        ctx = payload["conversationState"]["currentMessage"]["userInputMessage"].setdefault(
+            "userInputMessageContext", {})
+        ctx["maxTokens"] = max_tokens
     return payload
 
 
@@ -580,6 +770,21 @@ class KiroProvider(BaseProvider):
 
     # -- 认证 ---------------------------------------------------------------
 
+
+    def _quota_account_ids(self) -> dict[str, str]:
+        """额度标签序号（``#N``，字符串）→ 账号 id，供负载均衡把权重落到人头上。
+
+        必须与 :meth:`quota` 里 ``enumerate(accounts, 1)`` 的那份列表**完全同源**，
+        否则 ``#2`` 会被记到另一个账号的权重上——轮转偏向一个其实没额度的号，
+        比没有权重更糟。
+        """
+        try:
+            accounts = creds.list_accounts()
+        except Exception:  # noqa: BLE001 - 拿不到就不给权重，不影响额度展示
+            return {}
+        return {str(i): str(getattr(a, "id", "") or "")
+                for i, a in enumerate(accounts or (), start=1) if getattr(a, "id", "")}
+
     def ensure_auth(self) -> None:
         if not creds.list_accounts():
             raise HTTPException(status_code=401, detail={"error": {
@@ -715,6 +920,8 @@ class KiroProvider(BaseProvider):
         text_parts: list[str] = []
         credit: float | None = None
         ctx_percent: float | None = None
+        pending: dict[str, dict[str, Any]] = {}
+        done_tools: list[dict[str, Any]] = []
         async for event in self._events(byte_iter()):
             if event["type"] == "text":
                 text_parts.append(event["text"])
@@ -722,28 +929,64 @@ class KiroProvider(BaseProvider):
                 credit = event["credit"]
             elif event["type"] == "context":
                 ctx_percent = event["percent"]
+            elif event["type"] == "tool":
+                tid = event["tool_id"]
+                slot = pending.setdefault(tid, {"name": "", "input": ""})
+                if event.get("name"):
+                    slot["name"] = event["name"]
+                if event.get("input"):
+                    slot["input"] += event["input"]
+                if event.get("stop"):
+                    done_tools.append({"id": tid, **slot})
         text = "".join(text_parts)
         chars = len(text)
+        to_emit = done_tools or [{"id": k, **v} for k, v in pending.items()]
         # ⚠ ``credit`` 必须放进 **usage 里面**，不能放响应顶层。
         # metrics 的非流式路径读的是 ``payload["usage"]`` 再走 normalize_usage，
         # 顶层字段它根本看不到——踩过一次：响应体里明明有 credit，
         # 日志却记成 0.0/估算。（流式那条路走的是 usage chunk，同样的口径。）
         if protocol == "anthropic":
+            blocks: list[dict[str, Any]] = []
+            if text:
+                blocks.append({"type": "text", "text": text})
+            for call in to_emit:
+                if not call.get("name"):
+                    continue
+                try:
+                    parsed_input = json.loads(call.get("input") or "{}")
+                except ValueError:
+                    parsed_input = {}
+                blocks.append({"type": "tool_use", "id": call["id"],
+                               "name": call["name"],
+                               "input": parsed_input if isinstance(parsed_input, dict) else {}})
             return JSONResponse(content={
                 "id": message_id, "type": "message", "role": "assistant",
                 "model": model,
-                "content": [{"type": "text", "text": text}] if text else [],
-                "stop_reason": "end_turn", "stop_sequence": None,
+                "content": blocks,
+                "stop_reason": "tool_use" if to_emit else "end_turn",
+                "stop_sequence": None,
                 "usage": _usage_payload(chars, credit, anthropic=True,
                                         ctx_percent=ctx_percent,
                                         input_chars=input_chars,
                                         window=_window_for(model)),
             })
+        message: dict[str, Any] = {"role": "assistant", "content": text or None}
+        tool_calls: list[dict[str, Any]] = []
+        for call in to_emit:
+            if not call.get("name"):
+                continue
+            tool_calls.append({
+                "id": call["id"], "type": "function",
+                "function": {"name": call["name"],
+                             "arguments": call.get("input") or "{}"},
+            })
+        if tool_calls:
+            message["tool_calls"] = tool_calls
         return JSONResponse(content={
             "id": request_id, "object": "chat.completion", "created": created,
             "model": model,
-            "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
-                         "finish_reason": "stop"}],
+            "choices": [{"index": 0, "message": message,
+                         "finish_reason": "tool_calls" if tool_calls else "stop"}],
             "usage": _usage_payload(chars, credit, ctx_percent=ctx_percent,
                                     input_chars=input_chars,
                                     window=_window_for(model)),
@@ -789,12 +1032,32 @@ class KiroProvider(BaseProvider):
         chars = 0
         credit: float | None = None
         ctx_percent: float | None = None
+        finish = "stop"
+        # 工具调用：上游把一次调用拆成多帧增量（见 stream._tool_use_event）。
+        # 这里按 toolUseId 累计 name/参数，直到 stop 帧才发出完整 tool_call。
+        # 为什么不边收边发：OpenAI 的流式 tool_call 虽然支持参数增量，但工具名
+        # 只在首帧出现一次，客户端（尤其 dsh/Claude Code）普遍等 name 到齐才
+        # 建状态；参数也需完整 JSON 才能用。上游帧又极碎（一个字符一帧），
+        # 攒齐再发最稳。
+        pending: dict[str, dict[str, Any]] = {}
+        done_tools: list[dict[str, Any]] = []
+
         async for event in self._events(source):
             if event["type"] == "credit":
                 credit = event["credit"]
                 continue
             if event["type"] == "context":
                 ctx_percent = event["percent"]
+                continue
+            if event["type"] == "tool":
+                tid = event["tool_id"]
+                slot = pending.setdefault(tid, {"name": "", "input": ""})
+                if event.get("name"):
+                    slot["name"] = event["name"]
+                if event.get("input"):
+                    slot["input"] += event["input"]
+                if event.get("stop"):
+                    done_tools.append({"id": tid, **slot})
                 continue
             if event["type"] != "text":
                 continue
@@ -808,10 +1071,35 @@ class KiroProvider(BaseProvider):
                 "created": created, "model": model,
                 "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
             })
+        # 补发工具调用：**优先发收到 stop 帧的**；一个都没有但确实攒到了调用时
+        # （流被截断、上游没发末帧），也照发——参数可能已完整，让客户端自己判断，
+        # 总比静默丢掉一次工具调用好。
+        to_emit = done_tools or [{"id": k, **v} for k, v in pending.items()]
+        for idx, call in enumerate(to_emit):
+            if not call.get("name"):
+                continue
+            finish = "tool_calls"
+            if first:
+                first = False
+                yield _sse_json({
+                    "id": request_id, "object": "chat.completion.chunk",
+                    "created": created, "model": model,
+                    "choices": [{"index": 0,
+                                 "delta": {"role": "assistant"}, "finish_reason": None}],
+                })
+            yield _sse_json({
+                "id": request_id, "object": "chat.completion.chunk",
+                "created": created, "model": model,
+                "choices": [{"index": 0, "delta": {"tool_calls": [{
+                    "index": idx, "id": call["id"], "type": "function",
+                    "function": {"name": call["name"],
+                                 "arguments": call.get("input") or "{}"},
+                }]}, "finish_reason": None}],
+            })
         yield _sse_json({
             "id": request_id, "object": "chat.completion.chunk",
             "created": created, "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
         })
         # usage 收尾 chunk：**日志从这里取本次消耗**。
         #
@@ -847,12 +1135,24 @@ class KiroProvider(BaseProvider):
         chars = 0
         credit: float | None = None
         ctx_percent: float | None = None
+        pending: dict[str, dict[str, Any]] = {}
+        done_tools: list[dict[str, Any]] = []
         async for event in self._events(source):
             if event["type"] == "credit":
                 credit = event["credit"]
                 continue
             if event["type"] == "context":
                 ctx_percent = event["percent"]
+                continue
+            if event["type"] == "tool":
+                tid = event["tool_id"]
+                slot = pending.setdefault(tid, {"name": "", "input": ""})
+                if event.get("name"):
+                    slot["name"] = event["name"]
+                if event.get("input"):
+                    slot["input"] += event["input"]
+                if event.get("stop"):
+                    done_tools.append({"id": tid, **slot})
                 continue
             if event["type"] != "text":
                 continue
@@ -861,11 +1161,36 @@ class KiroProvider(BaseProvider):
                 "type": "content_block_delta", "index": 0,
                 "delta": {"type": "text_delta", "text": event["text"]}})
         yield ev("content_block_stop", {"type": "content_block_stop", "index": 0})
+        # 工具调用：Anthropic 用 tool_use 内容块，每个工具一个 block（index 递增）。
+        # 参数必须是**对象**（不是 JSON 字符串）——这是与 OpenAI 的关键差别。
+        to_emit = done_tools or [{"id": k, **v} for k, v in pending.items()]
+        block_index = 1
+        for call in to_emit:
+            if not call.get("name"):
+                continue
+            try:
+                parsed_input = json.loads(call.get("input") or "{}")
+            except ValueError:
+                parsed_input = {}
+            if not isinstance(parsed_input, dict):
+                parsed_input = {}
+            yield ev("content_block_start", {
+                "type": "content_block_start", "index": block_index,
+                "content_block": {"type": "tool_use", "id": call["id"],
+                                  "name": call["name"], "input": {}}})
+            yield ev("content_block_delta", {
+                "type": "content_block_delta", "index": block_index,
+                "delta": {"type": "input_json_delta",
+                          "partial_json": json.dumps(parsed_input, ensure_ascii=False)}})
+            yield ev("content_block_stop", {"type": "content_block_stop",
+                                            "index": block_index})
+            block_index += 1
         # usage 里带 ``credit``：Anthropic 官方没有这个字段，但本仓库
         # ``normalize_usage`` 会从 usage 里取它（见 metrics_protocol._credit_field），
         # 日志因此能显示 kiro 的真实计费。客户端不认识这个键会忽略，无害。
         yield ev("message_delta", {"type": "message_delta", "delta": {
-            "stop_reason": "end_turn", "stop_sequence": None},
+            "stop_reason": "tool_use" if to_emit else "end_turn",
+            "stop_sequence": None},
             "usage": _usage_payload(chars, credit, anthropic=True,
                                     ctx_percent=ctx_percent,
                                     input_chars=input_chars,
