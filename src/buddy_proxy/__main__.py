@@ -155,6 +155,34 @@ async def _qoder_model_refresh_loop(provider) -> None:
         await asyncio.sleep(CACHE_TTL_S)
 
 
+async def _kiro_model_warmup_once(provider) -> None:
+    """启动时拉一次 kiro 模型目录（fire-and-forget）。
+
+    为什么需要：kiro 的目录**纯内存**、没有静态兜底表（模型表完全来自上游
+    ``ListAvailableModels``）。不预热的话，进程重启后到第一次「刷新模型」
+    之间目录是空的——表现是 ``/v1/models`` 里没有 kiro，且调用 ``kiro/xxx``
+    直接报 ``INVALID_MODEL_ID``（踩过一次：改完代码重启，测试全挂）。
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+    try:
+        models = await provider.refresh_models()
+        log.info("kiro 模型目录已预热（%d 个模型）", len(models))
+    except Exception as exc:  # noqa: BLE001 - 预热失败不影响转发
+        log.warning("kiro 模型目录预热失败: %s", type(exc).__name__)
+
+
+def _install_kiro_model_warmup(provider) -> None:
+    """把 kiro 目录预热挂到应用启动。"""
+    import asyncio
+
+    async def _start() -> None:
+        asyncio.create_task(_kiro_model_warmup_once(provider))  # noqa: RUF006
+
+    app.router.on_startup.append(_start)
+
+
 def _install_qoder_model_warmup(provider) -> None:
     """把目录预热挂到应用启动（fire-and-forget 常驻任务，随进程生命周期）。"""
     import asyncio
@@ -547,8 +575,9 @@ def main():
         providers[kiro.id] = kiro
         health = kiro.health()
         logger.info("Kiro provider enabled (accounts=%s)", health.get("accounts"))
+        _install_kiro_model_warmup(kiro)
         print(f"[kiro] Enabled ({health.get('accounts')} 个账号; "
-              f"模型目录需刷新后从上游拉取)")
+              f"模型目录启动时自动预热)")
     else:
         print("[kiro] Disabled (pass --kiro or KIRO_ENABLED=1 to enable)")
 
@@ -677,6 +706,16 @@ def main():
         print(f"[Disabled Providers] {len(disabled_providers)} 个通道已停用: "
               f"{', '.join(sorted(disabled_providers))}")
 
+    # 负载均衡：settings.json 的 provider id 列表，命中通道改为按剩余额度加权
+    # 轮转（额度页开关写入，用户 2026-11-10 需求）。缺省空集 = 全部照旧。
+    load_balance = {
+        k.strip() for k in (saved_settings.get("load_balance") or [])
+        if isinstance(k, str) and k.strip()
+    }
+    if load_balance:
+        print(f"[Load Balance] {len(load_balance)} 个通道按剩余额度轮转: "
+              f"{', '.join(sorted(load_balance))}")
+
     # 限时可用模型：settings.json 的 {"provider/model": {"windows": [["HH:MM","HH:MM"],...]}}，
     # 窗口外拒绝转发。键规范化 + 窗口校验，非法窗口丢弃、空窗口不入表。
     model_schedules: dict[str, list] = {}
@@ -735,6 +774,7 @@ def main():
         disabled_models=disabled_models,
         hidden_models=hidden_models,
         disabled_providers=disabled_providers,
+        load_balance=load_balance,
         model_schedules=model_schedules,
         model_order=model_order,
         metrics=metrics,

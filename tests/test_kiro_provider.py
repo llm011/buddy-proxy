@@ -465,3 +465,62 @@ def test_set_label_only_overwrites_auto_generated():
     # 用户手动改过的名字不受影响
     assert auto_like("主号", "x") is False
     assert auto_like("addbackteam9@addbacktech.com", "x") is False
+
+
+# ---------------------------------------------------------------------------
+# token 反推：从 contextUsagePercentage 估算 input
+# ---------------------------------------------------------------------------
+#
+# kiro 的 EventStream 只给两样：``contextUsagePercentage``（整段对话占窗口的
+# 百分比）与 ``credit``（真实计费）。**没有 inputTokens / outputTokens / 缓存
+# 命中数**，响应头里也没有任何缓存字段（逐项查过）。
+#
+# 但 ctx% 可以反推 input：实测输入行数 10/100/300/600 对应 2.227%/3.220%/
+# 5.416%/8.697%，严格线性。反推时要**扣掉 Kiro 自己注入的系统提示**——
+# 四点标定出来是 4214~4243 token，波动 <1%，所以取 4233 当常量。
+
+def test_estimate_tokens_subtracts_system_overhead():
+    """不扣系统开销会把一句 16 字符的提问算成 4457 token（高估约 4200）。"""
+    from buddy_proxy.kiro.provider import _estimate_tokens, _KIRO_SYSTEM_OVERHEAD_TOKENS
+
+    window = 200_000
+    # ctx% 刚好对应「系统开销 + 1000 token 输入」
+    pct = (_KIRO_SYSTEM_OVERHEAD_TOKENS + 1000) / window * 100
+    inp, _out, src = _estimate_tokens(pct, window, input_chars=3000, output_chars=100)
+    assert src == "context"
+    assert 900 <= inp <= 1100, f"应约 1000，实际 {inp}"
+
+
+def test_estimate_tokens_falls_back_to_chars():
+    """拿不到 ctx% 时按字符估（4 字符/token），并如实标记来源。"""
+    from buddy_proxy.kiro.provider import _estimate_tokens
+
+    inp, out, src = _estimate_tokens(None, 200_000, input_chars=400, output_chars=80)
+    assert src == "chars"
+    assert inp == 100 and out == 20
+
+
+def test_estimate_tokens_never_negative():
+    """ctx% 极小时扣完可能为负——必须兜住，不能吐负 token。"""
+    from buddy_proxy.kiro.provider import _estimate_tokens
+
+    inp, _out, src = _estimate_tokens(0.01, 200_000, input_chars=100, output_chars=10)
+    assert inp >= 1, f"token 不能为负/零，实际 {inp}"
+
+
+def test_usage_payload_has_input_and_no_fake_cache():
+    """input 要有数；**缓存字段不能编**——上游不提供就别填。"""
+    from buddy_proxy.kiro.provider import _usage_payload
+
+    usage = _usage_payload(400, 0.01, ctx_percent=5.0, input_chars=1600, window=200_000)
+    assert usage["prompt_tokens"] > 0, "input 应该有数了"
+    assert usage["completion_tokens"] == 100
+    assert "cached_tokens" not in usage, "上游不给缓存数，填 0 会被误读成「查了没命中」"
+
+
+def test_system_overhead_constant_is_documented():
+    """标定值别被人随手改：改之前必须重跑四点标定。"""
+    from buddy_proxy.kiro.provider import _KIRO_SYSTEM_OVERHEAD_TOKENS
+
+    assert 3_500 <= _KIRO_SYSTEM_OVERHEAD_TOKENS <= 5_000, \
+        "标定值在 4214~4243 之间；超范围说明窗口假设变了，要重新标定"
