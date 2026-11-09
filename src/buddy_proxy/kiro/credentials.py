@@ -516,3 +516,29 @@ def import_auth_file(path: str | pathlib.Path | None = None, *,
     if label:
         merged["label"] = label
     return save_account_cred(merged)
+
+
+def set_label(account_id: str, label: str) -> None:
+    """只改索引里的显示名（不动凭据）。
+
+    与 :func:`rename_account` 的区别：那个是用户手动的「改名」入口，空串表示
+    恢复默认；这个由程序调用（如探活时从上游拿到邮箱），只在 label 还是
+    **自动生成的占位**（``c-xxxxxxxx`` / ``p-xxxx`` 形态）时才覆盖，免得把
+    用户手动设的名字冲掉。
+    """
+    clean = (label or "").strip()
+    if not clean:
+        return
+    with _STORE.guard():
+        entries = _STORE.entries_locked()
+        hit = next((e for e in entries if str(e.get("id")) == account_id), None)
+        if hit is None:
+            return
+        current = str(hit.get("label") or "")
+        # 用户手动改过的名字优先保留：只覆盖「看起来是自动生成的」那种
+        auto_like = (not current) or current == str(hit.get("id") or "") \
+            or re.fullmatch(r"[cp]-[a-z0-9]{8,}", current) is not None
+        if not auto_like:
+            return
+        hit["label"] = clean
+        _STORE.write_index(entries)

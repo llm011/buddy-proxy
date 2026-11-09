@@ -433,8 +433,11 @@ class KiroProvider(BaseProvider):
 
         token, cred = creds.ensure_account_token(account_id)
         region = str(cred.get("region") or creds.DEFAULT_REGION)
+        # ``isEmailRequired=true`` 才会有 ``userInfo.email``——false 时那个字段是
+        # null。用户要求「额度里要看到账号名」，而 profileArn 尾部（KGVMAMAMGGDK）
+        # 和本地 id（c-d5c7...）都不是人能认的，邮箱才是。多一个参数不影响用量数字。
         url = (f"https://codewhisperer.{region}.amazonaws.com/getUsageLimits"
-               "?origin=AI_EDITOR&isEmailRequired=false")
+               "?origin=AI_EDITOR&isEmailRequired=true")
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",

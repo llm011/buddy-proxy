@@ -38,6 +38,32 @@ function _kiro_sub_html(a) {
     : '';
 }
 
+/** 单个账号的额度明细：复用通用卡的 ``quotaItemHtml``（进度条 + 剩余/已用 + 重置）。
+
+ * 额度条目的 label 形如 ``Kiro #1 · 主号 · Credit``（多账号）或
+ * ``Kiro · 主号 · Credit``（单账号），本函数按**账号名**把条目分回各自的卡。
+ * 认不出归属的一律不显示——错挂到别的账号比少显示一条更糟。
+ */
+function _kiro_quota_html(kiro, acct) {
+  const q = kiro.quota || {};
+  if (!q.supported) return '';
+  const items = (q.items || []).filter(it => it && it.label
+    && !it.query_failed && it.percent != null || (it.used != null && it.total));
+  const mine = items.filter(it => {
+    const parts = String(it.label).split(' · ');
+    // 形如 [Kiro, #N, 名字, 明细...] 或 [Kiro, 名字, 明细...]
+    const name = parts.find((x, i) => i > 0 && !/^#\d+$/.test(x) && x !== 'Kiro') || '';
+    return name === (acct.label || acct.id) || parts.includes(acct.label || acct.id);
+  });
+  if (!mine.length) return '';
+  return `<div class="kiro-quota">` + mine.map(it => {
+    // 去掉通道/账号前缀，只留包名（进度条自己会显示数字）
+    const idx = String(it.label).lastIndexOf(' · ');
+    const short = Object.assign({}, it, {label: idx >= 0 ? String(it.label).slice(idx + 3) : it.label});
+    return quotaItemHtml(short);
+  }).join('') + '</div>';
+}
+
 function renderKiroPanel() {
   const panel = document.getElementById('kiro-panel');
   if (!panel) return;
@@ -60,7 +86,8 @@ function renderKiroPanel() {
         <button class="ghost" onclick="kiroConfirmDelete('${esc(a.id)}')" title="删除该账号">✕</button>
       </div>
       ${_kiro_sub_html(a)}
-      <div class="muted" style="font-size:11px">${esc(a.id)}</div>
+      ${_kiro_quota_html(kiro, a)}
+      <div class="muted" style="font-size:11px" title="账号 id（排障用）">${esc(a.id)}</div>
     </div>`;
   }).join('');
 

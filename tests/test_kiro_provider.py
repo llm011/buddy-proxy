@@ -430,3 +430,38 @@ def test_chat_to_kiro_uses_upstream_name():
     out = _chat_to_kiro(body, {"claude-opus-5-5": "claude-opus-5.5"})
     assert out["conversationState"]["currentMessage"]["userInputMessage"]["modelId"] \
         == "claude-opus-5.5"
+
+
+# ---------------------------------------------------------------------------
+# 账号显示名：取上游邮箱（用户 2026-11-10 要求）
+# ---------------------------------------------------------------------------
+
+def test_usage_url_requests_email():
+    """``isEmailRequired=true`` 才有 ``userInfo.email``。
+
+    ``false`` 时那个字段恒 null，账号列表里只剩 ``c-xxxxxxxx`` 这种 id，
+    用户看不出是哪个号。这是实测出来的差异，不是猜的。
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "src" / "buddy_proxy" / "kiro"
+           / "provider.py").read_text(encoding="utf-8")
+    assert "isEmailRequired=true" in src
+    assert "isEmailRequired=false" not in src
+
+
+def test_set_label_only_overwrites_auto_generated():
+    """程序写名字时不能冲掉用户手动设的。"""
+    import re as _re
+
+    # 自动生成的形态：空串 / 等于 id / c-xxx / p-xxx
+    def auto_like(current, aid):
+        return (not current) or current == aid \
+            or _re.fullmatch(r"[cp]-[a-z0-9]{8,}", current) is not None
+
+    assert auto_like("", "c-abc12345678") is True
+    assert auto_like("c-abc12345678", "c-abc12345678") is True
+    assert auto_like("p-kgvmamamggdk", "x") is True
+    # 用户手动改过的名字不受影响
+    assert auto_like("主号", "x") is False
+    assert auto_like("addbackteam9@addbacktech.com", "x") is False
