@@ -133,8 +133,10 @@ def probe_account(account_id: str) -> dict[str, Any]:
     """
     token, cred = creds.ensure_account_token(account_id)
     region = str(cred.get("region") or creds.DEFAULT_REGION)
+    # isEmailRequired=true 才会带回 userInfo.email（false 时该字段恒 null）。
+    # 账号显示名要用它——用户要求「额度里看到是哪个号」。
     url = (f"https://codewhisperer.{region}.amazonaws.com/getUsageLimits"
-           "?origin=AI_EDITOR&isEmailRequired=false")
+           "?origin=AI_EDITOR&isEmailRequired=true")
     req = urllib.request.Request(url, headers=_headers(token))
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -151,9 +153,19 @@ def probe_account(account_id: str) -> dict[str, Any]:
         raise LoginError(f"探活失败 HTTP {exc.code}: {body}") from exc
     except Exception as exc:  # noqa: BLE001
         raise LoginError(f"探活失败: {type(exc).__name__}") from exc
+    info = data.get("userInfo") or {}
+    email = str(info.get("email") or "").strip()
+    if email:
+        # 探活顺手把邮箱写进索引当显示名：导入时用户不一定填 label，
+        # 不写的话列表里只剩一串 ``c-xxxxxxxx``，看不出是谁。
+        try:
+            creds.set_label(account_id, email)
+        except Exception:  # noqa: BLE001 - 写名失败不影响探活结果
+            pass
     return {
         "ok": True,
         "subscription": str((data.get("subscriptionInfo") or {}).get("subscriptionTitle") or ""),
+        "email": email,
         "usage": data,
     }
 

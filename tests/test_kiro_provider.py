@@ -144,7 +144,7 @@ def test_system_prompt_is_prepended_to_user_message():
         {"role": "system", "content": "You are terse."},
         {"role": "user", "content": "hi"},
     ]}
-    content, _ = _messages_to_conversation(body)
+    content, _, _hist = _messages_to_conversation(body)
     assert "You are terse." in content
     assert content.index("You are terse.") < content.index("hi")
 
@@ -155,7 +155,7 @@ def test_developer_role_treated_as_system():
         {"role": "developer", "content": "be brief"},
         {"role": "user", "content": "hi"},
     ]}
-    content, _ = _messages_to_conversation(body)
+    content, _, _hist = _messages_to_conversation(body)
     assert "be brief" in content
 
 
@@ -167,7 +167,7 @@ def test_block_array_content_flattened_to_text():
             {"type": "text", "text": "part2"},
         ]},
     ]}
-    content, _ = _messages_to_conversation(body)
+    content, _, _hist = _messages_to_conversation(body)
     assert content == "part1 part2", "只拼 text 块，图片本通道暂不支持"
 
 
@@ -177,7 +177,7 @@ def test_assistant_history_preserved():
         {"role": "assistant", "content": "a1"},
         {"role": "user", "content": "q2"},
     ]}
-    content, _ = _messages_to_conversation(body)
+    content, _, _hist = _messages_to_conversation(body)
     # currentMessage 是最后一条 user
     assert content == "q2"
 
@@ -430,3 +430,178 @@ def test_chat_to_kiro_uses_upstream_name():
     out = _chat_to_kiro(body, {"claude-opus-5-5": "claude-opus-5.5"})
     assert out["conversationState"]["currentMessage"]["userInputMessage"]["modelId"] \
         == "claude-opus-5.5"
+
+
+# ---------------------------------------------------------------------------
+# 账号显示名：取上游邮箱（用户 2026-11-10 要求）
+# ---------------------------------------------------------------------------
+
+def test_usage_url_requests_email():
+    """``isEmailRequired=true`` 才有 ``userInfo.email``。
+
+    ``false`` 时那个字段恒 null，账号列表里只剩 ``c-xxxxxxxx`` 这种 id，
+    用户看不出是哪个号。这是实测出来的差异，不是猜的。
+    """
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "src" / "buddy_proxy" / "kiro"
+           / "provider.py").read_text(encoding="utf-8")
+    assert "isEmailRequired=true" in src
+    assert "isEmailRequired=false" not in src
+
+
+def test_set_label_only_overwrites_auto_generated():
+    """程序写名字时不能冲掉用户手动设的。"""
+    import re as _re
+
+    # 自动生成的形态：空串 / 等于 id / c-xxx / p-xxx
+    def auto_like(current, aid):
+        return (not current) or current == aid \
+            or _re.fullmatch(r"[cp]-[a-z0-9]{8,}", current) is not None
+
+    assert auto_like("", "c-abc12345678") is True
+    assert auto_like("c-abc12345678", "c-abc12345678") is True
+    assert auto_like("p-kgvmamamggdk", "x") is True
+    # 用户手动改过的名字不受影响
+    assert auto_like("主号", "x") is False
+    assert auto_like("addbackteam9@addbacktech.com", "x") is False
+
+
+# ---------------------------------------------------------------------------
+# token 反推：从 contextUsagePercentage 估算 input
+# ---------------------------------------------------------------------------
+#
+# kiro 的 EventStream 只给两样：``contextUsagePercentage``（整段对话占窗口的
+# 百分比）与 ``credit``（真实计费）。**没有 inputTokens / outputTokens / 缓存
+# 命中数**，响应头里也没有任何缓存字段（逐项查过）。
+#
+# 但 ctx% 可以反推 input：实测输入行数 10/100/300/600 对应 2.227%/3.220%/
+# 5.416%/8.697%，严格线性。反推时要**扣掉 Kiro 自己注入的系统提示**——
+# 四点标定出来是 4214~4243 token，波动 <1%，所以取 4233 当常量。
+
+def test_estimate_tokens_subtracts_system_overhead():
+    """不扣系统开销会把一句 16 字符的提问算成 4457 token（高估约 4200）。"""
+    from buddy_proxy.kiro.provider import _estimate_tokens, _KIRO_SYSTEM_OVERHEAD_TOKENS
+
+    window = 200_000
+    # ctx% 刚好对应「系统开销 + 1000 token 输入」
+    pct = (_KIRO_SYSTEM_OVERHEAD_TOKENS + 1000) / window * 100
+    inp, _out, src = _estimate_tokens(pct, window, input_chars=3000, output_chars=100)
+    assert src == "context"
+    assert 900 <= inp <= 1100, f"应约 1000，实际 {inp}"
+
+
+def test_estimate_tokens_falls_back_to_chars():
+    """拿不到 ctx% 时按字符估（4 字符/token），并如实标记来源。"""
+    from buddy_proxy.kiro.provider import _estimate_tokens
+
+    inp, out, src = _estimate_tokens(None, 200_000, input_chars=400, output_chars=80)
+    assert src == "chars"
+    assert inp == 100 and out == 20
+
+
+def test_estimate_tokens_never_negative():
+    """ctx% 极小时扣完可能为负——必须兜住，不能吐负 token。"""
+    from buddy_proxy.kiro.provider import _estimate_tokens
+
+    inp, _out, src = _estimate_tokens(0.01, 200_000, input_chars=100, output_chars=10)
+    assert inp >= 1, f"token 不能为负/零，实际 {inp}"
+
+
+def test_usage_payload_has_input_and_no_fake_cache():
+    """input 要有数；**缓存字段不能编**——上游不提供就别填。"""
+    from buddy_proxy.kiro.provider import _usage_payload
+
+    usage = _usage_payload(400, 0.01, ctx_percent=5.0, input_chars=1600, window=200_000)
+    assert usage["prompt_tokens"] > 0, "input 应该有数了"
+    assert usage["completion_tokens"] == 100
+    assert "cached_tokens" not in usage, "上游不给缓存数，填 0 会被误读成「查了没命中」"
+
+
+def test_system_overhead_constant_is_documented():
+    """标定值别被人随手改：改之前必须重跑四点标定。"""
+    from buddy_proxy.kiro.provider import _KIRO_SYSTEM_OVERHEAD_TOKENS
+
+    assert 3_500 <= _KIRO_SYSTEM_OVERHEAD_TOKENS <= 5_000, \
+        "标定值在 4214~4243 之间；超范围说明窗口假设变了，要重新标定"
+
+
+# ---------------------------------------------------------------------------
+# 多轮对话：history 必须真的发给上游
+# ---------------------------------------------------------------------------
+#
+# 踩过的坑（很严重）：``_messages_to_conversation`` 一开始只返回
+# ``(content, model_id)``，把算好的 turns 直接丢掉，于是**每次请求都只有最后
+# 一条 user 消息**。表现是「在 dsh TUI 里聊了两句，第三句就忘了前面说过什么」，
+# 换别的通道却正常——极易误判成上游或客户端问题。
+#
+# 上游的 history 形状（实测可用，问「我叫什么」能正确答出「小明」）：
+#   {"userInputMessage": {"content":..., "modelId":..., "origin": "AI_EDITOR"}}
+#   {"assistantResponseMessage": {"content": ...}}
+
+def test_history_is_included_in_payload():
+    """核心回归：多轮消息必须出现在 payload 的 history 里。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "claude-haiku-4-5", "messages": [
+        {"role": "user", "content": "我叫小明"},
+        {"role": "assistant", "content": "好的，记住了"},
+        {"role": "user", "content": "我叫什么？"},
+    ]}
+    out = _chat_to_kiro(body, {"claude-haiku-4-5": "claude-haiku-4.5"})
+    state = out["conversationState"]
+    assert "history" in state, "缺 history = 模型失忆"
+    assert len(state["history"]) == 2
+    assert state["history"][0]["userInputMessage"]["content"] == "我叫小明"
+    assert state["history"][1]["assistantResponseMessage"]["content"] == "好的，记住了"
+    # currentMessage 只是最后那条
+    assert state["currentMessage"]["userInputMessage"]["content"] == "我叫什么？"
+
+
+def test_history_entries_carry_model_and_origin():
+    """history 里的 user 条目也要带 modelId/origin，否则上游可能拒。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "m", "messages": [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "q2"},
+    ]}
+    hist = _chat_to_kiro(body, {}).get("conversationState", {}).get("history") or []
+    assert hist and hist[0]["userInputMessage"]["modelId"] == "m"
+    assert hist[0]["userInputMessage"]["origin"] == "AI_EDITOR"
+
+
+def test_no_history_key_when_single_turn():
+    """单轮不带空 history：上游用不着，少发字段更干净。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    out = _chat_to_kiro({"model": "m", "messages": [
+        {"role": "user", "content": "只问一句"}]}, {})
+    assert "history" not in out["conversationState"]
+
+
+def test_empty_history_entries_skipped():
+    """空内容的轮次不发——没信息量，上游对空串也不友好。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "m", "messages": [
+        {"role": "user", "content": "q1"},
+        {"role": "assistant", "content": ""},
+        {"role": "user", "content": "q2"},
+    ]}
+    hist = _chat_to_kiro(body, {}).get("conversationState", {}).get("history") or []
+    assert all(
+        (h.get("assistantResponseMessage") or {}).get("content")
+        or (h.get("userInputMessage") or {}).get("content")
+        for h in hist
+    ), f"出现了空条目: {hist}"
+
+
+def test_messages_to_conversation_returns_history():
+    """函数签名必须是三元组（改回两元组就会重演失忆 bug）。"""
+    from buddy_proxy.kiro.provider import _messages_to_conversation
+
+    out = _messages_to_conversation({"model": "m", "messages": [
+        {"role": "user", "content": "a"}, {"role": "user", "content": "b"}]})
+    assert len(out) == 3, "必须返回 (content, model_id, history)"

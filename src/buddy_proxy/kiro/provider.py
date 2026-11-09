@@ -73,24 +73,122 @@ def _num(value: Any) -> float | None:
         return None
 
 
+#: kiro 的 ``contextUsagePercentage`` 是「**整段对话**占模型上下文窗口的比例」。
+#: 各模型窗口取 ``ListAvailableModels`` 的 ``maxInputTokens``（拿不到时用这个兜底：
+#: Claude 系普遍 200K）。
+#:
+#: 为什么能这样反推：实测同一段输入连发，``contextUsagePercentage`` 稳定不变
+#: （±0.001），而输入长度翻倍时它按比例上涨（66 字符/行 → 2.227% / 3.220% /
+#: 5.416% / 8.697% 对应 10/100/300/600 行，严格线性）。所以
+#: ``input_tokens ≈ ctx% × window`` 是从上游给的百分比推出来的**估算值**，
+#: 不是瞎猜的常数。
+_DEFAULT_CONTEXT_WINDOW = 200_000
+
+#: Kiro 在**每次请求**里都会注入自己的系统提示与工具定义，这部分也计入
+#: ``contextUsagePercentage``。实测标定（窗口按 200K）：
+#:
+#: ====== ============ ============ ============
+#: 输入行 ctx%         总 token     扣掉输入后
+#: ====== ============ ============ ============
+#: 10     2.227%       4454         4234
+#: 100    3.220%       6440         4243
+#: 300    5.416%       10832        4242
+#: 600    8.697%       17394        4214
+#: ====== ============ ============ ============
+#:
+#: 四个点算出来 4214~4243，波动 <1%——说明它确实是个**固定的系统开销**，不是
+#: 估算噪声。不扣掉它的话，一句 16 字符的提问会被算成 4457 token（高估约 4200）。
+_KIRO_SYSTEM_OVERHEAD_TOKENS = 4_233
+
+#: 模型 → 上下文窗口。由 :meth:`KiroProvider.refresh_models` 从
+#: ``ListAvailableModels`` 的 ``maxInputTokens`` 填进来（上游没给就留空，
+#: 由 :func:`_window_for` 兜底）。
+_MODEL_WINDOWS: dict[str, int] = {}
+
+
+def _estimate_tokens(ctx_percent: float | None, window: int,
+                     input_chars: int, output_chars: int
+                     ) -> tuple[int | None, int, str]:
+    """由 ``contextUsagePercentage`` 反推 input token；output 按字符估。
+
+    返回 ``(input_tokens, output_tokens, source)``。``source`` 说明可信度：
+
+    - ``"context"``：input 来自上游的 ctx%（较可信，误差主要在窗口大小）
+    - ``"chars"``：拿不到 ctx%，退回按字符估（4 字符/token，粗糙）
+    - ``"none"``：连字符数都没有
+
+    **输出侧上游不给任何数据**，只能按字符估。这一点在 UI 上必须能看出来
+    （日志的 token 列带「≈」），否则用户会拿它做精确统计。
+    """
+    output = max(1, output_chars // 4) if output_chars else 0
+    if isinstance(ctx_percent, (int, float)) and not isinstance(ctx_percent, bool) \
+            and ctx_percent > 0 and window > 0:
+        total = ctx_percent / 100.0 * window
+        # 扣掉 Kiro 自己的系统提示开销（见 _KIRO_SYSTEM_OVERHEAD_TOKENS 的标定表）
+        est = int(round(total - _KIRO_SYSTEM_OVERHEAD_TOKENS))
+        # 下限用字符粗估兜住：上游可能给极小的百分比，扣完会变成负数
+        floor = max(1, input_chars // 6)
+        if est <= 0:
+            return floor, output, "chars"
+        return max(est, 1), output, "context"
+    if input_chars:
+        return max(1, input_chars // 4), output, "chars"
+    return None, output, "none"
+
+
+def _input_chars(payload: dict[str, Any]) -> int:
+    """上游请求体里「用户输入」的字符数（只用于 token 估算的兜底）。"""
+    try:
+        cur = payload["conversationState"]["currentMessage"]["userInputMessage"]
+        return len(str(cur.get("content") or ""))
+    except (KeyError, TypeError):
+        return 0
+
+
+def _window_for(model: str) -> int:
+    """模型上下文窗口（token）。取不到就退回 :data:`_DEFAULT_CONTEXT_WINDOW`。"""
+    entry = _MODEL_WINDOWS.get(model)
+    if isinstance(entry, int) and entry > 0:
+        return entry
+    return _DEFAULT_CONTEXT_WINDOW
+
+
 def _usage_payload(chars: int, credit: float | None, *,
-                   anthropic: bool = False) -> dict[str, Any]:
+                   anthropic: bool = False,
+                   ctx_percent: float | None = None,
+                   input_chars: int = 0,
+                   window: int = _DEFAULT_CONTEXT_WINDOW) -> dict[str, Any]:
     """构造 usage 对象（两种协议共用）。
 
-    kiro 不返回 token 数（EventStream 里只有 contextUsagePercentage 和 credit），
-    所以 token 是按字符数粗估的（≈4 字符/token）——**标注为估算**，别让用户
-    以为那是上游给的精确值。``credit`` 则是 ``meteringEvent`` 里的真实计费。
+    kiro 的 EventStream **只给两样东西**：``contextUsagePercentage``（整段对话
+    占窗口的百分比）与 ``credit``（真实计费）。没有 inputTokens / outputTokens /
+    缓存命中数，响应头里也没有缓存字段（逐项查过，只有 ``Cache-Control:
+    no-cache``）。
+
+    所以这里：
+
+    - **input**：由 ``ctx% × 窗口`` 反推（见 :func:`_estimate_tokens`）。比原来
+      「恒为 0」有用得多——日志的 ``↑`` 列终于有数字了。
+    - **output**：只能按字符估（上游不给）。
+    - **credit**：``meteringEvent`` 的真实值，原样透传。
+    - **缓存**：上游不提供，**不填**。填 0 会被误读成「查了但没命中」；留空
+      才是「上游没报」。（实测确认过：credit 随输入长度线性上涨，说明输入
+      确实计费；但缓存命中与否没有任何可观测字段。）
 
     这个字段组合是给本仓库的 metrics 用的：``normalize_usage`` 会按
     ``prompt_tokens`` / ``completion_tokens`` / ``credit`` 取值。
     """
-    tokens = max(1, chars // 4)
-    base: dict[str, Any] = {"output_tokens": tokens, "completion_tokens": tokens,
-                            "total_tokens": tokens}
+    input_tokens, output_tokens, _src = _estimate_tokens(
+        ctx_percent, window, input_chars, chars)
+    total = (input_tokens or 0) + output_tokens
+    base: dict[str, Any] = {
+        "output_tokens": output_tokens, "completion_tokens": output_tokens,
+        "total_tokens": total,
+    }
     if anthropic:
-        base["input_tokens"] = 0
+        base["input_tokens"] = input_tokens or 0
     else:
-        base["prompt_tokens"] = 0
+        base["prompt_tokens"] = input_tokens or 0
     if credit is not None:
         base["credit"] = credit
     return base
@@ -138,13 +236,24 @@ def auth_headers(token: str) -> dict[str, str]:
     }
 
 
-def _messages_to_conversation(body: dict[str, Any]) -> tuple[str, str]:
+def _messages_to_conversation(body: dict[str, Any]
+                              ) -> tuple[str, str, list[dict[str, Any]]]:
     """把 chat 的 messages 压成 Kiro 的 conversationState。
 
     Kiro 的形状是「历史 + 当前消息」，没有独立的 system 字段——system 内容
     拼到**当前用户消息**前面（这是社区实现的通行做法，实测可用）。
 
-    返回 ``(content, model_id)``。
+    返回 ``(content, model_id, history)``。
+
+    ⚠ **``history`` 必须真的发给上游**，否则模型完全失忆。踩过的坑：
+    这个函数一开始只返回 ``(content, model_id)``，把算好的 ``turns`` 直接丢掉，
+    于是每次请求都只有最后一条 user 消息——表现是「在 dsh 里聊了两句，第三句
+    就忘记前面说过什么」，而换别的通道（如 deepseek）正常，极易误判成上游问题。
+
+    ``history`` 的元素是 Kiro 的形状（实测可用，问它「我叫什么」能正确答出）::
+
+        {"userInputMessage": {"content": ..., "modelId": ..., "origin": "AI_EDITOR"}}
+        {"assistantResponseMessage": {"content": ...}}
 
     只取最后一条 user 作为 currentMessage，其余按序进 history。连续同角色
     的消息合并：Kiro 对角色交替没有严格校验，但合并能少掉「assistant 空串」
@@ -184,7 +293,19 @@ def _messages_to_conversation(body: dict[str, Any]) -> tuple[str, str]:
     if system_parts:
         prefix = "\n\n".join(system_parts)
         content = f"{prefix}\n\n{content}" if content else prefix
-    return content, model_id
+    # 转成 Kiro 的 history 形状。空内容的历史条目直接跳过——上游对空串不友好，
+    # 而且没有信息量。
+    history: list[dict[str, Any]] = []
+    for turn in turns:
+        text = str(turn.get("content") or "")
+        if not text.strip():
+            continue
+        if turn.get("role") == "assistant":
+            history.append({"assistantResponseMessage": {"content": text}})
+        else:
+            history.append({"userInputMessage": {
+                "content": text, "modelId": model_id, "origin": "AI_EDITOR"}})
+    return content, model_id, history
 
 
 def _resolve_upstream_model(model: str, id_map: dict[str, str]) -> str:
@@ -209,7 +330,7 @@ def _chat_to_kiro(body: dict[str, Any],
     ⚠ **不要带 ``editorState``**：实测带它回 ``400 REQUEST_BODY_INVALID``，
     去掉就 200。``profileArn`` 有就带、没有也能通（两种都验过）。
     """
-    content, model_id = _messages_to_conversation(body)
+    content, model_id, history = _messages_to_conversation(body)
     model_id = _resolve_upstream_model(model_id, id_map or {})
     user_message: dict[str, Any] = {
         "content": content,
@@ -220,6 +341,8 @@ def _chat_to_kiro(body: dict[str, Any],
         "conversationState": {
             "chatTriggerType": "MANUAL",
             "conversationId": str(uuid.uuid4()),
+            # 历史一定要带上（见 _messages_to_conversation 的 ⚠ 说明）
+            **({"history": history} if history else {}),
             "currentMessage": {"userInputMessage": user_message},
         },
     }
@@ -340,6 +463,12 @@ class KiroProvider(BaseProvider):
             rate = item.get("rateMultiplier")
             if isinstance(rate, (int, float)) and not isinstance(rate, bool):
                 model["credits"] = round(float(rate), 2)
+            # 上下文窗口：token 反推要用（ctx% × 窗口 ≈ input token）。
+            # 上游给了 maxInputTokens 就用它，没给留空交给兜底常量。
+            win = item.get("maxInputTokens") or item.get("contextWindow")
+            if isinstance(win, int) and not isinstance(win, bool) and win > 0:
+                model["context_window"] = win
+                _MODEL_WINDOWS[public] = win
             out.append(model)
         return out
 
@@ -433,8 +562,11 @@ class KiroProvider(BaseProvider):
 
         token, cred = creds.ensure_account_token(account_id)
         region = str(cred.get("region") or creds.DEFAULT_REGION)
+        # ``isEmailRequired=true`` 才会有 ``userInfo.email``——false 时那个字段是
+        # null。用户要求「额度里要看到账号名」，而 profileArn 尾部（KGVMAMAMGGDK）
+        # 和本地 id（c-d5c7...）都不是人能认的，邮箱才是。多一个参数不影响用量数字。
         url = (f"https://codewhisperer.{region}.amazonaws.com/getUsageLimits"
-               "?origin=AI_EDITOR&isEmailRequired=false")
+               "?origin=AI_EDITOR&isEmailRequired=true")
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {token}",
             "Accept": "application/json",
@@ -523,7 +655,8 @@ class KiroProvider(BaseProvider):
                     raise HTTPException(status_code=resp.status_code, detail={"error": {
                         "message": f"kiro 上游错误: {body_text[:300]}",
                         "type": "upstream_error"}})
-                return await self._respond(resp, protocol, model_id, stream)
+                return await self._respond(resp, protocol, model_id, stream,
+                                           input_chars=_input_chars(payload))
             except HTTPException:
                 raise
             except Exception as exc:  # noqa: BLE001 - 单账号失败换下一个
@@ -550,7 +683,8 @@ class KiroProvider(BaseProvider):
         return await client.send(request, stream=True)
 
     async def _respond(self, resp: httpx.Response, protocol: str,
-                       model: str, stream: bool) -> StreamingResponse | JSONResponse:
+                       model: str, stream: bool, *,
+                       input_chars: int = 0) -> StreamingResponse | JSONResponse:
         """把上游 EventStream 转成客户端要的协议。"""
         request_id = "chatcmpl-" + uuid.uuid4().hex[:24]
         created = int(time.time())
@@ -569,20 +703,25 @@ class KiroProvider(BaseProvider):
         # event loop」的坑——实测过一次），而是把两个协议的输出都做成
         # **异步生成器**：内部用 async for 收字节、同步解析、立即 yield 出去。
         if stream:
-            gen = (self._stream_anthropic(byte_iter(), model, message_id)
+            gen = (self._stream_anthropic(byte_iter(), model, message_id,
+                                          input_chars=input_chars)
                    if protocol == "anthropic"
-                   else self._stream_openai(byte_iter(), model, request_id, created))
+                   else self._stream_openai(byte_iter(), model, request_id, created,
+                                            input_chars=input_chars))
             return StreamingResponse(gen, media_type="text/event-stream",
                                      headers=_SSE_HEADERS)
 
         # 非流式：把事件流聚合完再回一个整体 JSON
         text_parts: list[str] = []
         credit: float | None = None
+        ctx_percent: float | None = None
         async for event in self._events(byte_iter()):
             if event["type"] == "text":
                 text_parts.append(event["text"])
             elif event["type"] == "credit":
                 credit = event["credit"]
+            elif event["type"] == "context":
+                ctx_percent = event["percent"]
         text = "".join(text_parts)
         chars = len(text)
         # ⚠ ``credit`` 必须放进 **usage 里面**，不能放响应顶层。
@@ -595,14 +734,19 @@ class KiroProvider(BaseProvider):
                 "model": model,
                 "content": [{"type": "text", "text": text}] if text else [],
                 "stop_reason": "end_turn", "stop_sequence": None,
-                "usage": _usage_payload(chars, credit, anthropic=True),
+                "usage": _usage_payload(chars, credit, anthropic=True,
+                                        ctx_percent=ctx_percent,
+                                        input_chars=input_chars,
+                                        window=_window_for(model)),
             })
         return JSONResponse(content={
             "id": request_id, "object": "chat.completion", "created": created,
             "model": model,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
                          "finish_reason": "stop"}],
-            "usage": _usage_payload(chars, credit),
+            "usage": _usage_payload(chars, credit, ctx_percent=ctx_percent,
+                                    input_chars=input_chars,
+                                    window=_window_for(model)),
         })
 
     # -- 异步桥接：同步解析器 + 异步字节源 ---------------------------------
@@ -639,13 +783,18 @@ class KiroProvider(BaseProvider):
             yield event
 
     async def _stream_openai(self, source: AsyncIterator[bytes], model: str,
-                             request_id: str, created: int) -> AsyncIterator[str]:
+                             request_id: str, created: int, *,
+                             input_chars: int = 0) -> AsyncIterator[str]:
         first = True
         chars = 0
         credit: float | None = None
+        ctx_percent: float | None = None
         async for event in self._events(source):
             if event["type"] == "credit":
                 credit = event["credit"]
+                continue
+            if event["type"] == "context":
+                ctx_percent = event["percent"]
                 continue
             if event["type"] != "text":
                 continue
@@ -675,12 +824,16 @@ class KiroProvider(BaseProvider):
                 "id": request_id, "object": "chat.completion.chunk",
                 "created": created, "model": model,
                 "choices": [],
-                "usage": _usage_payload(chars, credit),
+                "usage": _usage_payload(chars, credit,
+                                        ctx_percent=ctx_percent,
+                                        input_chars=input_chars,
+                                        window=_window_for(model)),
             })
         yield "data: [DONE]\n\n"
 
     async def _stream_anthropic(self, source: AsyncIterator[bytes], model: str,
-                                message_id: str) -> AsyncIterator[str]:
+                                message_id: str, *,
+                                input_chars: int = 0) -> AsyncIterator[str]:
         def ev(name: str, payload: dict[str, Any]) -> str:
             return f"event: {name}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -693,9 +846,13 @@ class KiroProvider(BaseProvider):
                                          "content_block": {"type": "text", "text": ""}})
         chars = 0
         credit: float | None = None
+        ctx_percent: float | None = None
         async for event in self._events(source):
             if event["type"] == "credit":
                 credit = event["credit"]
+                continue
+            if event["type"] == "context":
+                ctx_percent = event["percent"]
                 continue
             if event["type"] != "text":
                 continue
@@ -709,7 +866,10 @@ class KiroProvider(BaseProvider):
         # 日志因此能显示 kiro 的真实计费。客户端不认识这个键会忽略，无害。
         yield ev("message_delta", {"type": "message_delta", "delta": {
             "stop_reason": "end_turn", "stop_sequence": None},
-            "usage": _usage_payload(chars, credit, anthropic=True)})
+            "usage": _usage_payload(chars, credit, anthropic=True,
+                                    ctx_percent=ctx_percent,
+                                    input_chars=input_chars,
+                                    window=_window_for(model))})
         yield ev("message_stop", {"type": "message_stop"})
 
     async def _get_client(self) -> httpx.AsyncClient:
