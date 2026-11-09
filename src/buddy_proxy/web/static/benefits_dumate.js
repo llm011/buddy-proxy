@@ -183,4 +183,5 @@ const ACCT_LOADERS = {
   kimi: () => loadKimiAccounts(),
   codex: () => loadCodexAccounts(),
   dumate: () => loadDumateAccounts(),
+  kiro: () => loadKiroAccounts(),
 };

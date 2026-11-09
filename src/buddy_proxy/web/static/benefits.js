@@ -687,7 +687,15 @@ function renderBenefits(opts) {
   // traepat/antigravity/kimi/codex/qoder/qoderintl/trae/traeintl/codebuddy/dumate 的额度
   // 挪到底部专属面板内展示，这里排除，避免重复且缩短页面。
   // 停用的通道整卡不展示（模型页 provider 开关，用户 2026-10-06 需求）
-  const qps = (BENEFITS.providers || []).filter(p => !p.disabled && p.quota.supported && p.id !== 'traepat' && p.id !== 'antigravity' && p.id !== 'kimi' && p.id !== 'codex' && p.id !== 'qoder' && p.id !== 'qoderintl' && p.id !== 'trae' && p.id !== 'traeintl' && p.id !== 'codebuddy' && p.id !== 'codebuddyintl' && p.id !== 'dumate');
+  // 排除表里是「有专属面板」的通道：它们的额度在各自面板里展示，这里不再重复。
+  // ⚠ 新增通道时**只有确实做了专属面板**才能加进这个表；否则它在两个地方都
+  // 不出现——踩过一次：kiro 既没有专属面板、又没被排除表之外的逻辑覆盖，
+  // 结果额度卡整块消失（后端数据明明有）。现在 kiro 走通用额度卡，不排除。
+  const _PANEL_PROVIDERS = new Set(['traepat', 'antigravity', 'kimi', 'codex',
+    'qoder', 'qoderintl', 'trae', 'traeintl', 'codebuddy', 'codebuddyintl',
+    'dumate', 'kiro']);
+  const qps = (BENEFITS.providers || []).filter(
+    p => !p.disabled && p.quota.supported && !_PANEL_PROVIDERS.has(p.id));
   // zcode / zcode-start 是同一家产品的两档套餐，卡片排一起好对照——providers
   // 默认按通道注册顺序排，zcode-start 落在队尾、和 zcode 中间隔着 glm/mimo 的卡
   const zcIdx = qps.findIndex(p => p.id === 'zcode');
@@ -727,6 +735,7 @@ function renderBenefits(opts) {
   renderQoderIntlPanel();
   renderAntigravityPanel();
   renderDumatePanel();
+  renderKiroPanel();
   syncQuotaFold();  // 样式与布局就位后按实际高度校准（各面板都已重建完）
   renderBenefitsNav();
 }

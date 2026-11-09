@@ -101,6 +101,28 @@ def _sse_json(payload: dict[str, Any]) -> str:
     return "data: " + json.dumps(payload, ensure_ascii=False) + "\n\n"
 
 
+#: Claude 系模型对外用**短横线**版本号（``claude-opus-5-5``），与 Anthropic
+#: 官方命名（``claude-3-5-sonnet``）和 yuntoken 目录一致。
+#:
+#: 上游（kiro）自己写的是点号（``claude-opus-5.5``），所以对外 id 与转发时
+#: 用的上游名**不是同一串**，必须双向映射：
+#:
+#: - 拉目录时 ``claude-opus-5.5`` → 对外 id ``claude-opus-5-5``，原串存进
+#:   ``upstream_key``（排障时能对回上游）；
+#: - 转发时把客户端给的 id 还原成上游串（也接受点号写法，做别名）。
+#:
+#: 只对 ``claude-`` 前缀生效。``gpt-5.6-sol`` / ``minimax-m2.5`` 这些**保持点号**
+#: —— 它们的厂商命名本来就用点，改了反而对不上别处的目录。
+_CLAUDE_PREFIX = "claude-"
+
+
+def _public_model_id(upstream_id: str) -> str:
+    """上游 id → 对外 id（只对 claude 系把点号换成短横线）。"""
+    if upstream_id.startswith(_CLAUDE_PREFIX) and "." in upstream_id:
+        return upstream_id.replace(".", "-")
+    return upstream_id
+
+
 def endpoint_base(region: str) -> str:
     """推理端点基址。Kiro 用区域化的 ``q.<region>.amazonaws.com``。"""
     return f"https://q.{region or creds.DEFAULT_REGION}.amazonaws.com"
@@ -165,13 +187,30 @@ def _messages_to_conversation(body: dict[str, Any]) -> tuple[str, str]:
     return content, model_id
 
 
-def _chat_to_kiro(body: dict[str, Any]) -> dict[str, Any]:
+def _resolve_upstream_model(model: str, id_map: dict[str, str]) -> str:
+    """客户端给的模型名 → 上游真名。
+
+    认三种写法：对外 id（``claude-opus-5-5``）、上游原名（``claude-opus-5.5``）、
+    以及带 ``kiro/`` 前缀的形式。都不命中就原样透传——上游会报错，比我们猜
+    一个名字然后「模型不存在」更好查。
+    """
+    want = (model or "").strip()
+    if "/" in want:
+        prefix, _, rest = want.partition("/")
+        if prefix == "kiro" and rest:
+            want = rest
+    return id_map.get(want, want)
+
+
+def _chat_to_kiro(body: dict[str, Any],
+                  id_map: dict[str, str] | None = None) -> dict[str, Any]:
     """chat 请求体 → Kiro ``generateAssistantResponse`` 请求体。
 
     ⚠ **不要带 ``editorState``**：实测带它回 ``400 REQUEST_BODY_INVALID``，
     去掉就 200。``profileArn`` 有就带、没有也能通（两种都验过）。
     """
     content, model_id = _messages_to_conversation(body)
+    model_id = _resolve_upstream_model(model_id, id_map or {})
     user_message: dict[str, Any] = {
         "content": content,
         "modelId": model_id,
@@ -211,6 +250,8 @@ class KiroProvider(BaseProvider):
         self._client: httpx.AsyncClient | None = None
         self._models_cache: list[dict[str, Any]] = []
         self._models_error = ""
+        #: 对外 id → 上游 id（同值时也存，方便统一查）。见 _public_model_id。
+        self._id_map: dict[str, str] = {}
 
     # -- 模型目录 -----------------------------------------------------------
 
@@ -278,12 +319,19 @@ class KiroProvider(BaseProvider):
             mid = str(item.get("modelId") or "").strip()
             if not mid:
                 continue
+            public = _public_model_id(mid)
+            # 登记双向映射：转发时要还原成上游串，别名解析要能认两种写法
+            self._id_map[public] = mid
+            if public != mid:
+                self._id_map.setdefault(mid, mid)   # 点号写法也当别名收下
             model: dict[str, Any] = {
-                "id": mid,
+                "id": public,
                 "object": "model",
                 "created": 0,
                 "owned_by": self.id,
                 "name": str(item.get("modelName") or mid),
+                # 上游真名：对外 id 变了以后，排障/对账要靠它
+                **({"upstream_key": mid} if public != mid else {}),
             }
             # 上游给了输入模态就用它（TEXT/IMAGE）；没给就不猜
             types = item.get("supportedInputTypes")
@@ -336,7 +384,15 @@ class KiroProvider(BaseProvider):
             title = str((usage.get("subscriptionInfo") or {}).get("subscriptionTitle") or "")
             if level is None and title:
                 level = title
-            prefix = f"Kiro #{index} · " if multi else ""
+            # 标签里**始终带账号名**（不只在多账号时加序号）。
+            #
+            # 用户 2026-11-10 反馈：「看得到额度，但看不到是哪个账号」。单账号
+            # 时不带名字，用户没法确认「这 1000 额度属于哪个号」——尤其
+            # kiro 会切号（凭据文件被覆盖），过几天再看就分不清了。
+            # 名字用 alias（用户可改），没有就用 profileArn 尾部/账号 id 短哈希。
+            account_label = acct.label or acct.id
+            prefix = (f"Kiro #{index} · {account_label} · " if multi
+                      else f"Kiro · {account_label} · ")
             for pack in usage.get("usageBreakdownList") or []:
                 if not isinstance(pack, dict):
                     continue
@@ -415,7 +471,10 @@ class KiroProvider(BaseProvider):
         if not want:
             return False
         bare = want.removeprefix(f"{self.id}/")
-        return any(str(m.get("id") or "") == bare for m in self._models_cache)
+        # 两条都认：对外 id（短横线）与上游原名（点号）——用户可能从上游
+        # 文档里直接抄了 ``claude-opus-5.5`` 过来。
+        return (any(str(m.get("id") or "") == bare for m in self._models_cache)
+                or bare in self._id_map)
 
     # -- 转发 ---------------------------------------------------------------
 
@@ -436,7 +495,7 @@ class KiroProvider(BaseProvider):
         if not accounts:
             self.ensure_auth()
         stream = bool(body.get("stream", False))
-        payload = _chat_to_kiro(body)
+        payload = _chat_to_kiro(body, self._id_map)
         model_id = str(body.get("model") or "").strip()
 
         last_exc: Exception | None = None

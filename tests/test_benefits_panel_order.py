@@ -28,6 +28,9 @@ EXPECTED_ORDER = [
     "qoderintl-panel",
     "antigravity-panel",
     "dumate-panel",
+    # kiro 放在 dumate 之后：两者都是「个人账号」性质的直连通道，排在
+    # antigravity/dumate 这组之后不打断既有的尾部顺序（2026-11-10 新增）。
+    "kiro-panel",
     "traepat-panel",
 ]
 
@@ -44,9 +47,11 @@ def test_personal_tail_then_traepat_last():
     """个人账号尾部三卡顺序不变，运维性质的 Trae PAT 永远收在最末。"""
     order = _panel_order(_INDEX.read_text("utf-8"))
     assert order[-1] == "traepat-panel"
-    assert order[-2] == "dumate-panel"
-    assert order[-3] == "antigravity-panel"
-    assert order[-4] == "qoderintl-panel"
+    # kiro 在 dumate 之后插入（同属个人账号直连通道），尾部三卡相对顺序不变
+    assert order[-2] == "kiro-panel"
+    assert order[-3] == "dumate-panel"
+    assert order[-4] == "antigravity-panel"
+    assert order[-5] == "qoderintl-panel"
 
 
 def test_cn_panel_precedes_its_intl_twin():

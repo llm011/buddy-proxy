@@ -103,6 +103,7 @@ function acctRenamePrompt(pid, id, current) {
       (typeof CODEBUDDY_ACCTS !== 'undefined' ? CODEBUDDY_ACCTS : []) || [],
       (typeof CODEBUDDY_INTL_ACCTS !== 'undefined' ? CODEBUDDY_INTL_ACCTS : []) || [],
       (typeof DUMATE_STATE !== 'undefined' && DUMATE_STATE ? DUMATE_STATE.accts : []) || [],
+      (typeof KIRO_ACCTS !== 'undefined' ? KIRO_ACCTS : []) || [],
       // 签到明细行（各通道 checkin.accounts[].name，后端按 alias 链下发）兜底——
       // 快照数组未到位（首屏）时从这里也能拿到显示名
       (typeof BENEFITS !== 'undefined' && BENEFITS.providers
