@@ -55,7 +55,9 @@ def test_traeintl_has_dedicated_quota_panel_and_explains_no_checkin():
     index = (_STATIC / "index.html").read_text(encoding="utf-8")
     assert 'id="traeintl-panel"' in index
     assert "renderTraeIntlPanel()" in CORE
-    assert "p.id !== 'traeintl'" in CORE, "专属面板存在时通用额度卡必须排除，避免重复"
+    # 2026-11-10 起排除表收敛成 _PANEL_PROVIDERS 集合；断言随之改成「在集合里」。
+    assert "'traeintl'" in CORE and "_PANEL_PROVIDERS" in CORE, \
+        "专属面板存在时通用额度卡必须排除，避免重复"
 
     panel = TRAE[TRAE.index("function renderTraeIntlPanel"):]
     assert "p.id === 'traeintl'" in panel

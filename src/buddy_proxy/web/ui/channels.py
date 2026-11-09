@@ -1106,3 +1106,24 @@ async def ui_kiro_account_delete(account_id: str, request: Request):
         raise HTTPException(status_code=404, detail={"error": {
             "message": f"账号不存在: {account_id}"}})
     return {"ok": True}
+
+
+@app.post("/ui/api/kiro/accounts/rename")
+async def ui_kiro_account_rename(request: Request):
+    """改 kiro 账号显示名（只改索引里的 label，不动凭据）。"""
+    _ensure_local(request)
+    from ...kiro import credentials as kiro_creds
+
+    body = await request.json()
+    account_id = str(body.get("id") or "").strip()
+    alias = str(body.get("alias") or "").strip()
+    if not account_id:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 id"}})
+    try:
+        accounts = await asyncio.to_thread(
+            kiro_creds.rename_account, account_id, alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {
+            "message": str(exc)}}) from exc
+    return {"ok": True, "accounts": [
+        {"id": a.id, "label": a.label, "alias": a.label} for a in accounts]}

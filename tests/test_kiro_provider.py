@@ -365,3 +365,68 @@ def test_kiro_rates_registered_for_estimation():
     register_kiro_rates({"claude-haiku-4.5": 0.4})
     assert _multiplier("kiro", "claude-haiku-4.5") == 0.4
     register_kiro_rates({})  # 清空，避免污染其它用例
+
+
+# ---------------------------------------------------------------------------
+# 对外 id 用短横线（与 yuntoken / Anthropic 官方命名一致）
+# ---------------------------------------------------------------------------
+#
+# 用户 2026-11-10 要求：kiro 也统一成 `claude-haiku-5-5` 这种写法（yuntoken 与
+# Anthropic 官方都是这么写的）。上游 kiro 自己写点号（`claude-haiku-5.5`），
+# 所以对外 id 与转发用的上游名不是同一串，必须双向映射：
+#   - 拉目录：点号 → 短横线，原串存 upstream_key
+#   - 转发：还原成上游串（也接受点号写法当别名）
+
+def test_public_id_rewrites_claude_dots():
+    from buddy_proxy.kiro.provider import _public_model_id
+
+    assert _public_model_id("claude-opus-5.5") == "claude-opus-5-5"
+    assert _public_model_id("claude-haiku-4.5") == "claude-haiku-4-5"
+    assert _public_model_id("claude-fable-5.1") == "claude-fable-5-1"
+
+
+def test_public_id_leaves_other_vendors_alone():
+    """非 claude 系保持点号——它们的厂商命名本来就用点。"""
+    from buddy_proxy.kiro.provider import _public_model_id
+
+    assert _public_model_id("gpt-5.6-sol") == "gpt-5.6-sol"
+    assert _public_model_id("minimax-m2.5") == "minimax-m2.5"
+    assert _public_model_id("deepseek-3.2") == "deepseek-3.2"
+    assert _public_model_id("kimi-k3") == "kimi-k3"
+
+
+def test_public_id_idempotent():
+    """已经是短横线的名字不再动（避免 refresh 两次变成怪名）。"""
+    from buddy_proxy.kiro.provider import _public_model_id
+
+    assert _public_model_id("claude-opus-5-5") == "claude-opus-5-5"
+
+
+def test_resolve_upstream_model_accepts_both_forms():
+    """转发时三种写法都要还原成上游真名。"""
+    from buddy_proxy.kiro.provider import _resolve_upstream_model
+
+    id_map = {"claude-opus-5-5": "claude-opus-5.5"}
+    assert _resolve_upstream_model("claude-opus-5-5", id_map) == "claude-opus-5.5"
+    # 点号写法本身就是上游名
+    assert _resolve_upstream_model("claude-opus-5.5", id_map) == "claude-opus-5.5"
+    # 带通道前缀
+    assert _resolve_upstream_model("kiro/claude-opus-5-5", id_map) == "claude-opus-5.5"
+
+
+def test_resolve_upstream_model_passes_unknown_through():
+    """认不出就原样透传——让上游报错，别猜一个名字。"""
+    from buddy_proxy.kiro.provider import _resolve_upstream_model
+
+    assert _resolve_upstream_model("some-new-model", {}) == "some-new-model"
+
+
+def test_chat_to_kiro_uses_upstream_name():
+    """核心断言：对外 id 进、上游 id 出。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    body = {"model": "claude-opus-5-5",
+            "messages": [{"role": "user", "content": "hi"}]}
+    out = _chat_to_kiro(body, {"claude-opus-5-5": "claude-opus-5.5"})
+    assert out["conversationState"]["currentMessage"]["userInputMessage"]["modelId"] \
+        == "claude-opus-5.5"
