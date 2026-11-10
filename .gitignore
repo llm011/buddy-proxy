@@ -51,6 +51,9 @@ build/
 !README.md
 !README_zh.md
 !docs/architecture.md
+# AGENTS.md 是给 agent / 协作者的公开工作约定（分支策略、worktree 规则、
+# 新通道检查清单），和 README 同属"该入库的公开文档"——不是本地分析记录。
+!AGENTS.md
 
 # VS Code 扩展文件
 *.vsix
