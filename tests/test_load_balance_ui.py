@@ -69,3 +69,16 @@ def test_toggle_is_incremental_write():
     src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
     assert "load_balance: {[pid]: !!on}" in src, (
         "切换开关必须只提交目标通道，整表覆盖会把其它通道的开关悄悄关掉")
+
+
+def test_ui_shows_skipped_models():
+    """开关旁要能看出「有模型被跳过」——否则用户会以为均衡对全通道生效。"""
+    src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
+    assert "LOAD_BALANCE_EXCLUDED" in src
+    assert "已跳过" in src
+    assert "showLoadBalanceSkipped" in src
+
+
+def test_ui_reads_excluded_list_from_settings():
+    src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
+    assert "load_balance_excluded" in src, "排除表要由 /ui/api/settings 下发"

@@ -21,6 +21,10 @@ let ACCT_CONFIRM_OPEN = false;
 //: 已开启「负载均衡」的通道 id 列表（GET /ui/api/settings 的 load_balance）。
 //: 放模块级而不是 DOM：整页 30s 重建一次，DOM 上的状态会被冲掉。
 let LOAD_BALANCE_ON = [];
+//: 已开启均衡的通道里，哪些模型因「缓存按账号隔离」被自动跳过。
+//: {provider: [model, ...]}，来源 GET /ui/api/settings 的 load_balance_excluded。
+//: 与 LOAD_BALANCE_ON 分开存：一个是「开没开」，一个是「开了之后哪些模型不跟着转」。
+let LOAD_BALANCE_EXCLUDED = {};
 function confirmAccountDelete(opts) {
   if (ACCT_CONFIRM_OPEN) return Promise.resolve(false);
   ACCT_CONFIRM_OPEN = true;
@@ -221,19 +225,31 @@ function providerRefreshButton(pid) {
 function providerLoadBalanceToggle(pid, multi) {
   if (!multi) return '';
   const on = (LOAD_BALANCE_ON || []).includes(pid);
-  // 缓存提示**不能一刀切**：实测不同模型的上游缓存隔离粒度不一样——glm-5.3-flash /
-  // kimi-k3.1-pro 换账号照样 100% 命中（缓存按内容前缀、跨账号共享），
-  // 而 deepseek-v4.1-flash 换账号 0 命中（按账号隔离）。所以这里只说「可能」，
-  // 真实影响让用户看日志的「↺ 前缀复用率」去判断，不要替上游下结论。
+  // 被自动跳过的模型（缓存按账号隔离，轮转会白丢缓存）。只有开着开关时才提示：
+  // 没开的时候不轮转，说「跳过了谁」没有意义。
+  const skipped = (LOAD_BALANCE_EXCLUDED || {})[pid] || [];
+  const skippedNote = (on && skipped.length)
+    ? `<span class="lb-skip" onclick="showLoadBalanceSkipped('${pid}')" style="cursor:pointer" ` +
+      `title="这些模型的缓存按账号隔离，换号会让本次前缀全部未命中，` +
+      `所以即使开关打开也不参与轮转：\n${esc(skipped.join('、'))}">` +
+      `已跳过 ${skipped.length} 个 ▾</span>`
+    : '';
   const hint = on
-    ? '已开启：按剩余积分加权轮转（额度多的账号用得更多）。注意部分模型的缓存按账号'
-      + '隔离，换号后本次前缀可能没命中——日志页「↺」列可看到真实复用率'
-    : '开启后按剩余积分加权轮转。注意部分模型的缓存按账号隔离，换号可能让本次前缀'
-      + '没命中（日志页「↺」列可查真实复用率）';
+    ? '已开启：按剩余积分加权轮转（额度多的账号用得更多）'
+      + (skipped.length ? `；${skipped.length} 个缓存按账号隔离的模型保持原顺位` : '')
+    : '开启后按剩余积分加权轮转。缓存按账号隔离的模型会自动跳过，避免白丢缓存';
   return `<label class="lb-toggle" title="${esc(hint)}">` +
     `<input type="checkbox" ${on ? 'checked' : ''} ` +
     `onchange="setProviderLoadBalance('${pid}', this.checked, this)">` +
-    `<span>负载均衡</span></label>`;
+    `<span>负载均衡</span></label>` + skippedNote;
+}
+
+/** 展开「已跳过 N 个」的模型清单（点一下弹 toast，不占版面）。 */
+function showLoadBalanceSkipped(pid) {
+  const models = (LOAD_BALANCE_EXCLUDED || {})[pid] || [];
+  if (!models.length) { toast('没有需要跳过的模型'); return; }
+  toast(`${pid} 跳过 ${models.length} 个缓存按账号隔离的模型：${models.join('、')}`
+    + '（换号会让前缀全部未命中，所以保持原顺位）');
 }
 
 /** 切换某通道的负载均衡开关。后端是**增量**写入，只动这一个通道。 */
@@ -244,6 +260,8 @@ async function setProviderLoadBalance(pid, on, el) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({load_balance: {[pid]: !!on}})});
     LOAD_BALANCE_ON = (r.settings && r.settings.load_balance) || [];
+    // 排除表也跟着变（开关一开，该通道的隔离模型清单才有意义）
+    LOAD_BALANCE_EXCLUDED = r.load_balance_excluded || LOAD_BALANCE_EXCLUDED;
     toast(on
       ? `${pid} 已开启负载均衡：按剩余积分在账号间加权轮转`
       : `${pid} 已关闭负载均衡：恢复按顺位固定主备`);
@@ -262,8 +280,10 @@ async function loadLoadBalanceState() {
   try {
     const r = await api('/ui/api/settings');
     LOAD_BALANCE_ON = r.load_balance || [];
+    LOAD_BALANCE_EXCLUDED = r.load_balance_excluded || {};
   } catch (e) {
     LOAD_BALANCE_ON = [];
+    LOAD_BALANCE_EXCLUDED = {};
   }
 }
 

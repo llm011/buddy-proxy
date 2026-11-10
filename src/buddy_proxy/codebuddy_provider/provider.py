@@ -1371,7 +1371,9 @@ class CodeBuddyProvider(BaseProvider):
         # 负载均衡（额度页开关，用户 2026-11-10 需求）：开启后不再固定从顺位
         # 第一开始，而是在**已通过过滤的**这批账号里按剩余积分加权抽一次排列。
         # 过滤（冷却/区/单模型限流）与关掉时完全一致——本步只改顺序。
-        accounts = lb_mod.reorder(get_state(), self.id, accounts)
+        accounts = lb_mod.reorder(
+            get_state(), self.id, accounts,
+            model=str(upstream_body.get("model") or "") or None)
         if not accounts:
             hint = "" if self._region == "cn" else "（海外版）"
             raise HTTPException(

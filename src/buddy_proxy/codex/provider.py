@@ -268,7 +268,7 @@ class CodexProvider(BaseProvider):
         accounts = failover.available_accounts()
         # 负载均衡（额度页开关）：只改"先试谁"，不改"谁能试"——
         # 冷却/权限等过滤已在上一行完成。关着时顺序与历史完全一致。
-        accounts = lb_mod.reorder(_lb_state(), 'codex', accounts)
+        accounts = lb_mod.reorder(_lb_state(), 'codex', accounts, model=upstream_model)
         if not accounts:
             raise HTTPException(
                 status_code=429,
@@ -524,7 +524,7 @@ class CodexProvider(BaseProvider):
         accounts = failover.available_accounts()
         # 负载均衡（额度页开关）：只改"先试谁"，不改"谁能试"——
         # 冷却/权限等过滤已在上一行完成。关着时顺序与历史完全一致。
-        accounts = lb_mod.reorder(_lb_state(), 'codex', accounts)
+        accounts = lb_mod.reorder(_lb_state(), 'codex', accounts, model=model)
         if not accounts:
             raise HTTPException(
                 status_code=429,
