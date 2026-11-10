@@ -153,6 +153,8 @@ globalThis.acctSubHtml = () => '';
 globalThis.acctDeleteButton = () => '<button class="del"></button>';
 globalThis.acctRowButtons = () => '<span class="rowbtns"></span>';
 globalThis.providerRefreshButton = () => '';
+// 负载均衡开关（benefits_accounts.js）：本用例只关心额度画没画，恒返回空
+globalThis.providerLoadBalanceToggle = () => '';
 globalThis.loadDumateAccounts = () => Promise.resolve();
 globalThis.quotaItemHtml = it => '<div class="qitem">' + esc(it.label) + '</div>';
 globalThis.quotaItemsHtml = (items, key) =>

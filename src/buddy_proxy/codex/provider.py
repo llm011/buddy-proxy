@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..asyncutil import LoopSafeLock
 from ..core.account_store import quota_epoch_from
+from ..core import load_balance as lb_mod
 from ..core.metrics import ACCOUNT_META
 from ..providers.base import BaseProvider
 from . import failover
@@ -265,6 +266,9 @@ class CodexProvider(BaseProvider):
         upstream_model = str(entry["id"])
 
         accounts = failover.available_accounts()
+        # 负载均衡（额度页开关）：只改"先试谁"，不改"谁能试"——
+        # 冷却/权限等过滤已在上一行完成。关着时顺序与历史完全一致。
+        accounts = lb_mod.reorder(_lb_state(), 'codex', accounts)
         if not accounts:
             raise HTTPException(
                 status_code=429,
@@ -518,6 +522,9 @@ class CodexProvider(BaseProvider):
                 }},
             )
         accounts = failover.available_accounts()
+        # 负载均衡（额度页开关）：只改"先试谁"，不改"谁能试"——
+        # 冷却/权限等过滤已在上一行完成。关着时顺序与历史完全一致。
+        accounts = lb_mod.reorder(_lb_state(), 'codex', accounts)
         if not accounts:
             raise HTTPException(
                 status_code=429,
@@ -698,6 +705,21 @@ class CodexProvider(BaseProvider):
         except ValueError as exc:
             raise RuntimeError("上游返回的不是 JSON") from exc
         return parse_usage(payload)
+
+
+    def _quota_account_ids(self) -> dict[str, str]:
+        """额度标签序号（``#N``，字符串）→ 账号 id，供负载均衡把权重落到人头上。
+
+        必须与 :meth:`quota` 里 ``enumerate(accounts, 1)`` 的那份列表**完全同源**
+        （同一个函数、同一个过滤），否则 ``#2`` 会被记到另一个账号的权重上：
+        轮转就会去偏向一个其实没额度的号，比没有权重更糟。
+        """
+        try:
+            accounts = list_accounts()
+        except Exception:  # noqa: BLE001 - 拿不到就不给权重，不影响额度展示
+            return {}
+        return {str(i): str(getattr(a, "id", "") or "")
+                for i, a in enumerate(accounts or (), start=1) if getattr(a, "id", "")}
 
     def quota_epoch(self) -> str:
         """账号集合指纹：账号变化时让额度缓存失效。"""
@@ -1096,3 +1118,12 @@ if __name__ == "__main__":  # pragma: no cover
     ))
     print("status:", resp.status_code)
     print(str(resp.body)[:400])
+
+def _lb_state():
+    """当前运行态（负载均衡开关读它）。未初始化时返回 None。
+
+    走 ``core.state`` 的模块级属性而不是导入期绑定的函数：测试普遍
+    monkeypatch ``state.proxy_state``，绑定早了会拿到旧对象。
+    """
+    from ..core import state as _state
+    return getattr(_state, "proxy_state", None)

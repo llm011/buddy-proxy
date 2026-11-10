@@ -96,7 +96,7 @@ function renderKiroPanel() {
       <span style="font-weight:600">Kiro（AWS CodeWhisperer）</span>
       <span class="muted" style="font-size:12px">${accts.length} 个账号</span>
       <span style="flex:1"></span>
-      ${providerRefreshButton('kiro')}
+      ${providerLoadBalanceToggle('kiro', accts.length > 1)}${providerRefreshButton('kiro')}
     </div>
     ${rows || '<div class="empty" style="padding:10px 0">还没有账号</div>'}
     <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">

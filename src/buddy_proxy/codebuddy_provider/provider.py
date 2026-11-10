@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.providers.base import BaseProvider
 from buddy_proxy.core import cooldown as cooldown_mod
+from buddy_proxy.core import load_balance as lb_mod
 from buddy_proxy.core.account_store import quota_epoch_from
 from buddy_proxy.core.checkin import (
     SOURCE_INFERRED,
@@ -1050,6 +1051,9 @@ class CodeBuddyProvider(BaseProvider):
         # 额度耗尽 → 自动排到顺位末尾。放在聚合之后、返回之前：此时一轮查询
         # 已经完整，不会出现「查到一半就动顺位」导致序号错位。
         self._demote_exhausted_accounts(accounts, remaining_by_id)
+        # 顺带把剩余量喂给负载均衡的权重表：额度页/后台预热每查一轮就刷新一次
+        # 分布，转发路径直接读，不必自己再打计费接口。
+        lb_mod.weights_from_items(self.id, remaining_by_id)
         if failed:
             items.insert(0, {
                 "label": f"{self._quota_tag} 额度查询失败",
@@ -1243,6 +1247,20 @@ class CodeBuddyProvider(BaseProvider):
             log.warning("codebuddy 资源包有效期查询失败（%s）: %s", acct.id, e)
             return {}
 
+
+    def _quota_account_ids(self) -> dict[str, str]:
+        """额度标签序号（``#N``，字符串）→ 账号 id，供负载均衡把权重落到人头上。
+
+        编号口径取 ``failover.display_index``（额度标签的 ``#N`` 就是它产生的），
+        不是 ``enumerate`` 的位次——codebuddy 的额度查询用 display_index 对齐
+        面板快照，两者可能不同源（删号会留下 priority 空洞）。
+        """
+        try:
+            didx = failover.display_index(self._region)
+        except Exception:  # noqa: BLE001
+            return {}
+        return {str(v): str(k) for k, v in (didx or {}).items()}
+
     def quota_epoch(self) -> str:
         """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。"""
         return quota_epoch_from(creds.list_accounts)
@@ -1350,6 +1368,10 @@ class CodeBuddyProvider(BaseProvider):
         # 仍可用于其它模型（见 failover.mark_model_cooldown）。
         accounts = failover.available_accounts(
             self._region, model=str(upstream_body.get("model") or "") or None)
+        # 负载均衡（额度页开关，用户 2026-11-10 需求）：开启后不再固定从顺位
+        # 第一开始，而是在**已通过过滤的**这批账号里按剩余积分加权抽一次排列。
+        # 过滤（冷却/区/单模型限流）与关掉时完全一致——本步只改顺序。
+        accounts = lb_mod.reorder(get_state(), self.id, accounts)
         if not accounts:
             hint = "" if self._region == "cn" else "（海外版）"
             raise HTTPException(

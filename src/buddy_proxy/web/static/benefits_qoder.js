@@ -170,7 +170,7 @@ function renderQoderPanel() {
         <span class="grow"></span>
         ${quotaAccountTotal(groups, {sumItems: true})}
         <span class="muted" style="font-size:11px">${multi ? '403/额度尽自动冷却换号（按登录顺位）' : '403/额度尽自动切换下一个账号'}</span>
-        ${fold.toggle}${providerRefreshButton('qoder')}
+        ${fold.toggle}${providerLoadBalanceToggle('qoder', multi)}${providerRefreshButton('qoder')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
@@ -273,7 +273,7 @@ function renderQoderIntlPanel() {
       <div class="pat-head"><span class="name">Qoder 海外版</span>
         <span class="tag">Global · 额度与签到</span>${fold.badge}<span class="grow"></span>
         ${quotaAccountTotal(groups, {sumItems: true})}
-        ${fold.toggle}${providerRefreshButton('qoderintl')}
+        ${fold.toggle}${providerLoadBalanceToggle('qoderintl', groups.size > 1)}${providerRefreshButton('qoderintl')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`

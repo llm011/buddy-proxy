@@ -54,6 +54,7 @@ from . import stream as kiro_stream
 from .credentials import KIRO_UA_VERSION, KiroAccount
 from ..providers.base import BaseProvider
 from ..core.errors import describe_exception
+from ..core import load_balance as lb_mod
 
 log = logging.getLogger(__name__)
 
@@ -831,6 +832,8 @@ class KiroProvider(BaseProvider):
         accounts = creds.list_accounts()
         if not accounts:
             self.ensure_auth()
+        # 负载均衡（额度页开关）：只改「先试谁」。关着时顺序与历史完全一致。
+        accounts = lb_mod.reorder(_lb_state(), self.id, accounts)
         stream = bool(body.get("stream", False))
         payload = _chat_to_kiro(body, self._id_map)
         model_id = str(body.get("model") or "").strip()
@@ -1201,3 +1204,13 @@ class KiroProvider(BaseProvider):
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=_TIMEOUT)
         return self._client
+
+
+def _lb_state():
+    """当前运行态（负载均衡开关读它）。未初始化时返回 None。
+
+    走 ``core.state`` 的模块级属性而不是导入期绑定的函数：测试普遍
+    monkeypatch ``state.proxy_state``，绑定早了会拿到旧对象。
+    """
+    from ..core import state as _state
+    return getattr(_state, "proxy_state", None)

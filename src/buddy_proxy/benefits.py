@@ -27,6 +27,12 @@ RETRY_THROTTLE_S = 1800
 SNAPSHOT_TTL_S = 300
 # 失败结果缓存 TTL：短得多，让网络抖动几秒恢复后下一轮就能自愈
 FAILURE_TTL_S = 30
+# 负载均衡的额度预热周期。取 10 分钟：额度是「积分」量纲、按请求消耗，
+# 几分钟的偏差只会让权重略有倾斜，不影响均衡效果；比 SNAPSHOT_TTL_S（5 分钟）
+# 长一倍，保证绝大多数轮次都是缓存命中，不额外打上游计费接口。
+LOAD_BALANCE_WARM_INTERVAL_S = 600
+# 启动后首次预热的延迟：等凭据/网络就绪，也避开「刚启动就打开管理页」那一轮。
+LOAD_BALANCE_WARM_DELAY_S = 60
 # 单次上游查询的硬超时：provider 实现各有各的 HTTP 超时，但「实现漏配/卡在
 # 网络风暴」的病态挂起不该把整个管理页拖住（实测 mimo 单键挂过 930s）。
 # 超时按失败处理走 FAILURE_TTL_S 短缓存，30s 后下一轮自然重试。
@@ -493,6 +499,45 @@ class CheckinHistory:
         return out
 
 
+def _feed_load_balance(provider_id: str, provider: Any, quota: Any) -> None:
+    """把一轮额度结果喂给负载均衡的权重表（「账号 id → 剩余」）。
+
+    放在 benefits 这一层而不是各 provider 的 ``quota()`` 里，是刻意的：
+    额度条目已经由各通道统一成同一形状（label 带 ``#N`` 分组 + ``remaining``），
+    在这里归并一次就能覆盖**所有**多账号通道，不必在 antigravity/kimi/qoder/
+    trae/codex/kiro 各写一遍（写六遍就一定会有一两处忘掉，然后那个通道的
+    权重永远是空的、静默退化成均匀轮转）。
+
+    序号 → 账号 id 的映射**向 provider 要**（``_quota_account_ids``）：额度
+    标签里的 ``#N`` 与账号快照的 ``index`` 同源，但各通道的账号列表函数签名
+    不一致（有的带 region、有的不带），在这层自己拼会拼错——拼错就会把权重
+    记到**别的账号**头上，轮转偏向错误方向，比没有权重更糟。
+
+    失败一律吞掉：额度展示是主功能，权重只是它的副产品。
+    """
+    try:
+        from buddy_proxy.core import load_balance as lb_mod
+
+        totals = lb_mod.remaining_by_account((quota or {}).get("items"))
+        if not totals:
+            return
+        by_index = getattr(provider, "_quota_account_ids", None)
+        if not callable(by_index):
+            return
+        mapping = by_index()
+        if not mapping:
+            return
+        mapped: dict[str, Any] = {}
+        for key, remaining in totals.items():
+            acct_id = mapping.get(key)
+            if acct_id:
+                mapped[acct_id] = remaining
+        if mapped:
+            lb_mod.weights_from_items(provider_id, mapped)
+    except Exception:  # noqa: BLE001 - 权重是副产品，绝不能影响额度展示
+        pass
+
+
 class BenefitsManager:
     """打卡状态聚合 + 自动打卡后台循环。挂在 ``ProxyState.benefits`` 上。"""
 
@@ -500,6 +545,8 @@ class BenefitsManager:
         self.history = CheckinHistory(history_path)
         self._state = state
         self._task: asyncio.Task | None = None
+        #: 负载均衡的额度预热循环（只有开着开关时才真的查上游）。
+        self._lb_task: asyncio.Task | None = None
         self._last_attempt: dict[str, float] = {}
         self._startup_seen: set[str] = set()
         self._cache: dict[str, tuple[float, Any]] = {}
@@ -644,6 +691,7 @@ class BenefitsManager:
         quota = await self._cached(qkey, p.quota)
         if quota is not None:
             entry["quota"] = {"supported": True, **quota}
+            _feed_load_balance(pid, p, quota)
         return entry
 
     async def _cached(self, key: str, fn: Callable, *args):
@@ -779,8 +827,19 @@ class BenefitsManager:
     def start(self) -> None:
         if self._task is None or self._task.done():
             self._task = asyncio.get_running_loop().create_task(self._run())
+        if self._lb_task is None or self._lb_task.done():
+            self._lb_task = asyncio.get_running_loop().create_task(
+                self._load_balance_warm_loop())
 
     async def stop(self) -> None:
+        # 负载均衡预热循环先收：它只是给权重表送数，停掉不影响数据一致性
+        if self._lb_task is not None:
+            self._lb_task.cancel()
+            try:
+                await self._lb_task
+            except asyncio.CancelledError:
+                pass
+            self._lb_task = None
         if self._task is None:
             return
         self._task.cancel()
@@ -793,6 +852,43 @@ class BenefitsManager:
         for t in self._refreshing.values():
             t.cancel()
         self._refreshing.clear()
+
+    async def _load_balance_warm_loop(self) -> None:
+        """负载均衡的额度预热：定期刷新各通道额度，喂权重表。
+
+        为什么需要它：加权轮转的权重来自「账号 → 剩余积分」读数，而读数目前
+        只在管理页打开额度页（``GET /ui/api/benefits``）时才被刷新。用户不开
+        页面（最常见的情形——代理只当后台服务用）时，权重会一直停在未知，
+        等于退化成均匀轮转，「按剩余积分均衡消耗」就名存实亡。
+
+        只在**至少一个通道开着开关**时才真的查：关着开关的通道多打一次计费
+        接口纯属浪费，而这是每 10 分钟一次的后台流量。
+
+        失败一律吞掉：预热是优化，不该在日志里制造噪声，也不该拖垮任何东西。
+        查询本身走 ``_cached``（TTL 300s）——与面板共用同一份缓存，管理页开着
+        时这里绝大多数轮次都是缓存命中，不会额外打上游。
+        """
+        # 首轮稍等一会儿再跑：启动瞬间各通道的凭据/网络都还没热，且用户刚
+        # 启动就打开管理页的路径已经会自己查一轮，没必要抢先撞上游。
+        await asyncio.sleep(LOAD_BALANCE_WARM_DELAY_S)
+        while True:
+            try:
+                enabled = set(getattr(self._state, "load_balance", None) or ())
+                if enabled:
+                    providers = self._providers()
+                    for pid in sorted(enabled):
+                        p = providers.get(pid)
+                        if p is None:
+                            continue
+                        quota = await self._cached(f"quota:{pid}", p.quota)
+                        # 面板打开时才由 _provider_entry 喂权重；这条后台路径
+                        # 必须自己喂一次，否则「不开页面就永远没有权重」。
+                        _feed_load_balance(pid, p, quota)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass  # 预热失败不影响任何功能
+            await asyncio.sleep(LOAD_BALANCE_WARM_INTERVAL_S)
 
     async def _run(self) -> None:
         while True:

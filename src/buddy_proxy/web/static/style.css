@@ -584,6 +584,16 @@
   .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
   .pat-head .name { font-weight: 600; }
   .pat-head .grow { flex: 1; }
+  /* 负载均衡开关（通道标题行）：带边框的小胶囊，与 .tag 同尺寸，勾选后高亮。
+     用 accent-color 而不是自绘开关——原生 checkbox 在暗色主题下也跟随系统
+     配色，不必再维护一套三态视觉。 */
+  .lb-toggle { display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+               font-size: 11px; color: var(--muted); padding: 1px 8px;
+               border-radius: 6px; border: 1px solid var(--line);
+               background: var(--bg); white-space: nowrap; user-select: none; }
+  .lb-toggle:hover { color: var(--text); }
+  .lb-toggle input { accent-color: var(--ok); margin: 0; cursor: pointer; }
+  .lb-toggle input:checked + span { color: var(--ok); }
   /* 轨道必须写 minmax(0, 1fr) 而不是 1fr：后者的隐含下限是内容的 min-content
      （= minmax(auto, 1fr)）。额度网关不可达时第一块是那条长说明条（「Trae PAT
      (服务账号直连) · PAT 额度网关不可达 剩 10/10 个账号本轮未取到新数据（网络

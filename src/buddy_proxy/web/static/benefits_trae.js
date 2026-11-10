@@ -165,7 +165,7 @@ function renderTraePanel() {
         <span class="grow"></span>
         ${quotaAccountTotal(groups)}
         <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
-        ${fold.toggle}${providerRefreshButton('trae')}
+        ${fold.toggle}${providerLoadBalanceToggle('trae', multi)}${providerRefreshButton('trae')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
@@ -256,7 +256,7 @@ function renderTraeIntlPanel() {
         <span class="tag">Global · 海外额度</span>${fold.badge}<span class="grow"></span>
         ${quotaAccountTotal(groups)}
         <span class="muted" style="font-size:11px">海外版无每日签到</span>
-        ${fold.toggle}${providerRefreshButton('traeintl')}
+        ${fold.toggle}${providerLoadBalanceToggle('traeintl', groups.size > 1)}${providerRefreshButton('traeintl')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`

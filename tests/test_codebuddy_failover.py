@@ -544,3 +544,103 @@ def test_upstream_read_timeout_env_override(monkeypatch):
     assert pipeline._env_read_timeout() == 1800
     monkeypatch.setenv("BUDDY_UPSTREAM_READ_TIMEOUT", "0")
     assert pipeline._env_read_timeout() == 1800
+
+
+# ---------------------------------------------------------------------------
+# 负载均衡：转发时的账号顺序
+# ---------------------------------------------------------------------------
+def _lb_env(monkeypatch, accounts, enabled=True):
+    """三个账号 + 置换 available_accounts + 设置开关。"""
+    monkeypatch.setattr(creds, "list_accounts", lambda: list(accounts))
+    monkeypatch.setattr(failover, "available_accounts", lambda *a, **k: list(accounts))
+
+    def _token(aid, **kw):
+        return f"tok-{aid}", {"account_id": aid, "token": f"tok-{aid}",
+                              "refresh_token": "rt", "uid": f"uid-{aid}",
+                              "nickname": aid, "machine_id": "m",
+                              "expires_at_ms": int(time.time() * 1000) + 3600_000}
+    monkeypatch.setattr(creds, "ensure_account_token", _token)
+    from types import SimpleNamespace
+    from buddy_proxy.core import state as st
+
+    monkeypatch.setattr(st, "proxy_state", SimpleNamespace(
+        enable_desensitize=False, logger=None,
+        write_log=lambda *a, **k: None,
+        load_balance={"codebuddy"} if enabled else set(),
+    ))
+
+
+def test_load_balance_off_keeps_priority_order(monkeypatch):
+    """关掉开关：顺序必须与顺位完全一致（逐字节回到旧行为）。"""
+    accts = [_acct("a"), _acct("b"), _acct("c")]
+    _lb_env(monkeypatch, accts, enabled=False)
+    seen: list[str] = []
+
+    async def _stream(url, headers, body, protocol, original):
+        seen.append(headers.get("X-User-Id", ""))
+        raise HTTPException(status_code=429, detail={"error": {"message": "boom"}})
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(cbp, "stream_upstream", _stream)
+    with pytest.raises(HTTPException):
+        asyncio.run(_forward_and_collect(
+            {"model": "kimi-k3", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]}))
+    assert seen == ["uid-a", "uid-b", "uid-c"]
+
+
+def test_load_balance_on_reorders_candidates(monkeypatch):
+    """开开关：候选集合不变，但顺序由加权抽样决定（多次尝试能观察到不同的首个）。"""
+    from buddy_proxy.codebuddy_provider import provider as prov_mod
+
+    accts = [_acct("a"), _acct("b"), _acct("c")]
+    _lb_env(monkeypatch, accts, enabled=True)
+    # 额度读数：a 极少、c 极多 → 首位几乎总是 c（读数表按 provider 分）
+    from buddy_proxy.core import load_balance as lb_mod
+    board = lb_mod.board("codebuddy")
+    board.clear()
+    board.update("a", 1)
+    board.update("b", 1)
+    board.update("c", 10000)
+
+    firsts: list[str] = []
+    for _ in range(20):
+        seen: list[str] = []
+
+        # 用 401（凭据失效）而不是 429：429 在实现里会顺手把该账号的权重压到
+        # 0（额度真的耗尽了），那样第一轮之后权重表就全零、退化成均匀分布，
+        # 测不到「额度多的排前面」。401 不改权重，等价于「本轮只是这个号坏了」。
+        async def _stream(url, headers, body, protocol, original, _seen=seen):
+            _seen.append(headers.get("X-User-Id", ""))
+            raise HTTPException(status_code=401, detail={"error": {"message": "boom"}})
+            yield b""  # pragma: no cover
+
+        monkeypatch.setattr(cbp, "stream_upstream", _stream)
+        with pytest.raises(HTTPException):
+            asyncio.run(_forward_and_collect(
+                {"model": "kimi-k3", "stream": True,
+                 "messages": [{"role": "user", "content": "hi"}]}))
+        # 每次都是三个账号全试一遍（集合没丢）
+        assert sorted(seen) == ["uid-a", "uid-b", "uid-c"]
+        firsts.append(seen[0])
+    board.clear()
+    assert firsts.count("uid-c") >= 15, firsts
+
+
+def test_load_balance_single_account_unaffected(monkeypatch):
+    """只有一个账号时不做加权（无意义，也免得引入无谓的随机）。"""
+    accts = [_acct("a")]
+    _lb_env(monkeypatch, accts, enabled=True)
+    seen: list[str] = []
+
+    async def _stream(url, headers, body, protocol, original):
+        seen.append(headers.get("X-User-Id", ""))
+        raise HTTPException(status_code=429, detail={"error": {"message": "boom"}})
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(cbp, "stream_upstream", _stream)
+    with pytest.raises(HTTPException):
+        asyncio.run(_forward_and_collect(
+            {"model": "kimi-k3", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]}))
+    assert seen == ["uid-a"]

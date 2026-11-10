@@ -36,6 +36,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
 from ..core.account_store import quota_epoch_from
+from ..core import load_balance as lb_mod
 from ..core.metrics import ACCOUNT_META
 from . import failover
 from .credentials import (
@@ -304,6 +305,9 @@ class KimiProvider(BaseProvider):
 
         # failover 循环：按顺位尝试可用账号（429/403/凭据失效 → 冷却换号）
         accounts = failover.available_accounts()
+        # 负载均衡（额度页开关）：只改"先试谁"，不改"谁能试"——
+        # 冷却/权限等过滤已在上一行完成。关着时顺序与历史完全一致。
+        accounts = lb_mod.reorder(_lb_state(), 'kimi', accounts)
         if not accounts:
             raise HTTPException(
                 status_code=429,
@@ -579,6 +583,21 @@ class KimiProvider(BaseProvider):
             "items": items,
             "level": level or None,  # 别把 str(None)="None" 当 level 发出去
         }
+
+
+    def _quota_account_ids(self) -> dict[str, str]:
+        """额度标签序号（``#N``，字符串）→ 账号 id，供负载均衡把权重落到人头上。
+
+        必须与 :meth:`quota` 里 ``enumerate(accounts, 1)`` 的那份列表**完全同源**
+        （同一个函数、同一个过滤），否则 ``#2`` 会被记到另一个账号的权重上：
+        轮转就会去偏向一个其实没额度的号，比没有权重更糟。
+        """
+        try:
+            accounts = list_accounts()
+        except Exception:  # noqa: BLE001 - 拿不到就不给权重，不影响额度展示
+            return {}
+        return {str(i): str(getattr(a, "id", "") or "")
+                for i, a in enumerate(accounts or (), start=1) if getattr(a, "id", "")}
 
     def quota_epoch(self) -> str:
         """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。
@@ -938,3 +957,12 @@ if __name__ == "__main__":  # pragma: no cover
     ))
     print("status:", resp.status_code)
     print(str(resp.body)[:400])
+
+def _lb_state():
+    """当前运行态（负载均衡开关读它）。未初始化时返回 None。
+
+    走 ``core.state`` 的模块级属性而不是导入期绑定的函数：测试普遍
+    monkeypatch ``state.proxy_state``，绑定早了会拿到旧对象。
+    """
+    from ..core import state as _state
+    return getattr(_state, "proxy_state", None)

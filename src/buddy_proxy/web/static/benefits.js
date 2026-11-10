@@ -678,6 +678,17 @@ function checkinCardHtml(p) {
   </article>`;
 }
 
+/** 额度条目里出现的账号分组数（形如「ZCode #2 · …」的 #N 前缀去重计数）。
+ *  没有分组前缀 = 单账号通道，返回 1。用于判断要不要显示负载均衡开关。 */
+function _quota_account_count(items) {
+  const ids = new Set();
+  for (const it of items || []) {
+    const m = /^[^\s]+ #(\d+) · /.exec(String(it.label || ''));
+    if (m) ids.add(m[1]);
+  }
+  return ids.size || 1;
+}
+
 function renderBenefits(opts) {
   if (!BENEFITS) return;
   const quiet = !!(opts && opts.quiet);
@@ -709,11 +720,15 @@ function renderBenefits(opts) {
     const items = quotaItemsHtml(q.items || [], p.id);
     const headSum = quotaHeadSum(q);
     const fold = quotaProviderFold(q.items || [], p.id);
+    // 多账号判定：通用卡的额度条目不带「#N」分组时仍是单账号通道
+    // （zcode/glm/ark/mimo 等），此时不显示负载均衡开关——它没有第二个号
+    // 可轮转，摆个按钮只会让人以为按下去有作用。
+    const accN = _quota_account_count(q.items || []);
     return `<div class="chart-card" style="margin-bottom:12px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="font-weight:600">${esc(p.name)}</span>
         ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}${fold.badge}
-        ${headSum}<span style="flex:1"></span>${fold.toggle}${providerRefreshButton(p.id)}
+        ${headSum}<span style="flex:1"></span>${fold.toggle}${providerLoadBalanceToggle(p.id, accN > 1)}${providerRefreshButton(p.id)}
       </div>${fold.bodyStart}${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}${fold.bodyEnd}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
   if (quiet) {
