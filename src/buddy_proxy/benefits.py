@@ -686,13 +686,23 @@ class BenefitsManager:
                     "message", "签到状态查询失败（未登录/网络异常）")
         # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
         # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
-        epoch_fn = getattr(p, "quota_epoch", None)
-        qkey = f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
+        qkey = self._quota_key(pid, p)
         quota = await self._cached(qkey, p.quota)
         if quota is not None:
             entry["quota"] = {"supported": True, **quota}
             _feed_load_balance(pid, p, quota)
         return entry
+
+    @staticmethod
+    def _quota_key(pid: str, provider: Any) -> str:
+        """额度缓存键:管理页(``_provider_entry``)与负载均衡预热**必须共用**这一个。
+
+        声明了 ``quota_epoch()`` 的通道键带「缓存代」后缀(账号一变键就变)。
+        预热若自己拼一个不带后缀的键,缓存里就躺着两份,开着管理页时每轮预热
+        都会多打一次计费接口。
+        """
+        epoch_fn = getattr(provider, "quota_epoch", None)
+        return f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
 
     async def _cached(self, key: str, fn: Callable, *args):
         """TTL 缓存的 to_thread 调用；上游抛错时返回错误结构而不是 500。
@@ -853,6 +863,25 @@ class BenefitsManager:
             t.cancel()
         self._refreshing.clear()
 
+    async def _warm_load_balance_once(self) -> None:
+        """预热一轮:给每个开着开关的通道刷新额度读数并喂权重表。"""
+        enabled = set(getattr(self._state, "load_balance", None) or ())
+        if not enabled:
+            return
+        providers = self._providers()
+        for pid in sorted(enabled):
+            p = providers.get(pid)
+            if p is None:
+                continue
+            key = self._quota_key(pid, p)
+            cached = self._cache.get(key)
+            fresh = (cached is not None and not _is_failure(cached[1])
+                     and time.time() - cached[0] < SNAPSHOT_TTL_S)
+            quota = cached[1] if fresh else await self._query(key, p.quota)
+            # 面板打开时才由 _provider_entry 喂权重;这条后台路径必须自己喂一次,
+            # 否则「不开页面就永远没有权重」。
+            _feed_load_balance(pid, p, quota)
+
     async def _load_balance_warm_loop(self) -> None:
         """负载均衡的额度预热：定期刷新各通道额度，喂权重表。
 
@@ -865,25 +894,17 @@ class BenefitsManager:
         接口纯属浪费，而这是每 10 分钟一次的后台流量。
 
         失败一律吞掉：预热是优化，不该在日志里制造噪声，也不该拖垮任何东西。
-        查询本身走 ``_cached``（TTL 300s）——与面板共用同一份缓存，管理页开着
-        时这里绝大多数轮次都是缓存命中，不会额外打上游。
+        缓存键与管理页同源(:meth:`_quota_key`);缓存仍新鲜(面板刚查过)就直接
+        用,过期则**同步重查**,不走 ``_cached`` 的 stale-while-revalidate——那条
+        路径先回旧值,而预热间隔(10 分钟)比 TTL(5 分钟)长,每轮喂进权重表的
+        就都是上一轮的数,还被标成「刚读到」。
         """
         # 首轮稍等一会儿再跑：启动瞬间各通道的凭据/网络都还没热，且用户刚
         # 启动就打开管理页的路径已经会自己查一轮，没必要抢先撞上游。
         await asyncio.sleep(LOAD_BALANCE_WARM_DELAY_S)
         while True:
             try:
-                enabled = set(getattr(self._state, "load_balance", None) or ())
-                if enabled:
-                    providers = self._providers()
-                    for pid in sorted(enabled):
-                        p = providers.get(pid)
-                        if p is None:
-                            continue
-                        quota = await self._cached(f"quota:{pid}", p.quota)
-                        # 面板打开时才由 _provider_entry 喂权重；这条后台路径
-                        # 必须自己喂一次，否则「不开页面就永远没有权重」。
-                        _feed_load_balance(pid, p, quota)
+                await self._warm_load_balance_once()
             except asyncio.CancelledError:
                 raise
             except Exception:

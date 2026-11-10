@@ -54,7 +54,8 @@ class QuotaBoard:
 
     - provider 的额度查询（``quota()``）顺手 ``update()`` 一轮，顺带覆盖面板
       上用户点「刷新」的情形；
-    - 转发收到 429/14018 时 ``set_zero()``，立刻把该账号的权重压到最低。
+    - ``set_zero()`` 是预留的:转发侧目前**没有**调用它。额度耗尽的账号由各通道
+      既有的冷却过滤挡在 ``reorder`` 之前(见模块文档「权重下限」一节)。
 
     读数带时间戳；``weight_of`` 超过 ``MAX_QUOTA_AGE_S`` 视为未知。
     """
@@ -82,7 +83,7 @@ class QuotaBoard:
             self.update(str(account_id), remaining)
 
     def set_zero(self, account_id: str) -> None:
-        """把某账号的剩余额度直接记 0（收到额度耗尽错误时）。"""
+        """把某账号的剩余额度直接记 0（预留:当前转发侧未调用）。"""
         self._values[str(account_id)] = (0.0, time.time())
 
     def weight_of(self, account_id: str, now: float | None = None) -> float:
@@ -176,7 +177,7 @@ def equal_weights(accounts: Iterable[Any], _acct: Any = None) -> list[Any]:
 # 复制一份 ``_QUOTA_BOARD`` / ``_load_balance_on``。
 
 #: 各通道的读数表（键 = provider id）。进程内、不落盘；额度是上游的实时状态，
-#: 重启后第一轮额度查询/第一条额度耗尽错误就会把它填回来。
+#: 重启后第一轮额度查询(面板或后台预热)就会把它填回来。
 _BOARDS: dict[str, QuotaBoard] = {}
 
 
