@@ -29,6 +29,10 @@ async def ui_settings_get(request: Request):
         "auto_checkin": cfg["auto_checkin"],
         "checkin_time": cfg["checkin_time"],
         "load_balance": sorted(getattr(state, "load_balance", set()) or ()),
+        # 负载均衡的「缓存隔离」提示：每个通道里哪些模型换号会掉缓存。
+        # 前端拿去在开关旁边显示一行小字，让用户知道「开了均衡，但这个模型
+        # 不会跟着轮转」。数据来自 core.load_balance（静态实测表 + 线上观测）。
+        "load_balance_excluded": _load_balance_excluded(state),
         "path": str(settings_mod.settings_path()),
     }
 
@@ -104,6 +108,26 @@ async def ui_settings_post(request: Request):
         state.load_balance = set(update["load_balance"])
     return {"ok": True, "settings": {
         k: saved.get(k) for k in ("default_model", "default_provider", "load_balance")}}
+
+
+def _load_balance_excluded(state: Any) -> dict[str, list[str]]:
+    """已开启均衡的通道里，哪些模型因「缓存按账号隔离」不参与轮转。
+
+    只返回**开着开关**的通道：没开的通道不轮转，告诉用户「哪些模型被排除」
+    没有意义（他也没在均衡）。返回 ``{provider_id: [model, ...]}``，前端在
+    开关旁显示「已跳过 N 个不共享缓存的模型」并在浮层里列出来。
+    """
+    try:
+        from buddy_proxy.core import load_balance as lb_mod
+
+        out: dict[str, list[str]] = {}
+        for pid in sorted(getattr(state, "load_balance", set()) or ()):
+            models = lb_mod.account_scoped_models(pid)
+            if models:
+                out[pid] = models
+        return out
+    except Exception:  # noqa: BLE001 - 提示信息，失败就不显示
+        return {}
 
 
 def _load_balance_patch(raw: Any, providers: dict[str, Any]) -> dict[str, bool]:

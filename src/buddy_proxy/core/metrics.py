@@ -109,6 +109,12 @@ class MetricsCollector:
         # 「换了账号所以没命中」误读成「缓存失效」。进程内、不落盘：重启后第一轮
         # 没有上一轮可比，prefix_reuse 落 null——这比编一个 0 诚实。
         self._prev_prompt: dict[tuple[str, str, str], int] = {}
+        # (provider, model) -> 上一次成功请求的账号 + 该账号上一轮的 prompt。
+        # 用来**检测换号**：换号后的第一条请求，cached 应该等于上一轮（另一个
+        # 账号）的 prompt，才说明「缓存跨账号共享」。这是
+        # load_balance.record_swap_reuse 的唯一数据来源——判断「该模型能不能
+        # 参与账号轮转」全靠它（见 core/load_balance 的缓存隔离名单）。
+        self._prev_by_model: dict[tuple[str, str], tuple[str, int]] = {}
         self._mix_floor: Optional[str] = None
         # 当前写入文件所属日期（跨天首次写入时触发滚动归档）
         self._rot_date = _date_str(time.time())
@@ -181,11 +187,54 @@ class MetricsCollector:
             rec["prefix_reuse"] = _prefix_reuse(rec["cached_tokens"], prev_prompt)
             if rec["prompt_tokens"] > 0:
                 self._prev_prompt[key] = rec["prompt_tokens"]
+            # 换号检测：同一 (provider, model) 上一条是**别的账号**时，用那条的
+            # prompt 当分母再算一次复用率，喂给负载均衡的观测表。
+            #
+            # 为什么不复用上面那个 prefix_reuse：它的分母是「同账号上一轮」，
+            # 换号时必然取不到（键里带 account），于是恰好给出 None——而这里
+            # 要回答的正是「换到新账号后，旧账号建立的前缀还在不在」。
+            # 两个问题的分母不同，必须分开算。
+            mkey = (rec["provider"], rec["model"])
+            acct_now = rec.get("account") or ""
+            prev_pair = self._prev_by_model.get(mkey)
+            swap_prev_prompt = None
+            if prev_pair and acct_now and prev_pair[0] and prev_pair[0] != acct_now:
+                swap_prev_prompt = prev_pair[1]
+            rec["swap_prev_prompt_tokens"] = swap_prev_prompt
+            if swap_prev_prompt:
+                rec["swap_prefix_reuse"] = _prefix_reuse(
+                    rec["cached_tokens"], swap_prev_prompt)
+                if isinstance(rec["swap_prefix_reuse"], (int, float)):
+                    self._observe_swap(rec)
+            else:
+                rec["swap_prefix_reuse"] = None
+            if rec["prompt_tokens"] > 0:
+                self._prev_by_model[mkey] = (acct_now, rec["prompt_tokens"])
             self._recent.append(rec)
             self._bucket_add(self._bucket(_date_str(ts), rec["provider"], rec["model"]), rec)
             self._count_add(rec)
             self._recent_add(rec)
         self._append_log(rec)
+
+    @staticmethod
+    def _observe_swap(rec: dict[str, Any]) -> None:
+        """把一次换号观测喂给 core.load_balance（调用方须持有 self._lock）。
+
+        延迟导入：``core.load_balance`` 反过来不 import metrics，但这条依赖是
+        「指标 → 路由」的反向耦合，放在模块顶层会让两个核心模块互相纠缠；
+        这里只在一个低频分支（换号，几分钟一次）里付出一次 import 开销。
+
+        任何异常都吞掉：观测是优化，绝不能因为它把请求记录搞挂。
+        """
+        try:
+            from . import load_balance as lb_mod
+
+            value = rec.get("swap_prefix_reuse")
+            if isinstance(value, (int, float)):
+                lb_mod.record_swap_reuse(rec.get("provider") or "",
+                                         rec.get("model") or "", float(value))
+        except Exception:  # noqa: BLE001 - 见 docstring
+            pass
 
     def _recent_add(self, rec: dict[str, Any]) -> None:
         """近三次耗时环 +1（调用方须持有 self._lock 或处于构造期）。"""
@@ -344,9 +393,13 @@ class MetricsCollector:
                     # 请求仍有可比对象，不会因为进程重启就把全部首请求标成「—」
                     # （用户几乎每天重启一次代理，那会让这一列一半是空的）。
                     if rec.get("prompt_tokens"):
-                        self._prev_prompt[(rec.get("provider") or "codebuddy",
-                                           rec.get("model") or "(unknown)",
-                                           rec.get("account") or "")] = int(rec["prompt_tokens"])
+                        pk = (rec.get("provider") or "codebuddy",
+                              rec.get("model") or "(unknown)")
+                        self._prev_prompt[(*pk, rec.get("account") or "")] = int(rec["prompt_tokens"])
+                        # 换号检测的分母同样要回读，否则重启后要等两次请求
+                        # 才能重新建立「上一个账号是谁」的认知。
+                        self._prev_by_model[pk] = (rec.get("account") or "",
+                                                   int(rec["prompt_tokens"]))
                     normalized = {
                         "status": rec.get("status", 200),
                         "duration_ms": rec.get("duration_ms", 0),

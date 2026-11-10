@@ -1060,7 +1060,8 @@ class TraeProvider(BaseProvider):
         # 空列表时区分「本区无账号但别区有」（401，配置问题）与「全在冷却」（429）。
         accounts = failover.available_accounts(self._region.key)
         # 负载均衡（额度页开关）：只改「先试谁」，region/冷却过滤已完成。
-        accounts = lb_mod.reorder(_lb_state(), self.id, accounts)
+        accounts = lb_mod.reorder(_lb_state(), self.id, accounts,
+                                  model=str(requested_model or "") or None)
         if not accounts:
             other = failover.available_accounts()
             if other:

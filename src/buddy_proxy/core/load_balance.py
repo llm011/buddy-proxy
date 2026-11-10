@@ -27,6 +27,15 @@
 
 **同一次请求内不重复**。返回的是完整顺位列表（而不是只挑一个）：failover
 循环仍要按序试后面的账号，所以这里做的是一次加权抽样的**无放回排列**。
+
+**缓存隔离是按模型分的，不是按通道**（2026-11-11 实测）。开关虽然挂在通道上，
+但同一通道内不同模型对「换账号还认不认前缀缓存」的表现完全不同：codebuddy 的
+``glm-5.3-flash`` / ``kimi-k3.1-pro`` 换号后仍 100% 命中（缓存按内容前缀、
+跨账号共享），而 ``deepseek-v4.1-flash`` 换号后 0 命中（按账号隔离）。对后者
+开均衡等于**每个请求都白丢一次缓存**，成本可能翻倍。
+
+所以 ``reorder`` 收一个 ``model``：命中「不共享缓存」名单的模型仍走原顺位。
+名单见 :data:`ACCOUNT_SCOPED_MODELS` 与 :func:`is_account_scoped`。
 """
 
 from __future__ import annotations
@@ -210,18 +219,28 @@ def enabled(state: Any, provider_id: str) -> bool:
     return provider_id in (on or ())
 
 
-def reorder(state: Any, provider_id: str, accounts: Sequence[Any]) -> list[Any]:
+def reorder(state: Any, provider_id: str, accounts: Sequence[Any],
+            model: str | None = None) -> list[Any]:
     """按开关决定是否重排账号顺序；返回**新列表**（不修改入参）。
 
     - 开关关着、或候选不足两个：原样返回列表副本——调用方拿到的东西与历史
       行为逐字节一致，不必在两处写 ``if``。
-    - 开关开着：按该通道读数表的权重做一次无放回加权抽样。
+    - 模型属于「缓存按账号隔离」那一类（见 :func:`is_account_scoped`）：
+      同样原样返回。**这是本函数最重要的分支**：对这些模型轮转没好处，
+      纯亏缓存。
+    - 其余情况：按该通道读数表的权重做一次无放回加权抽样。
 
     过滤（冷却 / region / 单模型限流 / per-account 模型支持）**必须**在调用
     本函数之前完成：这里只决定「先试谁」，不决定「谁能试」。
+
+    ``model`` 缺省（None）时按「未知」处理——**不做**隔离检查，照常均衡。
+    理由：老调用方（或未来新通道忘了传）应当保持"开关打开就生效"的行为，
+    而不是静默失效；宁可偶尔掉缓存，也不能让功能看起来失灵。
     """
     pool = list(accounts or ())
     if len(pool) < 2 or not enabled(state, provider_id):
+        return pool
+    if model and is_account_scoped(provider_id, model):
         return pool
     qb = board(provider_id)
     return weighted_order(pool, lambda a: qb.weight_of(str(getattr(a, "id", "") or "")))
@@ -278,3 +297,108 @@ def remaining_by_account(items: Any) -> dict[str, float]:
             continue
         totals[key] = totals.get(key, 0.0) + value
     return totals
+
+
+# ---------------------------------------------------------------------------
+# 缓存隔离名单：哪些模型的缓存是「按账号」的
+# ---------------------------------------------------------------------------
+#
+# 开关是通道维度的，缓存隔离却是**模型**维度的。这个名单回答：「开了均衡之后，
+# 这个模型换账号还能不能吃到上一轮的缓存？」
+#
+# 名单只放**实测确认按账号隔离**的模型。没列到的默认「共享」——这是刻意的
+# 保守方向：默认共享 → 均衡照常工作（功能可用）；默认隔离 → 用户开了开关却
+# 发现只有一半模型在均衡，会以为坏了。而共享是更常见的情形（实测 3/4 共享）。
+#
+# 数据来源（2026-11-11，大 prompt 增长会话 + 从未见过的第三个账号）：
+#   glm-5.3-flash       换号 100.0% 命中  → 共享
+#   kimi-k3.1-pro       换号  99.9% 命中  → 共享
+#   qwen3.8-max         换号 100.0% 命中  → 共享
+#   deepseek-v4.1-flash 换号   0.0% 命中  → 隔离 ★
+#
+# 注意这些是**实测当时**的结论，上游随时可能改。所以除了这张表，还有
+# :func:`observe_swap` 从真实流量里学：日志里换号前后的 prefix_reuse 能直接
+# 证伪/证实。观测结果优先于静态表（见 :func:`is_account_scoped`）。
+ACCOUNT_SCOPED_MODELS: frozenset[tuple[str, str]] = frozenset({
+    ("codebuddy", "deepseek-v4.1-flash"),
+})
+
+#: 观测样本的最小条数。少于这个数不采信——一两次偶发的 0 命中可能是上游抖动、
+#: 也可能是模型刚滚动（缓存还没写热），不足以推翻/建立结论。
+OBSERVE_MIN_SAMPLES = 8
+
+#: 判定「共享」的复用率门槛。换号后复用率中位数 >= 这个值就认为跨账号共享。
+#: 取 0.5 而不是 0.9：上游按 64k 块命中（实测），部分命中很常见，
+#: 0.5 已经能明确区分「共享（通常 >0.9）」与「隔离（通常 =0）」两座峰。
+OBSERVE_SHARED_THRESHOLD = 0.5
+
+#: (provider, model) -> [换号后的 prefix_reuse 样本]
+_SWAP_SAMPLES: dict[tuple[str, str], list[float]] = {}
+
+
+def record_swap_reuse(provider_id: str, model: str, reuse: float) -> None:
+    """登记一次「换号后的前缀复用率」观测（转发层在检测到账号变化时调用）。
+
+    只保留最近 ``OBSERVE_MIN_SAMPLES * 4`` 条：上游行为会变，样本太老会一直
+    拽着结论不放。超出后按 FIFO 丢弃。
+    """
+    key = (str(provider_id or ""), str(model or ""))
+    try:
+        value = float(reuse)
+    except (TypeError, ValueError):
+        return
+    if value != value or value < 0:  # NaN / 负数
+        return
+    bucket = _SWAP_SAMPLES.setdefault(key, [])
+    bucket.append(min(value, 1.0))
+    limit = OBSERVE_MIN_SAMPLES * 4
+    if len(bucket) > limit:
+        del bucket[:len(bucket) - limit]
+
+
+def observed_verdict(provider_id: str, model: str) -> bool | None:
+    """根据真实观测判断该模型是否「缓存按账号隔离」。
+
+    返回 ``True``（隔离）/ ``False``（共享）/ ``None``（样本不足，无从判断）。
+    中位数而不是均值：复用率是双峰的（≈1.0 与 ≈0.0），均值会给出 0.5 这种
+    两边都不属于的假象（日志指标那边踩过同一个坑）。
+    """
+    vals = _SWAP_SAMPLES.get((str(provider_id or ""), str(model or "")))
+    if not vals or len(vals) < OBSERVE_MIN_SAMPLES:
+        return None
+    ordered = sorted(vals)
+    mid = ordered[len(ordered) // 2]
+    return mid < OBSERVE_SHARED_THRESHOLD
+
+
+def is_account_scoped(provider_id: str, model: str) -> bool:
+    """该 (通道, 模型) 的缓存是否按账号隔离（= 不该参与账号轮转）。
+
+    观测优先于静态表，但只在样本够的时候覆盖：静态表是「上次人工实测的结论」，
+    观测是「线上真实流量」。上游改了行为时，观测会在几十个请求内纠正它，
+    不需要发版。
+    """
+    seen = observed_verdict(provider_id, model)
+    if seen is not None:
+        return seen
+    return (str(provider_id or ""), str(model or "")) in ACCOUNT_SCOPED_MODELS
+
+
+def account_scoped_models(provider_id: str) -> list[str]:
+    """该通道当前判定为「缓存按账号隔离」的模型清单（UI 提示用）。"""
+    pid = str(provider_id or "")
+    out = {m for p, m in ACCOUNT_SCOPED_MODELS if p == pid}
+    for (p, m), vals in _SWAP_SAMPLES.items():
+        if p != pid:
+            continue
+        verdict = observed_verdict(p, m)
+        if verdict is True:
+            out.add(m)
+        elif verdict is False:
+            out.discard(m)
+    return sorted(out)
+
+
+def clear_swap_samples() -> None:
+    """清空观测样本（测试隔离用）。"""
+    _SWAP_SAMPLES.clear()

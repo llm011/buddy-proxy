@@ -860,7 +860,7 @@ class QoderProvider(BaseProvider):
         accounts = failover.available_accounts(self._region.key)
         # 负载均衡（额度页开关）：只改「先试谁」，过滤已在上一步完成。
         # 用子通道自己的 id（qoder / qoderintl），开关按面板分别控制。
-        accounts = lb_mod.reorder(_lb_state(), self.id, accounts)
+        accounts = lb_mod.reorder(_lb_state(), self.id, accounts, model=model)
         if not accounts:
             other = failover.available_accounts()
             if other:

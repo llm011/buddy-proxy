@@ -594,6 +594,12 @@
   .lb-toggle:hover { color: var(--text); }
   .lb-toggle input { accent-color: var(--ok); margin: 0; cursor: pointer; }
   .lb-toggle input:checked + span { color: var(--ok); }
+  /* 「已跳过 N 个」：紧跟在开关后面的小字，可点开看清单。
+     不用 .tag 的边框——它挂在 label 外面，跟开关是一句话的两个部分，
+     画个独立胶囊反而像另一个按钮。 */
+  .lb-skip { font-size: 10px; color: var(--muted); margin-left: 2px;
+             white-space: nowrap; text-decoration: underline dotted; }
+  .lb-skip:hover { color: var(--warn); }
   /* 轨道必须写 minmax(0, 1fr) 而不是 1fr：后者的隐含下限是内容的 min-content
      （= minmax(auto, 1fr)）。额度网关不可达时第一块是那条长说明条（「Trae PAT
      (服务账号直连) · PAT 额度网关不可达 剩 10/10 个账号本轮未取到新数据（网络

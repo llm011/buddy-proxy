@@ -833,7 +833,8 @@ class KiroProvider(BaseProvider):
         if not accounts:
             self.ensure_auth()
         # 负载均衡（额度页开关）：只改「先试谁」。关着时顺序与历史完全一致。
-        accounts = lb_mod.reorder(_lb_state(), self.id, accounts)
+        accounts = lb_mod.reorder(_lb_state(), self.id, accounts,
+                                  model=str(body.get("model") or "") or None)
         stream = bool(body.get("stream", False))
         payload = _chat_to_kiro(body, self._id_map)
         model_id = str(body.get("model") or "").strip()
