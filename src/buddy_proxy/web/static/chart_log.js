@@ -302,6 +302,26 @@ async function renderRecent() {
       tok = `↑${fmtNum(r.prompt_tokens)} ↓${fmtNum(r.completion_tokens)}`;
       tokTitle = `输入 ${r.prompt_tokens}（↑ 含缓存命中）· 输出 ${r.completion_tokens}${cacheTxt}`;
     }
+    // 前缀复用率徽标：**这是判断「缓存有没有失效」唯一正确的读数**。
+    //
+    // ``cached / prompt`` 会随对话增长自动变小（prompt 含缓存，上一轮 100k 全命中、
+    // 这轮 200k 就恒显示 50%），照那个数看会以为缓存只覆盖一半。后端给的
+    // ``prefix_reuse`` = 本次 cached ÷**上一轮同账号同模型**的 prompt，1.0 就是
+    // 「上一轮的内容全在缓存里」。null = 没有可比对象（会话首请求/刚重启/换了账号），
+    // 那不是 0%，必须显示成「—」而不是「0%」。
+    //
+    // 颜色分级：>=90% 绿（正常延续）、<10% 红（缓存断了：换号或前缀被改）、
+    // 中间黄（部分失效，多半是工具定义/系统提示变了）。
+    const reuse = (typeof r.prefix_reuse === 'number') ? r.prefix_reuse : null;
+    let reuseBadge = '';
+    if (r.cached_tokens || reuse != null) {
+      const prevTxt = r.prev_prompt_tokens ? `上一轮 prompt ${fmtNum(r.prev_prompt_tokens)}` : '无上一轮可比（首请求/重启/换账号）';
+      const pct = reuse == null ? '—' : `${Math.round(reuse * 100)}%`;
+      const tone = reuse == null ? 'muted' : (reuse >= 0.9 ? 'ok' : (reuse < 0.1 ? 'bad' : 'warn'));
+      reuseBadge = ` <span class="tag ${tone}" title="前缀复用率：本次缓存命中 ÷ ${prevTxt}。` +
+        `100% = 上一轮内容完整命中；0% = 缓存失效或换了账号；— = 没有可比对象">↺ ${pct}</span>`;
+      tokTitle += ` · 前缀复用 ${pct}（${prevTxt}）`;
+    }
     // 积分列**只展示本次请求的真实消耗**（上游实扣或本地估算）。
     //
     // 2026-11-08 用户反馈：没有实扣时会回退去显示 credits_map 里的倍率字符串
@@ -324,7 +344,7 @@ async function renderRecent() {
       <td class="mono muted" title="客户端来源：X-Client-Name 自声明 > UA 推断（旧记录无此字段）${r.client ? `\n原始值：${esc(r.client)}` : ''}">${r.client ? esc(fmtClient(r.client)) : '<span class="muted">—</span>'}</td>
       <td class="num mono">${r.ttft_ms != null ? ttft : '—'}</td>
       <td class="num mono">${r.duration_ms ? fmtMs(r.duration_ms) : '—'}</td>
-      <td class="num mono" title="${esc(tokTitle)}">${tok}${r.cached_tokens ? ` <span class="tag">缓 ${fmtNum(r.cached_tokens)}</span>` : ''}</td>
+      <td class="num mono" title="${esc(tokTitle)}">${tok}${reuseBadge}</td>
       <td class="num mono">${creditTxt == null ? '<span class="muted" title="该上游未提供单次积分消耗">—</span>'
         : r.credit_estimated
           ? `<b style="color:var(--ok)" title="本地估算，非上游实扣：trae 已实测模型按官方账单校准的输入/输出单价×token（随倍率面板调价自动缩放；会话首请求实测偏高约 2~3 倍），未实测模型按倍率粗估；zcode 按 GLM Coding Plan 官方抵扣系数（含时段折扣）">≈${creditTxt}</b>`

@@ -19,6 +19,32 @@ from .metrics_protocol import (
     normalize_usage,
 )
 
+#: 前缀复用率的上限。理论上「上一轮的 prompt 全部命中」是 1.0，但上游的
+#: token 计数有 ±几十的抖动（分块边界、tokenizer 版本），实测会略超 1.0；
+#: 不截断的话界面会出现「复用 100.4%」这种明显不合理的数字。
+_PREFIX_REUSE_MAX = 1.0
+
+
+def _prefix_reuse(cached: int, prev_prompt: Optional[int]) -> Optional[float]:
+    """``cached / prev_prompt``，保留 4 位小数；无法计算时 None。
+
+    与 ``cached_tokens / prompt_tokens`` 的区别见 ``record`` 里的注释：分母必须是
+    **上一轮**的 prompt，否则增长型会话会恒等于 50%，读不出「缓存有没有失效」。
+
+    为 None 的两种情况（都要能区分于「0% 复用」）：
+    - 没有上一轮（会话首请求、进程刚重启、换了账号或模型）→ 无从比较；
+    - 上一轮 prompt <= 0（异常数据）。
+
+    首请求返回 None 而不是 0.0 很重要：0.0 会被读成「缓存全部失效」，而事实是
+    「还没有可比对象」。计划统计时两者混在一起会把首请求计入失败率。
+    """
+    if not isinstance(prev_prompt, int) or prev_prompt <= 0:
+        return None
+    if cached <= 0:
+        return 0.0
+    return round(min(cached / prev_prompt, _PREFIX_REUSE_MAX), 4)
+
+
 def _sum_credits(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """把一批日志行的积分拆成「上游实扣」与「本地估算」两个合计。
 
@@ -77,6 +103,12 @@ class MetricsCollector:
         # 更薄、更好整表裁剪（见 model_distribution）。
         self._model_counts: dict[tuple[str, str, str], list[int]] = {}
         # 计数表覆盖的最早日期（启动回填后确定）；None = 还没数据/内存模式
+        # (provider, model, account) -> 上一次成功请求的 prompt_tokens。
+        # 前缀复用率的分母（见 record）。按**账号**分键是必须的：缓存按账号隔离
+        # （实测 deepseek 换号后 0 命中，glm/kimi 则跨号共享），混在一起算会把
+        # 「换了账号所以没命中」误读成「缓存失效」。进程内、不落盘：重启后第一轮
+        # 没有上一轮可比，prefix_reuse 落 null——这比编一个 0 诚实。
+        self._prev_prompt: dict[tuple[str, str, str], int] = {}
         self._mix_floor: Optional[str] = None
         # 当前写入文件所属日期（跨天首次写入时触发滚动归档）
         self._rot_date = _date_str(time.time())
@@ -118,6 +150,21 @@ class MetricsCollector:
             "prompt_tokens": int(prompt_tokens or 0),
             "completion_tokens": int(completion_tokens or 0),
             "cached_tokens": int(cached_tokens or 0),
+            # 前缀复用率：本次命中的 cache 量 ÷**上一轮同账号同模型**的 prompt 大小。
+            #
+            # 为什么不能直接用 ``cached_tokens / prompt_tokens``：prompt 是**含
+            # 缓存**的 OpenAI 口径，而 agent 类客户端的会话是持续增长的——上一轮
+            # 100k 全命中、这一轮 200k，比值恒为 50%，看起来像「缓存只能覆盖一半」，
+            # 实际是分母翻倍把真相摊薄了。按「上一轮 prompt」当分母，比值就能直接
+            # 读成「上一轮的内容这次还在不在缓存里」：1.0 = 完整延续，0 = 缓存失效
+            # 或换了账号。2026-11-10 排查多账号缓存时正是被 50% 这个数字带偏过。
+            #
+            # ``prev_prompt_tokens`` 由转发层给出（它才知道「同一会话」是谁——
+            # provider+model+account 三元组，且必须按时间序取**紧邻的那一条**）；
+            # 拿不到时留 None，前端显示「—」而不是编一个 0。
+            # 两项都在下方 with self._lock 里补齐（要读上一条记录，必须同临界区）
+            "prefix_reuse": None,
+            "prev_prompt_tokens": None,
             "credit": credit,
             "credit_estimated": bool(credit_estimated),
             "chunk_count": int(chunk_count or 0),
@@ -126,6 +173,14 @@ class MetricsCollector:
             "account": (account or "")[:40],
         }
         with self._lock:
+            # 前缀复用率必须在**同一把锁**里算并更新上一条记录：转发是并发的，
+            # 锁外读「上一轮 prompt」会被另一个请求插队改写，算出别人的分母。
+            key = (rec["provider"], rec["model"], rec.get("account") or "")
+            prev_prompt = self._prev_prompt.get(key)
+            rec["prev_prompt_tokens"] = prev_prompt
+            rec["prefix_reuse"] = _prefix_reuse(rec["cached_tokens"], prev_prompt)
+            if rec["prompt_tokens"] > 0:
+                self._prev_prompt[key] = rec["prompt_tokens"]
             self._recent.append(rec)
             self._bucket_add(self._bucket(_date_str(ts), rec["provider"], rec["model"]), rec)
             self._count_add(rec)
@@ -284,6 +339,14 @@ class MetricsCollector:
                     # 刚重启后的状态）。_read_tail 按文件顺序给的是旧→新，
                     # appendleft 正好让最新的落在最前，与实时路径口径一致。
                     self._recent_add(rec)
+                    # 前缀复用率的分母：回读时按「文件顺序（旧→新）」覆盖，
+                    # 循环结束时留下的就是最新那条的 prompt。这样重启后第一次
+                    # 请求仍有可比对象，不会因为进程重启就把全部首请求标成「—」
+                    # （用户几乎每天重启一次代理，那会让这一列一半是空的）。
+                    if rec.get("prompt_tokens"):
+                        self._prev_prompt[(rec.get("provider") or "codebuddy",
+                                           rec.get("model") or "(unknown)",
+                                           rec.get("account") or "")] = int(rec["prompt_tokens"])
                     normalized = {
                         "status": rec.get("status", 200),
                         "duration_ms": rec.get("duration_ms", 0),
@@ -593,6 +656,31 @@ class MetricsCollector:
         # 近 N 次耗时：随本次 snapshot 一起快照，供模型页「平均耗时」列用
         with self._lock:
             recent_ms = {k: list(v) for k, v in self._recent_ms.items()}
+            # 前缀复用率同样只能从 recent 取：它出生在 record() 的锁内，
+            # 没进 _daily 桶（按天的均值对这个指标没意义——首请求没有分母，
+            # 把 None 当 0 混进平均值会系统性地压低命中率）。
+            reuse_recent = [
+                (rec.get("provider") or "codebuddy",
+                 rec.get("model") or "(unknown)",
+                 rec["prefix_reuse"])
+                for rec in self._recent
+                if isinstance(rec.get("prefix_reuse"), (int, float))
+            ]
+        # (provider, model) -> 前缀复用率中位数 / 样本数。
+        #
+        # 用**中位数**不用均值：复用率的分布是双峰的（1.0 与 0.0 各占一堆），
+        # 均值会给出「0.5」这种实际不存在的情况，读起来像「缓存半效」。
+        # 中位数则稳定落在其中一峰上，正好回答「这个模型换号后缓存还在不在」。
+        reuse_by_model: dict[tuple[str, str], tuple[float, int]] = {}
+        buckets: dict[tuple[str, str], list[float]] = {}
+        for provider, model, value in reuse_recent:
+            buckets.setdefault((provider, model), []).append(float(value))
+        for key, vals in buckets.items():
+            vals.sort()
+            n = len(vals)
+            mid = vals[n // 2] if n % 2 else (vals[n // 2 - 1] + vals[n // 2]) / 2
+            reuse_by_model[key] = (round(mid, 4), n)
+
         models = []
         for agg in per_model.values():
             count = agg["count"]
@@ -607,6 +695,9 @@ class MetricsCollector:
                 # 空环时留 None：前端按 recent_count 判「没有近几次样本」显示 —，
                 # 不能悄悄退回 14 天均值——那正是用户嫌「跟近期差太大」的数值。
                 agg["recent_avg_ms"] = None
+            got = reuse_by_model.get((agg["provider"], agg["model"]))
+            agg["prefix_reuse_median"] = got[0] if got else None
+            agg["prefix_reuse_samples"] = got[1] if got else 0
             models.append(agg)
         models.sort(key=lambda m: -m["count"])
 

@@ -221,9 +221,15 @@ function providerRefreshButton(pid) {
 function providerLoadBalanceToggle(pid, multi) {
   if (!multi) return '';
   const on = (LOAD_BALANCE_ON || []).includes(pid);
+  // 缓存提示**不能一刀切**：实测不同模型的上游缓存隔离粒度不一样——glm-5.3-flash /
+  // kimi-k3.1-pro 换账号照样 100% 命中（缓存按内容前缀、跨账号共享），
+  // 而 deepseek-v4.1-flash 换账号 0 命中（按账号隔离）。所以这里只说「可能」，
+  // 真实影响让用户看日志的「↺ 前缀复用率」去判断，不要替上游下结论。
   const hint = on
-    ? '已开启：按剩余积分加权轮转。缓存仍跨账号共享，不会因此失效'
-    : '开启后按剩余积分加权轮转（额度多的账号用得更多；缓存跨账号共享，不受影响）';
+    ? '已开启：按剩余积分加权轮转（额度多的账号用得更多）。注意部分模型的缓存按账号'
+      + '隔离，换号后本次前缀可能没命中——日志页「↺」列可看到真实复用率'
+    : '开启后按剩余积分加权轮转。注意部分模型的缓存按账号隔离，换号可能让本次前缀'
+      + '没命中（日志页「↺」列可查真实复用率）';
   return `<label class="lb-toggle" title="${esc(hint)}">` +
     `<input type="checkbox" ${on ? 'checked' : ''} ` +
     `onchange="setProviderLoadBalance('${pid}', this.checked, this)">` +
