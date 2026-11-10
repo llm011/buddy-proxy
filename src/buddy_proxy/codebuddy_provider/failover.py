@@ -24,7 +24,7 @@ import logging
 import time
 from typing import Any
 
-from ..core.account_failover import CooldownTracker
+from ..core.account_failover import CooldownTracker, diagnose_available
 from .credentials import AccountRef, list_accounts, load_account_cred
 
 log = logging.getLogger(__name__)
@@ -114,7 +114,9 @@ def available_accounts(region: str | None = None,
     按账号维度的调用方不受影响）。
     """
     out = []
+    all_ids: list[str] = []
     for acct in list_accounts():
+        all_ids.append(acct.id)
         if cooldown_left(acct.id)[0] > 0:
             continue
         if region is not None and acct.region != region:
@@ -122,7 +124,12 @@ def available_accounts(region: str | None = None,
         if model is not None and model_cooldown_left(acct.id, model)[0] > 0:
             continue
         out.append(acct)
+    # 有账号被跳过时留一行诊断（见 core.account_failover.diagnose_available）。
+    # 本通道额外可能因「单模型限流」跳过，所以 reason_for 要覆盖那一层。
+    diagnose_available("codebuddy", _tracker, list_accounts(), out,
+                       region=region, log=log)
     return out
+
 
 
 def cooldown_report() -> str:

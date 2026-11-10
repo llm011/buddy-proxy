@@ -165,3 +165,101 @@ def test_concurrent_marks(tracker):
     for t in threads:
         t.join()
     assert len(tracker.snapshot()) == 50
+
+
+# ---------------------------------------------------------------------------
+# 选号诊断：为什么某个账号被跳过
+# ---------------------------------------------------------------------------
+#
+# 动机（2026-11-11 用户实报）：顺位第一的账号本该被用，实际跳到了第三个号，
+# 而日志里完全看不到原因——只能靠反推时间线（对比前后 prompt 大小、数各账号
+# 出现次数）才敢断定是冷却。静默跳过（`continue` 之后什么也不留）是根因。
+
+
+def test_explain_skip_reports_reasons():
+    from buddy_proxy.core.account_failover import explain_skip
+
+    info = explain_skip("codebuddy", ["a", "b", "c"], ["b"],
+                        reason_for=lambda aid: f"{aid} 冷却" if aid == "a" else "")
+    assert [s["id"] for s in info["skipped"]] == ["a", "c"]
+    assert info["skipped"][0]["reason"] == "a 冷却"
+    # 没给理由时不能空着——空串会被读成「没有原因」，而这里确实跳过了
+    assert info["skipped"][1]["reason"] == "unknown"
+    assert info["available"] == 1 and info["total"] == 3
+
+
+def test_explain_skip_empty_when_nothing_skipped():
+    from buddy_proxy.core.account_failover import explain_skip
+
+    info = explain_skip("codebuddy", ["a", "b"], ["a", "b"])
+    assert info["skipped"] == []
+
+
+def test_explain_skip_survives_broken_reason_for():
+    """reason_for 抛异常不能让诊断把转发搞挂。"""
+    from buddy_proxy.core.account_failover import explain_skip
+
+    def boom(_aid):
+        raise RuntimeError("boom")
+
+    info = explain_skip("x", ["a"], [], reason_for=boom)
+    assert info["skipped"][0]["reason"] == "unknown"
+
+
+def test_cooldown_reason_formats_kind_and_time():
+    from buddy_proxy.core.account_failover import CooldownTracker, cooldown_reason
+
+    t = CooldownTracker()
+    t.mark("a", kind="quota", retry_after="300")
+    got = cooldown_reason(t, "a")
+    assert "额度冷却" in got and "min" in got
+    # 没在冷却 → 空串（调用方据此换别的说法，如 region 不匹配）
+    assert cooldown_reason(t, "nope") == ""
+    # 自定义类别名（antigravity 的 blacklist）
+    t.mark("b", kind="blacklist")
+    assert "疑似拉黑" in cooldown_reason(t, "b", {"blacklist": "疑似拉黑"})
+
+
+def test_available_accounts_emits_diagnostic_on_skip():
+    """真正接线的那一层：有跳过就打日志，没跳过就不打（否则正常路径一行一条）。"""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from buddy_proxy.codebuddy_provider import failover
+
+    accts = [SimpleNamespace(id="a1", region="cn"), SimpleNamespace(id="a2", region="cn")]
+    failover._cooldowns.clear()
+    failover.mark_cooldown("a1", quota=True, retry_after="120")
+    lines = []
+    with mock.patch.object(failover, "list_accounts", lambda: accts), \
+         mock.patch.object(failover.log, "info", lambda *a, **k: lines.append((a, k))):
+        assert [a.id for a in failover.available_accounts("cn")] == ["a2"]
+        assert lines, "跳过账号时必须留下诊断行"
+        # log.info("account_skip: %s", payload)：事件名在格式串里，payload 是 JSON
+        fmt, payload = lines[0][0][0], lines[0][0][1]
+        assert "account_skip" in fmt
+        assert "a1" in payload and "额度冷却" in payload
+
+        # 无人被跳过 → 不产生噪声
+        lines.clear()
+        failover._cooldowns.clear()
+        assert len(failover.available_accounts("cn")) == 2
+        assert lines == []
+
+
+def test_available_accounts_region_filter_is_explained():
+    """region 不匹配也要能看出来（qoder/trae 跨区时最容易困惑）。"""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from buddy_proxy.qoder import failover
+
+    accts = [SimpleNamespace(id="cn1", region="cn"),
+             SimpleNamespace(id="gl1", region="global")]
+    failover._cooldowns.clear()
+    lines = []
+    with mock.patch.object(failover, "list_accounts", lambda: accts), \
+         mock.patch.object(failover.log, "info", lambda *a, **k: lines.append((a, k))):
+        assert [a.id for a in failover.available_accounts("cn")] == ["cn1"]
+        assert lines
+        assert "region" in lines[0][0][1]

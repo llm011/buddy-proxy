@@ -22,7 +22,7 @@ import logging
 import time
 from typing import Any
 
-from ..core.account_failover import CooldownTracker
+from ..core.account_failover import CooldownTracker, diagnose_available
 from .catalog import unsupported_models_for
 from .credentials import AccountRef, list_accounts, load_account_cred, cred_to_credential
 
@@ -64,9 +64,12 @@ def available_accounts(region: str | None = None) -> list[AccountRef]:
     ``region`` 给出时只回该区账号——qoder 的 CN / 全球版账号不通用（连错域
     401），混域 failover 每轮必败一次，白白多付一次往返。
     """
-    out = [a for a in list_accounts() if cooldown_left(a.id)[0] <= 0]
+    accts = list_accounts()
+    out = [a for a in accts if cooldown_left(a.id)[0] <= 0]
     if region:
         out = [a for a in out if a.region == region]
+    # 有账号被跳过时留一行诊断（冷却 / region 不匹配），见 diagnose_available。
+    diagnose_available('qoder', _tracker, accts, out, region=region, log=log)
     return out
 
 

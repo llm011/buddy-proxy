@@ -22,7 +22,7 @@ import logging
 import time
 from typing import Any
 
-from ..core.account_failover import CooldownTracker
+from ..core.account_failover import CooldownTracker, diagnose_available
 from .credentials import AccountRef, list_accounts, load_account_cred
 
 log = logging.getLogger(__name__)
@@ -63,9 +63,12 @@ def available_accounts(region: str | None = None) -> list[AccountRef]:
     ``region`` 给出时只回该区账号——CN / 海外账号不通用（连错域 401），
     混域 failover 每轮必白付一次失败往返（照 qoder.available_accounts）。
     """
-    out = [a for a in list_accounts() if cooldown_left(a.id)[0] <= 0]
+    accts = list_accounts()
+    out = [a for a in accts if cooldown_left(a.id)[0] <= 0]
     if region:
         out = [a for a in out if a.region == region]
+    # 有账号被跳过时留一行诊断（冷却 / region 不匹配），见 diagnose_available。
+    diagnose_available('trae', _tracker, accts, out, region=region, log=log)
     return out
 
 
