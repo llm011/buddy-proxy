@@ -234,11 +234,14 @@ def test_reorder_uses_per_provider_board():
     lb.board("qoder").update("b", 1)
     st = SimpleNamespace(load_balance={"codebuddy", "qoder"})
 
+    # 用占比而不是「必须每次都是强侧」：权重 1:10000 时弱侧仍有极小概率被抽中，
+    # 断言 40 次一次不漏是 flaky 的（CI 上真挂过）。这里只要求强侧明显占优，
+    # 既能证明「用的是各自通道的权重」，又不受随机性摆布。
     accts = [_Acct("a"), _Acct("b")]
-    cb_firsts = {lb.reorder(st, "codebuddy", accts)[0].id for _ in range(40)}
-    qd_firsts = {lb.reorder(st, "qoder", accts)[0].id for _ in range(40)}
-    assert cb_firsts == {"b"}, cb_firsts
-    assert qd_firsts == {"a"}, qd_firsts
+    cb_firsts = [lb.reorder(st, "codebuddy", accts)[0].id for _ in range(60)]
+    qd_firsts = [lb.reorder(st, "qoder", accts)[0].id for _ in range(60)]
+    assert cb_firsts.count("b") > 50, cb_firsts
+    assert qd_firsts.count("a") > 50, qd_firsts
 
 
 def test_weights_from_items_skips_none():
@@ -383,10 +386,10 @@ def test_reorder_skips_account_scoped_model():
             got = lb.reorder(st, "codebuddy", accts, model="deepseek-v4.1-flash")
             assert [x.id for x in got] == ["a", "b"], "隔离模型不该被轮转"
 
-        # glm：共享 → 权重生效（额度大的 b 几乎总在第一）
-        firsts = {lb.reorder(st, "codebuddy", accts, model="glm-5.3-flash")[0].id
-                  for _ in range(30)}
-        assert firsts == {"b"}
+        # glm：共享 → 权重生效（额度大的 b 几乎总在第一，但不断言 100%）
+        firsts = [lb.reorder(st, "codebuddy", accts, model="glm-5.3-flash")[0].id
+                  for _ in range(60)]
+        assert firsts.count("b") > 50, firsts
     finally:
         lb.clear_swap_samples()
 
@@ -401,9 +404,9 @@ def test_reorder_without_model_still_balances():
     lb.board("codebuddy").update("a", 1)
     lb.board("codebuddy").update("b", 10000)
     st = SimpleNamespace(load_balance={"codebuddy"})
-    firsts = {lb.reorder(st, "codebuddy", [_Acct("a"), _Acct("b")])[0].id
-              for _ in range(30)}
-    assert firsts == {"b"}
+    firsts = [lb.reorder(st, "codebuddy", [_Acct("a"), _Acct("b")])[0].id
+              for _ in range(60)]
+    assert firsts.count("b") > 50, firsts
 
 
 def test_account_scoped_models_lists_for_ui():
