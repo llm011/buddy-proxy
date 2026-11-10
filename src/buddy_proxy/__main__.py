@@ -293,6 +293,12 @@ def main():
                              "~/.buddy-proxy/yuntoken_api_key + yuntoken.json 的 base_url）。"
                              "裸名与已有目录撞车时仍归原本那条通道，显式走网关用 "
                              "yuntoken/<模型>")
+    parser.add_argument("--qwenpc", action="store_true", default=os.getenv("QWENPC_ENABLED", "") == "1",
+                        help="启用 qwenpc provider（千问办公 QwenWorkCN 桌面端的 MaaS 通道，"
+                             "openai + anthropic 原生双协议、工具调用、usage）。"
+                             "鉴权经 CDP 从 App 抓 OAuth JWT → mint token → 自刷新，"
+                             "全程不读 Keychain；首次配置会请求重启千问（需你确认）。"
+                             "模型名统一小写：qwen3.8-max。显式走用 qwenpc/<模型>")
     parser.add_argument("--kiro", action="store_true", default=os.getenv("KIRO_ENABLED", "") == "1",
                         help="启用 kiro provider（AWS CodeWhisperer / Kiro IDE 直连，"
                              "openai + anthropic 双协议、多账号、额度可查）。"
@@ -564,6 +570,19 @@ def main():
 
     # kiro：AWS CodeWhisperer 直连。与 yuntoken 同款——缺登录只告警不阻断启动
     # （用户可能刚装好还没登录，转发时 ensure_auth 会再报一次可操作的 401）。
+    if args.qwenpc:
+        from buddy_proxy.qwenpc.provider import QwenpcProvider
+
+        qwenpc = QwenpcProvider()
+        providers[qwenpc.id] = qwenpc
+        health = qwenpc.health()
+        logger.info("qwenpc provider enabled (models=%s)", ",".join(health.get("models") or []))
+        # 注意：启动时不抓 JWT——那会拉起千问 App，副作用太重。首个请求时按需取。
+        print(f"[qwenpc] Enabled ({len(health.get('models') or [])} 个模型; "
+              f"凭证在首个请求时按需获取)")
+    else:
+        print("[qwenpc] Disabled (pass --qwenpc or QWENPC_ENABLED=1 to enable)")
+
     if args.kiro:
         from buddy_proxy.kiro.provider import KiroProvider
 
