@@ -28,6 +28,7 @@ async def ui_settings_get(request: Request):
         "default_provider": getattr(state, "default_provider", "codebuddy"),
         "auto_checkin": cfg["auto_checkin"],
         "checkin_time": cfg["checkin_time"],
+        "load_balance": sorted(getattr(state, "load_balance", set()) or ()),
         "path": str(settings_mod.settings_path()),
     }
 
@@ -75,14 +76,65 @@ async def ui_settings_post(request: Request):
                 detail={"error": {"message": f"打卡时间格式应为 HH:MM，收到 {raw_time!r}"}},
             )
         update["checkin_time"] = raw_time
+    # 负载均衡开关（provider 维度的**增量**写入）：body 里给
+    # ``load_balance: {"codebuddy": true}`` 就只改这一个通道，不动其它通道的
+    # 开关——整表覆盖的语义会让「切换一个通道」把别的通道悄悄关掉（多面板
+    # 并发点击时尤其危险）。要一次设置多个通道就传多个键。
+    lb_patch = _load_balance_patch(body.get("load_balance"), getattr(state, "providers", {}) or {})
+    if lb_patch:
+        current = set(getattr(state, "load_balance", set()) or ())
+        for pid, on in lb_patch.items():
+            if on:
+                current.add(pid)
+            else:
+                current.discard(pid)
+        # 排序写盘：settings.json 是给人看的，集合的随机序会让每次保存都产生
+        # 无意义的 diff（也会让「设置文件变了」的健康检查误报）。
+        update["load_balance"] = sorted(current)
 
     if not update:
         raise HTTPException(status_code=400, detail={"error": {"message": "没有可更新的设置字段"}})
-
     saved = settings_mod.save_settings(update)
     # 热更新运行态（"" 与 None 都视为未设置）
     if "default_model" in update:
         state.default_model = update["default_model"] or None
     if "default_provider" in update:
         state.default_provider = update["default_provider"]
-    return {"ok": True, "settings": {k: saved.get(k) for k in ("default_model", "default_provider")}}
+    if "load_balance" in update:
+        state.load_balance = set(update["load_balance"])
+    return {"ok": True, "settings": {
+        k: saved.get(k) for k in ("default_model", "default_provider", "load_balance")}}
+
+
+def _load_balance_patch(raw: Any, providers: dict[str, Any]) -> dict[str, bool]:
+    """校验并归一 ``load_balance`` 增量：``{provider_id: bool}``。
+
+    只接受已注册的通道 id（``codebuddy`` 恒认，它不在 ``providers`` 字典里而是
+    默认通道）。非法条目**整条拒绝**而不是静默跳过：静默跳过会让用户以为打开了，
+    实际下一次重启才发现没生效（与 ``model_order`` 的容错取向相反——那个是配置文件
+    手写，这个是 UI 点击，写错属于 bug 而非用户输入）。
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "load_balance 应为 {provider: bool} 对象"}},
+        )
+    out: dict[str, bool] = {}
+    for key, value in raw.items():
+        pid = str(key or "").strip()
+        if not pid:
+            continue
+        if pid != "codebuddy" and pid not in providers:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"provider {pid} 未启用"}},
+            )
+        if not isinstance(value, bool):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"load_balance.{pid} 应为 true/false"}},
+            )
+        out[pid] = value
+    return out

@@ -327,6 +327,32 @@ asynchronous (`asyncio.wrap_future` / `wait_for`); the single-account call uses
 `to_thread` as well. Otherwise a slow quota/stream request stalls health,
 benefits, and unrelated model routes in the same process.
 
+### Load balancing across accounts
+
+Off by default: a multi-account channel always starts from its first account
+(stable primary/backup). Turning on a channel's switch (`settings.json`
+`load_balance`, a list of provider ids; mirrored on `ProxyState.load_balance`)
+makes `core/load_balance.reorder(state, provider_id, accounts)` return a
+weighted random permutation of the accounts instead.
+
+- **Order only, never filtering.** Each channel calls `reorder` *after*
+  `failover.available_accounts(...)` (cooldown, region, per-model limits), so the
+  switch changes who is tried first, not who may be tried. Off, or fewer than two
+  candidates, returns the list unchanged. The failover loop still walks the whole
+  permutation on 429/403.
+- **Weights are remaining credits from an in-process `QuotaBoard`**, never fetched
+  on the request path. Missing/stale (older than `MAX_QUOTA_AGE_S`) readings get
+  `MIN_WEIGHT`; if no account has a reading the order is uniformly random.
+- **Feeding the board.** `benefits._feed_load_balance` folds each quota result
+  into the board using the channel's `_quota_account_ids()` (label `#N` to account
+  id; it must come from the same list `quota()` enumerates, otherwise a weight lands
+  on the wrong account). `BenefitsManager._load_balance_warm_loop` refreshes quota
+  every `LOAD_BALANCE_WARM_INTERVAL_S` while at least one switch is on, so the
+  weights do not depend on someone keeping the admin page open.
+- **Settings write is incremental.** `POST /ui/api/settings` takes
+  `{"load_balance": {"<provider>": bool}}` and changes only the named providers;
+  unknown providers and non-bool values are rejected with 400.
+
 ## Models and settings
 
 - `web/models_config.json` is the source for static CodeBuddy/PAT catalog

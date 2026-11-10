@@ -42,6 +42,18 @@ function _dumate_sub_extra(a, bits) {
   }
 }
 
+/** DuMate 是否多账号：额度条目按「DuMate #N · 」前缀分组，>1 组即多账号。
+ *  该通道目前只有单账号（复用 App 登录态），故常态不显示开关；将来支持多账号
+ *  时这里自动成立，不需要再改渲染代码。 */
+function _dumate_multi(items) {
+  const idxs = new Set();
+  for (const it of items || []) {
+    const m = /^DuMate #(\d+) · /.exec(String(it.label || ''));
+    if (m) idxs.add(m[1]);
+  }
+  return idxs.size > 1;
+}
+
 function renderDumatePanel() {
   const panel = document.getElementById('dumate-panel');
   if (!panel) return;
@@ -94,7 +106,7 @@ function renderDumatePanel() {
           <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor}"></i>
           ${esc(stateText)}${esc(ver)}${st && st.bceconsole_authenticated ? ' · 已登录' : ''}
         </span>
-        ${fold.toggle}${providerRefreshButton('dumate')}
+        ${fold.toggle}${providerLoadBalanceToggle('dumate', _dumate_multi(items))}${providerRefreshButton('dumate')}
       </div>
       ${fold.bodyStart}<div class="pat-quota-grid">
         <div class="pat-pkg">

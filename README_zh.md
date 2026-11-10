@@ -12,6 +12,7 @@
 - **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / codex / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
 - **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、每个模型一键复制**带通道前缀**的全名（`trae/gpt-6`、`ark/ds-flash`——正是客户端 `model` 字段该填的值；「模型顺序」页每一档也可单独复制）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
+- **负载均衡（可选，按通道开启）** — 多账号通道（codebuddy / qoder / trae / kimi / codex / antigravity / kiro）默认仍是固定主备顺位。额度卡标题行的「负载均衡」开关（仅该通道账号数大于 1 时出现）打开后，转发改为按**剩余积分**加权随机排序：额度多的账号被先试的概率更大。它只重排已经通过冷却 / 区域 / 单模型限流过滤的账号，所以关掉就逐字节回到旧顺序，遇到 429/403 照旧顺着后面的账号换号。权重来自进程内的额度读数（请求路径上不会同步查上游）；某账号没有新鲜读数时记一个很小的下限权重，所有账号都没读数时退回均匀随机。读数由额度页刷新，并在任一开关开着时由后台每 10 分钟预热一次。持久化在 `settings.json` 的 `load_balance`（通道 id 列表），UI 通过 `POST /ui/api/settings` 增量写入（`{"load_balance": {"<通道>": true}}`，只动这一个通道）。
 - **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）；本地隐藏项会同时从该端点、管理页目录和模型顺序候选中移除
 - **脱敏**（`--desensitize`）— 向 system 消息里的合规关键词插入零宽空格，避免后端关键词审核误拦。带客户端指纹的 harness 模板另行处理：当 system prompt 里含 CodeBuddy 会在链路层硬拦的标识（Claude Code、Codex，以及 **DeepSeek Harness** / dsh）时，整段替换成简短的「行为约定」摘要。零宽空格**绕不过** CodeBuddy 的渠道校验（`11128 Illegal API invocation from an unapproved channel`），那条路只有整段替换有效
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
@@ -37,7 +38,7 @@ buddy start                # 启动代理并打开管理页
 
 首次运行会自动创建状态目录 `~/.buddy-proxy/`（权限 `0700`，可用
 `BUDDY_PROXY_STATE_DIR` 整体覆盖）。机器本地的东西都在这里：`settings.json`
-（默认模型、已停用/隐藏模型、已停用通道、限时窗口）、Trae Work 凭证 `trae_work.json`、PAT token
+（默认模型、已停用/隐藏模型、已停用通道、各通道负载均衡开关、限时窗口）、Trae Work 凭证 `trae_work.json`、PAT token
 缓存 `trae_pat_token.json`、yuntoken 网关的 key 与基址（`yuntoken_api_key` /
 `yuntoken.json`）、客户端名映射 `buddy_client_names.json`。目录内含凭证，
 注意别被备份或版本控制带走。启动时会以 `[State] ...` 打印实际路径。

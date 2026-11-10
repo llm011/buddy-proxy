@@ -18,6 +18,9 @@
 // confirm。Promise 化：「删除该账号」resolve(true)；取消/遮罩/Esc（汇入 closeModal）
 // resolve(false)。closeModal 是 app.js 全局函数，临时替换拦下全部关闭路径、关完还原。
 let ACCT_CONFIRM_OPEN = false;
+//: 已开启「负载均衡」的通道 id 列表（GET /ui/api/settings 的 load_balance）。
+//: 放模块级而不是 DOM：整页 30s 重建一次，DOM 上的状态会被冲掉。
+let LOAD_BALANCE_ON = [];
 function confirmAccountDelete(opts) {
   if (ACCT_CONFIRM_OPEN) return Promise.resolve(false);
   ACCT_CONFIRM_OPEN = true;
@@ -205,6 +208,57 @@ function acctDeleteButton(pid, acct, hint) {
 function providerRefreshButton(pid) {
   return `<button class="ghost" title="刷新本通道全部账号额度（绕过缓存重查）" ` +
     `onclick="refreshProviderQuota('${pid}', this)">↻</button>`;
+}
+
+/** 负载均衡开关（provider 维度，额度卡标题栏）。
+ *
+ * 打开后该通道的转发不再固定从顺位第一开始，而是在可用账号间按剩余积分加权
+ * 随机排序——额度多的账号被选中更多次，几份额度一起按比例消耗。
+ *
+ * 状态来自 GET /ui/api/settings 的 ``load_balance`` 数组（运行态，即时生效）。
+ * 多账号才显示：单账号开不开都一样，摆个按钮只会让人以为它有作用。
+ * 账号数取本通道额度卡的分组数（与面板渲染同源），不从全局推断。 */
+function providerLoadBalanceToggle(pid, multi) {
+  if (!multi) return '';
+  const on = (LOAD_BALANCE_ON || []).includes(pid);
+  const hint = on
+    ? '已开启：按剩余积分加权轮转。缓存仍跨账号共享，不会因此失效'
+    : '开启后按剩余积分加权轮转（额度多的账号用得更多；缓存跨账号共享，不受影响）';
+  return `<label class="lb-toggle" title="${esc(hint)}">` +
+    `<input type="checkbox" ${on ? 'checked' : ''} ` +
+    `onchange="setProviderLoadBalance('${pid}', this.checked, this)">` +
+    `<span>负载均衡</span></label>`;
+}
+
+/** 切换某通道的负载均衡开关。后端是**增量**写入，只动这一个通道。 */
+async function setProviderLoadBalance(pid, on, el) {
+  if (el) el.disabled = true;
+  try {
+    const r = await api('/ui/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({load_balance: {[pid]: !!on}})});
+    LOAD_BALANCE_ON = (r.settings && r.settings.load_balance) || [];
+    toast(on
+      ? `${pid} 已开启负载均衡：按剩余积分在账号间加权轮转`
+      : `${pid} 已关闭负载均衡：恢复按顺位固定主备`);
+    // 标题行提示文案随状态变，重绘一次让用户看到差别
+    if (typeof refreshAll === 'function') refreshAll();
+  } catch (e) {
+    if (el) el.checked = !on;  // 失败回滚勾选，别让 UI 撒谎
+    toast('切换失败: ' + e.message, true);
+  } finally {
+    if (el) el.disabled = false;
+  }
+}
+
+/** 拉取负载均衡开关状态（一次，页面装载时调用；失败保持空表 = 全关）。 */
+async function loadLoadBalanceState() {
+  try {
+    const r = await api('/ui/api/settings');
+    LOAD_BALANCE_ON = r.load_balance || [];
+  } catch (e) {
+    LOAD_BALANCE_ON = [];
+  }
 }
 
 /** ▲▼ + ✕ 合成右上角账号按钮组。渠道级 ↻ 统一放面板标题；这里仍放块尾、

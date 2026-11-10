@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from buddy_proxy.core.account_store import quota_epoch_from
 from buddy_proxy.core.checkin import SOURCE_UPSTREAM, next_from_window
+from buddy_proxy.core import load_balance as lb_mod
 from buddy_proxy.core.metrics import ACCOUNT_META
 from buddy_proxy.providers.base import BaseProvider
 
@@ -630,6 +631,22 @@ class QoderProvider(BaseProvider):
             "level": first.plan or None,
         }
 
+
+    def _quota_account_ids(self) -> dict[str, str]:
+        """额度标签序号（``#N``，字符串）→ 账号 id，供负载均衡把权重落到人头上。
+
+        与 :meth:`quota` 同源：**本区全量**账号（不剔除冷却中的——额度查询本身
+        就不剔除，两边口径必须一致，否则 ``#N`` 会错位到别的账号）。
+        """
+        try:
+            region = self._region.key
+            accounts = [a for a in list_accounts()
+                        if getattr(a, "region", None) == region]
+        except Exception:  # noqa: BLE001
+            return {}
+        return {str(i): str(getattr(a, "id", "") or "")
+                for i, a in enumerate(accounts, start=1) if getattr(a, "id", "")}
+
     def quota_epoch(self) -> str:
         """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。"""
         return quota_epoch_from(list_accounts)
@@ -841,6 +858,9 @@ class QoderProvider(BaseProvider):
         model = self.resolve_model(str(body.get("model") or "auto"))
 
         accounts = failover.available_accounts(self._region.key)
+        # 负载均衡（额度页开关）：只改「先试谁」，过滤已在上一步完成。
+        # 用子通道自己的 id（qoder / qoderintl），开关按面板分别控制。
+        accounts = lb_mod.reorder(_lb_state(), self.id, accounts)
         if not accounts:
             other = failover.available_accounts()
             if other:
@@ -1511,3 +1531,12 @@ if __name__ == "__main__":  # pragma: no cover
     ))
     print("status:", resp.status_code)
     print(str(resp.body)[:400])
+
+def _lb_state():
+    """当前运行态（负载均衡开关读它）。未初始化时返回 None。
+
+    走 ``core.state`` 的模块级属性而不是导入期绑定的函数：测试普遍
+    monkeypatch ``state.proxy_state``，绑定早了会拿到旧对象。
+    """
+    from ..core import state as _state
+    return getattr(_state, "proxy_state", None)

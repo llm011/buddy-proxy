@@ -55,5 +55,8 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal()
 let initTab = location.hash.replace('#', '');
 try { initTab = initTab || localStorage.getItem('bp-tab') || ''; } catch (e) {}
 switchTab(initTab);
-loadAll();
+// 负载均衡开关状态先取一次再首屏渲染：额度卡标题行的 toggle 直接读
+// LOAD_BALANCE_ON，后到会让第一帧画成「全关」再跳出勾选（30s 轮询还会
+// 冲掉这个抖动）。失败不阻塞首屏——loadLoadBalanceState 自己吞异常。
+loadLoadBalanceState().finally(() => loadAll());
 setInterval(() => loadAll(false, true), 30000);

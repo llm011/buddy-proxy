@@ -261,7 +261,7 @@ function renderCodexPanel() {
         <span class="tag">${multi ? '多账号 · 自动切换' : 'ChatGPT 订阅 · 自动切换'}</span>${fold.badge}
         <span class="grow"></span>
         <span class="muted" style="font-size:11px">${multi ? '429/403 自动冷却换号（按账号顺位）' : '额度耗尽自动切换下一个账号'}</span>
-        ${fold.toggle}${providerRefreshButton('codex')}
+        ${fold.toggle}${providerLoadBalanceToggle('codex', multi)}${providerRefreshButton('codex')}
         <button class="ghost" title="粘贴 ~/.codex/auth.json 或同构 JSON（无需安装 Codex CLI）" onclick="openCodexImport()">导入账号</button>
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}

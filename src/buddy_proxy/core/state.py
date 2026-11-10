@@ -83,6 +83,7 @@ class ProxyState:
         disabled_models: Optional[set[str]] = None,
         hidden_models: Optional[set[str]] = None,
         disabled_providers: Optional[set[str]] = None,
+        load_balance: Optional[set[str]] = None,
         model_schedules: Optional[dict[str, list]] = None,
         model_order: Optional[dict[str, list[str]]] = None,
         metrics: Optional[Any] = None,
@@ -114,6 +115,11 @@ class ProxyState:
         # 2026-10-06 需求）。命中通道：转发 403、/v1/models 组置灰、额度页与告警
         # 不再展示、顺序页对应模型置灰。settings.py 持久化，/ui 可改。
         self.disabled_providers: set[str] = set(disabled_providers or ())
+        # 开启「按剩余额度加权轮转」的通道 id 集合（额度页开关写入，用户 2026-11-10
+        # 需求）。命中通道的转发不再固定从顺位第一开始，而是在已通过冷却/区域过滤的
+        # 账号间按剩余积分加权随机排序（见 core/load_balance.py）；未命中的通道行为
+        # 不变。settings.py 持久化，/ui 额度页的开关可改。
+        self.load_balance: set[str] = set(load_balance or ())
         # 限时可用模型：键 "provider/model" → 允许时间窗列表 [["HH:MM","HH:MM"], ...]。
         # 命中的模型仅在窗口内放行、窗口外 403（与 disabled_models 并存，disabled
         # 优先级更高）。settings.py 持久化，/ui 可改。空 dict = 所有模型不受时段限制。

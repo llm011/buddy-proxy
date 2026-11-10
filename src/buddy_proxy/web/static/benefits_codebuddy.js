@@ -159,6 +159,7 @@ function renderCodebuddyPanel() {
         <span class="grow"></span>
         ${quotaAccountTotal(groups, {sumItems: true})}
         <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
+        ${providerLoadBalanceToggle('codebuddy', multi)}
         ${fold.toggle}${providerRefreshButton('codebuddy')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
@@ -255,7 +256,7 @@ function renderCodebuddyIntlPanel() {
       <div class="pat-head"><span class="name">CodeBuddy 海外版</span>
         <span class="tag">Global · 额度与签到</span>${fold.badge}<span class="grow"></span>
         ${quotaAccountTotal(groups, {sumItems: true})}
-        ${fold.toggle}${providerRefreshButton('codebuddyintl')}
+        ${fold.toggle}${providerLoadBalanceToggle('codebuddyintl', groups.size > 1)}${providerRefreshButton('codebuddyintl')}
       </div>
       ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
       ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`

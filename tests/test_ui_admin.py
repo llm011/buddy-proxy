@@ -124,6 +124,8 @@ def _make_state(providers, tmp_path):
         disabled_providers=set(),
         model_schedules={},
         model_order={},
+        # 负载均衡开关：与 ProxyState 同型（set of provider id）
+        load_balance=set(),
         metrics=MetricsCollector(tmp_path / "metrics.jsonl"),
         write_log=mock.MagicMock(),
         ensure_auth=mock.MagicMock(),
@@ -2350,3 +2352,51 @@ def test_stamp_does_not_touch_other_urls():
 
     src = '<script src="https://cdn.example.com/x.js"></script>'
     assert _stamp_assets(src) == src
+
+
+# ---------------------------------------------------------------------------
+# 设置：负载均衡开关（provider 维度）
+# ---------------------------------------------------------------------------
+def test_load_balance_toggle_is_incremental_and_persisted(env):
+    # 打开 codebuddy
+    r = env.client.post("/ui/api/settings", json={"load_balance": {"codebuddy": True}})
+    assert r.status_code == 200
+    assert r.json()["settings"]["load_balance"] == ["codebuddy"]
+    assert env.state.load_balance == {"codebuddy"}
+    assert settings_mod.load_settings()["load_balance"] == ["codebuddy"]
+
+    # 再打开 fakeprov：**增量**——codebuddy 不能被顺手关掉
+    r = env.client.post("/ui/api/settings", json={"load_balance": {"fakeprov": True}})
+    assert r.status_code == 200
+    assert env.state.load_balance == {"codebuddy", "fakeprov"}
+    # 落盘保持排序，settings.json 的 diff 稳定
+    assert settings_mod.load_settings()["load_balance"] == ["codebuddy", "fakeprov"]
+
+    # 关掉一个
+    r = env.client.post("/ui/api/settings", json={"load_balance": {"codebuddy": False}})
+    assert r.status_code == 200
+    assert env.state.load_balance == {"fakeprov"}
+
+
+def test_load_balance_get_reports_state(env):
+    env.client.post("/ui/api/settings", json={"load_balance": {"codebuddy": True}})
+    r = env.client.get("/ui/api/settings")
+    assert r.status_code == 200
+    assert r.json()["load_balance"] == ["codebuddy"]
+
+
+def test_load_balance_rejects_unknown_provider(env):
+    r = env.client.post("/ui/api/settings", json={"load_balance": {"nope": True}})
+    assert r.status_code == 400
+    assert env.state.load_balance == set()
+
+
+def test_load_balance_rejects_non_bool(env):
+    r = env.client.post("/ui/api/settings", json={"load_balance": {"codebuddy": "yes"}})
+    assert r.status_code == 400
+    assert env.state.load_balance == set()
+
+
+def test_load_balance_rejects_non_object(env):
+    r = env.client.post("/ui/api/settings", json={"load_balance": ["codebuddy"]})
+    assert r.status_code == 400

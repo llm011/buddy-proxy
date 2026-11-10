@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..core.account_store import quota_epoch_from
 from ..core.checkin import SOURCE_INFERRED, next_daily_reset
+from ..core import load_balance as lb_mod
 from ..core.metrics import ACCOUNT_META
 from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
 from ..providers.base import BaseProvider
@@ -849,6 +850,19 @@ class TraeProvider(BaseProvider):
 
         return {"items": items, "level": None}
 
+
+    def _quota_account_ids(self) -> dict[str, str]:
+        """额度标签序号（``#N``，字符串）→ 账号 id，供负载均衡把权重落到人头上。
+
+        与 :meth:`quota` 同源（``_checkin_accounts()``，本区全量、不剔除冷却）。
+        """
+        try:
+            accounts = self._checkin_accounts()
+        except Exception:  # noqa: BLE001
+            return {}
+        return {str(i): str(getattr(a, "id", "") or "")
+                for i, a in enumerate(accounts or (), start=1) if getattr(a, "id", "")}
+
     def quota_epoch(self) -> str:
         """quota 缓存代：账号列表一变（登录新号/删号/换顺位）旧快照就该作废。"""
         return quota_epoch_from(list_accounts)
@@ -1045,6 +1059,8 @@ class TraeProvider(BaseProvider):
         # 已由 list_accounts 归一成 "cn"（credentials.py），过滤本身就覆盖到它们。
         # 空列表时区分「本区无账号但别区有」（401，配置问题）与「全在冷却」（429）。
         accounts = failover.available_accounts(self._region.key)
+        # 负载均衡（额度页开关）：只改「先试谁」，region/冷却过滤已完成。
+        accounts = lb_mod.reorder(_lb_state(), self.id, accounts)
         if not accounts:
             other = failover.available_accounts()
             if other:
@@ -1792,3 +1808,8 @@ def _replay_prefixed(buffered: list[str], gen: Any) -> Any:
         yield piece
     for piece in gen:
         yield piece
+
+def _lb_state():
+    """当前运行态（负载均衡开关读它）。未初始化时返回 None。"""
+    from ..core import state as _state
+    return getattr(_state, "proxy_state", None)
