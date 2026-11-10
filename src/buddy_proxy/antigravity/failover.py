@@ -24,7 +24,7 @@ import logging
 import time
 from typing import Any
 
-from ..core.account_failover import CooldownTracker
+from ..core.account_failover import CooldownTracker, diagnose_available
 from .credentials import (
     AccountRef,
     _expiry_dt,
@@ -88,7 +88,12 @@ def cooldown_left(account_id: str) -> tuple[float, str]:
 
 def available_accounts() -> list[AccountRef]:
     """当前可用的账号（按 failover 顺位）：全部账号剔除冷却中的。"""
-    return [a for a in list_accounts() if cooldown_left(a.id)[0] <= 0]
+    accts = list_accounts()
+    out = [a for a in accts if cooldown_left(a.id)[0] <= 0]
+    # 有账号被跳过时留一行诊断（见 core.account_failover.diagnose_available）：
+    # 「本该用顺位第一、实际跳到了第三个号」这类现象，过去在日志里完全不可见。
+    diagnose_available('antigravity', _tracker, accts, out, log=log)
+    return out
 
 
 def cooldown_report() -> str:

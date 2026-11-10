@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any, Callable, Sequence
 
 #: 403 / 401 强刷后仍被拒：账号级问题，短冷却快速重探。
 DEFAULT_ACCOUNT_COOLDOWN_S = 60.0
@@ -150,3 +151,128 @@ class CooldownTracker:
         if seconds >= 90 * 60:
             return f"{seconds / 3600:.1f}h"
         return f"{seconds / 60:.1f}min"
+
+
+# ---------------------------------------------------------------------------
+# 选号诊断：为什么某个账号这次没被用上
+# ---------------------------------------------------------------------------
+#
+# 动机（2026-11-11 实报）：用户看到「顺位第一的账号本该被用，却跳到了 #3」，
+# 而日志里**完全看不到原因**。那次排查只能靠反推时间线（对比前后 prompt 大小、
+# 数账号出现次数）才断定是冷却，而不是负载均衡或代码 bug。
+#
+# 这类事件的特征是「静默跳过」：过滤发生在 available_accounts 里，`continue`
+# 之后什么也不留。加日志的价值不在于事后能查，而在于**当时就能看出是哪一环**：
+# 冷却（还要能看出剩多久、哪一类）/ 被停用 / region 不匹配 / 单模型限流。
+
+
+def explain_skip(
+    provider_id: str,
+    total_accounts: Sequence[str],
+    available: Sequence[str],
+    *,
+    reason_for: Callable[[str], str] | None = None,
+) -> dict[str, Any]:
+    """对比「全部账号」与「本次可用的账号」，给出被跳过者及原因。
+
+    参数都是纯数据（id 列表），不碰任何通道的 AccountRef 类型——各通道字段
+    不同，传对象会把这层耦合进通道。
+
+    ``reason_for`` 由调用方提供（它才知道自己有哪些过滤条件：region、
+    单模型限流、额度耗尽……）。缺省只区分「在冷却」与「其它」。
+
+    返回 ``{"skipped": [{id, reason}], "available": n, "total": n}``。
+    **没有跳过时返回空 skipped**，调用方据此决定要不要打日志——正常路径不该
+    产生噪声，否则日志里每请求一行，真正要看的那条就埋了。
+    """
+    avail = {str(a) for a in available or ()}
+    skipped: list[dict[str, str]] = []
+    for aid in total_accounts or ():
+        key = str(aid)
+        if key in avail:
+            continue
+        reason = ""
+        if reason_for is not None:
+            try:
+                reason = str(reason_for(key) or "")
+            except Exception:  # noqa: BLE001 - 诊断失败不能影响转发
+                reason = ""
+        skipped.append({"id": key, "reason": reason or "unknown"})
+    return {
+        "skipped": skipped,
+        "available": len(avail),
+        "total": len(list(total_accounts or ())),
+    }
+
+
+def cooldown_reason(tracker: Any, account_id: str, labels: dict[str, str] | None = None
+                    ) -> str:
+    """某账号当前的冷却画像（供 ``explain_skip`` 的 ``reason_for`` 用）。
+
+    形如 ``额度冷却剩 4.2min``；没在冷却返回空串（让调用方决定要不要换别的
+    说法，比如「region 不匹配」）。
+    """
+    try:
+        left, kind = tracker.left(account_id)
+    except Exception:  # noqa: BLE001
+        return ""
+    if left <= 0:
+        return ""
+    names = {"quota": "额度冷却", "account": "账号冷却"}
+    if labels:
+        names.update(labels)
+    human = f"{left / 60:.1f}min" if left >= 60 else f"{left:.0f}s"
+    return f"{names.get(kind, kind or '冷却')}剩 {human}"
+
+
+def diagnose_available(
+    provider_id: str,
+    tracker: "CooldownTracker",
+    all_accounts: Sequence[Any],
+    available: Sequence[Any],
+    *,
+    region: str | None = None,
+    labels: dict[str, str] | None = None,
+    log: Any = None,
+) -> None:
+    """各通道 ``available_accounts`` 共用的收尾：有跳过就打一行诊断。
+
+    抽成公共函数而不是每个通道抄一份：漏抄一个通道，那个通道就继续静默跳过
+    （而「静默跳过」正是这次要消灭的东西）。五个通道的过滤条件只差 region，
+    在这里用参数表达即可。
+
+    **只在有跳过时输出**：正常路径（全部可用）打日志会让每请求一行，
+    真正要看的那条就被埋了。
+
+    异常全吞：诊断是旁路，绝不能因为取不到冷却状态把转发搞挂。
+    """
+    try:
+        avail_ids = {str(getattr(a, "id", "") or "") for a in available or ()}
+        all_ids = [str(getattr(a, "id", "") or "") for a in all_accounts or ()]
+        if len(avail_ids) >= len(all_ids):
+            return
+        def _reason(aid: str) -> str:
+            got = cooldown_reason(tracker, aid, labels)
+            if got:
+                return got
+            if region is not None:
+                for a in all_accounts or ():
+                    if str(getattr(a, "id", "") or "") == aid:
+                        if getattr(a, "region", None) not in (None, region):
+                            return f"region 不匹配（本通道 {region}）"
+                        break
+            return "未纳入可用集合"
+
+        info = explain_skip(provider_id, all_ids, [str(x) for x in avail_ids],
+                            reason_for=_reason)
+        if log is not None:
+            log.info("account_skip: %s", _json_dumps(provider_id, info))
+    except Exception:  # noqa: BLE001 - 见 docstring
+        pass
+
+
+def _json_dumps(provider_id: str, info: dict[str, Any]) -> str:
+    """诊断行 payload（延迟 import json：本模块其余部分不需要它）。"""
+    import json
+
+    return json.dumps({"provider": provider_id, **info}, ensure_ascii=False)
