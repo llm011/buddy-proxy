@@ -248,3 +248,70 @@ def test_mint_result_is_cached_with_jwt(tmp_path, monkeypatch):
     assert cache["jwt"] == "eyJJWT"
     assert cache["jwt_expires_at"] > 0
     assert cache["token"] == "sk-mm-v1.T"
+
+
+# ---------------------------------------------------------------------------
+# 积分反推：靠额度差，且要跨过上游的结算抖动
+# ---------------------------------------------------------------------------
+#
+# 上游**不提供**单次计费字段，只能「调用前后各查一次额度、取差值」。而它的
+# 额度接口有个固定怪癖（实测反复确认，三轮完全一致）：
+#
+#     调用前        384.1131
+#     +0.0s        364.1130   ← 比真实值低整整 20（结算中间值）
+#     +0.4s        384.0773   ← 真实值
+#     +0.8s        383.7585   ← 还会再降一点（二次结算）
+#
+# 所以：after 要跳过「低 20」的抖动值、取非抖动采样里的最小值；before 也
+# 可能踩到抖动值（那时差值是 `-20 + 真实消耗`），用固定幅度修正回来。
+
+def test_spent_credit_normal():
+    from buddy_proxy.qwenpc.provider import _spent_credit
+    assert _spent_credit(389.88, 389.84) == 0.04
+
+
+def test_spent_credit_corrects_jittered_baseline():
+    """before 踩了抖动值（偏小 20）时，差值约 -20，要加回来。"""
+    from buddy_proxy.qwenpc.provider import _spent_credit
+    got = _spent_credit(369.86, 389.83)
+    assert got is not None and 0.01 < got < 0.10, f"应修正为真实消耗，实际 {got}"
+
+
+def test_spent_credit_rejects_insane():
+    from buddy_proxy.qwenpc.provider import _spent_credit
+    assert _spent_credit(389.88, 300.0) is None      # 差 89
+    assert _spent_credit(None, 389.0) is None
+    assert _spent_credit(389.0, None) is None
+    assert _spent_credit(389.0, 389.0) is None       # 无消耗
+
+
+def test_is_jitter():
+    from buddy_proxy.qwenpc.provider import _is_jitter
+    assert _is_jitter(364.113, 384.113) is True      # 低 20
+    assert _is_jitter(384.077, 384.113) is False     # 正常消耗
+    assert _is_jitter(None, 384.0) is False
+
+
+def test_quota_method_shape():
+    """额度卡：个人版没有分母，不能编 total/percent。"""
+    from buddy_proxy.qwenpc.provider import QwenpcProvider
+    q = QwenpcProvider().quota()
+    if q is None:
+        pytest.skip("上游不可达")
+    assert "items" in q and q["items"]
+    item = q["items"][0]
+    assert isinstance(item["remaining"], (int, float))
+    assert item["total"] is None, "上游不给总量，不许编分母"
+    assert item["percent"] is None
+    assert item["unit"] == "credit"
+
+
+def test_credit_chunk_is_valid_sse():
+    """补发的 usage 帧要符合 OpenAI 流式规范（choices 为空）。"""
+    import json as _json
+    from buddy_proxy.qwenpc.provider import _credit_chunk
+    raw = _credit_chunk(0.0374).decode()
+    assert raw.startswith("data: ") and raw.endswith("\n\n")
+    payload = _json.loads(raw[len("data: "):].strip())
+    assert payload["choices"] == []
+    assert payload["usage"]["credit"] == 0.0374

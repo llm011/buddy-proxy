@@ -511,6 +511,65 @@ def api_base() -> str:
     return str(cache.get("base") or DEFAULT_API_BASE)
 
 
+#: 账号上下文端点（个人版拿额度的**唯一**入口）。
+#:
+#: 注意不是 ``/api/v2/quota/usage``——那个是**企业版**用的，个人版调用会返回
+#: 一堆 null（``total``/``used``/``remaining`` 全空，``user_type=personal_standard``），
+#: 看起来像"没有额度"。个人版的余额在 ``account-context`` 的 ``quota.remaining``
+#: 里（实测 395.9554）。
+ACCOUNT_CONTEXT_PATH = ("/api/v1/adapter/user/account-context"
+                        "?include=user,plan,quota")
+
+
+def account_context(jwt: str | None = None, *, timeout: float = 20.0
+                    ) -> dict[str, Any]:
+    """查账号上下文（用户 / 套餐 / 额度）。
+
+    返回 ``{"user": {...}, "plan": {...}, "quota": {"remaining": float, ...}}``。
+
+    ⚠ 必须用 **OAuth JWT**，不能用 MaaS token（``sk-mm-v1.*``）——后者是给
+    模型调用用的，打这个网关会 401。
+    """
+    token = jwt or str(_load_cache().get("jwt") or "")
+    if not token:
+        raise CredentialError("没有可用的 OAuth JWT，无法查询额度")
+    req = urllib.request.Request(
+        f"{GATEWAY}{ACCOUNT_CONTEXT_PATH}",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")[:160]
+        except Exception:  # noqa: BLE001
+            pass
+        raise CredentialError(
+            f"查询额度失败 HTTP {exc.code}: {body}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise CredentialError(
+            f"查询额度失败：{type(exc).__name__}") from exc
+    payload = data.get("data") if isinstance(data, dict) else None
+    return payload if isinstance(payload, dict) else {}
+
+
+def remaining_quota(jwt: str | None = None) -> float | None:
+    """当前剩余额度（拿不到返回 None）。"""
+    try:
+        ctx = account_context(jwt)
+    except CredentialError:
+        return None
+    quota = ctx.get("quota")
+    if not isinstance(quota, dict):
+        return None
+    value = quota.get("remaining")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
 def clear_cache() -> None:
     with _lock:
         try:

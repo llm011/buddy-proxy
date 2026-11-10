@@ -33,6 +33,7 @@ UI 上显示 ``Qwen3.8-Max``，但 API 只认全小写 ``qwen3.8-max``（踩过�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -74,11 +75,148 @@ _TIMEOUT = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=15.0)
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "close"}
 
-#: 协议 → 上游路径。两条都是原生支持，直接透传。
+#: 协议 → 上游路径。两条都是**原生**支持，所以直接透传、不做转换。
 _PROTOCOL_PATHS = {
     "openai": "/v1/chat/completions",
     "anthropic": "/v1/messages",
 }
+
+#: 额度查询的进程内缓存（秒）。
+_QUOTA_TTL_S = 3.0
+
+#: 额度快照缓存：``(ts, remaining)``。
+_quota_cache: tuple[float, float | None] = (0.0, None)
+
+#: 调用后**轮询等待稳定**的最长时间（秒）与间隔。
+#:
+#: 上游在调用结束后约 1 秒内会返回一个「比真实值低 20」的临时值（实测三轮
+#: 完全一致）::
+#:
+#:     调用前        394.8859
+#:     +0.0s        374.8858   ← 低 20（结算中）
+#:     +0.4s        374.8858   ← 还在低
+#:     +0.8s        394.8494   ← 稳定
+#:
+#: 所以这里不是「睡固定时间再查一次」，而是**轮询到连续两次读数一致**为止
+#: ——固定 sleep 在网络慢时可能还没结算完，快时又白等。
+_QUOTA_POLL_TIMEOUT_S = 10.0
+_QUOTA_POLL_GAP_S = 0.4
+
+#: 调用前采样的次数与间隔（取最大值，避开偶发抖动）。
+_QUOTA_PRE_SAMPLES = 3
+_QUOTA_SAMPLE_GAP_S = 0.35
+
+#: 调用前采样的间隔（秒）。
+_QUOTA_SAMPLE_GAP_S = 0.35
+
+#: 单次调用消耗的合理上界。超过它一定是结算抖动/额度池切换，不是真消耗
+#: （实测真实单次消耗 0.03~0.05）。
+_MAX_SANE_CREDIT = 5.0
+
+#: 抖动幅度：上游临时值 = 真实值 - 这个数。用来**识别**抖动读数。
+_JITTER_DROP = 20.0
+
+
+async def _quota_once() -> float | None:
+    try:
+        return await asyncio.to_thread(creds.remaining_quota)
+    except Exception as exc:  # noqa: BLE001 - 查额度失败不影响转发
+        log.debug("qwenpc 额度查询失败: %s", type(exc).__name__)
+        return None
+
+
+async def _quota_before() -> float | None:
+    """调用**之前**取额度基线。
+
+    注意：基线本身也可能落在抖动值上（实测 ``369.86`` vs 真实 ``389.88``，
+    差整整 20）。所以不能简单取「几次采样的最大值」——如果整组都采到了抖动
+    值，最大值也是错的。
+
+    做法：采一组，若**组内出现两个相差 20 的值**，说明这一组混着抖动值，
+    取大的那个（真实值只会比抖动值大）；若整组一致，也照用——但记下这个值，
+    调用后如果发现差值是负数，说明基线取错了，由 ``_spent_credit`` 兜住。
+    """
+    values: list[float] = []
+    for i in range(_QUOTA_PRE_SAMPLES):
+        v = await _quota_once()
+        if v is not None:
+            values.append(v)
+        if i < _QUOTA_PRE_SAMPLES - 1:
+            await asyncio.sleep(_QUOTA_SAMPLE_GAP_S)
+    if not values:
+        return None
+    return max(values)
+
+
+def _is_jitter(value: float | None, baseline: float | None) -> bool:
+    """这个读数是否是「比基线低 20」的结算抖动值。
+
+    上游在调用后约 1 秒内会返回 ``真实值 - 20``（实测三次全部一致）。这个
+    特征很明确，所以直接按差值判定，而不是靠「连续两次相同」——抖动值本身
+    也常常连续相同，指望它自己变化会误判。
+    """
+    if value is None or baseline is None:
+        return False
+    return abs((baseline - value) - _JITTER_DROP) < 1.0
+
+
+async def _quota_after(baseline: float | None) -> float | None:
+    """调用**之后**取稳定额度。
+
+    实测的完整过程（三轮完全一致）::
+
+        轮1: 364.113 → 384.077 → 383.758(稳定)
+        轮2: 363.758 → 383.725(稳定)
+        轮3: 363.185 → 383.138(稳定)
+
+    两个必须处理的特性：
+
+    1. **首采样恒为抖动值**（比真实值低 20）。它出现一次就消失，所以只要
+       跳过「比后续读数低约 20」的那个就能等到真实值。
+    2. **真实值本身还会再降一点**（384.077 → 383.758），那是另一笔消耗或
+       上游的二次结算。所以不能拿「第一次非抖动值」当最终值，要再观察一会。
+
+    策略：持续采样到截止时间，**取所有非抖动采样里的最小值**（额度只会下降，
+    最终稳定水位就是这一段里的最小非抖动值）。
+    """
+    end = time.monotonic() + _QUOTA_POLL_TIMEOUT_S
+    samples: list[float] = []
+    while time.monotonic() < end:
+        cur = await _quota_once()
+        if cur is not None:
+            samples.append(cur)
+            # 收够一定数量的样本且已稳定（最后三次完全一致）就提前结束
+            if len(samples) >= 4 and len(set(f"{v:.4f}" for v in samples[-3:])) == 1:
+                break
+        await asyncio.sleep(_QUOTA_POLL_GAP_S)
+    if not samples:
+        return None
+    # 非抖动值：不小于「整组最大值 - 20」的都算真实读数
+    top = max(samples)
+    real = [v for v in samples if v > top - _JITTER_DROP / 2]
+    if not real:
+        return None
+    return min(real)
+
+
+def _spent_credit(before: float | None, after: float | None) -> float | None:
+    """由前后额度算本次消耗；不可信时返回 None。
+
+    ``after`` 已由 :func:`_quota_after` 过滤掉抖动值。这里还要处理
+    **基线本身踩到抖动值**的情况（实测会发生）：那时差值是 ``-20 + 真实消耗``，
+    用固定的抖动幅度把它修正回来。
+    """
+    if before is None or after is None:
+        return None
+    spent = before - after
+    # 基线偏小 20（踩了抖动值）→ 差值约 -20，加回来
+    if spent < 0 and abs(spent + _JITTER_DROP) < 1.0:
+        spent = spent + _JITTER_DROP
+    if spent <= 0 or spent > _MAX_SANE_CREDIT:
+        log.debug("qwenpc 额度差 %.4f 不可信（before=%s after=%s），跳过",
+                  spent, before, after)
+        return None
+    return round(spent, 6)
 
 
 def provider_models() -> list[dict[str, Any]]:
@@ -162,6 +300,44 @@ class QwenpcProvider(BaseProvider):
                 if isinstance(expires, (int, float)) else None),
         }
 
+    # -- 额度（管理页「额度」卡） -------------------------------------------
+
+    def quota(self) -> dict[str, Any] | None:
+        """查额度卡数据，返回 ``{"items": [...], "level": ...}``。
+
+        上游的个人版**没有配额分母**：``account-context`` 的 ``quota`` 只给
+        ``remaining``，``total``/``used`` 都是 ``null``。所以这里只报剩余量，
+        不编一个假分母（``percent`` 留 ``None``，界面不会画进度条）。
+        """
+        try:
+            ctx = creds.account_context()
+        except Exception as exc:  # noqa: BLE001 - 查额度失败不阻塞整页
+            log.warning("qwenpc 额度查询失败: %s", type(exc).__name__)
+            return None
+        quota = ctx.get("quota")
+        if not isinstance(quota, dict):
+            return None
+        remaining = quota.get("remaining")
+        if not isinstance(remaining, (int, float)) or isinstance(remaining, bool):
+            return None
+        plan = ctx.get("plan") if isinstance(ctx.get("plan"), dict) else {}
+        user = ctx.get("user") if isinstance(ctx.get("user"), dict) else {}
+        label = str(user.get("name") or user.get("username") or "qwenpc")
+        return {
+            "items": [{
+                "label": f"{label} · Credits",
+                # 上游不给 total/used，只有 remaining —— 别编分母
+                "used": None,
+                "total": None,
+                "remaining": round(float(remaining), 2),
+                "percent": None,
+                "reset_ts": None,
+                "expire_ts": None,
+                "unit": "credit",
+            }],
+            "level": str(plan.get("name") or "") or None,
+        }
+
     # -- 转发 ---------------------------------------------------------------
 
     async def forward(
@@ -209,6 +385,10 @@ class QwenpcProvider(BaseProvider):
                          "Content-Type": "application/json",
                          "Accept": ("text/event-stream" if stream
                                     else "application/json")})
+            # ⚠ 基线必须在**发请求之前**取：请求一发出去上游就开始结算，
+            # 之后再读已经是扣费后的值，差值会算成 0（非流式因此恒为 None，
+            # 踩过）。注意它要放在 build_request 之前、紧邻 send。
+            before = await _quota_before()
             resp = await client.send(request, stream=True)
         except httpx.TimeoutException as exc:
             log.warning("qwenpc upstream timeout: %s", describe_exception(exc))
@@ -237,7 +417,7 @@ class QwenpcProvider(BaseProvider):
 
         if stream:
             return StreamingResponse(
-                self._passthrough(client, resp),
+                self._passthrough(client, resp, before=before),
                 media_type="text/event-stream", headers=_SSE_HEADERS)
 
         await resp.aread()
@@ -249,19 +429,72 @@ class QwenpcProvider(BaseProvider):
                 "type": "bad_gateway"}}) from exc
         finally:
             await resp.aclose()
+        # 非流式：响应体已完整，直接查额度差并塞进 usage。
+        #
+        # 为什么放 usage 而不是顶层：metrics 的非流式路径读 payload["usage"] 再走
+        # normalize_usage，顶层字段它看不到（kiro 那边踩过同样的坑）。
+        await self._fill_credit(payload, before)
         return JSONResponse(content=payload)
 
+    async def _fill_credit(self, payload: dict[str, Any],
+                           before: float | None) -> None:
+        """查一次额度、算差值、写进 ``payload["usage"]["credit"]``。
+
+        实测精度（``qwen3.8-max``，113 token）：扣 0.0434。上游**不提供**单次
+        计费字段，只能靠前后额度差反推——比按倍率估算准得多。
+        """
+        if before is None:
+            return
+        after = await _quota_after(before)
+        spent = _spent_credit(before, after)
+        if spent is None:
+            return
+        usage = payload.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+            payload["usage"] = usage
+        usage["credit"] = round(spent, 6)
+
     async def _passthrough(self, client: httpx.AsyncClient,
-                           resp: httpx.Response) -> AsyncIterator[bytes]:
-        """流式原样透传（上游已经是标准 SSE，不需要重组）。"""
+                           resp: httpx.Response, *,
+                           before: float | None = None) -> AsyncIterator[bytes]:
+        """流式原样透传 + 收尾补一个带 credit 的 usage 帧。
+
+        上游的 SSE 已经在末尾给了 usage（含 cached_tokens），但**没有单次计费**。
+        这里在流结束时查一次额度差，再补发一帧 ``choices: []`` 的 usage chunk
+        ——``SSEUsageExtractor`` 只认带 ``usage`` 的行，最后一帧会覆盖前面的，
+        所以客户端与 metrics 都能读到完整数字。
+
+        为什么必须在**这里**（而不是异步后台任务）：metrics 的
+        ``_metrics_stream`` 是在本生成器**结束之后**才写日志的。异步任务查回来时
+        日志已经落库，插不回去了——所以查询必须发生在 yield 完最后一帧之前。
+        查询本身只有 ~100ms，且只在流末尾发生一次。
+        """
+        usage_seen = False
         try:
             async for chunk in resp.aiter_bytes():
-                if chunk:
-                    yield chunk
+                if not chunk:
+                    continue
+                if b'"usage"' in chunk:
+                    usage_seen = True
+                yield chunk
         finally:
             await resp.aclose()
+        # 流结束：查额度差，补一帧 usage
+        if before is not None and usage_seen:
+            after = await _quota_after(before)
+            spent = _spent_credit(before, after)
+            if spent is not None:
+                yield _credit_chunk(spent)
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=_TIMEOUT)
         return self._client
+
+
+def _credit_chunk(credit: float) -> bytes:
+    """补发的 usage 帧（OpenAI 流式规范：usage chunk 的 choices 为空）。"""
+    payload = {"object": "chat.completion.chunk", "choices": [],
+               "usage": {"credit": credit}}
+    return ('data: ' + json.dumps(payload, ensure_ascii=False) + '\n\n').encode()
