@@ -39,7 +39,7 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # 加通道 flag 时两处一起改，否则 CI 红）。兜底通道用 codebuddy：它是唯一恒在的
 # 通道，不会因为某个 flag 被拿掉就失效——早先这里写 trae，与 proxy.sh 常年
 # 不一致，装成 launchd 服务后兜底通道和手跑脚本时是两个，排查极易被带偏。
-EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --ark --deepseek --yuntoken --zcode-start --mimo --qoder --antigravity --kimi --codex --kiro --default-provider codebuddy}"
+EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --ark --deepseek --yuntoken --zcode-start --mimo --qoder --antigravity --kimi --codex --kiro --qwenpc --default-provider codebuddy}"
 
 SERVICE_LABEL="com.buddy.proxy"
 PLIST="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
