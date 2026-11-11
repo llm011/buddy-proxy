@@ -43,7 +43,7 @@ pytestmark = pytest.mark.skipif(
 
 _FNS = ("quotaSpent", "quotaRemaining", "quotaMoreButton", "quotaItemsHtml", "syncQuotaFold",
         "quotaFoldToggle", "quotaItemHtml", "fmtExpireMmdd", "quotaProviderExhausted",
-        "quotaProviderFold", "quotaProviderToggle")
+        "quotaProviderFold", "quotaProviderToggle", "remainSpan")
 
 
 def _extract_fn(text: str, name: str) -> str:
