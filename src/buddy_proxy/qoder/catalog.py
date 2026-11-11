@@ -150,6 +150,15 @@ def is_enabled(entry: dict[str, Any]) -> bool:
 #: CodeBuddy 静态表同名——同一批模型两边都有，裸名调用由 ``forward_chat``
 #: 的路由决定归属；要强制走本通道请写 ``qoder/<id>``。
 MODEL_IDS: dict[str, str] = {
+    # ``qwen4-max`` **上游目录里没有**（``/v1/models`` 只给 9 个，不含它），但
+    # 直接点名调用**实测可用**（2026-11-12：返回正常文本，``billable: false``
+    # 说明走的是不计费的内测档）。
+    #
+    # 登记在这里是为了让「用户敲 qwen4-max」能命中本通道并出现在目录里；
+    # 它的上下文窗口 / 是否支持图片等元数据**上游没给**，所以下面 models()
+    # 里不带那些字段（宁缺勿造）。既然可能是内测版，上游随时可能撤，
+    # 真撤了调用会回 400，不影响其它模型。
+    "qwen4-max": "qwen4-max",
     "qmodel_38max": "qwen3.8-max",
     "qfmodel": "qwen3.8-flash",
     "qmodel_latest": "qwen3.7-max",
@@ -169,6 +178,30 @@ MODEL_IDS: dict[str, str] = {
     "cmodel": "cantus",
     "smodel": "sonus",
 }
+
+#: 上游目录里**没有**、但实测可调用、需要主动列出来的模型。
+#:
+#: 与 :data:`MODEL_IDS` 的区别：那个是「上游 key → 对外 id」的翻译表，只对
+#: 上游真实返回的条目生效；这里是**凭空补一条**——上游 ``/v1/models`` 根本
+#: 不给它，但点名调用能通。
+#:
+#: 当前只有 ``qwen4-max``（2026-11-12 实测）：调用返回正常文本、
+#: ``billable: false``（不计费的内测档）。上游目录只报 9 个模型，不含它。
+#:
+#: ⚠ 只填**确定的**能力字段。上游没声明 ``max_input`` / 是否支持图片，
+#: 这里就不写——`to_openai_model` 会把这些留空，客户端按「未知」处理，
+#: 不会因为编了个数字导致长上下文请求被误判。
+LOCAL_EXTRA_MODELS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "qwen4-max",
+        "display_name": "Qwen4-Max",
+        "is_reasoning": True,
+        # 注意：本次实测它自述为「Qwen3.5」——上游命名与模型自我认知不一致，
+        # 可能是内测期的占位。等上游正式收录后再校正 display_name。
+        "local_extra": True,
+    },
+)
+
 
 #: 改名前的旧对外 id -> 上游 key。上游原地换代时只改 display_name，老客户端的
 #: 配置里还留着旧名字，这里兜住，避免升级后点名直接 400。

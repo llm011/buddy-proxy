@@ -41,6 +41,7 @@ from buddy_proxy.providers.base import BaseProvider
 from . import failover
 from .campaigns import CLAIM_ACTION, CampaignClient
 from .catalog import (
+    LOCAL_EXTRA_MODELS,
     Catalog,
     account_supports,
     is_enabled,
@@ -213,8 +214,16 @@ class QoderProvider(BaseProvider):
         摆着调不通的模型只会让客户端白白选到它（2026-10-03 三方模型整批
         被收回后，/v1/models 仍虚报 7 个 403 模型的教训）。
         """
-        return [to_openai_model(e, self.id)
-                for e in self._entries() if not is_hidden(e) and is_enabled(e)]
+        out = [to_openai_model(e, self.id)
+               for e in self._entries() if not is_hidden(e) and is_enabled(e)]
+        # 本地补充的模型：上游目录里没登记、但实测可调用的（见 catalog.LOCAL_EXTRA_MODELS）。
+        # 不加这段，它们只能靠「裸名硬发」调用，在管理页和客户端选择器里都看不见。
+        present = {str(m.get("id") or "") for m in out}
+        for extra in LOCAL_EXTRA_MODELS:
+            mid = f"{self.id}/{extra['key']}"
+            if mid not in present:
+                out.append(to_openai_model(extra, self.id))
+        return out
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
         """逐账号刷新目录取并集（供管理页「刷新模型」与启动预热用）。

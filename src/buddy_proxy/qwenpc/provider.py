@@ -52,24 +52,50 @@ log = logging.getLogger(__name__)
 
 #: 已知模型（上游无目录接口，这里是兜底表）。
 #:
-#: ``credits`` 是相对倍率（``qwen3.8-max`` = 1.0 为基准），仅供 UI 参考——
-#: 上游不提供这个数据，是从界面里观察到的档位（Max > Plus > Flash）。
+#: ``credits`` 是相对倍率（``qwen3.8-max`` = 1.0 为基准）。
+#:
+#: **来自实测标定，不是估的**（2026-11-12）。上游没有任何「模型单价」接口，
+#: 只能靠「调用前后额度差」反推，而反推有两个坑，标定时必须控住：
+#:
+#: 1. **缓存命中会大幅打折**。同一段 prompt 第二次调用（``cached_tokens`` 命中
+#:    87%）扣费只有第一次的 1/3.7。所以标定必须用**每次全新随机内容**保证
+#:    ``cached_tokens == 0``，否则测出来的数字偏低且不稳定。
+#: 2. **结算有抖动窗口**。调用刚结束时上游返回的是临时值（低 5 或低 20），
+#:    要等结算完成（约 1.7s）再读数。
+#:
+#: 标定方法：固定 1600 字随机输入、``max_tokens=1``（把输出压到最小）、
+#: 每个模型测 2 次取均值、只保留 ``cached_tokens == 0`` 的样本。
+#:
+#: 结果（每千 token 单价 → 相对倍率）::
+#:
+#:     qwen3.8-max              0.2172  →  1.00
+#:     qwen3.8-flash            0.0264  →  0.12
+#:     glm-5.3                  0.1122  →  0.52
+#:     glm-5.3-flash            0.0080  →  0.04
+#:     deepseek-v4-pro          0.0902  →  0.42
+#:     deepseek-v4-flash        0.0100  →  0.05
+#:     kimi-k3.1-pro            0.5013  →  2.31
+#:     kimi-k3.1-pro-highspeed  1.0041  →  4.63
+#:
+#: ⚠ 这组数字**只反映输入侧（冷缓存）**的计价比。实际扣费还受缓存命中率影响，
+#: 同一段对话的第二轮往往只花第一轮的 1/4——所以倍率适合横向比较模型贵贱，
+#: 不适合估算具体一次调用花多少（那要看日志里的真实 ``credit``）。
 FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
     # 每个系列**只留最新版**（用户 2026-11-11 要求）：有 glm-5.3 就不要 glm-5.2。
     # 上游确实同时提供旧版，但列出来只会让模型选择器变长、还容易选错。
     #
     # ---- Qwen 系 ----
     {"id": "qwen3.8-max", "name": "Qwen3.8-Max", "credits": 1.0, "images": True},
-    {"id": "qwen3.8-flash", "name": "Qwen3.8-Flash", "credits": 0.1, "images": True},
+    {"id": "qwen3.8-flash", "name": "Qwen3.8-Flash", "credits": 0.12, "images": True},
     # ---- GLM 系（智谱）----
-    {"id": "glm-5.3", "name": "GLM-5.3", "credits": 0.6},
-    {"id": "glm-5.3-flash", "name": "GLM-5.3-Flash", "credits": 0.1},
+    {"id": "glm-5.3", "name": "GLM-5.3", "credits": 0.52},
+    {"id": "glm-5.3-flash", "name": "GLM-5.3-Flash", "credits": 0.04},
     # ---- DeepSeek 系 ----
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "credits": 0.8},
-    {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "credits": 0.1},
+    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "credits": 0.42},
+    {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "credits": 0.05},
     # ---- Kimi 系（月之暗面）----
-    {"id": "kimi-k3.1-pro", "name": "Kimi K3.1 Pro", "credits": 1.0},
-    {"id": "kimi-k3.1-pro-highspeed", "name": "Kimi K3.1 Pro (Highspeed)", "credits": 1.2},
+    {"id": "kimi-k3.1-pro", "name": "Kimi K3.1 Pro", "credits": 2.31},
+    {"id": "kimi-k3.1-pro-highspeed", "name": "Kimi K3.1 Pro (Highspeed)", "credits": 4.63},
 )
 
 _TIMEOUT = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=15.0)
