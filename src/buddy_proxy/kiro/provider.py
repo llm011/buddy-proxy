@@ -408,6 +408,26 @@ def _messages_to_conversation(body: dict[str, Any],
         user_msg = entry.get("userInputMessage")
         if user_msg is not None and "modelId" in user_msg:
             user_msg["modelId"] = upstream_model
+    # ⚠ **配对修复**：上游对 toolUse/toolResult 的要求是硬约束——
+    # ``toolUses`` 后面必须紧跟一条含对应 ``toolResults`` 的 user 消息，
+    # **一个都不能缺**，否则整条请求 400::
+    #
+    #     messages.710: `tool_use` ids were found without `tool_result` blocks
+    #     immediately after: toolu_bdrk_01YFVaiNmbRBq7kv5yZde3r8
+    #
+    # 客户端历史里出现下列情况时会破坏配对，任何一种都会让整轮对话中断：
+    #
+    # 1. **工具调用后对话就结束了**（用户看到工具跑完就没再发消息）——
+    #    那条 assistant 成了 history 最后一条，后面没有 user。
+    # 2. **工具结果排在后续 user 消息后面**（客户端把 result 和 next user
+    #    的顺序写反了，或者中间插了一条 user）。
+    # 3. **客户端直接跳过工具结果**（用户点了「跳过」/执行失败没回填）。
+    #
+    # 修法：逐条检查每个 ``toolUses``，把缺失的 result 补成「未执行」占位。
+    # 用占位而不是删掉 toolUses——删掉会让模型以为它没调用过工具，
+    # 下一轮可能重复调用同一个工具；占位则如实告诉它「这次没跑」。
+    history = _fix_tool_pairing(history)
+
     # 把工具定义铺到**每一条** user 历史里。上游要求：用了 toolUse/toolResult
     # 内容块时，那一段上下文必须自己声明 tools，否则 TOOL_CONFIG_MISSING。
     if tool_specs:
@@ -418,6 +438,76 @@ def _messages_to_conversation(body: dict[str, Any],
             ctx = user_msg.setdefault("userInputMessageContext", {})
             ctx.setdefault("tools", tool_specs)
     return content, model_id, history
+
+
+#: 缺失工具结果时的占位内容。措辞要**如实**：告诉模型这次没执行，
+#: 而不是编一个「成功」让它以为拿到了数据。
+MISSING_TOOL_RESULT_TEXT = "（该工具本次未执行或无返回结果）"
+
+
+def _fix_tool_pairing(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """保证每个 ``toolUses`` 后面都有配对的 ``toolResults``。
+
+    上游的约束是硬性的（``TOOL_USE_RESULT_MISMATCH`` 直接 400），而客户端
+    历史不保证满足——用户可能工具跑完就不再说话、也可能点「跳过」。
+    这里把缺失的结果补成占位，让请求能发出去。
+
+    三种形态分别处理（见调用处的注释）：
+
+    - 后面**没有** user 消息 → 补一条只含 toolResults 的 user
+    - 后面**有** user 但缺部分 id → 把缺的塞进那条 user 的 toolResults
+    - id 全缺 → 同上
+
+    注意「后面有 user 但不是紧跟」的情况：这里只补紧邻的那一条，
+    不去重排历史顺序——那会改变对话语义，风险更大。
+    """
+    out: list[dict[str, Any]] = []
+    for idx, entry in enumerate(history):
+        out.append(entry)
+        assistant = entry.get("assistantResponseMessage")
+        if not isinstance(assistant, dict):
+            continue
+        uses = assistant.get("toolUses") or []
+        if not uses:
+            continue
+        want = {str(u.get("toolUseId") or "") for u in uses if u.get("toolUseId")}
+        if not want:
+            continue
+
+        nxt = history[idx + 1] if idx + 1 < len(history) else None
+        user_msg = nxt.get("userInputMessage") if isinstance(nxt, dict) else None
+        if isinstance(user_msg, dict):
+            ctx = user_msg.get("userInputMessageContext")
+            if not isinstance(ctx, dict):
+                ctx = {}
+                user_msg["userInputMessageContext"] = ctx
+            results = ctx.get("toolResults")
+            if not isinstance(results, list):
+                results = []
+                ctx["toolResults"] = results
+            have = {str(r.get("toolUseId") or "") for r in results}
+            missing = want - have
+            for tid in want:
+                if tid not in missing:
+                    continue
+                results.append({
+                    "toolUseId": tid,
+                    "content": [{"text": MISSING_TOOL_RESULT_TEXT}],
+                    # 用 error 而不是 success：它确实没有成功产出。
+                    # 有的客户端会据 status 决定是否重试，如实标错更有用。
+                    "status": "error",
+                })
+        else:
+            # 后面没有 user：补一条只装 toolResults 的
+            out.append({"userInputMessage": {
+                "content": "",
+                "userInputMessageContext": {"toolResults": [
+                    {"toolUseId": tid,
+                     "content": [{"text": MISSING_TOOL_RESULT_TEXT}],
+                     "status": "error"}
+                    for tid in want]},
+            }})
+    return out
 
 
 def _tool_result_to_kiro(result: dict[str, Any]) -> dict[str, Any]:
