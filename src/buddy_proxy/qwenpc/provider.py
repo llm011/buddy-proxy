@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, AsyncIterator, Sequence
 
@@ -111,12 +112,25 @@ _QUOTA_POLL_GAP_S = 0.7
 _QUOTA_PRE_SAMPLES = 3
 _QUOTA_SAMPLE_GAP_S = 0.35
 
-#: 调用前采样的间隔（秒）。
-_QUOTA_SAMPLE_GAP_S = 0.35
-
-#: 单次调用消耗的合理上界。超过它一定是结算抖动/额度池切换，不是真消耗
-#: （实测真实单次消耗 0.03~0.05）。
+#: 单次消耗的**兜底上界**（无 token 数据时用）。
+#:
+#: 真实消耗**不是固定量级**——它随请求规模线性增长（实测同一模型）：
+#:
+#: ======= ========== ========
+#: 输入 token   扣费     每千 token
+#: ======= ========== ========
+#: 2 088     0.118    0.057
+#: 10 088    1.353    0.134
+#: 40 089   15.929    0.397
+#: ======= ========== ========
+#:
+#: 所以**不能用一个固定阈值判断「是否异常」**——旧版写死 5.0，直接导致
+#: 4 万 token 的请求（真实扣 15.9）被当成抖动丢掉，日志里只剩 None。
+#: 现在按本次请求的 token 数动态算上界（见 :func:`_max_sane_credit`）。
 _MAX_SANE_CREDIT = 5.0
+
+#: 每千 token 的扣费上界（实测最贵 0.397/千，留 3 倍余量）。
+_CREDIT_PER_1K_TOKENS_CAP = 1.2
 
 #: 抖动的**已知幅度**（实测见过 20 和 5 两档）。
 #:
@@ -217,7 +231,19 @@ async def _quota_after(baseline: float | None) -> float | None:
     return top
 
 
-def _spent_credit(before: float | None, after: float | None) -> float | None:
+def _max_sane_credit(tokens: int | None) -> float:
+    """按本次请求规模算「合理消耗」上界。
+
+    有 token 数就按 :data:`_CREDIT_PER_1K_TOKENS_CAP` 算（+1 的固定余量给
+    小请求），否则退回 :data:`_MAX_SANE_CREDIT`。
+    """
+    if isinstance(tokens, int) and tokens > 0:
+        return max(_MAX_SANE_CREDIT, tokens / 1000.0 * _CREDIT_PER_1K_TOKENS_CAP + 1.0)
+    return _MAX_SANE_CREDIT
+
+
+def _spent_credit(before: float | None, after: float | None,
+                  *, tokens: int | None = None) -> float | None:
     """由前后额度算本次消耗；不可信时返回 None。
 
     ``after`` 已由 :func:`_quota_after` 过滤掉抖动值。这里还要处理
@@ -233,7 +259,7 @@ def _spent_credit(before: float | None, after: float | None) -> float | None:
             if abs(spent + drop) < 1.0:
                 spent = spent + drop
                 break
-    if spent <= 0 or spent > _MAX_SANE_CREDIT:
+    if spent <= 0 or spent > _max_sane_credit(tokens):
         log.debug("qwenpc 额度差 %.4f 不可信（before=%s after=%s），跳过",
                   spent, before, after)
         return None
@@ -471,7 +497,12 @@ class QwenpcProvider(BaseProvider):
         if before is None:
             return
         after = await _quota_after(before)
-        spent = _spent_credit(before, after)
+        # 用本次请求的 token 数算「合理消耗」上界：扣费随输入规模线性增长，
+        # 固定阈值会把大请求误判成抖动（旧版写死 5.0，4 万 token 的请求被
+        # 直接丢掉，日志里只剩 None）。
+        _u = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        _n = (_u.get("prompt_tokens") or 0) + (_u.get("completion_tokens") or 0)
+        spent = _spent_credit(before, after, tokens=_n or None)
         if spent is None:
             return
         usage = payload.get("usage")
@@ -496,19 +527,26 @@ class QwenpcProvider(BaseProvider):
         查询本身只有 ~100ms，且只在流末尾发生一次。
         """
         usage_seen = False
+        total_tokens: int | None = None
         try:
             async for chunk in resp.aiter_bytes():
                 if not chunk:
                     continue
                 if b'"usage"' in chunk:
                     usage_seen = True
+                    m = _USAGE_TOKENS_RE.search(chunk)
+                    if m:
+                        try:
+                            total_tokens = int(m.group(1))
+                        except ValueError:
+                            pass
                 yield chunk
         finally:
             await resp.aclose()
         # 流结束：查额度差，补一帧 usage
         if before is not None and usage_seen:
             after = await _quota_after(before)
-            spent = _spent_credit(before, after)
+            spent = _spent_credit(before, after, tokens=total_tokens)
             if spent is not None:
                 yield _credit_chunk(spent)
 
@@ -516,6 +554,10 @@ class QwenpcProvider(BaseProvider):
         if self._client is None or self._client.is_closed:
             self._client = httpx.AsyncClient(timeout=_TIMEOUT)
         return self._client
+
+
+#: 从流式 chunk 里抠 ``total_tokens``（用于算合理消耗上界）。
+_USAGE_TOKENS_RE = re.compile(r'"total_tokens"\s*:\s*(\d+)')
 
 
 def _credit_chunk(credit: float) -> bytes:
