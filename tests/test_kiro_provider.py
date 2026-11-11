@@ -712,3 +712,119 @@ def test_openai_stream_emits_tool_calls():
            / "provider.py").read_text(encoding="utf-8")
     assert '"tool_calls"' in src and 'finish = "tool_calls"' in src
     assert 'stop_reason": "tool_use"' in src or '"tool_use"' in src
+
+
+# ---------------------------------------------------------------------------
+# tool_use / tool_result 配对修复
+# ---------------------------------------------------------------------------
+#
+# 真实事故（用户 dsh 会话反复中断，2026-11-11）：
+#
+#     messages.710: `tool_use` ids were found without `tool_result` blocks
+#     immediately after: toolu_bdrk_01YFVaiNmbRBq7kv5yZde3r8
+#     reason: TOOL_USE_RESULT_MISMATCH
+#
+# 上游的约束是硬性的：每个 toolUses 后面**必须**紧跟配对的 toolResults，
+# 一个都不能缺，否则整条请求 400、整轮对话中断。
+#
+# 而客户端历史不保证满足——用户可能工具跑完就不再说话、也可能点「跳过」。
+
+def _pairing_problems(msgs):
+    """把 chat messages 转成 payload，检查每个 toolUses 是否都有配对结果。"""
+    from buddy_proxy.kiro.provider import _chat_to_kiro
+
+    out = _chat_to_kiro({"model": "m", "messages": msgs}, {})
+    hist = out["conversationState"]["history"]
+    cur = out["conversationState"]["currentMessage"]["userInputMessage"]
+    problems = []
+    for i, e in enumerate(hist):
+        uses = (e.get("assistantResponseMessage") or {}).get("toolUses") or []
+        if not uses:
+            continue
+        nxt = hist[i + 1] if i + 1 < len(hist) else None
+        if nxt and "userInputMessage" in nxt:
+            ctx = nxt["userInputMessage"].get("userInputMessageContext") or {}
+        else:
+            ctx = cur.get("userInputMessageContext") or {}
+        have = {r.get("toolUseId") for r in (ctx.get("toolResults") or [])}
+        want = {u.get("toolUseId") for u in uses}
+        if want - have:
+            problems.append((i, want - have))
+    return problems
+
+
+def _t(i):
+    return {"id": i, "type": "function",
+            "function": {"name": "f", "arguments": "{}"}}
+
+
+def _r(i):
+    return {"role": "tool", "tool_call_id": i, "content": "ok"}
+
+
+def test_pairing_ok_for_normal_single_tool():
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [_t("t1")]},
+            _r("t1"), {"role": "user", "content": "next"}]
+    assert _pairing_problems(msgs) == []
+
+
+def test_pairing_ok_for_multiple_tools():
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [_t("t1"), _t("t2")]},
+            _r("t1"), _r("t2"), {"role": "user", "content": "next"}]
+    assert _pairing_problems(msgs) == []
+
+
+def test_pairing_fixed_when_conversation_ends_right_after_tool():
+    """工具跑完用户就没再说话——这是最容易踩的一种（对话自然结束）。"""
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [_t("t1")]},
+            _r("t1")]
+    assert _pairing_problems(msgs) == [], "末尾工具调用必须补上结果"
+
+
+def test_pairing_fixed_when_result_missing_entirely():
+    """客户端点「跳过」——根本没有 tool 消息。"""
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [_t("t1")]},
+            {"role": "user", "content": "next"}]
+    assert _pairing_problems(msgs) == [], "缺失的结果要补占位"
+
+
+def test_pairing_fixed_when_result_comes_after_next_user():
+    """客户端把 result 写在后续 user 之后（顺序错乱）。"""
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [_t("t1")]},
+            {"role": "user", "content": "跳过工具"},
+            _r("t1")]
+    assert _pairing_problems(msgs) == []
+
+
+def test_pairing_fixed_for_consecutive_tool_rounds():
+    msgs = [{"role": "user", "content": "q"},
+            {"role": "assistant", "content": None, "tool_calls": [_t("t1")]},
+            _r("t1"),
+            {"role": "assistant", "content": None, "tool_calls": [_t("t2")]},
+            _r("t2"), {"role": "user", "content": "next"}]
+    assert _pairing_problems(msgs) == []
+
+
+def test_missing_result_placeholder_is_marked_error():
+    """补的占位要如实标 error，不能伪装成成功。
+
+    模型据 status 判断工具是否产出过数据；标 success 会让它以为拿到了
+    结果，进而基于不存在的数据继续推理。
+    """
+    from buddy_proxy.kiro.provider import MISSING_TOOL_RESULT_TEXT, _fix_tool_pairing
+
+    hist = _fix_tool_pairing([
+        {"assistantResponseMessage": {"content": "", "toolUses": [
+            {"toolUseId": "tX", "name": "f", "input": {}}]}},
+    ])
+    assert len(hist) == 2
+    ctx = hist[1]["userInputMessage"]["userInputMessageContext"]
+    result = ctx["toolResults"][0]
+    assert result["toolUseId"] == "tX"
+    assert result["status"] == "error"
+    assert MISSING_TOOL_RESULT_TEXT in result["content"][0]["text"]
