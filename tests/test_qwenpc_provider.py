@@ -323,3 +323,43 @@ def test_credit_chunk_is_valid_sse():
     payload = _json.loads(raw[len("data: "):].strip())
     assert payload["choices"] == []
     assert payload["usage"]["credit"] == 0.0374
+
+
+# ---------------------------------------------------------------------------
+# 倍率：实测标定值（不是估的）
+# ---------------------------------------------------------------------------
+#
+# 上游没有任何「模型单价」接口，只能靠调用前后的额度差反推。反推有两个坑，
+# 标定时必须控住：
+#
+# 1. **缓存命中大幅打折**：同一 prompt 第二次（cached_tokens 命中 87%）
+#    扣费只有第一次的 1/3.7。不控住的话测出来的数字偏低且不稳定。
+# 2. **结算抖动**：调用刚结束时读到的是临时值（低 5 或低 20）。
+#
+# 标定方法：固定 1600 字随机输入、max_tokens=1、每模型 2 次取均值、
+# 只留 cached_tokens == 0 的样本。
+
+def test_credit_rates_match_calibration():
+    """倍率必须与实测标定值一致（防止有人凭感觉改）。"""
+    from buddy_proxy.qwenpc.provider import FALLBACK_MODELS
+
+    expected = {
+        "qwen3.8-max": 1.0,
+        "qwen3.8-flash": 0.12,
+        "glm-5.3": 0.52,
+        "glm-5.3-flash": 0.04,
+        "deepseek-v4-pro": 0.42,
+        "deepseek-v4-flash": 0.05,
+        "kimi-k3.1-pro": 2.31,
+        "kimi-k3.1-pro-highspeed": 4.63,
+    }
+    actual = {m["id"]: m["credits"] for m in FALLBACK_MODELS}
+    assert actual == expected, f"倍率与标定不符: {actual}"
+
+
+def test_highspeed_is_most_expensive():
+    """kimi-k3.1-pro-highspeed 是最贵的（4.63），别被名字骗了当成免费档。"""
+    from buddy_proxy.qwenpc.provider import FALLBACK_MODELS
+
+    by_id = {m["id"]: m["credits"] for m in FALLBACK_MODELS}
+    assert by_id["kimi-k3.1-pro-highspeed"] == max(by_id.values())
