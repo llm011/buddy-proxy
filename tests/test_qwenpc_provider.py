@@ -293,7 +293,13 @@ def test_is_jitter():
 
 
 def test_quota_method_shape():
-    """额度卡：个人版没有分母，不能编 total/percent。"""
+    """额度卡：只报剩余量。
+
+    ⚠ **不要写 `used`/`total` 键**（哪怕值是 None）。前端 ``quotaRemaining()``
+    的判定是「这两个键存在但不是数字 → 当作查不到额度」，会让卡片挂上
+    「无剩余额度」红标、且画不出进度条（用户 2026-11-11 报障用）。
+    语义上「上游没有这个字段」就该**不出现**，而不是出现一个 null。
+    """
     from buddy_proxy.qwenpc.provider import QwenpcProvider
     q = QwenpcProvider().quota()
     if q is None:
@@ -301,8 +307,10 @@ def test_quota_method_shape():
     assert "items" in q and q["items"]
     item = q["items"][0]
     assert isinstance(item["remaining"], (int, float))
-    assert item["total"] is None, "上游不给总量，不许编分母"
-    assert item["percent"] is None
+    assert item["remaining"] > 0
+    assert "used" not in item, "used 键存在会让前端判成查不到额度"
+    assert "total" not in item, "total 键存在会让前端判成查不到额度"
+    assert "percent" not in item, "没有分母就不该给百分比"
     assert item["unit"] == "credit"
 
 

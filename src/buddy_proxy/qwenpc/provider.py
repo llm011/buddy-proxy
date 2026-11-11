@@ -323,18 +323,22 @@ class QwenpcProvider(BaseProvider):
         plan = ctx.get("plan") if isinstance(ctx.get("plan"), dict) else {}
         user = ctx.get("user") if isinstance(ctx.get("user"), dict) else {}
         label = str(user.get("name") or user.get("username") or "qwenpc")
+        # ⚠ **不要**写 ``"used": None, "total": None``。
+        #
+        # 前端 ``quotaRemaining()`` 有一道判定：``used``/``total`` 这两个键
+        # **存在但不是数字**时直接返回 null —— 于是整条被当成「查不到额度」，
+        # 卡片顶部挂「无剩余额度」红标、且画不出进度条（用户 2026-11-11 报障：
+        # 「剩 386 却说无剩余额度」）。
+        #
+        # 正确做法是**干脆不写这两个键**：语义是「上游没有这个概念」，而不是
+        # 「有这个字段但值是空」。只留 ``remaining`` 就能被正常识别。
+        item: dict[str, Any] = {
+            "label": f"{label} · Credits",
+            "remaining": round(float(remaining), 2),
+            "unit": "credit",
+        }
         return {
-            "items": [{
-                "label": f"{label} · Credits",
-                # 上游不给 total/used，只有 remaining —— 别编分母
-                "used": None,
-                "total": None,
-                "remaining": round(float(remaining), 2),
-                "percent": None,
-                "reset_ts": None,
-                "expire_ts": None,
-                "unit": "credit",
-            }],
+            "items": [item],
             "level": str(plan.get("name") or "") or None,
         }
 
