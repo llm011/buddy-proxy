@@ -148,10 +148,17 @@ def aggregate_models(
     for bare, group in buckets.items():
         preferred = _pick_preferred(group, bare, order, known_providers)
         ordered_providers: list[str] = []
-        # 先按 model_order 的候选顺序，再补上目录里其余通道
+        # 目录里**真实提供**这个模型的所有通道。它才是事实依据：某个模型从某个
+        # 通道下线后，model_order 里可能还留着那条候选（用户手动配的 / 历史
+        # 自动生成的），光看 model_order 会把「已经拿不到的通道」也报出去
+        # （踩过：dumate 下线 deepseek-v4.1-flash 后，/v1/models 的 providers
+        # 里它还在，但真正调用报 invalid_model）。
+        available = {str(e.get("provider") or "codebuddy") for e in group}
+        # 先按 model_order 的候选顺序，再补上目录里其余通道；两者都要求该通道
+        # 此刻确实提供这个模型。
         for target in order.get(bare) or []:
             pid = target.partition("/")[0] or "codebuddy"
-            if pid not in ordered_providers:
+            if pid in available and pid not in ordered_providers:
                 ordered_providers.append(pid)
         for e in group:
             pid = str(e.get("provider") or "codebuddy")

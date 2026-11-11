@@ -253,3 +253,44 @@ def test_window_tier_end_to_end_through_normalize_and_aggregate():
     )
     assert out[0]["context_window"] == 600000
     assert out[0]["max_input"] == 600000
+
+
+def test_providers_omits_stale_model_order_channels():
+    """``model_order`` 里残留的通道不该出现在 ``providers``。
+
+    来由（真实事故）：dumate 下线 ``deepseek-v4.1-flash`` 后，目录里已经没有
+    它了，但 ``~/.buddy-proxy/settings.json`` 的 ``model_order`` 里还留着
+    ``dumate/deepseek-v4.1-flash``。聚合逻辑原来**无条件**把 model_order 里的
+    通道拉进 ``providers``，于是 ``/v1/models`` 仍宣称 dumate 提供这个模型——
+    真去调用却报 ``invalid_model``。
+    """
+    entries = [
+        {"id": "codebuddy/deepseek-v4.1-flash", "provider": "codebuddy",
+         "name": "DeepSeek V4.1 Flash"},
+        {"id": "trae/deepseek-v4.1-flash", "provider": "trae",
+         "name": "DeepSeek V4.1 Flash"},
+    ]
+    order = {"deepseek-v4.1-flash": [
+        "codebuddy/deepseek-v4.1-flash",
+        "dumate/deepseek-v4.1-flash",     # ← 已下线，目录里没有
+        "trae/deepseek-v4.1-flash",
+    ]}
+    out = aggregate_models(entries, order=order,
+                           known_providers=frozenset({"codebuddy", "trae", "dumate"}))
+    assert len(out) == 1
+    got = out[0]["providers"]
+    assert "dumate" not in got, f"已下线的通道不该出现: {got}"
+    assert got == ["codebuddy", "trae"], f"顺序应保持 model_order 里的相对次序: {got}"
+
+
+def test_providers_keeps_order_for_available_channels():
+    """model_order 的候选顺序对**真实存在**的通道仍然生效。"""
+    entries = [
+        {"id": "a/m1", "provider": "a", "name": "M1"},
+        {"id": "b/m1", "provider": "b", "name": "M1"},
+        {"id": "c/m1", "provider": "c", "name": "M1"},
+    ]
+    order = {"m1": ["c/m1", "a/m1"]}
+    out = aggregate_models(entries, order=order,
+                           known_providers=frozenset({"a", "b", "c"}))
+    assert out[0]["providers"] == ["c", "a", "b"]
