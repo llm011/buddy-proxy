@@ -55,8 +55,11 @@ _PAGE_LOCK = threading.RLock()
 #:
 #: 另外实测过：``pc_version`` 对 ``v3/detail/`` **不是必需**——去掉它、甚至写成
 #: ``9.99.99`` 都返回 ``code: 0``，只有整串 query 为空才失败（``code: 1``）。
-#: 所以这里的目标不是「值必须精确」，而是「别落后于客户端」，避免某天版本校验
-#: 变成硬门槛。
+#: 2026-11-12 实测：App 2.36.3 把签到请求改回主聊天页发起，必须用绝对 URL。
+#: 所以这里不再依赖活动落地页的参数集，而是直接从聊天页 performance 里
+#: 取一条已成功的 /alice/ 请求，剥掉签名参数 → 桌面全量参数集（含 device_id、
+#: web_id、tea_uuid、fp、channel=mac_official 等）。兜底值保留旧参数集形状，
+#: 只在取不到实时参数时退化成它（不会成功，但至少能跑通查询逻辑）。
 _PAGE_QUERY = (
     "?version_code=20800&language=zh&device_platform=web"
     "&doubao_device_platform=web&aid=497858&real_aid=497858"
@@ -76,10 +79,10 @@ _UA_VERSION_JS = """
 
 _DETAIL_QUERY_JS = """
 (() => {
-  const entries = performance.getEntriesByType('resource').filter(
-    e => e.name.includes('/alice/ug/campaign/v3/detail/'));
-  if (!entries.length) return '';
-  const url = new URL(entries[entries.length - 1].name);
+  const es = performance.getEntriesByType('resource').filter(
+    e => e.name.includes('/alice/ug/campaign'));
+  if (!es.length) return '';
+  const url = new URL(es[es.length - 1].name);
   url.searchParams.delete('msToken');
   url.searchParams.delete('a_bogus');
   return url.search;
@@ -233,6 +236,10 @@ class CheckinPage:
 
     def request(self, path: str, body: dict[str, Any], timeout: float,
                 *, daily_task_only: bool = False) -> tuple[int, Any, str]:
+        # 2026-11-12：App 2.36.3 把网络行为改了——聊天页（chrome://）里发
+        # 相对路径会落到 SPA 首页（200+HTML），必须用绝对 URL 才带 httpOnly cookie。
+        # 所以这里统一走绝对 URL，不再依赖页面 origin 判断。
+        url = _ORIGIN + path + self.query
         # detail 的 example_cases 远超 20KB；只在页面内取签到任务，不能截断整份 JSON。
         select = (
             "const task = data.data && Array.isArray(data.data.tasks) "
@@ -242,7 +249,7 @@ class CheckinPage:
             "&& data.data.campaign_code, tasks: task ? [task] : []}};"
         ) if daily_task_only else ""
         expr = _FETCH_JS % (
-            json.dumps(_ORIGIN + path + self.query),
+            json.dumps(url),
             json.dumps(json.dumps(body, separators=(",", ":"))),
             select,
         )
