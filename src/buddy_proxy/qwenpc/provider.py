@@ -99,8 +99,13 @@ _quota_cache: tuple[float, float | None] = (0.0, None)
 #:
 #: 所以这里不是「睡固定时间再查一次」，而是**轮询到连续两次读数一致**为止
 #: ——固定 sleep 在网络慢时可能还没结算完，快时又白等。
+#: 采样次数。结算通常在 1.7s 内完成（实测 20 秒连续观察），但**偶尔会拖到
+#: 5 秒以上**（并发/网络慢时）。0.7s × 8 次 ≈ 5.6s，覆盖最坏情况的绝大多数；
+#: 再长就是在拿用户等待时间换一个参考数字，不值。
+_QUOTA_POLL_SAMPLES = 8
+
 _QUOTA_POLL_TIMEOUT_S = 10.0
-_QUOTA_POLL_GAP_S = 0.4
+_QUOTA_POLL_GAP_S = 0.7
 
 #: 调用前采样的次数与间隔（取最大值，避开偶发抖动）。
 _QUOTA_PRE_SAMPLES = 3
@@ -113,9 +118,23 @@ _QUOTA_SAMPLE_GAP_S = 0.35
 #: （实测真实单次消耗 0.03~0.05）。
 _MAX_SANE_CREDIT = 5.0
 
-#: 抖动幅度：上游临时值 = 真实值 - 这个数。用来**识别**抖动读数。
-_JITTER_DROP = 20.0
+#: 抖动的**已知幅度**（实测见过 20 和 5 两档）。
+#:
+#: 上游结算窗口内会先返回一个「真实值 - N」的中间值，N 不是固定的::
+#:
+#:     轮1: 365.3232 → 370.3055   （-5）
+#:     轮2: 370.3055 → 370.2884   （无抖动，正常消耗）
+#:     轮3: 365.2890 → 370.2713   （-5）
+#:
+#: 更早还观测到过 -20 的档位。所以**不能只按某个固定幅度过滤**——这里只用来
+#: 做「事后修正」的候选，真正的主判据是下方 ``_quota_after`` 的「取最高值」。
+#:
+#: ⚠ 档位最小值取 2.0：真实单次消耗在 0.0x 量级，绝不会到 2；而把 1.0 这类
+#: 小档位也列进来，会让「正常消耗 0.0171」被误判成抖动。
+_JITTER_DROPS = (20.0, 5.0, 2.0)
 
+#: 单次调用消耗的合理上界（实测真实值 0.03~0.05）。
+_MAX_SANE_CREDIT = 1.0
 
 async def _quota_once() -> float | None:
     try:
@@ -149,35 +168,35 @@ async def _quota_before() -> float | None:
 
 
 def _is_jitter(value: float | None, baseline: float | None) -> bool:
-    """这个读数是否是「比基线低 20」的结算抖动值。
+    """该读数是否「比基线低一个已知抖动幅度」。
 
-    上游在调用后约 1 秒内会返回 ``真实值 - 20``（实测三次全部一致）。这个
-    特征很明确，所以直接按差值判定，而不是靠「连续两次相同」——抖动值本身
-    也常常连续相同，指望它自己变化会误判。
+    只用于**日志/兜底判断**；主判据是 ``_quota_after`` 的取最高值策略
+    （见那里的说明）——因为抖动的幅度不固定，靠特征匹配总有漏网的。
     """
     if value is None or baseline is None:
         return False
-    return abs((baseline - value) - _JITTER_DROP) < 1.0
+    drop = baseline - value
+    return any(abs(drop - d) < 1.0 for d in _JITTER_DROPS)
 
 
 async def _quota_after(baseline: float | None) -> float | None:
-    """调用**之后**取稳定额度。
+    """调用**之后**取真实水位。
 
-    实测的完整过程（三轮完全一致）::
+    实测的确定性规律（20 秒连续观察）：::
 
-        轮1: 364.113 → 384.077 → 383.758(稳定)
-        轮2: 363.758 → 383.725(稳定)
-        轮3: 363.185 → 383.138(稳定)
+        before      370.0116
+        +0.1s       365.0122   ← 抖动（-5）
+        +1.7s       369.9945   ← 真实值，之后一直不动
+        ...
+        +19.4s      369.9945
 
-    两个必须处理的特性：
+    **结算在 1.7 秒内完成**，之后读数完全稳定。抖动只会「先低后高」，所以
+    **这一段采样里的最大值就是真实水位**——不必等固定时长，也不必按固定
+    幅度去猜（实测见过 -20 和 -5 两档）。
 
-    1. **首采样恒为抖动值**（比真实值低 20）。它出现一次就消失，所以只要
-       跳过「比后续读数低约 20」的那个就能等到真实值。
-    2. **真实值本身还会再降一点**（384.077 → 383.758），那是另一笔消耗或
-       上游的二次结算。所以不能拿「第一次非抖动值」当最终值，要再观察一会。
-
-    策略：持续采样到截止时间，**取所有非抖动采样里的最小值**（额度只会下降，
-    最终稳定水位就是这一段里的最小非抖动值）。
+    早先版本「连续两次一致就收」会踩到两个坑：抖动值自己连续一致（提前收，
+    拿到偏低值）；以及结算还没开始时读数一直等于基线（差值为 0，积分丢失）。
+    取最大值同时解决这两件事。
     """
     end = time.monotonic() + _QUOTA_POLL_TIMEOUT_S
     samples: list[float] = []
@@ -185,18 +204,17 @@ async def _quota_after(baseline: float | None) -> float | None:
         cur = await _quota_once()
         if cur is not None:
             samples.append(cur)
-            # 收够一定数量的样本且已稳定（最后三次完全一致）就提前结束
-            if len(samples) >= 4 and len(set(f"{v:.4f}" for v in samples[-3:])) == 1:
+            # 采样窗口覆盖过结算点（> _SETTLE_CONFIRM_S）且已有稳定读数就收
+            if len(samples) >= _QUOTA_POLL_SAMPLES:
                 break
         await asyncio.sleep(_QUOTA_POLL_GAP_S)
     if not samples:
         return None
-    # 非抖动值：不小于「整组最大值 - 20」的都算真实读数
     top = max(samples)
-    real = [v for v in samples if v > top - _JITTER_DROP / 2]
-    if not real:
+    if baseline is not None and abs(top - baseline) < 1e-9:
+        # 整段都等于基线：结算尚未落地，当次不记（宁缺毋错）
         return None
-    return min(real)
+    return top
 
 
 def _spent_credit(before: float | None, after: float | None) -> float | None:
@@ -209,9 +227,12 @@ def _spent_credit(before: float | None, after: float | None) -> float | None:
     if before is None or after is None:
         return None
     spent = before - after
-    # 基线偏小 20（踩了抖动值）→ 差值约 -20，加回来
-    if spent < 0 and abs(spent + _JITTER_DROP) < 1.0:
-        spent = spent + _JITTER_DROP
+    # 基线踩了抖动值（偏小一个已知幅度）→ 差值约为负的那个幅度，加回来
+    if spent < 0:
+        for drop in _JITTER_DROPS:
+            if abs(spent + drop) < 1.0:
+                spent = spent + drop
+                break
     if spent <= 0 or spent > _MAX_SANE_CREDIT:
         log.debug("qwenpc 额度差 %.4f 不可信（before=%s after=%s），跳过",
                   spent, before, after)

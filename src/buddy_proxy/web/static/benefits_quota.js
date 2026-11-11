@@ -98,6 +98,23 @@ function quotaHeadSumHtml(sum) {
       <span class="muted">/ ${fmtNum(sum.total)}${hUsed}</span></span>`;
 }
 
+// 「剩 N」的统一渲染：数字用**成功色**高亮加粗。
+//
+// 用户 2026-11-11 要求：所有通道的剩余量都要像 zcode 那样绿色高亮。之前这里
+// 用 `color:var(--text)`（普通正文色），和「/ 总量 · 已用 N%」的次要信息混在
+// 一起，一眼看不出哪个是重点。
+//
+// 颜色按水位分档，与进度条同语义：>15% 绿、≤15% 黄、≤0 红。没有分母的通道
+// （DeepSeek 钱包、qwenpc 个人版）拿不到占比，一律按绿色处理——它们只有绝对
+// 量，没水位可言，不该因为「无法判断」就退回灰字。
+function remainSpan(text, pct) {
+  let color = 'var(--ok)';
+  if (typeof pct === 'number' && Number.isFinite(pct)) {
+    color = pct >= 85 ? 'var(--err)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)';
+  }
+  return `<span style="color:${color};font-weight:600">剩 ${text}</span>`;
+}
+
 function quotaItemHtml(it) {
   let pct = it.percent;
   if (pct == null && it.used != null && it.total) pct = Math.round(it.used / it.total * 100);
@@ -158,10 +175,10 @@ function quotaItemHtml(it) {
     ? `<span class="mono"><span style="color:var(--ok);font-weight:600">${fmtNum(rem)}</span> <span class="muted">可用</span></span>`
     : (hasNums
     ? (percentOnly
-        ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}%</span> · 已用 ${pct}%</span>`
+        ? `<span class="mono">${remainSpan(`${fmtNum(rem)}%`, pct)} · 已用 ${pct}%</span>`
         : (hasVolume
-            ? `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
-            : `<span class="mono"><span style="color:var(--text)">剩 ${fmtNum(rem)}</span> · 已用未知</span>`))
+            ? `<span class="mono">${remainSpan(fmtNum(rem), pct)} / ${fmtNum(it.total)} · 已用 ${pct}%</span>`
+            : `<span class="mono">${remainSpan(fmtNum(rem), hasVolume ? pct : null)} · 已用未知</span>`))
     : (pending
         ? `<span class="mono muted" title="standard 池无主动查询接口，用量仅在账号撞 4031 时被动采集；重置后成功请求不带账单事件，故用量待下次撞码确认">已于 ${fmtReset || '—'} 重置 · 用量待确认</span>`
         : (notice
@@ -170,7 +187,7 @@ function quotaItemHtml(it) {
                 // 总额已知、用量未知（如海外 Trae 的次数制：上游不给已用
                 // 次数）——明说「剩 — / N · 已用未知」，别兜底成空 span
                 //（那行只剩 label + 到期日，看不出是没用量还是没渲染出来）
-                ? `<span class="mono"><span style="color:var(--text)">剩 —</span> / ${fmtNum(it.total)} · 已用未知</span>`
+                ? `<span class="mono"><span style="color:var(--muted)">剩 —</span> / ${fmtNum(it.total)} · 已用未知</span>`
                 : '<span class="mono"></span>'))));
   // 用量为 0 时留空条（不画那撮绿点，避免「0% 却有进度」的观感）；
   // >0 时至少给 2% 让细条可见
