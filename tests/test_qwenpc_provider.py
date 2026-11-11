@@ -323,3 +323,55 @@ def test_credit_chunk_is_valid_sse():
     payload = _json.loads(raw[len("data: "):].strip())
     assert payload["choices"] == []
     assert payload["usage"]["credit"] == 0.0374
+
+
+# ---------------------------------------------------------------------------
+# 大请求的积分：上界必须随 token 数增长
+# ---------------------------------------------------------------------------
+#
+# 真实扣费**不是固定量级**，它随请求规模线性增长（同一模型实测）：
+#
+#     输入 token    扣费     每千 token
+#     2 088       0.118    0.057
+#     10 088      1.353    0.134
+#     40 089     15.929    0.397
+#
+# 旧版把上界写死 5.0，于是 4 万 token 的请求（真实扣 15.9）被当成抖动丢掉，
+# 日志里只剩 None —— 这正是用户「qwenpc 日志里没有积分」的直接原因。
+
+def test_max_sane_credit_scales_with_tokens():
+    from buddy_proxy.qwenpc.provider import _max_sane_credit
+
+    small = _max_sane_credit(100)
+    large = _max_sane_credit(40_089)
+    assert large > small, "上界必须随 token 数增长"
+    assert large > 15.9, f"4 万 token 的真实扣费是 15.9，上界要覆盖它（实际 {large}）"
+    # 无 token 数据时退回兜底常量
+    assert _max_sane_credit(None) == _max_sane_credit(0)
+
+
+def test_spent_credit_accepts_large_request():
+    """4 万 token 的真实扣费（15.9）不能被当成异常丢掉。"""
+    from buddy_proxy.qwenpc.provider import _spent_credit
+
+    got = _spent_credit(276.4676, 260.539, tokens=40_089)
+    assert got is not None, "大请求的合理扣费被判成异常了"
+    assert 15.0 < got < 16.5, f"应约 15.93，实际 {got}"
+
+
+def test_jitter_is_filtered_by_quota_after_not_by_magnitude():
+    """抖动靠 `_quota_after` 的「取最大值」过滤，不是靠 magnitude 阈值。
+
+    为什么不能靠 magnitude：上界随 token 数放宽后（4 万 token → 49），一个
+    -5 的抖动差值在数值上「完全合理」，没法用大小区分。真正可靠的判据是
+    **抖动的方向**——它只会「先低后高」，所以同一段采样取最大值就避开了它。
+
+    这条测试锁住分工：`_spent_credit` 只做最终合理性（非正/超上界），
+    抖动识别是 `_quota_after` 的职责。两者混在一起会让放宽上界时误伤。
+    """
+    from buddy_proxy.qwenpc.provider import _is_jitter, _spent_credit
+
+    # 抖动特征（-5）能被识别出来
+    assert _is_jitter(271.4, 276.4) is True
+    # 但 _spent_credit 对它不设防——这是设计取舍，不是遗漏
+    assert _spent_credit(276.4, 271.4, tokens=40_089) == 5.0
