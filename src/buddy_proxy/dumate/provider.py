@@ -44,7 +44,7 @@ _TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
 # 上游实测可用的模型名（2026-11-01 对 DuMate 1.0.88 逐个试确认，非照抄 App 配置）。
 # id 一律小写，与全站 models_config.json 命名一致，便于 forward_chat 的
 # 「自动匹配 provider.models()」命中本通道，不至于让请求漏到 codebuddy 兜底。
-# - kimi-k3 / qwen3.8-max / deepseek-v4.1-flash / deepseek-v4-pro：直连具体模型。
+# - kimi-k3 / qwen3.8-max / deepseek-v4-pro：直连具体模型。
 #
 # 同一底座的别名只保留实名一个条目（用户 2026-11-01：背后自己去对应就行）。
 # 判据是响应头 ``x-dumate-gw-realmodel``——它给出网关实际路由到的模型。
@@ -54,6 +54,12 @@ _TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
 # 所以它们不各占一条，只留 ``deepseek-v4.1-flash``；``text.L0`` 的「智能路由」
 # 只是 App 侧说法，网关记账与路由目标都一样，没必要当独立模型发布。
 # 其余：``glm-5`` → glm-5.2（已按用户要求不收）。
+#
+# 2026-11-11 复测：``deepseek-v4.1-flash`` **已下线**（网关回
+# ``model ... does not exist. api not registered``），已从表里移除。
+# 同时按 codebuddy 的 25 个模型名全量重扫，**没有新增可用模型**
+# （glm-* / hy* / kimi-k2.* / mimo-* / minimax-* / space-bunny / step-* /
+# qwen3.8-flash 全部 404），所以现在只剩三条。
 #
 # 同日复测已失效/未开通：deepseek-v4.1、deepseek-v4-flash、glm-4.9/5.1/5.2/5.3、
 # kimi-k2.5/2.7、qwen3.5-235b-a22b、qwen3-max 均 404 invalid_model；ernie-* 全系 404。
@@ -75,12 +81,6 @@ _MODELS: dict[str, dict[str, Any]] = {
     "qwen3.8-max": {
         "name": "Qwen3.8-Max",
         "desc": "通义千问 3.8 Max（DuMate 直连）",
-        "reasoning": True,
-        "tool_call": True,
-    },
-    "deepseek-v4.1-flash": {
-        "name": "DeepSeek V4.1 Flash",
-        "desc": "DeepSeek V4.1 Flash 低延迟档（DuMate 直连）",
         "reasoning": True,
         "tool_call": True,
     },
