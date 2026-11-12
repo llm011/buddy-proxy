@@ -40,7 +40,7 @@ from buddy_proxy.core.error_handler import categorize_http_exception, extract_er
 from buddy_proxy.core.http_client import create_client, HttpClientConfig
 from buddy_proxy.providers.base import BaseProvider
 
-from . import failover
+from . import failover, credentials
 from .campaigns import CLAIM_ACTION, CampaignClient
 from .catalog import (
     LOCAL_EXTRA_MODELS,
@@ -963,6 +963,8 @@ class QoderProvider(BaseProvider):
                     continue
 
                 if resp.status_code != 200:
+                    # 成功：提升权重，下次优先用
+                    failover.mark_success(acct.id)
                     break  # 非 200 交给下方原有分支处理
                 gate = await _gate_first_event(resp, stream)
                 if gate.queue_wait_s <= 0:
@@ -984,6 +986,8 @@ class QoderProvider(BaseProvider):
                 continue
 
             if resp.status_code != 200:
+                # 成功：提升权重，下次优先用
+                failover.mark_success(acct.id)
                 text = (await resp.aread()).decode("utf-8", "replace")[:300]
                 await resp.aclose()
                 if resp.status_code == 401:

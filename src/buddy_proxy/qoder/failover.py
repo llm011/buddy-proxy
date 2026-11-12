@@ -26,6 +26,14 @@ from ..core.account_failover import CooldownTracker, diagnose_available
 from .catalog import unsupported_models_for
 from .credentials import AccountRef, list_accounts, load_account_cred, cred_to_credential
 
+#: 轮询索引（每个 region 一个）：按登录顺序循环选择账号，避免单账号过度使用。
+#: key = region or "global"
+_rotation_index: dict[str, int] = {}
+
+#: 账号权重（每个 region 一个）：成功 +1、失败 -1，用于智能轮询。
+#: key = (region, account_id)
+_weights: dict[tuple[str, str], float] = {}
+
 log = logging.getLogger(__name__)
 
 #: 模块级冷却状态机（账号级，收敛自原 copy-paste 实现）。
@@ -42,14 +50,35 @@ _QUOTA_COOLDOWN_S = 300.0
 
 def mark_cooldown(account_id: str, *, retry_after: str | None = None,
                   quota: bool = False, reason: str = "") -> float:
-    """把账号冷却一段时间。``retry_after``（Retry-After 头）优先于默认时长。"""
+    """把账号冷却一段时间。``retry_after``（Retry-After 头）优先于默认时长。
+    
+    同时降低该账号权重（失败惩罚），让轮询更倾向其他账号。
+    """
+    # 降低权重（失败惩罚）
+    for region in ["global", "cn", "global"]:  # 所有 region
+        key = (region, account_id)
+        _weights[key] = max(0.0, _weights.get(key, 0.0) - 1.0)
+    
     return _tracker.mark(account_id, retry_after=retry_after,
                          kind="quota" if quota else "account",
                          reason=reason, log=log)
 
 
+def mark_success(account_id: str) -> None:
+    """账号请求成功，提升权重（成功奖励）。"""
+    for region in ["global", "cn", "global"]:
+        key = (region, account_id)
+        _weights[key] = _weights.get(key, 0.0) + 1.0
+
+
 def clear_cooldown(account_id: str) -> None:
-    """清掉该账号的冷却标记（删除账号后调用，防内存残留）。"""
+    """清掉该账号的冷却标记（删除账号后调用，防内存残留）。
+    
+    同时恢复权重到初始值（0）。
+    """
+    for region in ["global", "cn", "global"]:
+        key = (region, account_id)
+        _weights[key] = 0.0
     _tracker.clear(account_id)
 
 
@@ -59,16 +88,43 @@ def cooldown_left(account_id: str) -> tuple[float, str]:
 
 
 def available_accounts(region: str | None = None) -> list[AccountRef]:
-    """当前可用的账号（按 failover 顺位）。
+    """当前可用的账号（按轮询 + 权重排序）。
 
-    ``region`` 给出时只回该区账号——qoder 的 CN / 全球版账号不通用（连错域
-    401），混域 failover 每轮必败一次，白白多付一次往返。
+    策略：
+    1. 先过滤掉冷却中的账号与 region 不匹配的
+    2. 按权重降序排列（成功的账号优先）
+    3. 同权重的按登录顺序轮询（避免单账号过度使用）
+    
+    这样既避免单账号限流，又优先用成功率高的账号。
     """
     accts = list_accounts()
     out = [a for a in accts if cooldown_left(a.id)[0] <= 0]
     if region:
         out = [a for a in out if a.region == region]
-    # 有账号被跳过时留一行诊断（冷却 / region 不匹配），见 diagnose_available。
+    
+    if not out:
+        diagnose_available('qoder', _tracker, accts, [], region=region, log=log)
+        return []
+    
+    # 按权重降序 + 轮询索引排序
+    def sort_key(a):
+        w = _weights.get((region or "global", a.id), 0.0)
+        # 权重降序，同权重的按账号 ID 排序（确保稳定性）
+        return (-w, a.id)
+    
+    out.sort(key=sort_key)
+    
+    # 轮询：从 sorted list 中按 index 取一个，而不是改整个列表顺序
+    # 这样即使权重相同，也会轮流选不同的账号
+    if out:
+        rot_idx = _rotation_index.get(region or "global", 0)
+        # 选出当前轮次的账号
+        selected = out[rot_idx]
+        # 更新轮询索引
+        _rotation_index[region or "global"] = (rot_idx + 1) % len(out)
+        # 只返回选中的那个账号（单账号调用模式）
+        out = [selected]
+    
     diagnose_available('qoder', _tracker, accts, out, region=region, log=log)
     return out
 
