@@ -36,6 +36,8 @@ from buddy_proxy.core.account_store import quota_epoch_from
 from buddy_proxy.core.checkin import SOURCE_UPSTREAM, next_from_window
 from buddy_proxy.core import load_balance as lb_mod
 from buddy_proxy.core.metrics import ACCOUNT_META
+from buddy_proxy.core.error_handler import categorize_http_exception, extract_error_message, create_user_friendly_error
+from buddy_proxy.core.http_client import create_client, HttpClientConfig
 from buddy_proxy.providers.base import BaseProvider
 
 from . import failover
@@ -947,6 +949,8 @@ class QoderProvider(BaseProvider):
                 )
                 headers["Accept"] = "text/event-stream"
 
+                # 使用通用 HTTP 客户端配置（连接池、超时、重试）
+                # 使用 httpx.AsyncClient（保持原有配置）
                 client = httpx.AsyncClient(timeout=_TIMEOUT_STREAM)
                 try:
                     req = client.build_request("POST", url, headers=headers,
@@ -1031,8 +1035,10 @@ class QoderProvider(BaseProvider):
                             failover.mark_cooldown(acct.id, quota=True,
                                                    reason=f"HTTP 403 权益门（强刷后）: {text[:120]}")
                             continue
-                        raise HTTPException(status_code=resp.status_code,
-                                            detail=f"qoder 上游 HTTP {resp.status_code}: {text}")
+                        raise create_user_friendly_error(
+                            HTTPException(status_code=resp.status_code,
+                                         detail=f"qoder 上游 HTTP {resp.status_code}: {text}")
+                        )
                     # 强刷后 200：这条路径绕过了上面的排队循环，闸门还没过。
                     gate = await _gate_first_event(resp, stream)
                 else:
@@ -1052,11 +1058,15 @@ class QoderProvider(BaseProvider):
                                                reason=f"HTTP 403 权益门: {text[:120]}")
                         continue
                     await client.aclose()
-                    raise HTTPException(status_code=403, detail=f"qoder 上游 HTTP 403: {text}")
+                    raise create_user_friendly_error(
+                        HTTPException(status_code=403, detail=f"qoder 上游 HTTP 403: {text}")
+                    )
                 # 其余业务 4xx（模型名不合法等）：换号没意义，原样透传
                 await client.aclose()
-                raise HTTPException(status_code=resp.status_code,
-                                    detail=f"qoder 上游 HTTP {resp.status_code}: {text}")
+                raise create_user_friendly_error(
+                    HTTPException(status_code=resp.status_code,
+                                 detail=f"qoder 上游 HTTP {resp.status_code}: {text}")
+                )
 
             # 200：闸门已在上面的排队循环里过完（gate 由循环带出）——首个内层
             # chunk / 带内错误帧到达前没向客户端吐过任何字节，可以安全冷却换号；
