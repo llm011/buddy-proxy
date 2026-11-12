@@ -80,6 +80,41 @@ _DOUBAO_CHAT_MODELS: dict[str, dict[str, Any]] = {
             "provider": "cis",
         },
     },
+    # ---- 2026-11 新版模型菜单（``person-*`` 形态）----
+    #
+    # 2026-11-13 抓包确认：新版菜单的 ``model_item_key`` 不再是数字，而是
+    # ``person-<上游模型 id>`` 字符串。实测拿到的是
+    # ``person-deepseek-v4-1-flash-261017``；其余条目按同一规律构造
+    # （上游 id 从 App 缓存里挖出，见模块头的模型 id 清单）。
+    #
+    # 数字后缀是**版本日期**（``261111`` = 2026-11-11）。上游换版时会改这个
+    # 后缀，届时这里的 key 会失效——表现为请求报模型不存在，届时按新后缀更新。
+    #
+    # ``provider`` 留空：这些都是 App 菜单里的一方模型（走豆包自己的额度），
+    # 不像 Gemini/GPT 那样标 ``cis``。
+    **{
+        name: {
+            "desc": desc,
+            "agent": {"item_key": f"person-{mid}", "extra": {"total_window_size": "256000"},
+                      "provider": ""},
+        }
+        for name, mid, desc in (
+            ("deepseek-v4.1-flash", "deepseek-v4-1-flash-261017",
+             "DeepSeek V4.1 Flash（豆包工作内，限时优惠档）"),
+            ("deepseek-v4-flash", "deepseek-v4-flash",
+             "DeepSeek V4 Flash（豆包工作内）"),
+            ("kimi-k3.1-pro", "kimi-k3-1-pro-261111",
+             "Kimi K3.1 Pro（豆包工作内）"),
+            ("kimi-k3.1-pro-highspeed", "kimi-k3-1-pro-highspeed-261111",
+             "Kimi K3.1 Pro 高速（豆包工作内）"),
+            ("kimi-k3", "kimi-k3-261111",
+             "Kimi K3（豆包工作内）"),
+            ("glm-5.3", "glm-5-3-261111",
+             "GLM 5.3（豆包工作内）"),
+            ("glm-5.3-flash", "glm-5-3-flash-261111",
+             "GLM 5.3 Flash（豆包工作内）"),
+        )
+    },
 }
 
 # agent 管线默认推理强度（3=低 4=中 5=高 6=极高 7=最高），可被请求体

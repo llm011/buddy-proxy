@@ -90,6 +90,14 @@ def _build_classic_payload(
     }
 
 
+#: ``person-*`` 形态的模型（2026-11 新菜单）在 ``need_deep_think`` 上的固定值。
+#:
+#: 实测（2026-11-13 抓包 person-deepseek-v4-1-flash-261017）App 传的就是
+#: 10001。它与经典管线的 0/1/3 思考枚举不是一个语义域——新菜单的推理强度由
+#: ``model_config.reasoning_effort`` 表达，``need_deep_think`` 退化成占位。
+_PERSON_MODEL_DEEP_THINK = 10001
+
+
 def _build_agent_payload(
     text: str,
     model_spec: dict[str, Any],
@@ -111,8 +119,22 @@ def _build_agent_payload(
     provider = model_spec.get("provider") or ""
     effort = int(model_spec.get("reasoning_effort", 5))
     # agent 管线里 need_deep_think/use_deep_think 就是 model_item_key
-    # （App 抓包：自动=9、Orange=6），不是经典管线的 0/1/3 思考枚举
-    deep_think = int(item_key)
+    # （App 抓包：自动=9、Orange=6），不是经典管线的 0/1/3 思考枚举。
+    #
+    # ⚠ **key 有两种形态**（2026-11-13 抓包确认）：
+    #
+    #   旧：纯数字，如 ``"4"``（Turbo）/``"6"``（Orange）/``"9"``（Auto）
+    #   新：``person-<model-id>``，如 ``"person-deepseek-v4-1-flash-261017"``
+    #
+    # 新形态直接 ``int()`` 会 ValueError。App 在这种模型上根本**不传**
+    # ``need_deep_think`` 的数字语义——它仍带着这个字段，但值不再是 key。
+    # 实测新模型请求里 ``need_deep_think: 10001``（固定值），与经典管线的
+    # 0/1/3 完全不同。所以这里按「能不能转 int」分派：
+    # 数字 key 沿用旧语义；``person-*`` 走 10001。
+    try:
+        deep_think: Any = int(item_key)
+    except ValueError:
+        deep_think = _PERSON_MODEL_DEEP_THINK
 
     local_message_id = str(uuid.uuid4())
     # 新会话 runtime_type=2 + 不修改现有会话；续聊 runtime_type=1 +

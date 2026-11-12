@@ -45,26 +45,37 @@ _TASK = "daily_signin"
 #: session 的页面加载 / 请求 / 关闭交叉。RLock 允许领取入口先查状态再领取。
 _PAGE_LOCK = threading.RLock()
 
-#: 页面还没有留下 detail 资源时的兜底参数集。不能用聊天通道的 aid=1044603。
+#: 兜底参数集（`_open` 拿不到实时参数时用它）。
 #:
-#: ⚠ ``pc_version`` 曾经写死成 ``2.34.12``，是个迟早要炸的隐患：客户端升级后
-#: 真实请求带的是新版本号，写死的值会让上游按「旧客户端」对待（实测官方 2.35.19
-#: 与写死值并存时，接口仍能通，但谁也不敢保证哪天按版本卡功能）。
-#: 现在 :meth:`CheckinPage._open` 会从页面 UA 里读实时版本覆盖它（见
-#: :data:`_UA_VERSION_JS`），这里的值只在读不到 UA 时兜底。
+#: ⚠⚠ **``aid`` 必须是 ``1044603``（豆包工作），``doubao_device_platform`` /
+#: ``web_platform`` 必须是 ``desktop``。**
 #:
-#: 另外实测过：``pc_version`` 对 ``v3/detail/`` **不是必需**——去掉它、甚至写成
-#: ``9.99.99`` 都返回 ``code: 0``，只有整串 query 为空才失败（``code: 1``）。
-#: 2026-11-12 实测：App 2.36.3 把签到请求改回主聊天页发起，必须用绝对 URL。
-#: 所以这里不再依赖活动落地页的参数集，而是直接从聊天页 performance 里
-#: 取一条已成功的 /alice/ 请求，剥掉签名参数 → 桌面全量参数集（含 device_id、
-#: web_id、tea_uuid、fp、channel=mac_official 等）。兜底值保留旧参数集形状，
-#: 只在取不到实时参数时退化成它（不会成功，但至少能跑通查询逻辑）。
+#: 这行 2026-11-13 之前是 ``aid=497858`` + ``web`` / ``work_desktop``，看起来
+#: 只是"另一个渠道号"，实际是**领取接口连续失败三周的根因**：查询接口
+#: （``v3/detail/``）对 aid 宽容，返回正常；但领取接口（``landing/checkin``）
+#: 严格校验渠道，aid 不对就一律回 ``710010702 系统错误``。
+#:
+#: 为什么难查：错误码是笼统的"系统错误"，不带任何字段级提示，而查询一切正常
+#: → 表现就是"状态显示可以领、点了没反应"。前几次修复都栽在只看查询路径上。
+#:
+#: 对照 App 真实请求（2026-11-13 抓包，手动点一次签到）：
+#:
+#:     ?version_code=20800&language=zh&device_platform=web
+#:     &doubao_device_platform=desktop&aid=1044603&real_aid=1044603
+#:     &device_id=3506796878367920&pc_version=2.36.11&doubao_pc_version=2.36.11
+#:     &web_id=...&tea_uuid=...&web_platform=desktop&runtime_version=3.45.3
+#:     &client_platform=pc_client&chromium_version=147.0.7727.149
+#:     &channel=mac_official&fp=verify_...
+#:
+#: ``pc_version`` 曾经写死成 ``2.34.12``（客户端 2.36 时代就过期了），现在由
+#: :meth:`CheckinPage._query_with_live_version` 从页面 UA 覆盖成实时版本。
+#: 实测 ``pc_version`` 对 ``v3/detail/`` 不是必需（写 ``9.99.99`` 也返回 code 0），
+#: 但对 ``landing/checkin`` 保守起见仍用真实值。
 _PAGE_QUERY = (
     "?version_code=20800&language=zh&device_platform=web"
-    "&doubao_device_platform=web&aid=497858&real_aid=497858"
-    "&pkg_type=release_version&pc_version=2.34.12&region=CN&sys_region=CN"
-    "&samantha_web=1&web_platform=work_desktop&use-olympus-account=1&runtime=web"
+    "&doubao_device_platform=desktop&aid=1044603&real_aid=1044603"
+    "&pkg_type=release_version&pc_version=2.36.11&region=CN&sys_region=CN"
+    "&samantha_web=1&web_platform=desktop&use-olympus-account=1&runtime=web"
 )
 
 #: 从页面 UA 取客户端版本。豆包桌面端的 UA 尾巴形如
@@ -77,10 +88,27 @@ _UA_VERSION_JS = """
 })()
 """
 
+#: 从页面已发出的 ``/alice/ug/campaign`` 请求里取一份**真实**参数集。
+#:
+#: ⚠ 必须**排除我们自己发的请求**（自污染）。原来的实现取"最后一条"，而我们
+#: 的 ``request()`` 也会往 ``performance`` 里写条目——于是第一次跑完就把
+#: 参数集"锁死"成我们自己的（错误的）值，后面永远自动纠正不回来。这是"改一次
+#: 好一次、隔天又坏"的第二个根因：只要有一轮用错了参数，错误值就被自我固化。
+#:
+#: 判据：只认 ``aid=1044603`` 且 ``doubao_device_platform=desktop`` 的条目
+#: （App 真实签到请求的特征）。一条都没有就返回空串，让调用方走兜底参数集。
 _DETAIL_QUERY_JS = """
 (() => {
-  const es = performance.getEntriesByType('resource').filter(
-    e => e.name.includes('/alice/ug/campaign'));
+  const es = performance.getEntriesByType('resource').filter(e => {
+    if (!e.name.includes('/alice/ug/campaign')) return false;
+    try {
+      const p = new URL(e.name).searchParams;
+      // 只认 App 自己的请求，排除本模块发出的（那批是 aid=1044603 之外的值，
+      // 或缺少 desktop 标记的）
+      return p.get('aid') === '1044603'
+          && p.get('doubao_device_platform') === 'desktop';
+    } catch (err) { return false; }
+  });
   if (!es.length) return '';
   const url = new URL(es[es.length - 1].name);
   url.searchParams.delete('msToken');
