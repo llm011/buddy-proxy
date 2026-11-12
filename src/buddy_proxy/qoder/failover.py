@@ -34,8 +34,15 @@ _rotation_index: dict[str, int] = {}
 #: key = (region, account_id)
 _weights: dict[tuple[str, str], float] = {}
 
-#: 权重衰减率（每次请求后衰减 10%），避免单次失败导致长期低权重。
+#: 权重衰减率（每次取账号前乘这个系数），避免单次失败导致长期低权重。
 _WEIGHT_DECAY_RATE = 0.9
+
+#: 已知的 region 键（qoder 目前只有这两档）。
+#:
+#: 用于 ``mark_success`` / ``clear_cooldown`` 这类「只拿到 account_id、拿不到
+#: region」的调用点：对每个已知 region 都试一次，保证不会因为漏了一个键而
+#: 让权重更新失效。
+_KNOWN_REGIONS: tuple[str, ...] = ("global", "cn")
 
 log = logging.getLogger(__name__)
 
@@ -68,20 +75,25 @@ def mark_cooldown(account_id: str, *, retry_after: str | None = None,
 
 
 def mark_success(account_id: str) -> None:
-    """账号请求成功，提升权重（成功奖励）。"""
-    for region in ["global", "cn", "global"]:
-        key = (region, account_id)
-        _weights[key] = _weights.get(key, 0.0) + 1.0
+    """账号请求成功，提升权重。
+
+    对**所有 region** 下的该账号生效：调用方（``forward``）拿不到「这次用的
+    是哪个 region 键」，而一个账号只属于一个 region，所以全量匹配是安全的。
+    早先写死 ``["global", "cn"]`` 会在区域名变化时漏掉（region 名不止这两个）。
+    """
+    for key in list(_weights.keys()) + [(r, account_id) for r in _KNOWN_REGIONS]:
+        if key[1] == account_id:
+            _weights[key] = _weights.get(key, 0.0) + 1.0
 
 
 def clear_cooldown(account_id: str) -> None:
     """清掉该账号的冷却标记（删除账号后调用，防内存残留）。
-    
-    同时恢复权重到初始值（0）。
+
+    同时把权重恢复到初始值；同样对所有 region 生效。
     """
-    for region in ["global", "cn", "global"]:
-        key = (region, account_id)
-        _weights[key] = 0.0
+    for key in list(_weights.keys()) + [(r, account_id) for r in _KNOWN_REGIONS]:
+        if key[1] == account_id:
+            _weights[key] = 0.0
     _tracker.clear(account_id)
 
 
@@ -109,12 +121,25 @@ def available_accounts(region: str | None = None) -> list[AccountRef]:
         diagnose_available('qoder', _tracker, accts, [], region=region, log=log)
         return []
     
+    # **权重衰减**：每次取账号前把所有候选的权重乘 0.9。
+    #
+    # 为什么必须衰减：纯「成功 +1 / 失败 -1」会让被限流过的账号**永久**低人
+    # 一等——它冷却恢复后权重还是负的，即使早就没问题了也轮不到它。用户指出
+    # 的正是这点（「某个号被用多了限流，之后就一直被降权」）。
+    #
+    # 乘性衰减模拟「遗忘」：一次失败的 -1 影响会随请求次数指数衰减
+    # （10 次后剩 0.35，30 次后剩 0.04），账号自然回到公平竞争。
+    for a in out:
+        key = (region or "global", a.id)
+        if key in _weights:
+            _weights[key] *= _WEIGHT_DECAY_RATE
+
     # 按权重降序 + 轮询索引排序
     def sort_key(a):
         w = _weights.get((region or "global", a.id), 0.0)
         # 权重降序，同权重的按账号 ID 排序（确保稳定性）
         return (-w, a.id)
-    
+
     out.sort(key=sort_key)
     
     # 轮询：**把排序后的列表按轮转起点旋转**，而不是只摘一个。

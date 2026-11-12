@@ -219,3 +219,38 @@ def test_rotation_index_survives_shrinking_account_list():
     finally:
         failover._rotation_index.clear()
         failover._weights.clear()
+
+
+def test_weight_decays_so_throttled_account_recovers():
+    """被限流的账号要能「恢复」，不能永久低人一等。
+
+    用户指出的问题：纯「成功 +1 / 失败 -1」会让被限流过的账号永久负权重，
+    冷却恢复后也轮不到它，等于一次失败永久惩罚。
+
+    修法是每次取账号前乘性衰减（×0.9）：一次 -1 的影响在 10 次请求后只剩
+    0.35，30 次后只剩 0.04，账号自然回到公平竞争。
+    """
+    from buddy_proxy.qoder import failover
+
+    failover._rotation_index.clear()
+    failover._weights.clear()
+    try:
+        save_account_cred(_cred("a"))
+        save_account_cred(_cred("b"))
+        save_account_cred(_cred("c"))
+
+        # 把 a 打到很低的权重（模拟被限流过的账号）
+        key = ("global", "a")
+        failover._weights[key] = -20.0
+        assert failover._weights[key] < 0
+
+        # 反复取账号（每次都会衰减一次）
+        for _ in range(40):
+            failover.available_accounts()
+
+        # a 的权重应该已经衰减到接近 0，不再是压倒性的负值
+        w = failover._weights.get(key, 0.0)
+        assert w > -1.0, f"权重没衰减回合理区间: {w}"
+    finally:
+        failover._rotation_index.clear()
+        failover._weights.clear()

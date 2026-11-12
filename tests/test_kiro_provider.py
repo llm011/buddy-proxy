@@ -828,3 +828,37 @@ def test_missing_result_placeholder_is_marked_error():
     assert result["toolUseId"] == "tX"
     assert result["status"] == "error"
     assert MISSING_TOOL_RESULT_TEXT in result["content"][0]["text"]
+
+
+# ---------------------------------------------------------------------------
+# 瞬时错误重试 + 放宽超时
+# ---------------------------------------------------------------------------
+#
+# 用户报障（2026-11-13）：claude-haiku-5-5 卡死、context 变 0。
+# 查日志是两类**偶发**错误，重试即好：
+#
+#     Server disconnected without sending a response
+#     WriteTimeout (deadline exceeded)   ← 48~60s 就掐断
+#
+# 旧实现遇到就直接整轮失败、把用户对话打断。
+
+def test_retry_constants_are_sane():
+    from buddy_proxy.kiro.provider import _RETRYABLE_ATTEMPTS, _TIMEOUT
+
+    assert _RETRYABLE_ATTEMPTS >= 2, "至少重试一次"
+    # write 必须放宽：长上下文请求体是 MB 级，60s 不够（实测 48s 就超时）
+    assert _TIMEOUT.write >= 120.0, f"write 超时太短: {_TIMEOUT.write}"
+    assert _TIMEOUT.read >= 300.0, f"read 超时太短: {_TIMEOUT.read}"
+
+
+def test_retryable_exc_covers_transient_errors():
+    """可重试名单必须含这两类实测偶发错误，且**不含** 4xx。"""
+    import httpx as _h
+    from buddy_proxy.kiro.provider import _RETRYABLE_EXC
+
+    assert _h.RemoteProtocolError in _RETRYABLE_EXC      # Server disconnected
+    assert _h.WriteTimeout in _RETRYABLE_EXC
+    assert _h.ReadTimeout in _RETRYABLE_EXC
+    assert _h.ConnectError in _RETRYABLE_EXC
+    # 4xx 是确定性的，重试只是浪费往返
+    assert _h.HTTPStatusError not in _RETRYABLE_EXC
