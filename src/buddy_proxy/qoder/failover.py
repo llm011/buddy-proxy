@@ -34,6 +34,9 @@ _rotation_index: dict[str, int] = {}
 #: key = (region, account_id)
 _weights: dict[tuple[str, str], float] = {}
 
+#: 权重衰减率（每次请求后衰减 10%），避免单次失败导致长期低权重。
+_WEIGHT_DECAY_RATE = 0.9
+
 log = logging.getLogger(__name__)
 
 #: 模块级冷却状态机（账号级，收敛自原 copy-paste 实现）。
@@ -114,16 +117,23 @@ def available_accounts(region: str | None = None) -> list[AccountRef]:
     
     out.sort(key=sort_key)
     
-    # 轮询：从 sorted list 中按 index 取一个，而不是改整个列表顺序
-    # 这样即使权重相同，也会轮流选不同的账号
+    # 轮询：**把排序后的列表按轮转起点旋转**，而不是只摘一个。
+    #
+    # 为什么要返回完整列表（不只是首选那个）：``forward`` 的 failover 循环靠
+    # 遍历这个列表来「A 失败换 B」。只回一个的话，首选账号一失败就直接报
+    # 「所有账号均不可用」——比原来的主备降级还脆弱（踩过：8 个 failover
+    # 测试全红，生产上单个账号抖一下就整轮挂）。
+    #
+    # 旋转而不是重排：保持权重与相对次序不变，只换起点。这样连续请求会从
+    # 不同账号开始（分摊负载），而每个请求内部仍能按权重顺序依次兜底。
+    #
+    # ⚠ ``rot_idx`` 必须对**当前**列表长度取模：索引按 region 累积，而账号会
+    # 被冷却过滤掉、列表随时变短。直接用会 ``list index out of range``
+    # （踩过：6 条连续 500、耗时 0ms，根本没发请求就崩了）。
     if out:
-        rot_idx = _rotation_index.get(region or "global", 0)
-        # 选出当前轮次的账号
-        selected = out[rot_idx]
-        # 更新轮询索引
+        rot_idx = _rotation_index.get(region or "global", 0) % len(out)
+        out = out[rot_idx:] + out[:rot_idx]
         _rotation_index[region or "global"] = (rot_idx + 1) % len(out)
-        # 只返回选中的那个账号（单账号调用模式）
-        out = [selected]
     
     diagnose_available('qoder', _tracker, accts, out, region=region, log=log)
     return out

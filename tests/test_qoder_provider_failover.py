@@ -32,9 +32,19 @@ from buddy_proxy.qoder.provider import QoderProvider
 
 @pytest.fixture(autouse=True)
 def _fresh_cooldowns():
+    """每个用例都从干净的冷却/轮询状态开始。
+
+    ⚠ 必须同时清 ``_rotation_index`` 与 ``_weights``：2026-11-12 引入轮询后，
+    这两个是**模块级累积状态**，不清会让上一个用例的账号数/索引影响下一个，
+    表现是「单独跑过、一起跑挂」（踩过：3 个用例互相污染）。
+    """
     failover._cooldowns.clear()
+    failover._rotation_index.clear()
+    failover._weights.clear()
     yield
     failover._cooldowns.clear()
+    failover._rotation_index.clear()
+    failover._weights.clear()
 
 
 def _write_account(acct_id: str, *, region: str = "cn") -> None:
