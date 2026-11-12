@@ -516,9 +516,10 @@ def test_live_version_replaces_hardcoded_pc_version():
     query = page._query_with_live_version()
     assert "pc_version=2.35.19" in query
     assert "pc_version=2.34.12" not in query
-    # 渠道标识不能跟着版本一起改
-    assert "aid=497858" in query and "version_code=20800" in query
-    assert "web_platform=work_desktop" in query
+    # 渠道标识不能跟着版本一起改（必须是豆包工作的值，见
+    # test_fallback_query_uses_doubao_work_app_id）
+    assert "aid=1044603" in query and "version_code=20800" in query
+    assert "web_platform=desktop" in query
 
 
 def test_live_version_falls_back_when_ua_has_no_version():
@@ -650,3 +651,48 @@ def test_report_failure_does_not_block_claim(monkeypatch):
     monkeypatch.setattr(doubao_checkin, "CheckinPage", lambda *a, **k: Page())
     result = doubao_checkin.claim_checkin(object(), doubao_checkin._DETAIL_PATH, timeout=10)
     assert result is not None and result["checked_in"] is True
+
+
+# ---------------------------------------------------------------------------
+# 渠道参数：aid 必须与 App 一致，且不能被自己的请求污染
+# ---------------------------------------------------------------------------
+#
+# 真实事故（2026-11 连续三周）：签到领取恒回 ``710010702 系统错误``，而查询
+# 一切正常 —— 表现是"界面说可以领、点了没反应"。用户为此找了三轮。
+#
+# 根因有两层，互相叠加：
+#
+# 1. ``_PAGE_QUERY`` 用的是 ``aid=497858`` + ``web`` / ``work_desktop``，
+#    而豆包工作 App 真实值是 ``aid=1044603`` + ``desktop``。查询接口对 aid
+#    宽容（照常返回），领取接口严格校验（直接系统错误）。
+# 2. ``_DETAIL_QUERY_JS`` 取 performance 里"最后一条" /alice/ 请求 —— 而我们
+#    自己发的也进 performance，于是第一轮跑完就把错误参数**自我固化**，
+#    后面永远自动纠正不回来。
+
+def test_fallback_query_uses_doubao_work_app_id():
+    """兜底参数集必须是豆包工作的渠道标识。
+
+    ``aid=497858`` 是另一个产品线的 id。用它查得通、领不了，而且错误码是笼统的
+    「系统错误」，极难定位。
+    """
+    from buddy_proxy.doubao import checkin
+
+    q = checkin._PAGE_QUERY
+    assert "aid=1044603" in q, f"aid 必须是豆包工作的 1044603：{q}"
+    assert "real_aid=1044603" in q
+    assert "aid=497858" not in q, "497858 是别的产品线，查询能通但领不了"
+    assert "doubao_device_platform=desktop" in q
+    assert "web_platform=desktop" in q
+
+
+def test_detail_query_js_filters_out_own_requests():
+    """抓参数时必须排除本模块自己发的请求。
+
+    不排除的话，第一次跑完就把错误参数写进了 performance，之后 ``_DETAIL_QUERY_JS``
+    永远取到那份错的 —— 也就是「改一次好一次、隔天又坏」的机制。
+    """
+    from buddy_proxy.doubao import checkin
+
+    js = checkin._DETAIL_QUERY_JS
+    assert "1044603" in js, "判据里必须校验 aid，否则排除不了自己的请求"
+    assert "desktop" in js, "还要校验 doubao_device_platform"

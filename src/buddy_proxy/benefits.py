@@ -13,12 +13,21 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import re
 import time
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
 from buddy_proxy.core import settings as settings_mod
+
+log = logging.getLogger(__name__)
+
+#: 同一通道连续打卡失败多少次后升级为 ERROR 日志。
+#:
+#: 3 次 ≈ 启动首轮 + 两轮重试（RETRY_THROTTLE_S 级），足够排除偶发网络抖动；
+#: 又能保证「参数/凭据真的坏了」在**当天内**就被看见，而不是拖三周。
+CLAIM_FAIL_ALERT_STREAK = 3
 
 # 自动打卡巡检周期；失败重试间隔
 CHECK_INTERVAL_S = 600
@@ -548,6 +557,9 @@ class BenefitsManager:
         #: 负载均衡的额度预热循环（只有开着开关时才真的查上游）。
         self._lb_task: asyncio.Task | None = None
         self._last_attempt: dict[str, float] = {}
+        #: 各通道的**连续**打卡失败次数（成功即清零）。用于 :meth:
+        #: 判断是否该升级告警——避免像 2026-11 那样静默失败三周没人发现。
+        self._claim_fail_streak: dict[str, int] = {}
         self._startup_seen: set[str] = set()
         self._cache: dict[str, tuple[float, Any]] = {}
         # 后台刷新在飞任务（stale-while-revalidate 用）：同键去重
@@ -809,6 +821,40 @@ class BenefitsManager:
         # 领完就作废状态缓存：_tick 现在也走这份缓存，不清掉的话界面要等满
         # TTL（300s）才会从「立即打卡」翻成「已签到」。手动与自动共用这条路径。
         self._cache.pop(f"checkin:{provider_id}", None)
+        result = await self._claim_and_record_inner(provider_id, provider)
+        self._track_claim_failure(provider_id, result)
+        return result
+
+    def _track_claim_failure(self, provider_id: str, result: dict[str, Any]) -> None:
+        """连续打卡失败到一定次数就**喊出来**，别再静默三周。
+
+        为什么需要这个（2026-11-13 的真实教训）：豆包签到因为一个渠道参数
+        （``aid``）写错，连续三周每天失败。但失败只落在 ``checkin.jsonl`` 里，
+        界面上"今天没签"和"今天不需要签"长得一模一样，用户只能靠自己发现
+        ——于是他来找我修了三次，每次我都只看到"当下能跑通"。
+
+        现在一旦同一通道连续失败达到 :data:`CLAIM_FAIL_ALERT_STREAK` 次，
+        就写一条 ERROR 级日志（含最后一次的上游原文），并把失败次数挂在
+        ``self._claim_fail_streak`` 上供管理页读取展示。
+        """
+        streak = self._claim_fail_streak
+        if result.get("ok"):
+            if streak.get(provider_id):
+                log.info("打卡连续失败已恢复：%s（此前 %d 次）",
+                         provider_id, streak[provider_id])
+            streak.pop(provider_id, None)
+            return
+        streak[provider_id] = streak.get(provider_id, 0) + 1
+        n = streak[provider_id]
+        if n >= CLAIM_FAIL_ALERT_STREAK:
+            # 只在刚达到阈值时打一次 ERROR，之后每 6 倍阈值再提醒一次，
+            # 免得每天刷屏把日志淹掉
+            if n == CLAIM_FAIL_ALERT_STREAK or n % (CLAIM_FAIL_ALERT_STREAK * 6) == 0:
+                log.error(
+                    "打卡连续失败 %d 次（%s）：%s —— 请检查凭据/渠道参数是否过期",
+                    n, provider_id, str(result.get("message") or "")[:200])
+
+    async def _claim_and_record_inner(self, provider_id: str, provider: Any) -> dict[str, Any]:
         try:
             status = await _call(provider.checkin_claim)
         except Exception as exc:
