@@ -39,6 +39,7 @@ user 消息合并**，否则最后一条被 pop 成 currentMessage、结果丢�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -71,7 +72,35 @@ _USER_AGENT = f"aws-sdk-js/1.0.0 Kiro/{KIRO_UA_VERSION}"
 #: ——它仍回二进制帧，所以这里如实声明。
 _ACCEPT = "application/vnd.amazon.eventstream"
 
-_TIMEOUT = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=15.0)
+#: HTTP 超时。**write 给到 180s 是有原因的**：长上下文请求（dsh 里动辄 18 万
+#: token）的请求体本身就有 MB 级，上传 + 上游排队可能远超 60s。实测用户侧
+#: 出现过 ``WriteTimeout (deadline exceeded)`` 在 48~60 秒触发，整轮对话直接
+#: 中断——而同一个请求只要放宽 write 就能正常完成。
+#:
+#: read 从 300s 提到 600s：推理模型（kimi/opus 这类）的首 token 等待可以很长，
+#: 300s 在多轮长上下文时偏紧。connect/pool 保持保守值不变。
+_TIMEOUT = httpx.Timeout(connect=20.0, read=600.0, write=180.0, pool=15.0)
+
+#: 上游「连接被断开」这类瞬时错误的重试次数。
+#:
+#: 实测 ``Server disconnected without sending a response`` 与 ``WriteTimeout``
+#: 都是**偶发**的（同一账号同一模型隔几秒重试就成功），不是账号失效。旧实现
+#: 遇到就直接整轮失败、把用户对话打断——而它本来只需要再试一次。
+#:
+#: 只对**还没向客户端吐过字节**的情况重试（见 ``_RETRYABLE_EXC``），一旦开始
+#: 流式输出就不能重试了，否则客户端会收到重复内容。
+_RETRYABLE_ATTEMPTS = 2
+
+#: 哪些异常算「可重试的瞬时错误」。
+#:
+#: 注意不含 4xx：那些是确定性的（模型名错、鉴权失败），重试只是浪费往返。
+_RETRYABLE_EXC: tuple[type[BaseException], ...] = (
+    httpx.RemoteProtocolError,   # Server disconnected
+    httpx.WriteTimeout,          # 写入超时
+    httpx.ReadTimeout,           # 读取超时
+    httpx.ConnectError,          # 连接失败
+    httpx.ConnectTimeout,        # 连接超时
+)
 
 _SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "close"}
 
@@ -967,19 +996,44 @@ class KiroProvider(BaseProvider):
             "message": f"kiro 所有账号均失败：{detail}", "type": "bad_gateway"}})
 
     async def _token_for(self, acct: KiroAccount) -> tuple[str, dict[str, Any]]:
-        import asyncio
-
         return await asyncio.to_thread(creds.ensure_account_token, acct.id)
 
     async def _post_chat(self, token: str, region: str,
                          payload: dict[str, Any]) -> httpx.Response:
+        """发请求，对**瞬时**错误自动重试。
+
+        只在这里重试是安全的：此时还没向客户端吐过任何字节。一旦开始流式
+        转发就不能重试了（客户端会收到重复内容），那个边界由 ``_respond``
+        之后的流程保证——重试全部发生在拿到 2xx 响应**之前**。
+
+        实测这两类错误是偶发的、重试即好（同一账号同一模型隔几秒就通）：
+        ``Server disconnected without sending a response``、
+        ``WriteTimeout (deadline exceeded)``。旧实现遇到就整轮失败、把用户
+        对话打断，而它本来只需要再试一次。
+        """
         client = await self._get_client()
         url = f"{endpoint_base(region)}{_CHAT_PATH}"
         headers = {**auth_headers(token),
                    "x-amz-target": ("AmazonCodeWhispererStreamingService"
                                     ".GenerateAssistantResponse")}
-        request = client.build_request("POST", url, json=payload, headers=headers)
-        return await client.send(request, stream=True)
+        last_exc: BaseException | None = None
+        for attempt in range(1, _RETRYABLE_ATTEMPTS + 1):
+            try:
+                request = client.build_request("POST", url, json=payload,
+                                               headers=headers)
+                return await client.send(request, stream=True)
+            except _RETRYABLE_EXC as exc:
+                last_exc = exc
+                if attempt >= _RETRYABLE_ATTEMPTS:
+                    raise
+                # 退避：1s、2s（指数）。这类错误通常是上游瞬时抖动，
+                # 稍等一下比立刻重试有效得多。
+                delay = 2 ** (attempt - 1)
+                log.info("kiro 请求瞬时失败（%s），%ss 后重试（%d/%d）",
+                         describe_exception(exc), delay,
+                         attempt, _RETRYABLE_ATTEMPTS)
+                await asyncio.sleep(delay)
+        raise last_exc if last_exc else RuntimeError("kiro 请求失败")
 
     async def _respond(self, resp: httpx.Response, protocol: str,
                        model: str, stream: bool, *,
