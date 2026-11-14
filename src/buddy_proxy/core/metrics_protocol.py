@@ -49,8 +49,9 @@ def normalize_usage(u: dict[str, Any]) -> dict[str, Any]:
 
     - prompt/completion：Anthropic 叫 input/output_tokens
     - 缓存：OpenAI 在 prompt_tokens_details.cached_tokens（prompt 含缓存），
-      Anthropic 是 cache_read_input_tokens（input 不含缓存，单列）——
-      统一输出 OpenAI 口径：prompt_tokens = input + cache_read + cache_creation
+      Anthropic 是 cache_read_input_tokens（input 不含缓存，单列），CodeBuddy
+      还有一份只写在 prompt_cache_hit_tokens 里的命中数——统一输出 OpenAI
+      口径：prompt_tokens = input + cache_read + cache_creation
     - credit：单次积分消耗。上游命名不统一（见 :func:`_credit_field`），
       都没有 → None（由上层决定是否估算）
     """
@@ -58,13 +59,26 @@ def normalize_usage(u: dict[str, Any]) -> dict[str, Any]:
                or u.get("input_tokens_details") or {})
     credit = _credit_field(u)
     prompt = int(u.get("prompt_tokens") or u.get("input_tokens") or 0)
+    # CodeBuddy 命中缓存时常把 cached_tokens / details.cached_tokens 都留 0，
+    # 只报 prompt_cache_hit_tokens（2026-11-14 hy4free 实测 hit=7168 而标准
+    # 字段全 0）。依次兜底，标准字段非 0 时仍以它为准，避免两份数打架。
     cached = int(u.get("cached_tokens") or details.get("cached_tokens")
-                 or u.get("cache_read_input_tokens") or 0)
+                 or u.get("cache_read_input_tokens")
+                 or u.get("prompt_cache_hit_tokens") or 0)
     cache_write = int(u.get("cache_creation_input_tokens") or 0)
-    if u.get("cache_read_input_tokens") is not None or cache_write:
-        # Anthropic 官方口径：input_tokens 不含缓存命中/创建，缓存单列——
-        # 统一成 OpenAI 口径（prompt 含 cached），UI 各通道才能横向对比。
-        # OpenAI/Responses 形态没有这两个顶层字段，prompt 本就含缓存，勿重复累加
+    # 只有 Anthropic 形态（input_tokens 单列、prompt_tokens 缺席）才需要把缓存
+    # 加回 prompt。CodeBuddy 连未命中时也回 cache_read_input_tokens: 0，若按
+    # 「字段存在」判断就会把命中数重复累加（prompt 已是含缓存的 OpenAI 口径）；
+    # 缓存创建是 Anthropic 的 5m/1h 写入，出现正数同样要补进全量输入。
+    # Anthropic 的 input 不含缓存、也不带 details；Responses 虽用 input_tokens，
+    # 但 input_tokens_details.cached_tokens 已含在 input 里，按 Anthropic 补加会
+    # 把 prompt 算多一份（原逻辑靠「无 cache_read 顶层字段」躲过，不能照搬）。
+    has_input_details = bool(u.get("input_tokens_details")
+                             or u.get("prompt_tokens_details"))
+    anthropic_shape = (u.get("prompt_tokens") is None
+                       and u.get("input_tokens") is not None
+                       and not has_input_details)
+    if anthropic_shape or cache_write:
         prompt += cached + cache_write
     return {
         "prompt_tokens": prompt,
