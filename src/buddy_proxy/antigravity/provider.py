@@ -350,16 +350,22 @@ class AntigravityProvider(BaseProvider):
         upstream_model = apply_effort_suffix(entry, body.get("reasoning_effort"))
 
         # failover 循环：按登录顺位尝试可用账号（429/403/凭据失效 → 冷却换号）
-        accounts = failover.available_accounts()
+        # 带上模型：429 只冷却 (账号, 模型) 这一格，别的模型仍能用这批账号。
+        accounts = failover.available_accounts(model=upstream_model)
         # 负载均衡（额度页开关）：只改"先试谁"，不改"谁能试"——
         # 冷却/权限等过滤已在上一行完成。关着时顺序与历史完全一致。
         accounts = lb_mod.reorder(_lb_state(), 'antigravity', accounts,
                                   model=upstream_model)
         if not accounts:
+            # 模型级冷却不出现在 cooldown_report 里（后者只查纯账号 id），
+            # 不补一句就会得到「冷却中：」后面一片空白的报错。
+            reason = (failover.cooldown_report()
+                      or failover.model_cooldown_report(upstream_model)
+                      or "无可用账号")
             raise HTTPException(
                 status_code=429,
                 detail={"error": {
-                    "message": (f"antigravity 所有账号均在冷却中：{failover.cooldown_report()}"
+                    "message": (f"antigravity {upstream_model} 无可用账号：{reason}"
                                 "；额度冷却到点自动恢复，疑似拉黑的账号请在管理页删除"),
                     "type": "rate_limit_error",
                 }},
@@ -440,19 +446,32 @@ class AntigravityProvider(BaseProvider):
                     failover.mark_cooldown(acct.id, reason="401 强刷后仍被拒")
                     continue
 
-            # 403/429：账号级拒绝（额度/风控）——冷却该账号换下一个。
-            # 403 文案是「Verify your account to continue.」时按拉黑档（6h）
-            # 冷却：账号能登录但被 Google 风控挡在门外，60s 一探只会白打。
+            # 429 与 403 不是同一类问题：
+            # - 403（含「Verify your account」拉黑）是账号级：按账号冷却，6h/60s；
+            # - 429 里混着「quota 真耗尽」与「模型名已下架的伪装 RESOURCE_EXHAUSTED」。
+            #   2026-11-14 实测后者：gemini-3.6-flash 两个账号连着 429，按账号冷却
+            #   5min 后整条通道 available=0，连正常的 gemini-3.8-flash 都被连坐拒绝。
+            #   因此 429 一律按 (账号, 模型) 复合键冷却：坏模型只挡自己，真额度
+            #   耗尽时同一模型的其它账号也照常换号，语义不受影响。
             if resp.status_code in (403, 429):
                 last_status = resp.status_code
                 last_detail = await _error_detail(resp, stream)
-                failover.mark_cooldown(
-                    acct.id,
-                    retry_after=resp.headers.get("Retry-After"),
-                    quota=resp.status_code == 429,
-                    blacklist=failover.is_blacklist_signal(resp.status_code, last_detail),
-                    reason=f"HTTP {resp.status_code}{(': ' + last_detail) if last_detail else ''}",
-                )
+                reason = (f"HTTP {resp.status_code}"
+                          f"{(': ' + last_detail) if last_detail else ''}")
+                if resp.status_code == 429:
+                    failover.mark_model_cooldown(
+                        acct.id, upstream_model,
+                        retry_after=resp.headers.get("Retry-After"),
+                        reason=reason,
+                    )
+                else:
+                    failover.mark_cooldown(
+                        acct.id,
+                        retry_after=resp.headers.get("Retry-After"),
+                        blacklist=failover.is_blacklist_signal(
+                            resp.status_code, last_detail),
+                        reason=reason,
+                    )
                 await _drain_and_close(resp, stream)
                 continue
 
@@ -470,10 +489,17 @@ class AntigravityProvider(BaseProvider):
             gate = await self._gate_first_event(resp, stream)
             if gate.account_error:
                 last_status, last_detail = gate.code, gate.message
-                failover.mark_cooldown(
-                    acct.id, quota=gate.code == 429,
-                    blacklist=failover.is_blacklist_signal(gate.code, gate.message),
-                    reason=f"带内 error {gate.code}: {gate.message}")
+                reason = f"带内 error {gate.code}: {gate.message}"
+                if gate.code == 429:
+                    failover.mark_model_cooldown(
+                        acct.id, upstream_model, reason=reason)
+                else:
+                    failover.mark_cooldown(
+                        acct.id,
+                        blacklist=failover.is_blacklist_signal(
+                            gate.code, gate.message),
+                        reason=reason,
+                    )
                 await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
             if gate.eof:
@@ -520,13 +546,18 @@ class AntigravityProvider(BaseProvider):
 
         # 全部账号失败：报错里逐账号说明当前状态（谁在额度冷却还剩几分钟、
         # 谁疑似被拉黑）——不然用户看到「两个账号明明能用」却报 403，没法自查。
+        # 429 走模型级冷却，不在 cooldown_report 里，补一段模型维度的画像。
         report = failover.cooldown_report()
+        model_report = (failover.model_cooldown_report(upstream_model)
+                        if last_status == 429 else "")
+        states = "；".join(part for part in (report, model_report) if part)
         tail = f"最后错误 HTTP {last_status or 'n/a'}{(': ' + last_detail) if last_detail else ''}"
         raise HTTPException(
             status_code=last_status if last_status in (401, 403, 429, 504) else 502,
             detail={"error": {
-                "message": (f"antigravity 所有账号均不可用（{report}；{tail}）" if report
-                            else f"antigravity 所有账号均不可用（{tail}）"),
+                "message": (f"antigravity {upstream_model} 所有账号均不可用"
+                            f"（{states}；{tail}）" if states
+                            else f"antigravity {upstream_model} 所有账号均不可用（{tail}）"),
                 "type": ("timeout" if last_status == 504
                          else "rate_limit_error" if last_status in (403, 429)
                          else "bad_gateway"),

@@ -128,6 +128,14 @@ def _patch_token(monkeypatch, refreshes: list[str] | None = None):
 _BODY = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 16}
 
 
+def _default_upstream_model() -> str:
+    """_run 默认请求的模型经 apply_effort_suffix 后的上游真名。"""
+    from buddy_proxy.antigravity.convert import apply_effort_suffix
+    from buddy_proxy.antigravity.provider import MODELS
+
+    return apply_effort_suffix(MODELS[0], None)
+
+
 def _run(provider, stream=False):
     from buddy_proxy.antigravity.provider import MODELS
 
@@ -160,9 +168,68 @@ def test_429_switches_account_and_respects_retry_after(two_accounts, monkeypatch
     resp = _run(provider)
     assert resp.status_code == 200 and b"pong" in resp.body
     assert up.calls == ["tok-u@x.com", "tok-v@y.com"]  # 主账号失败才动备用
-    left, kind = failover.cooldown_left("u@x.com")
-    assert 0 < left <= 90 and kind == "quota"  # Retry-After 覆盖默认 300s
-    assert failover.cooldown_left("v@y.com")[0] == 0
+    # 429 按 (账号, 模型) 冷却：Retry-After 覆盖默认 300s。
+    model = _default_upstream_model()
+    left, kind = failover.model_cooldown_left("u@x.com", model)
+    assert 0 < left <= 90 and kind == "quota"
+    assert failover.model_cooldown_left("v@y.com", model)[0] == 0
+    # 账号本身没被摘掉——换个模型仍能用主账号，这正是本次要防的「连坐」。
+    assert failover.cooldown_left("u@x.com") == (0.0, "")
+
+
+def test_bad_model_429_does_not_poison_other_models(two_accounts, monkeypatch):
+    """线上事故回归：一个下架模型的伪装 429 不能连坐毒死整个通道。
+
+    2026-11-14 实测：``gemini-3.6-flash`` 已不在上游目录，两个账号依次收到
+    ``429 RESOURCE_EXHAUSTED``；旧逻辑按账号级冷却 5min，随后
+    ``available_accounts()`` 为空，连正常的 ``gemini-3.8-flash`` 都 429。
+    修复后 429 只冷却 (账号, 模型)，别的模型仍能用同一批账号。
+    """
+    import httpx
+    from fastapi import HTTPException
+
+    from buddy_proxy.antigravity import failover
+    from buddy_proxy.antigravity.convert import apply_effort_suffix
+    from buddy_proxy.antigravity.provider import MODELS
+
+    by_id = {m["id"]: m for m in MODELS}
+    bad = apply_effort_suffix(by_id["gemini-3.6-flash"], None)
+    good = apply_effort_suffix(by_id["gemini-3.8-flash"], None)
+    seen: list[str] = []
+
+    def route(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        model = body.get("model", "")
+        seen.append(model)
+        if model == bad:
+            return httpx.Response(429, json={"error": {
+                "code": 429, "message": "Resource has been exhausted (e.g. check quota)."}})
+        return httpx.Response(200, json=_gemini_ok())
+
+    provider, _up = two_accounts
+    import buddy_proxy.antigravity.provider as prov
+
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(route),
+                                         timeout=prov._TIMEOUT)
+    _patch_token(monkeypatch)
+
+    # 1) 坏模型：两个账号都 429，按模型冷却。
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(provider.forward(
+            {**_BODY, "model": f"antigravity/gemini-3.6-flash", "stream": False},
+            "openai"))
+    assert ei.value.status_code == 429
+    assert failover.model_cooldown_left("u@x.com", bad)[0] > 0
+    assert failover.model_cooldown_left("v@y.com", bad)[0] > 0
+    assert failover.cooldown_left("u@x.com") == (0.0, ""), "账号不该被整体摘掉"
+
+    # 2) 紧跟着用好模型：必须 200，且仍从主账号开始，不被坏模型连坐。
+    seen.clear()
+    resp = asyncio.run(provider.forward(
+        {**_BODY, "model": f"antigravity/gemini-3.8-flash", "stream": False},
+        "openai"))
+    assert resp.status_code == 200 and b"pong" in resp.body
+    assert seen == [good], "好模型应一次成功，不该被前一轮的 429 挡在门外"
 
 
 def test_403_switches_account_short_cooldown(two_accounts, monkeypatch):
@@ -243,8 +310,11 @@ def test_all_accounts_failed_maps_last_status(two_accounts, monkeypatch):
     assert ei.value.status_code == 429
     msg = ei.value.detail["error"]["message"]
     assert "所有账号均不可用" in msg and "quota b" in msg  # 带上最后错误详情
-    # 逐账号状态画像：谁在额度冷却、还剩多久（不然「两个账号明明能用」没法自查）
-    assert "u@x.com 额度冷却剩" in msg and "v@y.com 额度冷却剩" in msg
+    # 429 是模型级冷却：画像要点名「哪个账号的哪个模型」还剩多久，
+    # 而不是查纯账号 id 的 cooldown_report（那样这里会是一片空白）。
+    model = _default_upstream_model()
+    assert f"u@x.com 的 {model} 额度冷却剩" in msg
+    assert f"v@y.com 的 {model} 额度冷却剩" in msg
 
 
 def test_business_4xx_passthrough_without_switching(two_accounts, monkeypatch):
@@ -274,7 +344,7 @@ def test_no_available_accounts_fast_429(two_accounts):
     with pytest.raises(HTTPException) as ei:
         _run(provider)
     assert ei.value.status_code == 429
-    assert "冷却中" in ei.value.detail["error"]["message"]
+    assert "无可用账号" in ei.value.detail["error"]["message"]
     assert "u@x.com 额度冷却剩" in ei.value.detail["error"]["message"], \
         "空候选的报错要说明谁在冷却、还剩多久"
 
@@ -447,7 +517,10 @@ def test_stream_gate_switches_on_in_band_429(two_accounts, monkeypatch):
     assert sr.status_code == 200
     text = _stream_text(sr)
     assert "RESOURCE_EXHAUSTED" not in text  # 客户端没吃到失败账号的错误
-    assert failover.cooldown_left("u@x.com")[0] > 0
+    # 带内 429 与 HTTP 429 走同一套模型级冷却，闸门路径不漏。
+    assert failover.model_cooldown_left(
+        "u@x.com", _default_upstream_model())[0] > 0
+    assert failover.cooldown_left("u@x.com") == (0.0, "")
     assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
 
 
