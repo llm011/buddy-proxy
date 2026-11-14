@@ -265,7 +265,8 @@ def test_refreshed_model_routes_and_drives_quota_mapping(monkeypatch):
         return httpx.Response(200, json={})
 
     monkeypatch.setattr(provider, "ensure_auth", lambda: None)
-    monkeypatch.setattr(prov.failover, "available_accounts", lambda: [account])
+    monkeypatch.setattr(prov.failover, "available_accounts",
+                        lambda model=None: [account])
     monkeypatch.setattr(prov, "ensure_account_token", lambda _account_id: ("token", {"project_id": "p1"}))
     monkeypatch.setattr(prov, "chat_to_antigravity_request", fake_convert)
     monkeypatch.setattr(prov, "gemini_response_to_chat", lambda _payload, *, model: {"model": model})
