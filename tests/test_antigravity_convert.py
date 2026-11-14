@@ -59,6 +59,66 @@ def test_scrub_identity_rules_and_env(monkeypatch):
     assert convert.scrub_identity("Hermes Agent") == "helper Agent"  # env 规则追加在默认后
 
 
+def test_scrub_identity_replaces_claude_code_agent_template():
+    """Claude Code 的 agent 模板整句会触发 cloudcode-pa 的伪装 429。
+
+    2026-11-15 直连逐项实测：``You are an interactive agent that helps users
+    with software engineering tasks.`` 单独放进 systemInstruction 就稳定 429
+    RESOURCE_EXHAUSTED；改一个词 / 换语序 / 去掉前缀都 200，说明上游认的是
+    精确句式而非关键词。旧 scrub 只换 ``You are Claude Code``，剩下这段模板
+    原样进上游，于是 Claude Code 走 /v1/messages 时两个账号接连 429、被按
+    模型冷却 5 分钟，用户看到「渠道都不可用」。
+
+    修法照抄 CodeBuddy/dsh 的先例：命中固定身份声明就整段换成短摘要，
+    零宽空格绕不过硬校验。断言锁住「整段替换」与「近似句式不误伤」两条，
+    实现退回词级替换时第一条当场红。
+    """
+    from buddy_proxy.antigravity import convert
+    from buddy_proxy.core.desensitize import _CLAUDE_HARNESS_SUMMARY
+
+    marker = "You are an interactive agent that helps users with software engineering tasks."
+    real = ("You are Claude Code, Anthropic's official CLI for Claude.\n\n"
+            + marker + "\nUse the instructions below and the tools available to you.\n\n"
+            "# Tone and style\nYou should be concise, direct, and to the point.")
+    out = convert.scrub_identity(real)
+    assert out == _CLAUDE_HARNESS_SUMMARY, "命中模板必须整段替换，不能留残句"
+    assert marker not in out
+    assert "Anthropic's official CLI" not in out
+
+    # 单独一句、没有长度门槛也要拦（实测 82 字符即触发 429）
+    assert convert.scrub_identity(marker) == _CLAUDE_HARNESS_SUMMARY
+
+    # 近似句式不误伤：改一个词 / 换语序都不该被整段吃掉
+    variant = "You are an interactive agent that helps users with coding tasks."
+    assert convert.scrub_identity(variant) == variant
+    reordered = "You help users with software engineering tasks as an interactive agent."
+    assert convert.scrub_identity(reordered) == reordered
+
+    # 普通词级规则仍然生效
+    assert convert.scrub_identity("You are Claude, made by Anthropic") == \
+        "You are the assistant, made by Anthropic"
+
+
+def test_chat_to_antigravity_request_neutralizes_claude_system():
+    """从 Claude Code 风格的 chat body 走完整 envelope，user system 必须是摘要。"""
+    from buddy_proxy.antigravity.convert import chat_to_antigravity_request
+    from buddy_proxy.core.desensitize import _CLAUDE_HARNESS_SUMMARY
+
+    body = {
+        "model": "gemini-3.8-flash",
+        "messages": [
+            {"role": "system", "content":
+                "You are Claude Code, Anthropic's official CLI for Claude.\n\n"
+                "You are an interactive agent that helps users with software engineering tasks."},
+            {"role": "user", "content": "hi"},
+        ],
+    }
+    parts = chat_to_antigravity_request(body, project_id="p", model="m")[
+        "request"]["systemInstruction"]["parts"]
+    assert parts[2]["text"] == _CLAUDE_HARNESS_SUMMARY
+    assert "interactive agent" not in parts[2]["text"]
+
+
 def test_effort_suffix():
     """模型表条目 → 上游真名：efforts/default_effort 声明驱动（上游只认列表变体名）。"""
     from buddy_proxy.antigravity.convert import apply_effort_suffix
