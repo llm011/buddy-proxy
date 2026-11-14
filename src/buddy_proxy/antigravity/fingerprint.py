@@ -20,8 +20,15 @@ import os
 import platform
 from pathlib import Path
 
-#: product.json 读不到时的兜底（antigravity-claude-proxy 同款值，已验证可用）。
-FALLBACK_UA_VERSION = "2.0.3"
+#: product.json 读不到时的兜底。
+#: UA 版本是上游的**版本门槛**，不是装饰：2026-11-15 实测 antigravity/2.0.3
+#: 及 2.5.0 请求 streamGenerateContent 恒返回单事件固定文案
+#: 「This version of Antigravity is no longer supported.」（无 usageMetadata、
+#: 无 finishReason，是网关短路，压根没进模型）；2.9.0 起才返回真回复。
+#: 用 3.0.0 留一档余量。只认 UA，不认 X-Client-Version——把后者从 1.110.0
+#: 单独提到 2.0.0 仍得到提示文本（同一轮交叉实测），所以那个值保持不动。
+#: 本机装了官方客户端时仍以 product.json 的 ideVersion 为准（见 _detect_versions）。
+FALLBACK_UA_VERSION = "3.0.0"
 FALLBACK_CLIENT_VERSION = "1.110.0"
 
 #: 模拟 Google Node.js 客户端环境的 x-goog-api-client（参考实现写死值）。

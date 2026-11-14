@@ -158,10 +158,27 @@ yes）：access token 过期自动用同一 OAuth client 刷新、onboarding 自
 | 端点 | `daily-cloudcode-pa.googleapis.com` → `cloudcode-pa.googleapis.com` | 参考实现同序；`CLOUD_CODE_URL` env 可覆盖（agy 内置） |
 | `X-Client-Name` | `antigravity` | 参考实现 |
 | `X-Client-Version` | 本机 product.json `version`（fallback `1.110.0`） | version-detector 同策略 |
-| UA | `antigravity/<ideVersion> <os>/<arch>[ <model>]`（ideVersion fallback `2.0.3`） | 参考实现 |
+| UA | `antigravity/<ideVersion> <os>/<arch>[ <model>]`（ideVersion fallback `3.0.0`） | 见下方「UA 版本门槛」 |
 | `x-goog-api-client` | `gl-node/18.18.2 fire/0.8.6 grpc/1.10.x` | 参考实现（Electron 内嵌 Node） |
 | CLIENT_METADATA | 数字枚举 `{ideType: 9, platform: 1-5, pluginType: 2}` | agy 是数字枚举（与 gemini 通道的字符串枚举不同） |
 | redirect path | `/oauth-callback`（PKCE S256 + state） | agy strings |
+
+### UA 版本门槛（2026-11-15 实测）
+
+上游按 User-Agent 里的 `antigravity/<ideVersion>` 做版本校验，旧版**流式端点**
+（`streamGenerateContent`）被短路：
+
+| ideVersion | 流式响应 | 耗时 |
+|---|---|---|
+| `2.0.3`（旧 fallback）、`2.5.0` | 单事件固定文案「This version of Antigravity is no longer supported.」，无 `usageMetadata` / `finishReason` | ~0.7s |
+| `2.9.0`、`3.0.0`、`3.5.0`、`4.0.0` | 真回复，带完整 `usageMetadata` / `finishReason: STOP` | 2.5–3.4s |
+
+那 0.7s 不是「快」，是网关没跑模型直接吐常量，不能拿来和真回复比速度。
+`X-Client-Version` 不是门槛：单独把它从 `1.110.0` 提到 `2.0.0` 仍是提示文本，
+所以只有 UA 的 fallback 升到 `3.0.0`。留一档余量（2.9.0 刚好过线）。
+
+判断某次响应是不是短路，看有没有 `usageMetadata` 即可——单事件、只有
+`candidates`、无 `finishReason` 的就是被版本门槛挡了，别当成模型回答。
 
 ## 配额结构（2026-10-04 实测，两个 g1-pro-tier 账号）
 
