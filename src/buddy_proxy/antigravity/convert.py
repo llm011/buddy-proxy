@@ -12,7 +12,9 @@ API 家族，转换规则一致）；本模块只做 antigravity 特有的三件
    用户自己的 system 追加在后面。
 3. **身份清洗**：用户 system 里「You are Claude/Codex/…」式断言会触发
    cloudcode-pa 的 429 RESOURCE_EXHAUSTED（Adrian De Vera 逆向实测），替换
-   成中性表述。``ANTIGRAVITY_SCRUB_IDENTITY``（``term=>replacement,…``）可加规则。
+   成中性表述。Claude Code 的 agent 模板另有一条精确句式指纹，命中必须整段
+   换成短摘要（见 :func:`scrub_identity`）。``ANTIGRAVITY_SCRUB_IDENTITY``
+   （``term=>replacement,…``）可加规则。
 
 响应方向（Gemini → OpenAI / SSE 解析）与 gemini 完全同构，直接复用。
 """
@@ -24,6 +26,7 @@ import re
 import uuid
 from typing import Any
 
+from ..core.desensitize import _CLAUDE_HARNESS_MARKERS, _CLAUDE_HARNESS_SUMMARY
 from ..gemini.convert import gemini_response_to_chat, iter_gemini_sse_payloads  # noqa: F401 - re-export 供 provider 用
 from ..gemini.convert import chat_to_gemini_request
 
@@ -67,7 +70,26 @@ def _scrub_rules() -> list[tuple[str, str]]:
 
 
 def scrub_identity(text: str) -> str:
-    """清洗 system 文本里的竞品身份断言（大小写不敏感的整词替换）。"""
+    """清洗 system 文本里的竞品身份断言（大小写不敏感的整词替换）。
+
+    Claude Code 2.x 的 system 模板里有一句**精确句式指纹**：
+    ``You are an interactive agent that helps users with software engineering
+    tasks.``。2026-11-15 直连 cloudcode-pa 逐项实测：这句单独放进
+    systemInstruction 就稳定 429 ``RESOURCE_EXHAUSTED``（伪装成配额错误），
+    改一个词、换语序、去掉 ``You are`` 前缀都 200；零宽空格也绕不过
+    （与 CodeBuddy 的 dsh 身份声明同款硬校验）。旧逻辑只把
+    ``You are Claude Code`` 换成 ``You are the assistant``，剩下整段模板
+    原样保留，于是 Claude Code 走 /v1/messages 时两个账号接连 429、被按模型
+    冷却 5 分钟，用户看到「渠道都不可用」。
+
+    所以命中这条指纹时**整段换成短摘要**（复用 core.desensitize 里已为
+    CodeBuddy 通道写好的同一份契约），而不是继续做词级替换。用精确子串
+    匹配整句，不用长度阈值——实测这句单独 82 字符就足以触发 429，
+    加 >=1000 的门槛会让短模板漏网；反过来改一个词就 200，说明上游认的
+    就是这句话本身，精确匹配不会误伤普通业务指令。
+    """
+    if _CLAUDE_HARNESS_MARKERS[0] in text:
+        return _CLAUDE_HARNESS_SUMMARY
     for term, repl in _scrub_rules():
         text = re.sub(re.escape(term), repl, text, flags=re.IGNORECASE)
     return text
