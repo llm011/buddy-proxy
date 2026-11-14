@@ -138,3 +138,32 @@ def test_fingerprint_fallback_without_product_json(monkeypatch):
 
     assert fp.ua_version() == fp.FALLBACK_UA_VERSION
     assert fp.client_version() == fp.FALLBACK_CLIENT_VERSION
+
+
+def test_fallback_ua_clears_upstream_version_gate(monkeypatch):
+    """fallback UA 必须过上游版本门槛；退回旧值会让流式恒吐提示文本。
+
+    2026-11-15 实测（两个账号、交错 A/B 多轮）：antigravity/2.0.3 的
+    streamGenerateContent 返回单事件固定文案「This version of Antigravity is
+    no longer supported.」，没有 usageMetadata / finishReason，是网关短路、
+    没进模型；2.9.0 起才给真回复。X-Client-Version 不是门槛，单独改它无效，
+    所以只有 UA 的 fallback 升到 3.0.0（留一档余量）。
+
+    锁具体值而不是只锁「等于常量」：上一版常量就是 2.0.3，若有人把它改回
+    旧值，这条断言当场红，而不是等用户在 dsh 里选模型才发现拿到的是废话。
+    """
+    from buddy_proxy.antigravity import fingerprint as fp
+
+    monkeypatch.delenv("ANTIGRAVITY_UA_VERSION", raising=False)
+    monkeypatch.delenv("ANTIGRAVITY_CLIENT_VERSION", raising=False)
+    monkeypatch.setattr(fp, "_UA_VERSION", None)
+    monkeypatch.setattr(fp, "_CLIENT_VERSION", None)
+    monkeypatch.setattr(fp, "_product_json_paths", lambda: [])
+
+    assert fp.FALLBACK_UA_VERSION == "3.0.0"
+    assert fp.user_agent("gemini-3.8-flash-tiered").startswith("antigravity/3.0.0 ")
+    # 门槛只在 UA：X-Client-Version 保持参考实现的值不动。
+    assert fp.FALLBACK_CLIENT_VERSION == "1.110.0"
+    h = fp.auth_headers("tok", stream=True)
+    assert h["X-Client-Version"] == "1.110.0"
+    assert h["User-Agent"].startswith("antigravity/3.0.0 ")
