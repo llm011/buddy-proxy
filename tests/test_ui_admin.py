@@ -1454,6 +1454,25 @@ def test_sse_usage_extractor_openai():
                         "cached_tokens": 9, "credit": 0.35}
 
 
+def test_sse_usage_extractor_codebuddy_prompt_cache_hit_tokens():
+    """流式路径（dsh/Claude Code 实际走的）也要读到 CodeBuddy 私有命中字段。
+
+    只测 normalize_usage 不够：SSEUsageExtractor 是流式记账的唯一入口，
+    hy4free 命中时上游末尾 chunk 的 usage 里标准字段全 0，漏读会让整条
+    流的 cached_tokens 记 0（2026-11-14 线上 hy4free 的真实形态）。
+    """
+    ex = SSEUsageExtractor()
+    ex.feed(b'data: {"choices":[{"delta":{"content":"OK"}}]}\n\n')
+    ex.feed(b'data: {"choices":[],"usage":{"prompt_tokens":7259,"completion_tokens":16,'
+            b'"prompt_tokens_details":{"cached_tokens":0},"cached_tokens":0,'
+            b'"prompt_cache_hit_tokens":7168,"prompt_cache_miss_tokens":91,'
+            b'"cache_read_input_tokens":0,"cache_creation_input_tokens":0,'
+            b'"credit":0}}\n\n')
+    ex.feed(b"data: [DONE]\n\n")
+    assert ex.usage["cached_tokens"] == 7168, "流式命中数不能记成 0"
+    assert ex.usage["prompt_tokens"] == 7259, "含缓存口径的 prompt 不得重复累加"
+
+
 def test_sse_usage_extractor_anthropic_and_split_lines():
     """Anthropic 形态（input/output 分事件）+ usage 行跨 chunk 断开。
 
@@ -1619,6 +1638,50 @@ def test_normalize_usage_shapes():
     r = normalize_usage({"input_tokens": 9, "output_tokens": 1,
                          "input_tokens_details": {"cached_tokens": 7}, "credit": 0.3})
     assert r["cached_tokens"] == 7 and r["credit"] == 0.3
+
+
+def test_normalize_usage_reads_codebuddy_prompt_cache_hit_tokens():
+    """CodeBuddy 只报 prompt_cache_hit_tokens 时，缓存命中不能记成 0。
+
+    2026-11-14 hy4free 跨账号实测：同一段前缀命中后上游回包是
+    prompt_cache_hit_tokens=7168、prompt_cache_miss_tokens=91，而顶层
+    cached_tokens 与 prompt_tokens_details.cached_tokens 都是 0，同时
+    cache_read_input_tokens 也恒为 0。旧 normalize_usage 三个字段全读不到，
+    metrics/UI 便显示「无缓存」，还会把 prefix_reuse 算成 0%。
+    """
+    # 真实回包形态（省略无关的 details/quota）：命中只落在私有字段里。
+    hit = normalize_usage({
+        "prompt_tokens": 7259,
+        "completion_tokens": 16,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "prompt_cache_hit_tokens": 7168,
+        "prompt_cache_miss_tokens": 91,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "cached_tokens": 0,
+        "credit": 0,
+    })
+    assert hit["cached_tokens"] == 7168, "命中数必须从 prompt_cache_hit_tokens 兜住"
+    # prompt_tokens 本身已是含缓存的 OpenAI 口径，不能因补读命中而重复累加。
+    assert hit["prompt_tokens"] == 7259, "含缓存口径的 prompt 不得再加一次命中数"
+
+    # 标准字段非 0 时以标准字段为准，不被私有字段覆盖（防两份数打架）。
+    standard = normalize_usage({
+        "prompt_tokens": 7259,
+        "prompt_tokens_details": {"cached_tokens": 4096},
+        "prompt_cache_hit_tokens": 7168,
+    })
+    assert standard["cached_tokens"] == 4096
+
+    # 未命中且 CodeBuddy 回 cache_read_input_tokens: 0：不能把 prompt 加脏。
+    miss = normalize_usage({
+        "prompt_tokens": 7259,
+        "prompt_cache_hit_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+    })
+    assert miss["cached_tokens"] == 0
+    assert miss["prompt_tokens"] == 7259
 
 
 def test_normalize_usage_accepts_plural_credits():
