@@ -627,7 +627,7 @@ curl -s http://127.0.0.1:8787/v1/tools/fetch \
   命中行，无命中的组整体隐藏；搜索中匹配组强制展开、「全部展开/折叠」暂时禁用，清空
   （✕ 或 Esc）后精确恢复原展开/折叠布局——搜索全程不改写 localStorage 里的折叠偏好
   （`bp-collapsed`），30 秒自动刷新也不丢搜索词
-- **目录刷新与隐藏** — Qoder、Kimi、Antigravity 这类实现动态目录能力的通道，标题栏显示「↻ 重新拉取」：遍历全部账号（包括因冷却暂时不参与聊天 failover 的账号）取并集并原子更新实例目录。部分账号成功时只新增、不删除上一版 id，因为失败账号可能是某模型的唯一来源；只有全部账号成功才确认下架，若所有账号都失败则保留最后一份好目录。Antigravity 的上游 `fetchAvailableModels` 列表当「脏且缺」的不可信输入处理，而非权威目录：它仍回传已淘汰的旧代（`gemini-2.5-*`、`gemini-3-flash*`、`gemini-3.1-flash*`、`gemini-3.5-*`），由 `models.json` 的 `blocked_prefixes` 在发现时按前缀丢弃（前缀保持粗粒度，仍要用的模型用 `blocked_prefix_exceptions` 按精确基名豁免，目前只有生图模型 `gemini-3.1-flash-image`；真·新模型不在表里，照常收录）；它又不回传 premium curated 模型（`gemini-3.1-pro` / `gemini-3.6-flash`——IDE 可见、能路由，但目录接口不吐），故每个 `verified: true` 条目被钉死、刷新永不下架。模型行的“隐藏”只影响模型页、选择器与 `/v1/models` 两套数组，显式 `provider/model` 仍可调用；与“停用”（直接拒绝调用）严格不同。隐藏键写入 `settings.json` 的 `hidden_models`，上游后来下架也能在「已隐藏」弹窗清理。
+- **目录刷新与隐藏** — Qoder、Kimi、Antigravity 这类实现动态目录能力的通道，标题栏显示「↻ 重新拉取」：遍历全部账号（包括因冷却暂时不参与聊天 failover 的账号）取并集并原子更新实例目录。部分账号成功时只新增、不删除上一版 id，因为失败账号可能是某模型的唯一来源；只有全部账号成功才确认下架，若所有账号都失败则保留最后一份好目录。Antigravity 的上游 `fetchAvailableModels` 列表当「脏且缺」的不可信输入处理，而非权威目录：它仍回传已淘汰的旧代（`gemini-2.5-*`、`gemini-3-flash*`、`gemini-3.1-flash*`、`gemini-3.5-*`，以及已下架的 `gemini-3.1-pro` / `gemini-3.6-flash`），由 `models.json` 的 `blocked_prefixes` 在发现时按前缀丢弃（前缀保持粗粒度，仍要用的模型用 `blocked_prefix_exceptions` 按精确基名豁免，目前只有生图模型 `gemini-3.1-flash-image`；真·新模型不在表里，照常收录；`-disabled` 占位条目 `gemini-4-carbon-disabled` 落在 `gemini-4-*` 区间前缀盖不住，改按后缀丢弃——它是列表里唯一没有 `quotaInfo` 的条目，`generateContent` 直接 404）；它又不回传能路由但目录接口不吐的 claude/gpt-oss 条目（回传的话会被并成只剩一个 effort 档），故每个 `verified: true` 条目被钉死、刷新永不下架。`gemini-2.5-flash` / `gemini-3.5-flash-lite` 直连仍可用，但没有 `quotaInfo`，不放进对外目录。模型行的“隐藏”只影响模型页、选择器与 `/v1/models` 两套数组，显式 `provider/model` 仍可调用；与“停用”（直接拒绝调用）严格不同。隐藏键写入 `settings.json` 的 `hidden_models`，上游后来下架也能在「已隐藏」弹窗清理。
 - **一键测试** — 每个模型一个「测试」按钮，向上游发一条 `hi`，弹窗里返回延迟、token 用量、回复预览，以及实际响应的 provider/模型（如 `zcode/glm-5.3`；模型顺序路由时也显示最终命中的通道）
   （非流式、`max_tokens=256`，走真实上游、会产生真实调用）
 - **自动打卡 & 打卡日历** — CodeBuddy / Trae / Qoder 三家上游都提供每日签到：勾选「自动打卡」后
@@ -1405,9 +1405,9 @@ buddy start
 详见 `src/buddy_proxy/antigravity/README.md`）。上游只认
 `fetchAvailableModels` 列表里的变体名（gemini 3 系裸名会被 429 伪装拒绝），
 所以 `reasoning_effort` 按模型表声明的档位映射后缀（`models.json` 的
-`efforts`/`default_effort`——如 `gemini-3.1-pro` 默认 `-low`、
-`gemini-3.8-flash` 实发 `gemini-3.8-flash-tiered`、`gpt-oss-120b` 实发
-`gpt-oss-120b-medium`）。模型页手动刷新会遍历所有可用账号、取
+`efforts`/`default_effort`——如 `gemini-4-hydrogen` 默认 `-high`（另有 `-xhigh`）、
+`gemini-3.8-flash` 实发 `gemini-3.8-flash-tiered`、`claude-opus-5-5` 实发
+`claude-opus-5-5-medium`、`gpt-oss-120b` 实发 `gpt-oss-120b-medium`）。模型页手动刷新会遍历所有可用账号、取
 `fetchAvailableModels` 并集，只裁掉已知 effort 后缀（绝不泛化裁掉 `-thinking` /
 `-image` / `-agent` 这类模型身份），已知条目保留人工 metadata，新发现项立即可路由。
 Kimi 的同一刷新按钮走官方 `GET /v1/models`；两者目录都归 provider 实例持有，整轮失败
@@ -1424,12 +1424,34 @@ OpenAI 协议的扩展字段里有容身之处，Anthropic 客户端（Claude Co
 时回落到上游接受（实测 200）的哨兵值 `skip_thought_signature_validator`。
 三种行为均于 2026-10-03 对真实上游实证（矩阵见模块 docstring）。
 
-模型（真实账号实测通过；表在 `src/buddy_proxy/antigravity/models.json`）：
-`antigravity/gemini-3.1-pro`（默认 `-low`，可显式 `-high`）、
-`gemini-3.6-flash`（默认 `-medium`，可 `-low`/`-high`）、`gemini-3.8-flash`
-（tiered 自动档）、`gemini-3.1-flash-image`（生图：走 `chat/completions`，图片在
+**延迟与限频实测（2026-11-15，两个免费层账号，直连上游）**——同一短 prompt、
+`maxOutputTokens=4096`（**给太小会被思考 token 吃光、返回空正文**）下的 TTFT p50：
+`gemini-2.5-flash` ≈1 s、`gemini-3.5-flash-lite` ≈1 s、`gemini-3.8-flash` 7–10 s、
+`gemini-4-hydrogen-xhigh` 9–14 s、`gemini-4-hydrogen-high` ≈11 s、
+`gemini-4-argon` 80–86 s（独立周池，且会排在其他请求后面——后测的一次比先测的还慢）、
+`claude-sonnet-5-5-medium` ≈1.7 s、`claude-opus-5-5-medium` ≈3.7 s、
+`gpt-oss-120b-medium` ≈1.4 s。`gemini-2.5-flash` 与 `gemini-3.5-flash-lite`
+**20 req/s 连打 5 秒（100 次）全部 200**，没探到限频天花板，TTFT 也没恶化。
+池级 `remainingFraction` **不能**用来预测排队（读到 ≈1.0 时 `gemini-3.8-flash`
+仍等了 30–70 s 首字）——要快慢只能实测，别看配额条。当天复核后**已从目录删除**
+（2026-11-15 每个默认档都对真实账号重测）：`gemini-3.1-pro`（`-low`/`-high` 都
+404 `NOT_FOUND`）、`gemini-3.6-flash`（裸名 404；`-medium` 两账号全 429，复测
+挂起 >5 分钟）、`claude-sonnet-4-6` / `claude-opus-4-6-thinking`（HTTP 200，但正文
+就是空壳「Claude Opus 4.6 is no longer available. Please switch to Claude Opus 5.5.」）。
+完整表格与复测脚本（`tools/bench_antigravity.py`）见
+[`docs/antigravity-bench.md`](docs/antigravity-bench.md)。
+
+模型（2026-11-15 每个默认档都实测 200；表在
+`src/buddy_proxy/antigravity/models.json`）：
+`antigravity/gemini-4-argon`（默认 `-medium`，可 `-low`/`-high`；**独立周池**，
+首字 35–86 s，只在重推理时用）、`gemini-4-hydrogen`（默认 `-high`，可
+`-low`/`-medium`/`-xhigh`；TTFT 不跟档位单调，`-low` 反而最慢 34 s）、
+`gemini-3.8-flash`（默认 `tiered` 自动档，`-low`/`-medium`/`-high` 也可用）、
+`gemini-3.1-flash-image`（生图：走 `chat/completions`，图片在
 `choices[0].message.images[]`；Anthropic 出口转成 `image` content block）、
-`claude-sonnet-4-6`、`claude-opus-4-6-thinking`、`gpt-oss-120b`。
+`claude-opus-5-5`（默认 `-medium`，可 `-low`/`-high`）、`claude-sonnet-5-5`
+（默认 `-medium`，可 `-low`/`-high`）、`gpt-oss-120b`（实发
+`gpt-oss-120b-medium`）。
 
 管理面板配额区在 `fetchAvailableModels` 可达时按组显示真进度条（组内取最紧
 水位）：剩余量用千分制展示（如 `989.9 / 1000`，小数看着直观）并带下次重置
