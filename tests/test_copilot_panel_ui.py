@@ -371,3 +371,36 @@ console.log(JSON.stringify({calls: CALLS, toasts: TOASTS, disabled: btn.disabled
     assert data["calls"] == ["/ui/api/copilot/models/refresh"]
     assert any("12" in t["m"] for t in data["toasts"])
     assert data["disabled"] is False
+
+
+def test_copilot_single_account_does_not_duplicate_card():
+    """单账号有额度（无 `Copilot #1 · ` 前缀）只出一张卡，不额外补 `Copilot #1` 空卡；
+    单账号只有说明条（groups 为空）仍保留一张空卡以挂载改名/删除按钮。
+    """
+    single_item = {"label": "Premium 交互", "used": 782, "total": 1500,
+                   "remaining": 718, "percent": 52.1, "unit": "次"}
+    notice_item = {"label": "Copilot 套餐额度", "used": None, "total": None,
+                   "remaining": "额度接口未返回数据", "percent": None}
+    out = _run_js("""
+const acct = [{id: 'jsongo', name: 'jsongo', index: 1, source: 'gh:jsongo', token: 'ok', cooling: []}];
+globalThis.api = async () => ({enabled: true, accounts: acct});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+COPILOT_ACCTS = acct;
+globalThis.BENEFITS = {providers: [%s]};
+renderCopilotPanel();
+const withQuota = PANEL.innerHTML;
+globalThis.BENEFITS = {providers: [%s]};
+renderCopilotPanel();
+const withNoticeOnly = PANEL.innerHTML;
+console.log(JSON.stringify({
+  quotaCards: withQuota.split('pat-pkg-name').length - 1,
+  quotaHasItem: withQuota.includes('Premium 交互'),
+  quotaHasActions: withQuota.includes("acctDelete('copilot','jsongo')"),
+  noticeCards: withNoticeOnly.split('pat-pkg-name').length - 1,
+}));
+""" % (json.dumps(_provider([single_item])), json.dumps(_provider([notice_item]))))
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["quotaCards"] == 1 and data["quotaHasItem"] and data["quotaHasActions"]
+    assert data["noticeCards"] == 1
+

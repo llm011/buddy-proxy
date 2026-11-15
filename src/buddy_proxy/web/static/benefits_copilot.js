@@ -209,9 +209,13 @@ function renderCopilotPanel() {
   const items = (cp.quota && cp.quota.supported ? cp.quota.items : []) || [];
   const { groups, notices } = groupAccountsByPrefix(items, 'Copilot', 'Copilot');
   // 只有说明条/没窗口的账号也要出卡片：按账号快照补空组，按钮才有地方挂。
-  for (const a of COPILOT_ACCTS || []) {
-    const g = `Copilot #${a.index}`;
-    if (!groups.has(g)) groups.set(g, []);
+  // 单账号时后端不拼 `Copilot #1 · ` 前缀，条目归进 `'Copilot'` 组；此时卡已在，
+  // 不能再补 `'Copilot #1'` 空卡，否则同一个号会出两张卡（一有额度一空卡）。
+  if (!((COPILOT_ACCTS || []).length === 1 && groups.has('Copilot'))) {
+    for (const a of COPILOT_ACCTS || []) {
+      const g = `Copilot #${a.index}`;
+      if (!groups.has(g)) groups.set(g, []);
+    }
   }
   const idxOf = grp => {
     const m = grp.match(/^Copilot #(\d+)(?: · |$)/);
