@@ -465,10 +465,11 @@ buddy login copilot --token gho_… # 直接给一把 GitHub token
 - **工具 schema 收敛（上游 `/v1/messages` 严格校验）**：Copilot 的 anthropic 端点对
   `tools[].input_schema` 校验很严，只要有一个工具命中「`anyOf`/`oneOf`/`allOf` 与同级
   `type` 并存」「`type` 写成联合数组且含 `array` 却无 `items`」「`items` 挂在非 `array`
-  类型下」任意一条，**整条**请求就回 `400 invalid request body`，而且不告诉你是哪个
-  工具。MCP 工具集（本机常见几十上百个）正好大量命中，于是 Claude Code 这类客户端
-  一切到 copilot 就 400。anthropic 透传前会把这些 schema 收敛成上游能接受的形状
-  （删冲突的 `type`、联合收敛成单一类型、给 `array` 补 `items`），只删不改语义，
+  类型下」「顶层不是带 `properties` 的 object」任意一条，**整条**请求就回
+  `400 invalid request body`，而且不告诉你是哪个工具。MCP 工具集（本机常见几十上百个）
+  正好大量命中，于是 Claude Code 这类客户端一切到 copilot 就 400。anthropic 透传前
+  会把这些 schema 收敛成上游能接受的形状（删冲突的 `type`、联合收敛成单一类型、
+  给 `array` 补 `items`、顶层钉成带 `properties` 的 object），只删不改语义，
   未命中的工具原样保留；走 chat 端点时不收敛（同一份 schema 实测在 chat 端点能过）。
 - **多账号 failover**：重复登录 / 面板导入即追加备用号；401/403 冷却换号（并提示 token
   已被撤销，需重新 `gh auth login`）；「模型被拒」只冷却该账号上的**这个模型**（换模型

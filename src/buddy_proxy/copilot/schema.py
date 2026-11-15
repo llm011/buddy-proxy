@@ -11,6 +11,10 @@
    ``"array"`` 又没配套的 ``items``，或联合过长（六个类型全写）。
 3. **``items`` 不在 ``type: "array"`` 下面**：``{"type": ["null","string"], "items": {}}``、
    裸 ``{"items": {}}`` 都会被拒。``items`` 写成数组（旧版 tuple 校验）同样被拒。
+4. **顶层必须是「带 properties 的 object」**：``{"type":"array","items":{}}``、``{}``、
+   ``{"type":"object"}`` 都是 ``400``，`{"type":"object","properties":{…}}` 才是 200
+   （实测，同一工具名对照）。所以顶层 ``type`` 一律钉成 ``object`` 并保证有
+   ``properties``；嵌套层的 ``array`` + ``items`` 是合法的（实测 200）。
 
 MCP 服务器（本机就有几十个）和 Claude Code 的工具集正好大量命中这几条，
 于是 ``/model copilot/gemini-4-hydrogen`` 这种请求**一律** 400——不是模型不行，
@@ -51,7 +55,7 @@ def sanitize_anthropic_tools(tools: Any) -> tuple[Any, int]:
         if not isinstance(schema, dict):
             out.append(tool)
             continue
-        fixed = _sanitize_node(schema)
+        fixed = _sanitize_node(schema, root=True)
         if fixed == schema:
             out.append(tool)
             continue
@@ -60,8 +64,13 @@ def sanitize_anthropic_tools(tools: Any) -> tuple[Any, int]:
     return out, changed
 
 
-def _sanitize_node(node: Any) -> Any:
-    """递归收敛一个 JSON Schema 子树（``dict`` / ``list`` 以外的值原样返回）。"""
+def _sanitize_node(node: Any, *, root: bool = False) -> Any:
+    """递归收敛一个 JSON Schema 子树（``dict`` / ``list`` 以外的值原样返回）。
+
+    ``root`` 表示这是工具的顶层 ``input_schema``：上游只接受 object 形状的顶层
+    （``{"type":"array","items":{}}`` 和空 ``{}`` 都是 ``400``，实测），所以顶层
+    的 ``type`` 一律钉成 object，``items`` 在顶层没有意义，直接丢掉。
+    """
     if isinstance(node, list):
         return [_sanitize_node(item) for item in node]
     if not isinstance(node, dict):
@@ -77,17 +86,25 @@ def _sanitize_node(node: Any) -> Any:
     declared = out.get("type")
     if isinstance(declared, list):
         rest = [item for item in declared if item != "null"]
-        if len(rest) == 1:
-            out["type"] = rest[0]
-        elif "object" in rest:
-            # object 分支通常带着 properties，只是丢 items 就行
+        # 带 properties 的联合一定是 object：别把形状信息选丢。
+        if "object" in rest or "properties" in out:
             out["type"] = "object"
+        elif len(rest) == 1:
+            out["type"] = rest[0]
         elif "array" in rest:
             out["type"] = "array"
         elif rest:
             out["type"] = rest[0]
         else:
             out.pop("type", None)
+
+    if root:
+        out["type"] = "object"
+        out.pop("items", None)
+        # 光有 type 没有 properties 也过不去（实测 400）；补个空对象。
+        if not isinstance(out.get("properties"), dict):
+            out["properties"] = {}
+        return out
 
     # 3) items 只在 type == "array" 下合法；array 又必须带一个合法的 items。
     if out.get("type") != "array":

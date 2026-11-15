@@ -34,8 +34,14 @@ def _unchanged(tools: list[dict]) -> None:
 # 纯函数：收敛规则
 # ---------------------------------------------------------------------------
 
+def _prop(schema: dict) -> dict:
+    """把 schema 放进某个属性里（规则在嵌套层验证，顶层一律钉 object）。"""
+    return _only([_tool("t", {"type": "object", "properties": {"x": schema}})])[
+        "properties"]["x"]
+
+
 def test_union_type_with_null_collapses_to_single_type():
-    assert _only([_tool("t", {"type": ["null", "string"]})]) == {"type": "string"}
+    assert _prop({"type": ["null", "string"]}) == {"type": "string"}
 
 
 def test_union_type_prefers_object_over_other_scalars():
@@ -47,38 +53,81 @@ def test_union_type_prefers_object_over_other_scalars():
 
 
 def test_union_type_with_array_gets_items():
-    # 联合里带 array 又没 items：上游直接拒；补 items 而不是把形状丢掉。
+    # 嵌套层：联合里带 array 又没 items，补 items 而不是把形状丢掉。
+    got = _only([_tool("t", {"type": "object", "properties": {
+        "xs": {"type": ["array", "null"]},
+    }})])
+    assert got["properties"]["xs"] == {"type": "array", "items": {}}
+
+
+def test_union_with_properties_prefers_object_even_beside_array():
+    got = _only([_tool("t", {
+        "type": ["array", "string"],
+        "properties": {"a": {"type": "string"}},
+    })])
+    assert got == {"type": "object", "properties": {"a": {"type": "string"}}}
+
+
+def test_all_null_union_falls_back_to_object():
+    # 什么都不剩：嵌套层删 type，顶层钉 object。
+    assert _only([_tool("t", {"properties": {"a": {"type": ["null"]}}}),
+                  ])["properties"]["a"] == {}
+
+
+# ---------------------------------------------------------------------------
+# 顶层必须是 object（实测 array / 空对象 / 无 properties 的 object 以外的形态全 400）
+# ---------------------------------------------------------------------------
+
+_EMPTY_OBJECT = {"type": "object", "properties": {}}
+
+
+def test_top_level_array_is_forced_to_object():
+    got = _only([_tool("t", {"type": "array", "items": {"type": "string"}})])
+    assert got == _EMPTY_OBJECT
+
+
+def test_top_level_union_with_array_is_forced_to_object():
     got = _only([_tool("t", {"type": ["array", "null"]})])
-    assert got == {"type": "array", "items": {}}
+    assert got == _EMPTY_OBJECT
 
 
-def test_all_null_union_drops_type():
-    assert _only([_tool("t", {"type": ["null"]})]) == {}
+def test_empty_schema_is_forced_to_object_with_properties():
+    # 光 {"type": "object"} 上游也拒，必须带 properties。
+    assert _only([_tool("t", {})]) == _EMPTY_OBJECT
+    assert _only([_tool("t", {"type": "object"})]) == _EMPTY_OBJECT
+
+
+def test_top_level_items_is_dropped():
+    assert _only([_tool("t", {"items": {"type": "string"}})]) == _EMPTY_OBJECT
+
+
+def test_top_level_keeps_existing_properties():
+    got = _only([_tool("t", {"type": "array",
+                             "properties": {"a": {"type": "string"}}})])
+    assert got == {"type": "object", "properties": {"a": {"type": "string"}}}
 
 
 def test_combinator_conflicting_with_sibling_type_drops_type():
     # MCP 的 record_unknown / update_analysis_settings 就长这样。
-    got = _only([_tool("t", {
+    got = _prop({
         "type": "array",
         "anyOf": [{"type": "string"}],
         "items": {"type": "string"},
-    })])
+    })
     assert got == {"anyOf": [{"type": "string"}]}
 
 
 def test_items_outside_array_type_is_dropped():
-    got = _only([_tool("t", {"type": "object", "items": {}})])
-    assert got == {"type": "object"}
+    assert _prop({"type": "object", "items": {}}) == {"type": "object"}
 
 
 def test_bare_items_is_dropped():
-    got = _only([_tool("t", {"items": {"type": "string"}})])
-    assert got == {}
+    assert _prop({"items": {"type": "string"}}) == {}
 
 
 def test_tuple_form_items_becomes_empty_object():
-    got = _only([_tool("t", {"type": "array",
-                             "items": [{"type": "string"}, {"type": "number"}]})])
+    got = _prop({"type": "array",
+                 "items": [{"type": "string"}, {"type": "number"}]})
     assert got == {"type": "array", "items": {}}
 
 
@@ -144,17 +193,20 @@ def _anthropic_entry(*endpoints: str) -> ModelEntry:
 
 
 def test_payload_for_anthropic_passthrough_sanitizes_tools():
+    dirty = {"type": "object", "properties": {"x": {"type": ["null", "string"]}}}
     original = {
-        "tools": [_tool("t", {"type": ["null", "string"]})],
+        "tools": [_tool("t", dirty)],
         "messages": [{"role": "user", "content": "hi"}],
     }
     payload = CopilotProvider()._payload_for(
         {"messages": []}, {"messages": []}, original, _anthropic_entry(),
         upstream_model="gemini-4-hydrogen", protocol="anthropic", stream=True,
     )
-    assert payload["tools"][0]["input_schema"] == {"type": "string"}
+    assert payload["tools"][0]["input_schema"]["properties"]["x"] == {
+        "type": "string"}
     # 客户端原始请求体不能被就地改坏。
-    assert original["tools"][0]["input_schema"] == {"type": ["null", "string"]}
+    assert original["tools"][0]["input_schema"] is dirty
+    assert dirty["properties"]["x"] == {"type": ["null", "string"]}
 
 
 def test_payload_for_anthropic_passthrough_keeps_clean_tools():
