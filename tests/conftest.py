@@ -55,6 +55,8 @@ def _isolate_gemini_state_paths(tmp_path, monkeypatch):
                        str(tmp_path / "codebuddy_legacy_session.json"))
     # codex 多账号状态（见模块 docstring）
     monkeypatch.setenv("CODEX_STATE_DIR", str(tmp_path / "codex"))
+    # copilot 多账号状态（GitHub token 落盘目录）：导入/删除/重排都会写盘
+    monkeypatch.setenv("COPILOT_STATE_DIR", str(tmp_path / "copilot"))
     # dumate：App 用户数据目录（auth.json / .cookie-key 所在）。默认路径是真实
     # 的 App 目录 `~/Library/Application Support/qianfan-desktop-app`——本机装了
     # App 时，任何触达 dumate 凭据的用例（如 /ui/api/stats 里的账号级账单扫描、

@@ -8,11 +8,11 @@
 
 ## 特性
 
-- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**火山方舟**（Volcengine Ark，模型/接入点走本地 `ark.json`、不进代码，Responses 优先自动降级 chat，三协议可直连 Claude Code）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态）、**DeepSeek 官方**（预付费余额，三协议原生直通）与 **yuntoken**（自建 OpenAI 兼容聚合网关，key + 基址全走本地配置、不进代码），统一经 `/v1/models` 列出、按模型名路由
-- **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / codex / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
+- **多 Provider** — 除 CodeBuddy 外，内置 **Trae**（解密 Trae IDE 登录态直连底层模型）、**ZCode**（智谱 GLM）、**GLM 官方**（BigModel Coding Plan 官方 key，与 ZCode 同上游、凭据独立）、**火山方舟**（Volcengine Ark，模型/接入点走本地 `ark.json`、不进代码，Responses 优先自动降级 chat，三协议可直连 Claude Code）、**豆包**（纯 stdlib CDP 直连豆包工作 App）、**百度搭子**（DuMate 千帆桌面端本地代理，GLM / Qwen / Kimi）、**小米 MiMo**（API key，或复用 MiMo 桌面登录态）、**Qoder**（COSY 签名纯 Python 复刻，千问3.8 / GLM / Kimi）、**Gemini**（Google OAuth，Code Assist 免费额度——登录态与本机 gemini CLI 双向互通）与 **Antigravity**（Google Antigravity 免费额度——一个 OAuth 登录通吃 Gemini 3.x / Claude / GPT-OSS，可导入本机 `agy` CLI 登录态）、**GitHub Copilot**（复用本机已登录 GitHub 账号的订阅额度，Premium 交互数进额度面板）、**DeepSeek 官方**（预付费余额，三协议原生直通）与 **yuntoken**（自建 OpenAI 兼容聚合网关，key + 基址全走本地配置、不进代码），统一经 `/v1/models` 列出、按模型名路由
+- **多账号 failover** — 多数订阅通道（codebuddy / trae / qoder / kimi / codex / copilot / antigravity…）支持多账号：按登录顺位主备轮转，账号级错误（401 凭据失效 / 429 额度耗尽）自动冷却当前账号并切换下一个；逐账号额度、签到、改名 / 顺位 / 删除都在管理页操作
 - **协议转换** — `/v1/chat/completions`(OpenAI)、`/v1/responses`(Codex CLI)、`/v1/messages`(Anthropic / Claude Code)
 - **管理界面** — 内置 Web 控制台 `/ui`：按 provider 分组管理模型、一键「设为默认启用模型」、每个模型一键测试（发条 hi）、每个模型一键复制**带通道前缀**的全名（`trae/gpt-6`、`ark/ds-flash`——正是客户端 `model` 字段该填的值；「模型顺序」页每一档也可单独复制）、按模型维度聚合请求统计图表。模型页每个 provider 标题栏带「启用」开关（默认开）：关掉后该通道调用直接 403、`/v1/models` 不再列出、额度卡与告警隐藏、顺序页对应行置灰（codebuddy 是默认兜底通道，不可停用）；动态目录通道可点「↻ 重新拉取」，模型也可只“隐藏”（从目录/选择器消失但直接点名仍可调用，与停用不同），并能在「已隐藏」弹窗恢复。配置分别持久化在 `disabled_providers` / `hidden_models`。按页签懒加载，首屏不会卡在最慢的日志接口上
-- **负载均衡（可选，按通道开启）** — 多账号通道（codebuddy / qoder / trae / kimi / codex / antigravity / kiro）默认仍是固定主备顺位。额度卡标题行的「负载均衡」开关（仅该通道账号数大于 1 时出现）打开后，转发改为按**剩余积分**加权随机排序：额度多的账号被先试的概率更大。它只重排已经通过冷却 / 区域 / 单模型限流过滤的账号，所以关掉就逐字节回到旧顺序，遇到 429/403 照旧顺着后面的账号换号。权重来自进程内的额度读数（请求路径上不会同步查上游）；某账号没有新鲜读数时记一个很小的下限权重，所有账号都没读数时退回均匀随机。读数由额度页刷新，并在任一开关开着时由后台每 10 分钟预热一次。持久化在 `settings.json` 的 `load_balance`（通道 id 列表），UI 通过 `POST /ui/api/settings` 增量写入（`{"load_balance": {"<通道>": true}}`，只动这一个通道）。
+- **负载均衡（可选，按通道开启）** — 多账号通道（codebuddy / qoder / trae / kimi / codex / copilot / antigravity / kiro）默认仍是固定主备顺位。额度卡标题行的「负载均衡」开关（仅该通道账号数大于 1 时出现）打开后，转发改为按**剩余积分**加权随机排序：额度多的账号被先试的概率更大。它只重排已经通过冷却 / 区域 / 单模型限流过滤的账号，所以关掉就逐字节回到旧顺序，遇到 429/403 照旧顺着后面的账号换号。权重来自进程内的额度读数（请求路径上不会同步查上游）；某账号没有新鲜读数时记一个很小的下限权重，所有账号都没读数时退回均匀随机。读数由额度页刷新，并在任一开关开着时由后台每 10 分钟预热一次。持久化在 `settings.json` 的 `load_balance`（通道 id 列表），UI 通过 `POST /ui/api/settings` 增量写入（`{"load_balance": {"<通道>": true}}`，只动这一个通道）。
 - **模型列表** — `/v1/models` 返回 OpenAI 兼容的模型列表，附带每个模型的完整元数据（上下文窗口、积分倍率、输入模态 / 图片支持）；本地隐藏项会同时从该端点、管理页目录和模型顺序候选中移除
 - **脱敏**（`--desensitize`）— 向 system 消息里的合规关键词插入零宽空格，避免后端关键词审核误拦。带客户端指纹的 harness 模板另行处理：当 system prompt 里含 CodeBuddy 会在链路层硬拦的标识（Claude Code、Codex，以及 **DeepSeek Harness** / dsh）时，整段替换成简短的「行为约定」摘要。零宽空格**绕不过** CodeBuddy 的渠道校验（`11128 Illegal API invocation from an unapproved channel`），那条路只有整段替换有效
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
@@ -62,7 +62,7 @@ buddy login codebuddy
 
 buddy start                # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 buddy stop / restart / status / logs
-buddy login [provider]     # 登录/自检上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/dumate/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/codex）
+buddy login [provider]     # 登录/自检上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/dumate/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/codex/copilot）
                            # trae/qoder 可加 --region cn|global（两区账号不通用），其它 provider 忽略该参数；
                            # traeintl/qoderintl 是登录别名，等价 --region global；登录过海外账号会自动启用独立通道，
                            # 管理页里海外额度单独一张卡
@@ -397,6 +397,42 @@ buddy login codex    # 浏览器授权（回环 1455 收回调）；打不开浏
   `choices[0].message.images[]`（`/v1/messages` 出口转成 Anthropic `image` 块，
   `/v1/responses` 出口转成 `output_image`）。上游首帧是十几秒的 `keepalive` 心跳，
   心跳不计入「已提交」，生图失败同样按 401/403/429 换号。
+
+#### GitHub Copilot Provider（`copilot/` 子包，可选，`--copilot`）
+
+把本机已登录的 **GitHub Copilot 订阅**（Free / Pro / Pro+ / Business）变成上游通道，以
+`copilot/<id>` 寻址：
+
+```bash
+buddy login copilot            # 优先复用本机 gh CLI 已登录的账号（gh auth token）
+buddy login copilot --gh-user X   # 只导入 gh 里指定的账号
+buddy login copilot --token gho_… # 直接给一把 GitHub token
+```
+
+- **不需要安装 Copilot 客户端**：凭据就是一把 GitHub OAuth token（`gho_…`），直接作
+  Bearer 调 `api.githubcopilot.com`。取 token 只有三条受支持路径：`gh auth token`、
+  `--token` 手工粘贴、GitHub device flow（没装 gh 时自动兜底，浏览器输码）。
+  **不读 keychain、不调 `/copilot_internal/v2/token`**（后者对个人订阅已 403）。
+- **必需头**：`copilot-integration-id: vscode-chat` 与 editor/plugin 版本，缺了上游会
+  把请求当成非官方客户端拒掉；`X-Initiator` 按「最后一条是不是 user 消息」判定
+  `user`/`agent`，带图时补 `Copilot-Vision-Request: true`。
+- **协议**：上游端点由目录里每个模型的 `supported_endpoints` 决定，优先级
+  `/v1/messages` > `/responses` > `/chat/completions`，三者都没有就按 chat 发。
+  三条出口（openai / anthropic / responses）都走本通道自己的转换：Anthropic 入站转上游
+  chat/Responses，再按客户端协议转回；非流式请求也是流式打上游后聚合，避免上游超时。
+- **多账号 failover**：重复登录 / 面板导入即追加备用号；401/403 冷却换号（并提示 token
+  已被撤销，需重新 `gh auth login`）；「模型被拒」只冷却该账号上的**这个模型**（换模型
+  还能用），429 额度信号则按 `Retry-After` 冷却整号——两种情况都会继续试后面的账号。管理页支持 ▲▼ 顺位、✎ 改名、✕ 删除、粘贴 token
+  导入与「从本机 gh 导入」（一次导入 gh 里全部账号，逐个汇报失败原因）。
+- **额度与积分**：`/copilot_internal/user` 的 `quota_snapshots` 换算成面板条目（单位
+  「次」= premium 交互数，月度重置）；每次响应里的 `copilot_usage.total_nano_aiu / 1e9`
+  写成 `usage.credit`，`cache_write` 映射到 `cache_creation_input_tokens`，所以
+  `metrics_protocol.normalize_usage` 与统计页能直接读到 token 与积分。
+- **模型目录 + 「刷新模型」**：来自 `GET /models`（多账号取并集），按语言/能力过滤掉
+  编辑器内部模型；TTL 内不重复拉，面板「刷新模型」强制重拉。全部账号都失败时**保留
+  旧目录**（换成空表只会让所有请求 400「未知模型」），失败原因写在 `_refresh_error`
+  并在 `health()` 里如实展示。随包的 `catalog_fallback.json` 只保证冷启动/离线时
+  `/v1/models` 有东西可看。
 
 ### 10. 火山方舟 Provider（`providers/ark.py`，可选）
 

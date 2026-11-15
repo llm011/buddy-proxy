@@ -746,6 +746,7 @@ function renderBenefits(opts) {
   renderTraepatPanel();
   renderKimiPanel();
   renderCodexPanel();
+  renderCopilotPanel();
   renderQoderPanel();
   renderQoderIntlPanel();
   renderAntigravityPanel();

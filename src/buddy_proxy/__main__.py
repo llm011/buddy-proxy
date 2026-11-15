@@ -28,6 +28,8 @@ Usage with uv:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 import os
 import pathlib
 
@@ -52,6 +54,18 @@ from buddy_proxy.web import ui as _ui  # noqa: F401
 
 
 _DEFAULT_ENV = pathlib.Path(__file__).resolve().parents[2] / ".env"
+
+_log = logging.getLogger(__name__)
+
+# 启动期 fire-and-forget 任务（目录预热 / 常驻刷新循环）的强引用集合。
+# 事件循环只持有任务的弱引用，不挂住的话任务可能在中途被 GC 回收。
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_bg(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
 
 
 def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
@@ -140,12 +154,9 @@ async def _qoder_model_refresh_loop(provider) -> None:
 
     失败只 log 不退出——下一轮目录刷新自会补上；循环随进程生命周期常驻。
     """
-    import asyncio
-    import logging
-
     from buddy_proxy.qoder.catalog import CACHE_TTL_S
 
-    log = logging.getLogger(__name__)
+    log = _log
     while True:
         try:
             models = await provider.refresh_models()
@@ -163,9 +174,7 @@ async def _kiro_model_warmup_once(provider) -> None:
     之间目录是空的——表现是 ``/v1/models`` 里没有 kiro，且调用 ``kiro/xxx``
     直接报 ``INVALID_MODEL_ID``（踩过一次：改完代码重启，测试全挂）。
     """
-    import logging
-
-    log = logging.getLogger(__name__)
+    log = _log
     try:
         models = await provider.refresh_models()
         log.info("kiro 模型目录已预热（%d 个模型）", len(models))
@@ -173,22 +182,40 @@ async def _kiro_model_warmup_once(provider) -> None:
         log.warning("kiro 模型目录预热失败: %s", type(exc).__name__)
 
 
+async def _copilot_model_warmup_once(provider) -> None:
+    """启动时拉一次 copilot 目录（fire-and-forget）。
+
+    随包的静态目录只是「保证有东西可用」，是否真在这台机器的订阅里只有上游
+    ``/models`` 说了算。不预热的话，重启后到第一次请求之间用户看到的是过期的
+    静态表，模型已下线时会先撞一次 400 才反应过来。
+    """
+    log = _log
+    try:
+        count = await provider.refresh_models()
+        log.info("copilot 模型目录已预热（%d 个模型）", count)
+    except Exception as exc:  # noqa: BLE001 - 预热失败不影响转发
+        log.warning("copilot 模型目录预热失败: %s", type(exc).__name__)
+
+
+def _install_copilot_model_warmup(provider) -> None:
+    async def _start() -> None:
+        _spawn_bg(_copilot_model_warmup_once(provider))
+
+    app.router.on_startup.append(_start)
+
+
 def _install_kiro_model_warmup(provider) -> None:
     """把 kiro 目录预热挂到应用启动。"""
-    import asyncio
-
     async def _start() -> None:
-        asyncio.create_task(_kiro_model_warmup_once(provider))  # noqa: RUF006
+        _spawn_bg(_kiro_model_warmup_once(provider))
 
     app.router.on_startup.append(_start)
 
 
 def _install_qoder_model_warmup(provider) -> None:
     """把目录预热挂到应用启动（fire-and-forget 常驻任务，随进程生命周期）。"""
-    import asyncio
-
     async def _start() -> None:
-        asyncio.create_task(_qoder_model_refresh_loop(provider))  # noqa: RUF006
+        _spawn_bg(_qoder_model_refresh_loop(provider))
 
     app.router.on_startup.append(_start)
 
@@ -271,6 +298,9 @@ def main():
     parser.add_argument("--kimi", action="store_true", default=os.getenv("KIMI_ENABLED", "") == "1",
                         help="启用 Kimi provider（Kimi Code 订阅通道，kimi cli 同款 OAuth；"
                              "凭据跑 `buddy login kimi` 或在管理面板导入 token JSON）")
+    parser.add_argument("--copilot", action="store_true", default=os.getenv("COPILOT_ENABLED", "") == "1",
+                        help="启用 GitHub Copilot provider（复用本机已登录的 GitHub 账号与 Copilot 订阅；"
+                             "凭据跑 `buddy login copilot` / `buddy login copilot --gh` 或在管理面板导入 token）")
     parser.add_argument("--codex", action="store_true", default=os.getenv("CODEX_ENABLED", "") == "1",
                         help="启用 Codex provider（ChatGPT 订阅通道，OpenAI OAuth 登录，上游 Responses 协议；"
                              "凭据跑 `buddy login codex` 或在管理面板导入 ~/.codex/auth.json）")
@@ -497,6 +527,24 @@ def main():
               f"{_ch.get('plan_type') or '?'} / {_ch.get('accounts') or 0} 个账号)")
     else:
         print("[Codex] Disabled (pass --codex or CODEX_ENABLED=1 to enable)")
+
+    if args.copilot:
+        from buddy_proxy.copilot.provider import CopilotProvider
+
+        copilot = CopilotProvider()
+        try:
+            copilot.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("copilot provider 认证未就绪: %s", exc.detail)
+        providers[copilot.id] = copilot
+        _cph = copilot.health()
+        logger.info("Copilot provider enabled (%s 个账号 / %s 个模型 / 目录来源 %s)",
+                    _cph.get("accounts"), _cph.get("models"), _cph.get("catalog_source"))
+        print(f"[Copilot] Enabled ({_cph.get('accounts') or 0} 个账号 / "
+              f"{_cph.get('models') or 0} 个模型)")
+        _install_copilot_model_warmup(copilot)
+    else:
+        print("[Copilot] Disabled (pass --copilot or COPILOT_ENABLED=1 to enable)")
 
     if args.doubao:
         doubao = DoubaoProvider()
