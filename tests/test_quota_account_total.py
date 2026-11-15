@@ -223,6 +223,101 @@ quotaAccountTotal(new Map([
     assert "千分制水位" in out, f"千分制要说明，别当成积分: {out}"
 
 
+def test_antigravity_single_account_multi_group_uses_slash_in_order():
+    """单账号也有多个独立分组时，header 按顺序用斜杠列出每一组剩余量。"""
+    out = _render("""
+quotaAccountTotal(new Map([
+  ['Antigravity', [
+    {label: 'Claude/GPT 组', remaining: 800, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（Gemini 3 / 其余模型 · 5 小时池）', remaining: 900, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（Gemini 4 Argon · 周池）', remaining: 1000, total: 1000, unit: 'permille'},
+  ]],
+]))""")
+    assert re.search(r"剩 800.*?/.*900.*?/.*1,000", out, re.S), f"该按顺序斜杠分割各组剩余: {out}"
+    assert "（各 1,000）" in out, f"同上限应消歧标注: {out}"
+    assert "千分制水位" in out, out
+    assert "1 账号合计" not in out, f"单账号不要写 1 账号合计: {out}"
+    assert "1. Claude/GPT 组" in out and "2. Gemini 组" in out and "3. Gemini 组" in out, out
+
+
+def test_antigravity_multi_account_multi_group_sums_per_group_in_order():
+    """多账号多分组时，按组对齐累加，并用斜杠按顺序全部展示。"""
+    out = _render("""
+quotaAccountTotal(new Map([
+  ['AG #1', [
+    {label: 'Claude/GPT 组', remaining: 800, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（Gemini 3 / 其余模型 · 5 小时池）', remaining: 900, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（Gemini 4 Argon · 周池）', remaining: 1000, total: 1000, unit: 'permille'},
+  ]],
+  ['AG #2', [
+    {label: 'Claude/GPT 组', remaining: 600, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（Gemini 3 / 其余模型 · 5 小时池）', remaining: 700, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（Gemini 4 Argon · 周池）', remaining: 1000, total: 1000, unit: 'permille'},
+  ]],
+]))""")
+    assert re.search(r"剩 1,400.*?/.*1,600.*?/.*2,000", out, re.S), f"三组合计应按顺序展示: {out}"
+    assert "（各 2,000）" in out, out
+    assert "2 账号合计" in out, out
+    assert "千分制水位" in out, out
+
+
+def test_multi_group_different_totals_and_independent_colors():
+    """上限不同的多分组用「上限 A / B」消歧，且每组按各自水位独立着色。"""
+    out = _render("""
+quotaAccountTotal(new Map([
+  ['Kimi #1', [
+    {label: '5 小时窗口', remaining: 10, total: 100, unit: 'credit'},
+    {label: '7 天池', remaining: 700, total: 2000, unit: 'credit'},
+  ]],
+  ['Kimi #2', [
+    {label: '5 小时窗口', remaining: 10, total: 100, unit: 'credit'},
+    {label: '7 天池', remaining: 800, total: 2000, unit: 'credit'},
+  ]],
+]))""")
+    assert re.search(r"剩 20.*?/.*1,500", out, re.S), out
+    assert "（上限 200 / 4,000）" in out, out
+    assert "2 账号合计" in out, out
+    # 第 1 组剩 20/200（已用 90% >=85% -> --err），第 2 组剩 1500/4000（已用 63% >=60% -> --warn）
+    assert re.search(r"color:var\(--err\)[^>]*>剩 20<", out), out
+    assert re.search(r"color:var\(--warn\)[^>]*>1,500<", out), out
+
+
+def test_multi_account_missing_group_and_notice_do_not_misalign_or_pollute_unit():
+    """部分账号缺某个池子或混有说明条/percent 兜底时，按组名对齐且不污染单位。"""
+    out = _render("""
+quotaAccountTotal(new Map([
+  ['AG #1', [
+    {label: '本轮失败', remaining: '上次缓存', unit: 'credit', query_failed: true},
+    {label: 'Claude/GPT 组', remaining: 500, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（5 小时池）', remaining: 800, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（周池）', remaining: 900, total: 1000, unit: 'permille'},
+  ]],
+  ['AG #2', [
+    {label: 'Claude/GPT 组', remaining: 700, total: 1000, unit: 'permille'},
+    {label: 'Gemini 组（周池）', remaining: 1000, total: 1000, unit: 'permille'},
+    {label: '兜底比例', remaining: 50, total: 100, unit: 'percent'},
+  ]],
+]))""")
+    assert re.search(r"剩 1,200.*?/.*800.*?/.*1,900", out, re.S), f"缺失中间组不应错位相加: {out}"
+    assert "（上限 2,000 / 1,000 / 2,000）" in out, out
+    assert "（1/2 账号）" in out, f"缺组行应在悬停提示标明计入账号比: {out}"
+    assert "千分制水位" in out, f"说明条/percent 不得把 permille 污染成 credit: {out}"
+    assert "兜底比例" not in out and "本轮失败" not in out, out
+
+
+def test_multi_group_zero_total_does_not_show_zero_cap():
+    """某组上限异常 <= 0 时不拼出「/ 0」，括号和悬停改标未知或省略分母。"""
+    out = _render("""
+quotaAccountTotal(new Map([
+  ['A', [
+    {label: '主池', remaining: 1200, total: 2000, unit: 'credit'},
+    {label: '异常池', remaining: 50, total: 0, unit: 'credit'},
+  ]],
+]))""")
+    assert "（上限 2,000 / 未知）" in out, out
+    assert "/ 0" not in out, out
+
+
 def test_all_accounts_failed_renders_nothing():
     """一个能算的都没有时不出空 chip（否则是「剩 0 / 0」）。"""
     out = _render("""

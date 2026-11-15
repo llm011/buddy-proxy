@@ -389,41 +389,54 @@ function quotaFoldToggle(btn) {
   syncQuotaFold();
 }
 
-// ---- 多账号通道：面板标题行的「跨账号合计」----
+// ---- 多账号通道：面板标题行的「跨账号合计 / 多组剩余」----
 //
 // 子卡上的合计行（quotaHeadSum）只算**一个账号**里的几个资源包。多账号通道里
 // 用户真正想知道的是「这个通道总共还剩多少」，原先只能自己把几张卡加起来
-// （用户 2026-11-02 提出）。
+// （用户 2026-11-02 提出）；若通道存在多个独立分组/池（如 Antigravity 的
+// Claude/GPT 组 + Gemini 各池、Kimi 的 5h 窗口 + 7 天池），标题行必须按顺序用
+// 斜杠分割列出每一组的剩余量，而不能只取第一组把后面的池子吞掉。
 //
-// 三条口径，缺一条就会显示成假数字：
+// 四条口径，缺一条就会显示成假数字：
 //
 // 1. **按区分别累加。** CN 与 Global 是不同面板 / 不同 provider（额度标签就不同：
 //    ``CodeBuddy`` vs ``CodeBuddy 海外版``；Trae 的 CN 记 credits、海外记 dollars），
 //    各自算各自的。合起来是个既不可兑付、又没有量纲的数字——所以跨区**绝不**由
 //    这里合并；哪怕哪天两个区挤进同一个面板，下面按 unit 分桶也会拆成两个 chip。
 //
-// 2. **取数口径跟子卡一致**：走 ``quotaSumOf``。``opts.sumItems`` 由面板按通道
-//    声明——Qoder / CodeBuddy 系列的条目是并存份额要相加；Trae / traepat /
-//    Antigravity 传假，按「取第一条有数的」处理（Trae 的「总额度」本就是各权益
-//    包的合计，再加一遍就是重复计算）。
+// 2. **区分「并存包相加」/「head_only 总计」/「多独立分组」**：
+//    - ``opts.sumItems`` 为真（Qoder / CodeBuddy）：各条目是同池并存份额，累加为 1 组；
+//    - 存在 ``head_only`` 条（Trae）：该条本身已是全账号总计，下面权益包只是明细，只取它；
+//    - 其余（Antigravity / Kimi / Trae PAT）：每条代表独立分组/池，按原始顺序对齐
+//      跨账号累加，多于 1 组时用斜杠按顺序展示全部组剩余量。
 //
 // 3. **不可加的就明确说没加。** 上游只给比例（``percent``，没有绝对积分）的账号
 //    直接跳过，被跳过的个数写进 chip（「2 账号合计 · 1 个未计入」），账号名进
 //    悬停提示。宁可显示一个标注过的不完整总数，也不许拿百分比反推绝对量拼出
 //    一个看起来完整的假数。
 //
-// 返回 chip HTML；不该显示时返回 ``''``：分组不足两个（单账号——子卡上已经有
-// 一行了，标题再写一遍没有信息量），或一个可加的账号都没有。
+// 4. **单账号单组不重复占位**：只有一个账号且只有 1 组（且无未计入账号）时，
+//    子卡上已经有这一行，返回 ``''``；只有一个账号但本身有多个独立分组时，仍要在
+//    面板标题行用斜杠展示多组剩余。
 function quotaAccountTotal(groups, opts) {
   const sumItems = !!(opts && opts.sumItems);
-  if (!(groups instanceof Map) || groups.size <= 1) return '';
+  if (!(groups instanceof Map) || groups.size === 0) return '';
   // 千分制 / 美元不是积分：Antigravity 的 total 恒为 1000，加出来的「剩 1,700」
   // 会被当成积分数。这类量纲在 chip 里点名，免得和 credits 混为一谈。
   const UNIT_LABEL = {permille: '千分制水位', dollar: '美元'};
-  // unit → {rem, total, counted, skipped: [组名]}
+  const num = v => v !== null && v !== '' && typeof v !== 'boolean'
+                && Number.isFinite(Number(v));
+  const pctColor = (rem, total) => {
+    if (!(total > 0)) return 'var(--ok)';
+    const pct = Math.round((1 - rem / total) * 100);
+    return pct >= 85 ? 'var(--err)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)';
+  };
+  // unit → {unit, counted, skipped: [组名], series: Map<key, {label, rem, total, count}>}
   const buckets = new Map();
   const bucket = unit => {
-    if (!buckets.has(unit)) buckets.set(unit, {unit, rem: 0, total: 0, counted: 0, skipped: []});
+    if (!buckets.has(unit)) {
+      buckets.set(unit, {unit, counted: 0, skipped: [], series: new Map()});
+    }
     return buckets.get(unit);
   };
   for (const [name, items] of groups) {
@@ -436,17 +449,52 @@ function quotaAccountTotal(groups, opts) {
     if (noticeOnly) continue;
     // 整组都只有比例 → 没有绝对量可加（**先判 percent**：它的 total 是 100
     // 这种占位分母，``quotaSumOf`` 照样能得出数，但那不是积分）。
-    // 券行不进量纲集合：它没有单位含义，混进来会把整组打成 credit。
-    const units = [...new Set(list
-      .filter(it => !(it.unit === 'reset_credit' || it.reset_credit === true))
+    // 券行与说明条不进量纲集合：没有单位含义的条目混进来会把真数据的 unit 打偏。
+    const nonNotice = list.filter(it =>
+      !(it.unit === 'reset_credit' || it.reset_credit === true)
+      && it.unreachable !== true
+      && it.query_failed !== true
+      && (it.unit === 'percent' || (num(it.remaining) && num(it.total))));
+    if (!nonNotice.length) continue;   // 只剩券行/说明条：没额度可加，也不算「跳过」
+    const absUnits = [...new Set(nonNotice
+      .filter(it => it.unit !== 'percent')
       .map(it => it.unit || 'credit'))];
-    if (!units.length) continue;   // 只剩券行：没额度可加，也不算「跳过」
-    const unit = units.every(u => u === 'percent') ? 'percent'
-      : (units.length === 1 ? units[0] : 'credit');
-    const sum = unit === 'percent' ? null : quotaSumOf(list, sumItems);
-    if (!sum) { bucket(unit).skipped.push(name); continue; }
+    if (!absUnits.length) { bucket('percent').skipped.push(name); continue; }
+    const unit = absUnits.length === 1 ? absUnits[0] : 'credit';
+    if (sumItems) {
+      const sum = quotaSumOf(list, true);
+      if (!sum) { bucket(unit).skipped.push(name); continue; }
+      const b = bucket(unit);
+      const g = b.series.get('__sum__') || {label: '', rem: 0, total: 0, count: 0};
+      g.rem += sum.rem; g.total += sum.total; g.count += 1;
+      b.series.set('__sum__', g);
+      b.counted += 1;
+      continue;
+    }
+    // 独立分组渠道：过滤券行、说明条与 percent 兜底行（不把 percent 混进绝对量累加）
+    const usable = nonNotice.filter(it => it.unit !== 'percent');
+    if (!usable.length) { bucket(unit).skipped.push(name); continue; }
+    const headItems = usable.filter(it => it.head_only === true);
+    const picks = headItems.length ? [headItems[0]] : usable;
     const b = bucket(unit);
-    b.rem += sum.rem; b.total += sum.total; b.counted += 1;
+    const seenKeys = new Set();
+    for (let i = 0; i < picks.length; i++) {
+      const it = picks[i];
+      const rawLabel = String(it.label || '').trim();
+      let key = rawLabel || `#${i}`;
+      if (seenKeys.has(key)) {
+        let k = 2;
+        while (seenKeys.has(`${key}#${k}`)) k++;
+        key = `${key}#${k}`;
+      }
+      seenKeys.add(key);
+      const g = b.series.get(key) || {label: rawLabel, rem: 0, total: 0, count: 0};
+      g.rem += Number(it.remaining);
+      g.total += Number(it.total);
+      g.count += 1;
+      b.series.set(key, g);
+    }
+    b.counted += 1;
   }
   const chips = [];
   // 整组都不可加的账号（如只给百分比）：挂到「算了的」那份上一起标出来。
@@ -458,19 +506,57 @@ function quotaAccountTotal(groups, opts) {
     dropped += b.skipped.length;
     droppedNames = droppedNames.concat(b.skipped);
   }
+  const activeBuckets = [...buckets.values()].filter(b => b.counted > 0).length;
   for (const b of buckets.values()) {
     if (!b.counted) continue;
-    const parts = [`${b.counted} 账号合计`];
+    const series = [...b.series.values()];
     const skipped = b.skipped.length + dropped;
+    if (activeBuckets <= 1 && b.counted <= 1 && !skipped && series.length <= 1) continue;
+    if (series.length === 1) {
+      const g = series[0];
+      const parts = [`${b.counted} 账号合计`];
+      if (skipped) parts.push(`${skipped} 个未计入`);
+      const used = g.total > 0 ? ` · 已用 ${Math.round((1 - g.rem / g.total) * 100)}%` : '';
+      const label = `${parts.join(' · ')}${UNIT_LABEL[b.unit] ? ` · ${UNIT_LABEL[b.unit]}` : ''}`;
+      const tip = `跨账号合计：各账号子卡合计相加`
+        + (skipped ? `；未计入 ${skipped} 个：${b.skipped.concat(droppedNames).join('、')}` : '');
+      chips.push(`<span class="mono" title="${esc(tip)}">
+          <span style="color:${pctColor(g.rem, g.total)};font-weight:600">剩 ${fmtNum(g.rem)}</span>
+          <span class="muted">/ ${fmtNum(g.total)}${used}</span>
+          <span class="muted" style="font-size:11px"> · ${esc(label)}</span></span>`);
+      continue;
+    }
+    const parts = [];
+    if (b.counted > 1) parts.push(`${b.counted} 账号合计`);
     if (skipped) parts.push(`${skipped} 个未计入`);
-    const used = b.total > 0 ? ` · 已用 ${Math.round((1 - b.rem / b.total) * 100)}%` : '';
-    const label = `${parts.join(' · ')}${UNIT_LABEL[b.unit] ? ` · ${UNIT_LABEL[b.unit]}` : ''}`;
-    const tip = `跨账号合计：各账号子卡合计相加`
-      + (skipped ? `；未计入 ${skipped} 个：${b.skipped.concat(droppedNames).join('、')}` : '');
-    chips.push(`<span class="mono" title="${esc(tip)}">
-        <span style="color:var(--ok);font-weight:600">剩 ${fmtNum(b.rem)}</span>
-        <span class="muted">/ ${fmtNum(b.total)}${used}</span>
-        <span class="muted" style="font-size:11px"> · ${esc(label)}</span></span>`);
+    if (UNIT_LABEL[b.unit]) parts.push(UNIT_LABEL[b.unit]);
+    const remHtml = series.map((g, i) => {
+      const prefix = i === 0 ? '剩 ' : '';
+      return `<span style="color:${pctColor(g.rem, g.total)};font-weight:600">${prefix}${fmtNum(g.rem)}</span>`;
+    }).join('<span class="muted"> / </span>');
+    const totals = series.map(g => g.total);
+    const sameTotal = totals.every(t => t === totals[0]);
+    // 多组（尤其 2 组）不写上限会和「剩 X / Y」分数撞形，用括号写明各组上限
+    const capText = sameTotal && totals[0] > 0
+      ? `（各 ${fmtNum(totals[0])}）`
+      : (totals.some(t => t > 0)
+        ? `（上限 ${totals.map(t => (t > 0 ? fmtNum(t) : '未知')).join(' / ')}）` : '');
+    const tipLines = [
+      `${b.counted > 1 ? '跨账号合计（按组顺序）' : '各分组剩余（按顺序）'}：`,
+      ...series.map((g, i) => {
+        const name = g.label || `第 ${i + 1} 组`;
+        const totText = g.total > 0 ? ` / ${fmtNum(g.total)}` : '';
+        const u = g.total > 0 ? `（已用 ${Math.round((1 - g.rem / g.total) * 100)}%）` : '';
+        const part = b.counted > 1 && g.count < b.counted ? `（${g.count}/${b.counted} 账号）` : '';
+        return `${i + 1}. ${name}：剩 ${fmtNum(g.rem)}${totText}${u}${part}`;
+      }),
+    ];
+    if (skipped) tipLines.push(`未计入 ${skipped} 个：${b.skipped.concat(droppedNames).join('、')}`);
+    const tail = parts.length
+      ? `<span class="muted" style="font-size:11px"> · ${esc(parts.join(' · '))}</span>`
+      : '';
+    chips.push(`<span class="mono" title="${esc(tipLines.join('\n'))}">
+        ${remHtml}${capText ? `<span class="muted">${esc(capText)}</span>` : ''}${tail}</span>`);
   }
   return chips.join('');
 }
