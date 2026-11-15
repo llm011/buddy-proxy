@@ -73,7 +73,9 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
     # Claude 裸名里的版本/家族都属于固定模型名，不能被后缀归一化误伤。
     claude = by_id["claude-sonnet-5-5"]
     assert claude["id"] == "claude-sonnet-5-5"
-    assert "upstream" not in claude  # 裸名 + effort 后缀（claude-sonnet-5-5-medium）
+    # 家族名 upstream + effort 后缀（claude-sonnet-5-5-medium）并入同一条目，
+    # 对外 id 保持 models.json 声明的裸名
+    assert claude["upstream"] == "claude-sonnet-5-5"
     assert claude["group"] == "claude-gpt"
 
     tiered = by_id["gpt-next"]
@@ -145,6 +147,69 @@ def test_refresh_blocks_stale_families_and_pins_verified_curated(monkeypatch):
     assert "gemini-3.1-flash-image" in ids
     # 真·新模型照常收录
     assert "gemini-4-argon" in ids
+
+
+def test_refresh_keeps_curated_ids_when_upstream_returns_effort_variants(monkeypatch):
+    """上游回传家族 + effort 变体时，对外 id 必须仍是 models.json 的 id。
+
+    线上实测：fetchAvailableModels 回传 gemini-4-hydrogen-xhigh、
+    claude-opus-5-5-medium 这类变体名。旧合并逻辑只按「去后缀后的 base」
+    精确匹配静态条目，匹配不上就另起动态条目，导致 /v1/models 里出现
+    另一套同前缀 id（gemini-4-hydrogen-xhigh / claude-opus-5-5），客户端按
+    旧 id 配置的请求直接 400「未知模型」。
+    """
+    provider = prov.AntigravityProvider()
+    monkeypatch.setattr(prov, "list_accounts", lambda: [_account("a1")])
+
+    async def fake_fetch(_account_id: str):
+        return {"models": {
+            "gemini-4-hydrogen-low": {},
+            "gemini-4-hydrogen-xhigh": {},
+            "gemini-4-argon-high": {},
+            "gemini-3.8-flash-tiered": {},
+            "claude-opus-5-5-medium": {},
+            "claude-sonnet-5-5-medium": {},
+            "gpt-oss-120b-medium": {},
+        }}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", fake_fetch)
+    asyncio.run(provider.refresh_models())
+    ids = _ids(provider)
+
+    # 对外 id 与静态表一致，不出现上游变体名
+    assert {"gemini-4-hydrogen", "gemini-4-argon", "gemini-3.8-flash",
+            "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b"} <= ids
+    assert not {"gemini-4-hydrogen-xhigh", "gemini-4-hydrogen-low",
+                "claude-opus-5-5-medium", "claude-sonnet-5-5-medium"} & ids
+
+    by_id = provider._model_by_id
+    hydrogen = by_id["gemini-4-hydrogen"]
+    # verified 条目的 metadata 原样保留，档位取并集、默认档不变
+    static_hydrogen = next(m for m in prov.MODELS if m["id"] == "gemini-4-hydrogen")
+    assert hydrogen["default_effort"] == static_hydrogen["default_effort"] == "high"
+    assert hydrogen["efforts"] == ["low", "medium", "high", "xhigh"]
+    assert hydrogen["upstream"] == "gemini-4-hydrogen"
+    assert hydrogen["group"] == "gemini"
+    # 家族名 upstream（claude-*-5-5）同样并入静态条目
+    assert by_id["claude-opus-5-5"]["upstream"] == "claude-opus-5-5"
+    assert by_id["gpt-oss-120b"]["upstream"] == "gpt-oss-120b-medium"
+
+
+def test_refresh_union_appends_new_upstream_effort_without_changing_default(monkeypatch):
+    """上游新见档位并入静态条目，但 default_effort 不被改写。"""
+    provider = prov.AntigravityProvider()
+    monkeypatch.setattr(prov, "list_accounts", lambda: [_account("a1")])
+
+    async def fake_fetch(_account_id: str):
+        return {"models": {"gemini-4-argon-extra-low": {}}}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", fake_fetch)
+    asyncio.run(provider.refresh_models())
+
+    argon = provider._model_by_id["gemini-4-argon"]
+    assert argon["efforts"] == ["low", "medium", "high", "extra-low"]
+    assert argon["default_effort"] == "medium"
+    assert argon["description"].startswith("Gemini 4 Argon")
 
 
 def test_blocked_prefix_keeps_gross_prefix_with_explicit_exception():

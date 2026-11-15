@@ -1485,7 +1485,7 @@ buddy start
 所以 `reasoning_effort` 按模型表声明的档位映射后缀（`models.json` 的
 `efforts`/`default_effort`——如 `gemini-4-hydrogen` 默认 `-high`（另有 `-xhigh`）、
 `gemini-3.8-flash` 实发 `gemini-3.8-flash-tiered`、`claude-opus-5-5` 实发
-`claude-opus-5-5-medium`、`gpt-oss-120b` 实发 `gpt-oss-120b-medium`）。档位**不进模型 id**：对外和客户端里只有基名（`antigravity/gemini-4-hydrogen`），档位取请求体 `reasoning_effort`、缺省用 `default_effort`，所以 `antigravity/gemini-4-hydrogen-xhigh` 这种写法是未知模型（400）。模型页手动刷新会遍历所有可用账号、取
+`claude-opus-5-5-medium`、`gpt-oss-120b` 实发 `gpt-oss-120b-medium`）。档位**不进模型 id**：对外和客户端里只有基名（`antigravity/gemini-4-hydrogen`），档位取请求体 `reasoning_effort`、缺省用 `default_effort`，所以 `antigravity/gemini-4-hydrogen-xhigh` 这种写法是未知模型（400）。刷新**不会**改变对外 id：上游回传的家族变体（`gemini-4-hydrogen-xhigh`、`claude-opus-5-5-medium`）会按最长家族前缀并回静态条目，`/v1/models` 里始终是基名。模型页手动刷新会遍历所有可用账号、取
 `fetchAvailableModels` 并集，只裁掉已知 effort 后缀（绝不泛化裁掉 `-thinking` /
 `-image` / `-agent` 这类模型身份），已知条目保留人工 metadata，新发现项立即可路由。
 Kimi 的同一刷新按钮走官方 `GET /v1/models`；两者目录都归 provider 实例持有，整轮失败
