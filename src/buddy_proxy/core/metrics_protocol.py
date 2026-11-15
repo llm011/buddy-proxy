@@ -29,6 +29,48 @@ def _date_str(ts: float) -> str:
     return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
+def log_matches(
+    rec: dict[str, Any],
+    *,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    providers: Optional[list[str]] = None,
+    models: Optional[list[str]] = None,
+    clients: Optional[list[str]] = None,
+    accounts: Optional[list[str]] = None,
+) -> bool:
+    """一条日志行是否落在筛选条件内（组内 OR、组间 AND）。
+
+    放在协议层而不是 ``MetricsCollector`` 里：``query_logs``（分页列表）和
+    ``logs_scan``（统计）必须用**同一个判据**。两处各写一份，最典型的事故是
+    ``buddy logs -p trae`` 的合计与 ``/ui/api/logs`` 的列表对不上——用户只会
+    看到「同一天同通道两个数」这种无法解释的差异。
+
+    日期用 ``_date_str(ts)`` 比较（本地时区、YYYY-MM-DD 定长可直接比大小），
+    与 ``_logs_in_range`` 的按文件日期裁剪同口径。
+    """
+    ts = rec.get("ts")
+    if start or end:
+        if not isinstance(ts, (int, float)):
+            return False
+        day = _date_str(float(ts))
+        if start and day < start:
+            return False
+        if end and day > end:
+            return False
+    for key, allowed in (
+        ("provider", providers),
+        ("model", models),
+        ("client", clients),
+        ("account", accounts),
+    ):
+        if not allowed:
+            continue
+        if (rec.get(key) or "") not in allowed:
+            return False
+    return True
+
+
 def _credit_field(u: dict[str, Any]) -> Any:
     """取单次请求的积分消耗，兼容两种拼写。
 

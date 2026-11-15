@@ -66,6 +66,9 @@ buddy login [provider]     # 登录/自检上游账号（codebuddy(=workbuddy)/t
                            # trae/qoder 可加 --region cn|global（两区账号不通用），其它 provider 忽略该参数；
                            # traeintl/qoderintl 是登录别名，等价 --region global；登录过海外账号会自动启用独立通道，
                            # 管理页里海外额度单独一张卡
+buddy usage                # 按通道 / 账号看套餐余量、重置与到期时间
+buddy logs                 # 请求统计：成功率、耗时 p50/p95、首字、token、缓存、积分
+buddy doctor               # 体检：服务 / 配置 / 通道 / 指标落盘 / 磁盘
 buddy ui                   # 仅打开管理页（必要时先启动）
 buddy update               # 更新到最新代码（git pull -> uv sync -> 重启）
 
@@ -77,7 +80,46 @@ buddy service uninstall
 
 - 有系统服务时 `buddy start/stop/restart` 自动转 `launchctl`，否则走 `proxy.sh` 的 pid 管理
 - 环境变量 `PROXY_HOST`（默认 0.0.0.0）、`PROXY_PORT`（默认 8787）、`PROXY_EXTRA_ARGS` 对 `start` 与 `service install` 生效
+- `buddy usage` / `buddy logs` / `buddy doctor` 是查询在跑的服务用的本机工具，逐个说明见下文
 - `buddy update` 在安装来源那个仓库里跑 `git pull --ff-only` → `uv sync` → 重启服务。**工作树有未提交改动时它会直接拒绝执行**——不 stash、不 merge、不碰任何在制品，所以写了一半的改动不可能被悄悄覆盖。拒绝时会把「脏在哪」列出来，并按实际情况给对应的处理办法：只要含未跟踪文件就提示 `git stash -u`（普通 `git stash` 收不走未跟踪文件，照做会带着同一个 `??` 再被拦一次），纯已跟踪改动才提示普通 `git stash`。`--ff-only` 保证本地分叉时明确报错、而不是替你造一个意外的 merge commit——报错信息里会引 git 自己的原话（`Not possible to fast-forward` 对应本地分叉，`Could not read from remote` 对应连不上远端），好让你一眼分清是哪种。`uv sync` 失败则保留服务继续运行，不会用坏掉的依赖去重启。已经是最新版本时跑它也无害：只是重新同步依赖并重启一遍。
+
+### 终端查额度 / 日志 / 体检
+
+管理页不是什么时候都顺手。下面三个子命令回答的是**离开 UI 之后**的问题——「每个号还剩多少」「刚才那批请求慢不慢」「服务为什么没起来」。
+
+```bash
+buddy usage                       # 每个通道 → 每个账号：额度项、剩余、重置、到期
+buddy usage -p trae -p qoder      # 只看这些通道（id 见 `buddy usage --list-providers`）
+buddy usage -a '#2'               # 只看 #2 号账号（`buddy usage` 里显示的 #N）
+buddy usage --refresh kimi        # 真去上游强刷一次（默认读面板缓存，不会额外消耗配额）
+buddy usage --json                # 结构化输出，脚本用
+```
+
+- 数据来自在跑的服务的 `/ui/api/benefits` 面板缓存，并**与本地账号状态合并**（`failover.accounts_status()`）：额度表给出各项的剩余 / 总量 / 已用% / 重置 / 到期；冷却和「凭证 24 小时内过期」只有本地知道——一个 429 冷却中的号额度面板上仍显示剩 80%，只看额度会以为能随便用。
+- 服务**没起**时 `buddy usage` 仍会列出本地已知账号（纯读盘、不触网），并提示 `buddy start` 之后才能看余量。
+- 退出码：`0` 正常，`2` 需要留意（临近加急到期或余额告急），`1` 执行失败。可以写 `buddy usage -p trae || notify`。
+
+```bash
+buddy logs                        # 全量统计：总数、成功率、p50/p90/p95/p99、首字、token 与缓存命中、积分
+buddy logs --today                # 或 --days 3 / --start 2026-11-01 --end 2026-11-07
+buddy logs -p codebuddy -m claude-sonnet-4-5
+buddy logs -a '#2' -n 50          # 某个账号的最近 50 条
+buddy logs --csv > logs.csv       # 筛选后的全部明细，可直接丢进表格
+buddy logs --json                 # 与文本视图同一组数字
+buddy logs --raw                  # 服务日志的纯 tail（老行为）
+```
+
+- 数据源是磁盘上的 `metrics.jsonl` 及按天归档，即 `/ui/api/logs` 的同一批行，所以**服务挂了也查得到历史**——那往往正是最需要它的时候。
+- `-p/-m/-c/-a` 为精确匹配；`-a '#2'` 同时命中记录里不带 `#` 的账号。统计和明细共用同一套筛选，数字与行数永远对得上。
+- 按账号表只在同一 id 真的跨多个通道时才显示通道列，长 UUID 会折叠——目的是找出某个坏号，不是把 36 位 id 全铺出来。
+
+```bash
+buddy doctor                      # 服务 / 配置文件 / 通道账号 / 指标落盘 / 磁盘
+buddy doctor --json
+```
+
+- 服务没监听或任一 `settings.json` 解析失败时退出码非 0。坏掉的 settings.json 会被服务**整份静默忽略**（所有开关退回默认值），这里是唯一能看到它的地方。
+- 指标目录与 `buddy logs` 用同一套推导，所以「指标落盘」说的永远是服务真正在写的那个文件。
 
 ### 用 `proxy.sh` 后台管理
 

@@ -159,6 +159,22 @@ blocking through sync helpers remain review territory.
   it on every account card; Trae Global has a separate quota panel and an
   explicit unsupported-check-in row. The UI may update runtime settings but
   must use `core/settings.py` for persistence.
+- **`cli/`** is the `buddy usage` / `buddy logs` / `buddy doctor` layer. It is
+  read-only and runs in its own short-lived process, so it never imports the
+  service startup chain (`__main__`, `ProxyState`) where a bad optional
+  dependency could stop it from diagnosing exactly that problem. `usage.py`
+  reads the running proxy's `/ui/api/benefits` cache and merges local
+  `failover.accounts_status()` (cooldown / credential expiry exist only
+  locally); with no service it degrades to the local account list.
+  `logs.py` reuses `MetricsCollector` as a **reader** over
+  `metrics.jsonl` + archives — the same on-disk rows `/ui/api/logs` serves — and
+  derives its stats from `core/metrics_protocol.log_matches`, which the log
+  list and the stats share so filters and counts cannot drift. `doctor.py`
+  owns the channel id → display name table and the state-dir checks. Two
+  derivations are deliberately centralised: the metrics directory
+  (`logs.metrics_dir()`, mirroring `__main__`'s `log_file.parent`) is used by
+  both `logs` and `doctor`, and account display names come from
+  `failover.accounts_status()` rather than re-parsing quota labels.
 
 ## Runtime composition
 

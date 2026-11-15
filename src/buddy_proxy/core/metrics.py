@@ -16,7 +16,7 @@ from typing import Any, Optional
 from .metrics_protocol import (
     _TAIL_BYTES, ACCOUNT_META, KEEP_DAYS, MAX_RECENT, RECENT_LATENCY_N,
     SSEErrorExtractor, SSEUsageExtractor, _credit_field, _date_str,
-    normalize_usage,
+    log_matches, normalize_usage,
 )
 
 #: 前缀复用率的上限。理论上「上一轮的 prompt 全部命中」是 1.0，但上游的
@@ -477,6 +477,39 @@ class MetricsCollector:
             return out
         return out
 
+    def _logs_in_range(self, start: Optional[str],
+                       end: Optional[str]) -> list[dict[str, Any]]:
+        """读出落在 [start, end] 的全部日志行（ts 倒序）。
+
+        ``query_logs`` 与 ``logs_scan`` 共用：抽出来是为了让「翻页看日志」和
+        「扫全量做统计」读到**同一批行**——两处各拼一份文件选择逻辑，一旦
+        归档路径/日期裁剪口径漂移，用户就会看到「列表里有的条目统计里没有」
+        这种最难解释的错。
+        """
+        if self.log_path is None:
+            with self._lock:
+                return list(reversed(self._recent))
+        # 当前文件的日期 + 所有归档日期，取落在 [start, end] 的文件整读
+        today = _date_str(time.time())
+        files: list[pathlib.Path] = [self.log_path]
+        for p in self.log_path.parent.glob(self.log_path.name + ".*"):
+            suffix = p.name[len(self.log_path.name) + 1:]
+            try:
+                time.strptime(suffix, "%Y-%m-%d")
+            except ValueError:
+                continue  # 非日期后缀的文件跳过
+            if (start and suffix < start) or (end and suffix > end):
+                continue
+            files.append(p)
+        # 当前文件写的是「今天」，若范围不含今天则不必读它
+        if end and today > end:
+            files = [f for f in files if f is not self.log_path]
+        rows = []
+        for path in files:
+            rows.extend(self._read_all(path))
+        rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        return rows
+
     def query_logs(
         self,
         start: Optional[str] = None,
@@ -486,6 +519,7 @@ class MetricsCollector:
         providers: Optional[list[str]] = None,
         models: Optional[list[str]] = None,
         clients: Optional[list[str]] = None,
+        accounts: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         """按日期范围（YYYY-MM-DD，含端点）分页读日志文件，按 ts 倒序返回。
 
@@ -498,29 +532,7 @@ class MetricsCollector:
         page_size = max(1, min(int(page_size or 20), 200))
         page = max(1, int(page or 1))
 
-        if self.log_path is None:
-            with self._lock:
-                rows = list(reversed(self._recent))
-        else:
-            # 当前文件的日期 + 所有归档日期，取落在 [start, end] 的文件整读
-            today = _date_str(time.time())
-            files: list[pathlib.Path] = [self.log_path]
-            for p in self.log_path.parent.glob(self.log_path.name + ".*"):
-                suffix = p.name[len(self.log_path.name) + 1:]
-                try:
-                    time.strptime(suffix, "%Y-%m-%d")
-                except ValueError:
-                    continue  # 非日期后缀的文件跳过
-                if (start and suffix < start) or (end and suffix > end):
-                    continue
-                files.append(p)
-            # 当前文件写的是「今天」，若范围不含今天则不必读它
-            if end and today > end:
-                files = [f for f in files if f is not self.log_path]
-            rows = []
-            for path in files:
-                rows.extend(self._read_all(path))
-            rows.sort(key=lambda r: r.get("ts", 0), reverse=True)
+        rows = self._logs_in_range(start, end)
 
         # 「客户端」筛选候选：日期范围内出现过的非空 client 值，按出现次数
         # 降序（与 UI 通道/模型候选「按流量排序」的口径一致）。必须在白名单
@@ -538,19 +550,10 @@ class MetricsCollector:
                        sorted(client_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
         # 逐条按日期范围 + 通道/模型/客户端白名单过滤（内存 recent 分支也走这里）
-        if start or end or providers or models or clients:
-            def _in(rec: dict[str, Any]) -> bool:
-                d = _date_str(rec.get("ts", 0))
-                if (start and d < start) or (end and d > end):
-                    return False
-                if providers and rec.get("provider", "") not in providers:
-                    return False
-                if models and rec.get("model", "") not in models:
-                    return False
-                if clients and rec.get("client", "") not in clients:
-                    return False
-                return True
-            rows = [r for r in rows if _in(r)]
+        if start or end or providers or models or clients or accounts:
+            rows = [r for r in rows if log_matches(
+                r, start=start, end=end, providers=providers, models=models,
+                clients=clients, accounts=accounts)]
 
         total = len(rows)
         pages = max(1, (total + page_size - 1) // page_size)
@@ -580,6 +583,159 @@ class MetricsCollector:
     # ------------------------------------------------------------------
     # 查询（积分累加按钮）
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # 查询（`buddy logs` 统计视图）
+    # ------------------------------------------------------------------
+
+    def logs_scan(
+        self,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        providers: Optional[list[str]] = None,
+        models: Optional[list[str]] = None,
+        clients: Optional[list[str]] = None,
+        accounts: Optional[list[str]] = None,
+        detail_limit: int = 20,
+    ) -> dict[str, Any]:
+        """按筛选条件扫全量日志行，给出统计 + 末尾明细。
+
+        与 ``query_logs`` 读同一批行（共用 ``_logs_in_range`` + ``log_matches``），
+        区别只在**聚合**而不分页：``query_logs`` 的 page_size 上限 200，拿它做
+        「本月一共多少请求、p95 多少」既读不全也无法算分位数。
+
+        为什么统计不在服务里做：``buddy logs`` 要能在服务没起（或挂了）时查历史
+        ——那恰恰是最需要看日志的时刻。所以数据源是磁盘上的 metrics.jsonl，
+        不依赖 HTTP 接口。
+
+        分位数用**最近秩法**（``sorted[ceil(p*n)-1]``），不插值：耗时分位数的
+        用途是「用户能忍到的那个阈值」，插值会算出一个实际没出现过的耗时。
+        """
+        rows = self._logs_in_range(start, end)
+        matched: list[dict[str, Any]] = []
+        for r in rows:
+            if log_matches(r, start=start, end=end, providers=providers,
+                           models=models, clients=clients, accounts=accounts):
+                matched.append(r)
+
+        durations = sorted(
+            int(r["duration_ms"]) for r in matched
+            if isinstance(r.get("duration_ms"), (int, float)))
+        ttfts = sorted(
+            int(r["ttft_ms"]) for r in matched
+            if isinstance(r.get("ttft_ms"), (int, float)))
+
+        def pct(sorted_vals: list[int], p: float) -> Optional[int]:
+            if not sorted_vals:
+                return None
+            idx = max(0, -(-int(p * 100) * len(sorted_vals) // 100) - 1)
+            return sorted_vals[min(idx, len(sorted_vals) - 1)]
+
+        errors = [r for r in matched
+                  if int(r.get("status") or 0) >= 400 or r.get("error")]
+        prompt = sum(int(r.get("prompt_tokens") or 0) for r in matched)
+        completion = sum(int(r.get("completion_tokens") or 0) for r in matched)
+        cached = sum(int(r.get("cached_tokens") or 0) for r in matched)
+
+        def providers_for(account: str) -> set[str]:
+            """同一个账号 id 出现在哪些通道下。
+
+            failover 会在通道之间挑号，而各家生成账号 id 的方式不同（UUID、
+            邮箱、``acct-xxx``），不同通道撞上同一个字符串并不代表是同一个
+            账号——展示时必须带通道，否则「哪个号在报错」会被合并成一行。
+            """
+            return {(r.get("provider") or "") for r in matched
+                    if (r.get("account") or "(unknown)") == account}
+
+        def group(key: str, top: Optional[int] = None) -> list[dict[str, Any]]:
+            """按某字段计数 + 错误数 + 耗时合计，按请求数降序。
+
+            没有 ``group()`` 之前每个维度都手写一遍循环，加一个维度就要复制
+            十行；统一成一个生成器后，第 5 个维度（天）也只是多传个取键函数。
+            """
+            buckets: dict[str, dict[str, Any]] = {}
+            for r in matched:
+                name = r.get(key) or "(unknown)"
+                b = buckets.setdefault(name, {"name": name, "count": 0,
+                                             "errors": 0, "duration_ms_sum": 0})
+                b["count"] += 1
+                if int(r.get("status") or 0) >= 400 or r.get("error"):
+                    b["errors"] += 1
+                if isinstance(r.get("duration_ms"), (int, float)):
+                    b["duration_ms_sum"] += int(r["duration_ms"])
+            out = sorted(buckets.values(), key=lambda b: (-b["count"], b["name"]))
+            for b in out:
+                b["avg_ms"] = round(b["duration_ms_sum"] / b["count"]) if b["count"] else 0
+            return out[:top] if top else out
+
+        status_family: dict[str, int] = {}
+        for r in matched:
+            code = int(r.get("status") or 0)
+            fam = f"{code // 100}xx" if code else "unknown"
+            status_family[fam] = status_family.get(fam, 0) + 1
+
+        by_day: dict[str, dict[str, Any]] = {}
+        for r in matched:
+            ts = r.get("ts")
+            if not isinstance(ts, (int, float)):
+                continue
+            d = _date_str(float(ts))
+            b = by_day.setdefault(d, {"date": d, "count": 0, "errors": 0,
+                                      "duration_ms_sum": 0})
+            b["count"] += 1
+            if int(r.get("status") or 0) >= 400 or r.get("error"):
+                b["errors"] += 1
+            if isinstance(r.get("duration_ms"), (int, float)):
+                b["duration_ms_sum"] += int(r["duration_ms"])
+
+        total = len(matched)
+        return {
+            "total": total,
+            "errors": len(errors),
+            "success_rate": round((total - len(errors)) / total, 4) if total else None,
+            "duration_ms": {
+                "avg": round(sum(durations) / len(durations)) if durations else None,
+                "p50": pct(durations, 0.50),
+                "p90": pct(durations, 0.90),
+                "p95": pct(durations, 0.95),
+                "p99": pct(durations, 0.99),
+                "max": durations[-1] if durations else None,
+            },
+            "ttft_ms": {
+                "avg": round(sum(ttfts) / len(ttfts)) if ttfts else None,
+                "p50": pct(ttfts, 0.50),
+                "p95": pct(ttfts, 0.95),
+            },
+            "tokens": {
+                "prompt": prompt,
+                "completion": completion,
+                "cached": cached,
+                # 缓存命中率用 cached / prompt。prompt 是含缓存的 OpenAI 口径
+                # （见 normalize_usage），所以这个比值就是「这次输入里多少是
+                # 命中缓存不花钱的」，与上游计费口径一致。
+                "cache_hit_rate": round(cached / prompt, 4) if prompt else None,
+            },
+            "credit": _sum_credits(matched),
+            "by_provider": group("provider"),
+            "by_model": group("model", top=10),
+            "by_client": group("client"),
+            # 按账号分组时把「同一个 id 出现在哪些通道」一起带上：渲染侧要据此
+            # 判断列怎么摆（见 cli/logs._account_table）。这里不截断 id：`--json`
+            # 输出的就是这份数据，截了脚本就没法拿它当 key；宽度是展示问题，
+            # 归渲染层管。
+            "by_account": [{**g, "providers": sorted(providers_for(g["name"]))}
+                           for g in group("account")],
+            "by_status": [{"name": k, "count": v}
+                          for k, v in sorted(status_family.items())],
+            "by_day": [by_day[d] for d in sorted(by_day)],
+            "rows": matched[:max(0, detail_limit)],
+            "filters": {
+                "start": start, "end": end,
+                "providers": providers or [], "models": models or [],
+                "clients": clients or [], "accounts": accounts or [],
+            },
+            "from_disk": self.log_path is not None,
+        }
 
     # ------------------------------------------------------------------
     # 查询（请求日志页头部饼图）：按日期范围聚合各模型请求次数
