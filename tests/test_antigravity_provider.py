@@ -102,15 +102,17 @@ def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
         return {"quotaInfo": info}
 
     async def _fake_fetch(account_id=None):
-        # 真实响应形态：models.<变体名>.quotaInfo.remainingFraction
+        # 真实响应形态：models.<变体名>.quotaInfo.remainingFraction。
+        # 同池模型共享同一 resetTime（2026-11-15 实测），这里照实刻画；
+        # 个别变体缺 resetTime 也应并回主池，不能碎成单模型条目。
         return {"models": {
             "gemini-3.1-pro-low": _quota(0.9, "2026-10-02T20:28:46Z"),
-            "gemini-3.1-pro-high": _quota(0.8),
-            "gemini-3.6-flash-medium": _quota(0.5, "2026-10-02T19:00:00Z"),
-            "gemini-3.8-flash-tiered": _quota(0.7),
+            "gemini-3.1-pro-high": _quota(0.8, "2026-10-02T20:28:46Z"),
+            "gemini-3.6-flash-medium": _quota(0.5, "2026-10-02T20:28:46Z"),
+            "gemini-3.8-flash-tiered": _quota(0.7),  # 缺 resetTime → 并回主池
             "claude-sonnet-4-6": _quota(1.0, "2026-10-02T20:30:52Z"),
-            "claude-opus-4-6-thinking": _quota(1.0),
-            "gpt-oss-120b-medium": _quota(0.99),
+            "claude-opus-4-6-thinking": _quota(1.0, "2026-10-02T20:30:52Z"),
+            "gpt-oss-120b-medium": _quota(0.99, "2026-10-02T20:30:52Z"),
             "chat_20706": _quota(0.1),  # 内部条目不该被算进来
         }}
 
@@ -125,24 +127,134 @@ def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
     by_label = {i["label"]: i for i in quota["items"]}
     gemini = by_label["Gemini 组"]
     cgpt = by_label["Claude/GPT 组"]
-    # 组内跨模型取最小：gemini 组 min(0.9,0.8,0.5,0.7)=0.5；claude-gpt 组 min(1.0,1.0,0.99)=0.99
+    # 池内跨模型取最小：gemini 组 min(0.9,0.8,0.5,0.7)=0.5；claude-gpt 组 min(1.0,1.0,0.99)=0.99
     assert gemini["remaining"] == 500.0 and gemini["total"] == 1000
     assert gemini["percent"] == 50.0  # 已用
     assert gemini["used"] == 500.0    # 已用千分制（与 remaining 同量纲，1-worst 反推）
     assert cgpt["remaining"] == 990.0 and cgpt["percent"] == 1.0
     assert cgpt["used"] == 10.0
-    # reset_ts = 组内**任一带 resetTime** 的模型的值（不强制最紧那个）：
-    # gemini 组首个带 resetTime 的是 3.1-pro-low(0.9) → 20:28:46Z（不是组内最早的 19:00Z）。
-    # claude-gpt 组最紧的 gpt-oss(0.99) 没带 resetTime，兜底到别的模型（20:30:52Z）——
-    # 旧实现会在「最紧的恰好没带」时整组不显示 reset，正是本次要修掉的损失。
+    # reset_ts = 池内任一 resetTime（不强制最紧那个）：gemini 主池是 20:28:46Z。
     assert gemini["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:28:46Z")
     assert cgpt["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:30:52Z")
     # reset_note 讲清「这只是 5 小时窗口滚动刷新点」
     assert "5 小时" in gemini["reset_note"]
-    # note 里点名最紧模型 + 列出组内模型清单
+    # note 里点名最紧模型 + 列出池内模型清单
     assert "gemini-3.6-flash" in gemini["note"]
     assert gemini["models_in_group"] == ["gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.8-flash"]
     assert cgpt["models_in_group"] == ["claude-opus-4-6-thinking", "claude-sonnet-4-6", "gpt-oss-120b"]
+    # 缺 resetTime 的变体不能单独成池：reset_ts 只反映「有 resetTime 的多数派」
+    assert prov._iso_to_epoch("2026-10-02T20:28:46Z") == gemini["reset_ts"]
+    assert not any("tiered" in i["label"] for i in quota["items"])
+
+
+def test_quota_pool_split_ignores_missing_reset_in_fixture():
+    """``_cluster_pools`` 单测：缺 resetTime 无条件并回主池，残留池按 reset 排序。"""
+    import buddy_proxy.antigravity.provider as prov
+
+    fracs = [
+        (0.9, prov._iso_to_epoch("2026-11-15T12:28:46Z"), "gemini-3.8-flash-tiered"),
+        (0.9, prov._iso_to_epoch("2026-11-15T12:28:46Z"), "gemini-4-hydrogen-high"),
+        (0.5, 0.0, "gemini-no-reset"),
+        (0.8, prov._iso_to_epoch("2026-11-22T08:12:41Z"), "gemini-4-argon-high"),
+    ]
+    pools = prov._cluster_pools(fracs)
+    assert len(pools) == 2
+    assert [n for _f, _r, n in pools[0]] == [
+        "gemini-3.8-flash-tiered", "gemini-4-hydrogen-high", "gemini-no-reset"]
+    assert [n for _f, _r, n in pools[1]] == ["gemini-4-argon-high"]
+
+    # 全部缺 resetTime / 空输入：不分裂，也不抛异常
+    assert prov._cluster_pools([]) == [[]]
+    only_missing = [(0.4, 0.0, "a"), (0.3, 0.0, "b")]
+    assert len(prov._cluster_pools(only_missing)) == 1
+
+
+def test_quota_splits_argon_weekly_pool(provider, tmp_path, monkeypatch):
+    """argon 的周池 resetTime 比其余 Gemini 晚一周 → 单独一条，不被 hydrogen 掩盖。
+
+    2026-11-15 实测（两个账号一致）：hydrogel/3.8/旧代共享 5 小时池（resetTime 当日），
+    gemini-4-argon 三档属另一周池（resetTime 落在一周后）。旧实现按 group 合并、
+    组内取 min，argon 独立水位被 hydrogen 掩盖，界面只能看到一个混合数。
+    """
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            "gemini-3.8-flash-tiered": {"quotaInfo": {"remainingFraction": 0.90,
+                                                      "resetTime": "2026-11-15T12:28:46Z"}},
+            "gemini-4-hydrogen-high": {"quotaInfo": {"remainingFraction": 0.90,
+                                                     "resetTime": "2026-11-15T12:28:46Z"}},
+            "gemini-4-argon-high": {"quotaInfo": {"remainingFraction": 0.80,
+                                                  "resetTime": "2026-11-22T08:12:41Z"}},
+            "gemini-4-argon-low": {"quotaInfo": {"remainingFraction": 0.80,
+                                                 "resetTime": "2026-11-22T08:12:41Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+    # 模拟 refresh_models 后目录里已有这些模型（argon 是动态发现的，静态表里没有）。
+    provider._models = [
+        {"id": "gemini-3.8-flash", "upstream": "gemini-3.8-flash-tiered", "group": "gemini"},
+        {"id": "gemini-4-hydrogen", "group": "gemini"},
+        {"id": "gemini-4-argon", "group": "gemini"},
+    ]
+
+    items = provider.quota()["items"]
+    labels = [i["label"] for i in items]
+    # 两条 Gemini 池（其余模型 + Argon 周池），各自独立读数
+    assert "Gemini 组（其余 Gemini 模型 5 小时池）" in labels
+    assert "Gemini 组（Gemini 4 Argon 周池）" in labels
+    by_label = {i["label"]: i for i in items}
+    shared = by_label["Gemini 组（其余 Gemini 模型 5 小时池）"]
+    argon = by_label["Gemini 组（Gemini 4 Argon 周池）"]
+    assert shared["remaining"] == 900.0
+    assert argon["remaining"] == 800.0  # 之前会被 min(0.9,0.8)=800 混在一起
+    assert argon["models_in_group"] == ["gemini-4-argon"]
+    assert shared["models_in_group"] == ["gemini-3.8-flash", "gemini-4-hydrogen"]
+    assert argon["reset_ts"] == prov._iso_to_epoch("2026-11-22T08:12:41Z")
+    assert shared["reset_ts"] == prov._iso_to_epoch("2026-11-15T12:28:46Z")
+
+
+def test_quota_pool_labels_stay_unique_when_pools_unrecognized(provider, tmp_path, monkeypatch):
+    """两个独立池都不含 argon → 通用后缀会撞车，兜底加重置时刻保证 label 唯一。"""
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            "gemini-3.8-flash-tiered": {"quotaInfo": {"remainingFraction": 0.9,
+                                                      "resetTime": "2026-11-15T12:28:46Z"}},
+            "gemini-4-hydrogen-high": {"quotaInfo": {"remainingFraction": 0.9,
+                                                     "resetTime": "2026-11-15T12:28:46Z"}},
+            "gemini-5-neo-high": {"quotaInfo": {"remainingFraction": 0.6,
+                                                "resetTime": "2026-11-21T03:00:00Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+    provider._models = [
+        {"id": "gemini-3.8-flash", "upstream": "gemini-3.8-flash-tiered", "group": "gemini"},
+        {"id": "gemini-4-hydrogen", "group": "gemini"},
+        {"id": "gemini-5-neo", "group": "gemini"},
+    ]
+
+    labels = [i["label"] for i in provider.quota()["items"]]
+    assert len(labels) == 2
+    assert len(set(labels)) == 2  # 不撞车
+    assert any("重置" in lab for lab in labels)
 
 
 def test_quota_full_quota_reads_as_full_not_zero(provider, tmp_path, monkeypatch):
@@ -296,8 +408,10 @@ def test_quota_multi_account_labels_and_failure_notice(provider, tmp_path, monke
     assert "1/2 个账号查询失败" in items[0]["remaining"]
     ag1 = [i for i in items if i["label"].startswith("AG #1 · ")]
     assert len(ag1) == 2  # u@x.com 的 Gemini/Claude 两组
-    assert ag1[0]["remaining"] == 900.0 and ag1[0]["percent"] == 10.0
-    assert ag1[0]["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:28:46Z")
+    # 按 label 取而不是按位置：分池后条目顺序由 resetTime 决定，位置不再稳定。
+    gemini = next(i for i in ag1 if i["label"] == "AG #1 · Gemini 组")
+    assert gemini["remaining"] == 900.0 and gemini["percent"] == 10.0
+    assert gemini["reset_ts"] == prov._iso_to_epoch("2026-10-02T20:28:46Z")
     assert not any(i["label"].startswith("AG #2") for i in items)  # 失败账号无条目
 
 
