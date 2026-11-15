@@ -1,20 +1,25 @@
 {
   "_comment": [
     "Antigravity 免费通道模型表。id 是对外的模型名（/v1/models 展示），upstream 是上游真名（缺省同 id）。",
-    "上游只认 fetchAvailableModels 列表里的名字（2026-10-02 实测）：gemini 3 系裸名会被 429 RESOURCE_EXHAUSTED 伪装拒绝，",
-    "必须带 effort 后缀；gemini-3.8-flash 只有 -tiered 变体；gpt-oss-120b 只有 -medium；claude 系裸名可用。",
+    "上游只认 fetchAvailableModels 列表里的名字（2026-11-15 复测）：gemini 3 系/4 系裸名会被 404 NOT_FOUND 或 429 RESOURCE_EXHAUSTED 伪装拒绝，",
+    "必须带 effort 后缀；gemini-3.8-flash 默认 tiered 自动档，实测 -low/-medium/-high 也可用；gpt-oss-120b 只有 -medium；claude 系裸名后接 effort（claude-*-5-5-medium）。",
     "efforts 声明该模型可加的档位（reasoning_effort 参数映射，不在表内的档位回落 default_effort）；缺省 = 名字固定不加后缀。",
-    "gemini-3.1-pro-high 在列表里但实测 400 INVALID_ARGUMENT，故 default_effort=low（显式指定 high 仍会尝试，便于上游放开后直接可用）。",
-    "group 对应 /usage 的两组独立限额（组内共享 weekly + 5h 双池）。",
-    "上游还有但未暴露：gemini-2.5-pro/-flash(-lite)、gemini-3.5-flash(-lite/-low/-extra-low)、gemini-3.1-flash(-lite)、gemini-3-flash(-agent)、gemini-pro-agent、gemini-3.x-flash-tiered 变体；chat_*/tab_* 是内部条目不暴露。",
-    "blocked_prefixes：fetchAvailableModels 仍会回传这些**旧代/内部**基名（去 effort 后缀后比对），运行期刷新目录时按前缀命中即丢弃，否则「重新拉取」会把 gemini-2.5/3-flash/3.1-flash/3.5 等旧模型灌回 /v1/models。只拦旧代，不拦真·新模型（如 gemini-4-*）——它们不在前缀表里会照常被发现收录。chat_/tab_ 内部前缀已由 _is_public_upstream_model 单独过滤，不重复列。",
+    "group 对应 /usage 的两组独立限额（组内共享 weekly + 5h 双池）。gemini-4-argon 在上游是独立周池（resetTime 单列，不和 gemini 组共享）。",
+    "2026-11-15 清理：gemini-3.1-pro（-low/-high 均 404 NOT_FOUND）、gemini-3.6-flash（裸名 404，-medium 两账号全 429/挂起）、",
+    "claude-opus-4-6-thinking / claude-sonnet-4-6（上游回「no longer available. Please switch to ... 5.5」的 200 空壳）已下架删除；",
+    "前两者的整族前缀进了 blocked_prefixes，刷新不会再灌回。",
+    "上游还有但未暴露：gemini-2.5-*、gemini-3-flash*、gemini-3.1-flash*、gemini-3.5-*；chat_*/tab_* 是内部条目不暴露（同见 _pinned_not_exposed）。",
+    "gemini-4-carbon-disabled 是上游的 -disabled 占位条目：fetchAvailableModels 照常回传（唯一没有 quotaInfo 的条目），但 generateContent 直接 404 NOT_FOUND。它在 gemini-4-* 区间里，前缀表拦不住，由 model_catalog._BLOCKED_BASE_SUFFIXES（-disabled 后缀）兜底丢弃，刷新不会灌回来。",
+    "blocked_prefixes：fetchAvailableModels 仍会回传这些**旧代/已下架**基名（去 effort 后缀后比对），运行期刷新目录时按前缀命中即丢弃，否则「重新拉取」会把 gemini-2.5/3-flash/3.1-flash/3.5/3.1-pro/3.6-flash 等灌回 /v1/models。只拦旧代，不拦真·新模型（如 gemini-4-*）——它们不在前缀表里会照常被发现收录。chat_/tab_ 内部前缀已由 _is_public_upstream_model 单独过滤，不重复列；-disabled 占位条目由 _BLOCKED_BASE_SUFFIXES 按后缀丢弃。",
     "blocked_prefix_exceptions：命中前缀但仍在用的模型（精确基名、大小写不敏感）豁免，目前只有生图模型 gemini-3.1-flash-image——旧代前缀保持粗粒度，不必为放行一个模型把整族放进来。"
   ],
   "blocked_prefixes": [
     "gemini-2.5-",
     "gemini-3-flash",
     "gemini-3.1-flash",
+    "gemini-3.1-pro",
     "gemini-3.5-",
+    "gemini-3.6-flash",
     "gemini-pro-agent"
   ],
   "blocked_prefix_exceptions": [
@@ -22,23 +27,34 @@
   ],
   "models": [
     {
-      "id": "gemini-3.1-pro",
-      "upstream": "gemini-3.1-pro",
-      "efforts": ["low", "high"],
-      "default_effort": "low",
+      "id": "gemini-4-argon",
+      "upstream": "gemini-4-argon",
+      "efforts": ["low", "medium", "high"],
+      "default_effort": "medium",
       "group": "gemini",
-      "description": "Gemini 3.1 Pro",
+      "description": "Gemini 4 Argon（独立周池；首字 35–70 s，重推理才用）",
       "context": 1048576,
       "max_output": 65536,
       "verified": true
     },
     {
-      "id": "gemini-3.6-flash",
-      "upstream": "gemini-3.6-flash",
-      "efforts": ["low", "medium", "high"],
-      "default_effort": "medium",
+      "id": "gemini-4-hydrogen",
+      "upstream": "gemini-4-hydrogen",
+      "efforts": ["low", "medium", "high", "xhigh"],
+      "default_effort": "high",
       "group": "gemini",
-      "description": "Gemini 3.6 Flash",
+      "description": "Gemini 4 Hydrogen（强推理，首字 9–14 s）",
+      "context": 1048576,
+      "max_output": 65536,
+      "verified": true
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "upstream": "gemini-3.8-flash",
+      "efforts": ["low", "medium", "high", "tiered"],
+      "default_effort": "tiered",
+      "group": "gemini",
+      "description": "Gemini 3.8 Flash（默认 tiered 自动档）",
       "context": 1048576,
       "max_output": 65536,
       "verified": true
@@ -51,26 +67,21 @@
       "verified": true
     },
     {
-      "id": "gemini-3.8-flash",
-      "upstream": "gemini-3.8-flash-tiered",
-      "group": "gemini",
-      "description": "Gemini 3.8 Flash（tiered 自动档）",
-      "context": 1048576,
-      "max_output": 65536,
-      "verified": true
-    },
-    {
-      "id": "claude-opus-4-6-thinking",
+      "id": "claude-opus-5-5",
       "group": "claude-gpt",
-      "description": "Claude Opus 4.6 (Thinking) via Google",
+      "efforts": ["low", "medium", "high"],
+      "default_effort": "medium",
+      "description": "Claude Opus 5.5 via Google（首字 3–4 s）",
       "context": 200000,
       "max_output": 64000,
       "verified": true
     },
     {
-      "id": "claude-sonnet-4-6",
+      "id": "claude-sonnet-5-5",
       "group": "claude-gpt",
-      "description": "Claude Sonnet 4.6 via Google",
+      "efforts": ["low", "medium", "high"],
+      "default_effort": "medium",
+      "description": "Claude Sonnet 5.5 via Google（首字 1.5–1.8 s）",
       "context": 200000,
       "max_output": 64000,
       "verified": true

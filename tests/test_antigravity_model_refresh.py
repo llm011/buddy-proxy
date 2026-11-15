@@ -30,14 +30,14 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
             raise RuntimeError("offline")
         if account_id == "a1":
             return {"models": {
-                "gemini-3.1-pro-low": {},
+                "gemini-4-argon-low": {},
                 "gemini-4-flash-extra-low": {},
                 "gemini-4-flash-medium": {},
                 "claude-sonnet-5-5": {},
                 "chat_20706": {},
             }}
         return {"models": {
-            "gemini-3.1-pro-high": {},
+            "gemini-4-argon-high": {},
             "gemini-4-flash-high": {},
             "gpt-next-tiered": {},
             "tab_jump": {},
@@ -48,7 +48,7 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
 
     refreshed_ids = {model["id"] for model in refreshed}
     assert {
-        "gemini-3.1-pro",
+        "gemini-4-argon",
         "gemini-4-flash",
         "claude-sonnet-5-5",
         "gpt-next",
@@ -60,9 +60,9 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
 
     by_id = provider._model_by_id
     # 本地实测条目的 metadata / upstream / effort 策略原样保留。
-    local = next(model for model in static_snapshot if model["id"] == "gemini-3.1-pro")
-    assert by_id["gemini-3.1-pro"] == local
-    assert by_id["gemini-3.1-pro"] is not local
+    local = next(model for model in static_snapshot if model["id"] == "gemini-4-argon")
+    assert by_id["gemini-4-argon"] == local
+    assert by_id["gemini-4-argon"] is not local
 
     dynamic = by_id["gemini-4-flash"]
     assert dynamic["upstream"] == "gemini-4-flash"
@@ -72,8 +72,8 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
 
     # Claude 裸名里的版本/家族都属于固定模型名，不能被后缀归一化误伤。
     claude = by_id["claude-sonnet-5-5"]
-    assert claude["id"] == claude["upstream"] == "claude-sonnet-5-5"
-    assert "efforts" not in claude
+    assert claude["id"] == "claude-sonnet-5-5"
+    assert "upstream" not in claude  # 裸名 + effort 后缀（claude-sonnet-5-5-medium）
     assert claude["group"] == "claude-gpt"
 
     tiered = by_id["gpt-next"]
@@ -87,11 +87,12 @@ def test_refresh_unions_accounts_preserves_verified_and_derives_new_models(monke
 
 
 def test_refresh_blocks_stale_families_and_pins_verified_curated(monkeypatch):
-    """上游目录吐旧代模型 + 不吐 premium curated 时：旧代被拦、curated 不丢。
+    """上游目录吐旧代/已下架模型 + 不吐 premium curated 时：前者被拦、后者不丢。
 
     复刻线上实测：fetchAvailableModels 回传 gemini-2.5/3-flash/3.1-flash/3.5 等
-    旧代变体，却**不含** gemini-3.1-pro / gemini-3.6-flash 这类人工校验过的
-    premium 条目。旧逻辑会「灌垃圾 + 丢好货」，这里断言两头都对。
+    旧代变体，以及 gemini-3.1-pro / gemini-3.6-flash 这类**已 404 下架**的条目
+    （2026-11-15 复测：`-low/-high` 均 404 NOT_FOUND），同时**不含**仍在供的
+    gemini-4-* / claude-5-5 curated 条目。旧逻辑会「灌垃圾 + 丢好货」。
     """
     provider = prov.AntigravityProvider()
     monkeypatch.setattr(prov, "list_accounts", lambda: [_account("a1")])
@@ -107,11 +108,19 @@ def test_refresh_blocks_stale_families_and_pins_verified_curated(monkeypatch):
             "gemini-3.1-flash-low": {},
             "gemini-3.5-flash-lite": {},
             "gemini-3.5-flash-low": {},
+            # 已下架但目录仍回传的 premium 条目（2026-11-15 实测 404）
+            "gemini-3.1-pro-low": {},
+            "gemini-3.1-pro-high": {},
+            "gemini-3.6-flash-medium": {},
             # 混合大小写旧代名字也要拦住（blocklist 大小写不敏感）
             "Gemini-2.5-Flash-Thinking": {},
+            # 上游 -disabled 占位条目：在 gemini-4 区间里，前缀表拦不住，
+            # 实测 404 NOT_FOUND 且唯一没有 quotaInfo，必须按后缀丢掉
+            "gemini-4-carbon-disabled": {},
             # 仍在供的 curated upstream（校验过，应保留）
             "gemini-3.8-flash-tiered": {},
-            "claude-sonnet-4-6": {},
+            "claude-sonnet-5-5-medium": {},
+            "claude-opus-5-5-medium": {},
             # 货真价实的新模型（不在前缀表里，应照常被发现）
             "gemini-4-argon-high": {},
         }}
@@ -124,11 +133,14 @@ def test_refresh_blocks_stale_families_and_pins_verified_curated(monkeypatch):
     for stale in ("gemini-2.5-flash", "gemini-2.5-pro", "gemini-3-flash",
                   "gemini-3-flash-agent", "gemini-3.1-flash-lite",
                   "gemini-3.1-flash-low", "gemini-3.5-flash-lite", "gemini-3.5-flash",
-                  "Gemini-2.5-Flash-Thinking"):
+                  "Gemini-2.5-Flash-Thinking",
+                  "gemini-3.1-pro", "gemini-3.6-flash", "gemini-4-carbon-disabled"):
         assert stale not in ids, stale
-    # curated premium 虽未被上游目录回传，也必须保住（verified-sticky）
-    assert {"gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.8-flash",
-            "claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b"} <= ids
+    # curated premium 虽未被上游目录回传，也必须保住（verified-sticky）；
+    # 已下架的 claude-4-6 已从表里删掉，刷新不会把它拉回来。
+    assert {"gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon",
+            "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b"} <= ids
+    assert not {"claude-opus-4-6-thinking", "claude-sonnet-4-6"} & ids
     # 生图模型不随旧代前缀被拦（前缀收窄到 -lite），刷新后仍在
     assert "gemini-3.1-flash-image" in ids
     # 真·新模型照常收录
@@ -144,6 +156,10 @@ def test_blocked_prefix_keeps_gross_prefix_with_explicit_exception():
     assert not _is_blocked_base("gemini-3.1-flash-image")
     assert not _is_blocked_base("Gemini-3.1-Flash-Image")  # 例外大小写不敏感
     assert not _is_blocked_base("gemini-4-flash")
+    # -disabled 占位条目：落在 gemini-4 区间，只能按后缀识别（实测 404）
+    assert _is_blocked_base("gemini-4-carbon-disabled")
+    assert _is_blocked_base("Gemini-4-Carbon-Disabled")
+    assert not _is_blocked_base("gemini-4-carbon")
 
 
 def test_refresh_all_failures_or_empty_keep_previous_catalog(monkeypatch):

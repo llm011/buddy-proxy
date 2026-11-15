@@ -162,26 +162,26 @@ def test_effort_suffix():
     """模型表条目 → 上游真名：efforts/default_effort 声明驱动（上游只认列表变体名）。"""
     from buddy_proxy.antigravity.convert import apply_effort_suffix
 
-    pro = {"id": "gemini-3.1-pro", "upstream": "gemini-3.1-pro",
-           "efforts": ["low", "high"], "default_effort": "low"}
-    flash = {"id": "gemini-3.6-flash", "efforts": ["low", "medium", "high"],
+    pro = {"id": "claude-opus-5-5", "efforts": ["low", "high"],
+           "default_effort": "low"}
+    flash = {"id": "gemini-4-argon", "efforts": ["low", "medium", "high"],
              "default_effort": "medium"}
     fixed_tiered = {"id": "gemini-3.8-flash", "upstream": "gemini-3.8-flash-tiered"}
     fixed_gpt = {"id": "gpt-oss-120b", "upstream": "gpt-oss-120b-medium"}
 
     # 无显式 effort → default_effort（裸名会被上游 429 伪装拒绝，必须有后缀）
-    assert apply_effort_suffix(pro, None) == "gemini-3.1-pro-low"
-    assert apply_effort_suffix(flash, None) == "gemini-3.6-flash-medium"
+    assert apply_effort_suffix(pro, None) == "claude-opus-5-5-low"
+    assert apply_effort_suffix(flash, None) == "gemini-4-argon-medium"
     # 显式 effort → 对应后缀；不在 efforts 里回落 default_effort
-    assert apply_effort_suffix(pro, "high") == "gemini-3.1-pro-high"
-    assert apply_effort_suffix(flash, "low") == "gemini-3.6-flash-low"
-    assert apply_effort_suffix(pro, "medium") == "gemini-3.1-pro-low"  # 不在 efforts → default
-    assert apply_effort_suffix(pro, "ultra") == "gemini-3.1-pro-low"  # 非法值 → default
+    assert apply_effort_suffix(pro, "high") == "claude-opus-5-5-high"
+    assert apply_effort_suffix(flash, "low") == "gemini-4-argon-low"
+    assert apply_effort_suffix(pro, "medium") == "claude-opus-5-5-low"  # 不在 efforts → default
+    assert apply_effort_suffix(pro, "ultra") == "claude-opus-5-5-low"  # 非法值 → default
     # 名字固定的模型（无 efforts）只做 upstream 映射，不加热后缀
     assert apply_effort_suffix(fixed_tiered, "high") == "gemini-3.8-flash-tiered"
     assert apply_effort_suffix(fixed_gpt, None) == "gpt-oss-120b-medium"
     # 无 upstream 字段 → 同 id（claude 裸名可用）
-    assert apply_effort_suffix({"id": "claude-sonnet-4-6"}, "high") == "claude-sonnet-4-6"
+    assert apply_effort_suffix({"id": "claude-sonnet-5-5"}, "high") == "claude-sonnet-5-5"
 
 
 def test_response_reuse_from_gemini_convert():
