@@ -1281,4 +1281,4 @@ async def ui_copilot_models_refresh(request: Request):
                             detail={"error": {"message": "copilot 通道未启用"}})
     count = await provider.refresh_models(force=True)
     return {"ok": True, "count": count, "models": list(provider.models()),
-            "error": provider._refresh_error}
+            "error": provider.health().get("catalog_error", "")}

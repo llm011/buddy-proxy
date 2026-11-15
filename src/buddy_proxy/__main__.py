@@ -28,6 +28,8 @@ Usage with uv:
 from __future__ import annotations
 
 import argparse
+import asyncio
+import logging
 import os
 import pathlib
 
@@ -52,6 +54,18 @@ from buddy_proxy.web import ui as _ui  # noqa: F401
 
 
 _DEFAULT_ENV = pathlib.Path(__file__).resolve().parents[2] / ".env"
+
+_log = logging.getLogger(__name__)
+
+# 启动期 fire-and-forget 任务（目录预热 / 常驻刷新循环）的强引用集合。
+# 事件循环只持有任务的弱引用，不挂住的话任务可能在中途被 GC 回收。
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_bg(coro) -> None:
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
 
 
 def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
@@ -140,12 +154,9 @@ async def _qoder_model_refresh_loop(provider) -> None:
 
     失败只 log 不退出——下一轮目录刷新自会补上；循环随进程生命周期常驻。
     """
-    import asyncio
-    import logging
-
     from buddy_proxy.qoder.catalog import CACHE_TTL_S
 
-    log = logging.getLogger(__name__)
+    log = _log
     while True:
         try:
             models = await provider.refresh_models()
@@ -163,9 +174,7 @@ async def _kiro_model_warmup_once(provider) -> None:
     之间目录是空的——表现是 ``/v1/models`` 里没有 kiro，且调用 ``kiro/xxx``
     直接报 ``INVALID_MODEL_ID``（踩过一次：改完代码重启，测试全挂）。
     """
-    import logging
-
-    log = logging.getLogger(__name__)
+    log = _log
     try:
         models = await provider.refresh_models()
         log.info("kiro 模型目录已预热（%d 个模型）", len(models))
@@ -180,9 +189,7 @@ async def _copilot_model_warmup_once(provider) -> None:
     ``/models`` 说了算。不预热的话，重启后到第一次请求之间用户看到的是过期的
     静态表，模型已下线时会先撞一次 400 才反应过来。
     """
-    import logging
-
-    log = logging.getLogger(__name__)
+    log = _log
     try:
         count = await provider.refresh_models()
         log.info("copilot 模型目录已预热（%d 个模型）", count)
@@ -191,30 +198,24 @@ async def _copilot_model_warmup_once(provider) -> None:
 
 
 def _install_copilot_model_warmup(provider) -> None:
-    import asyncio
-
     async def _start() -> None:
-        asyncio.create_task(_copilot_model_warmup_once(provider))  # noqa: RUF006
+        _spawn_bg(_copilot_model_warmup_once(provider))
 
     app.router.on_startup.append(_start)
 
 
 def _install_kiro_model_warmup(provider) -> None:
     """把 kiro 目录预热挂到应用启动。"""
-    import asyncio
-
     async def _start() -> None:
-        asyncio.create_task(_kiro_model_warmup_once(provider))  # noqa: RUF006
+        _spawn_bg(_kiro_model_warmup_once(provider))
 
     app.router.on_startup.append(_start)
 
 
 def _install_qoder_model_warmup(provider) -> None:
     """把目录预热挂到应用启动（fire-and-forget 常驻任务，随进程生命周期）。"""
-    import asyncio
-
     async def _start() -> None:
-        asyncio.create_task(_qoder_model_refresh_loop(provider))  # noqa: RUF006
+        _spawn_bg(_qoder_model_refresh_loop(provider))
 
     app.router.on_startup.append(_start)
 

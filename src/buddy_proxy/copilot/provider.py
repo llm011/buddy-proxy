@@ -350,10 +350,14 @@ class CopilotProvider(BaseProvider):
                         quota=True, reason=f"HTTP {resp.status_code} {code or message}")
                     continue
                 if resp.status_code in (401, 403):
+                    # 403 有两种来源：登录态没权限，或订阅不含该模型（个人号的
+                    # SKU 差异常走 403 而不是 400）。后者只该冷却模型，否则一个
+                    # 落后账号会把整号钉住、连带同号其它模型一起不可用。
+                    # 403 的分支已由上面的 is_model_reject 先认领。
                     failover.mark_cooldown(
                         acct.id, retry_after=resp.headers.get("retry-after"),
                         reason=f"HTTP {resp.status_code} {code or message}")
-                    last_detail = _auth_detail(resp.status_code, message, acct.id)
+                    last_detail = _auth_detail(resp.status_code, message, acct)
                     continue
                 return _upstream_error_response(resp.status_code, detail)
 
@@ -1170,11 +1174,17 @@ def _upstream_error_response(status: int, detail: Any) -> JSONResponse:
     return JSONResponse(status_code=status, content=detail)
 
 
-def _auth_detail(status: int, message: str, account_id: str) -> str:
-    """401/403 的可操作提示：账号 + 下一步动作 + 上游原话。"""
+def _auth_detail(status: int, message: str, account) -> str:
+    """401/403 的可操作提示：账号 + 下一步动作 + 上游原话。
+
+    优先报 GitHub login（``gh auth login --user`` 要的是 login）；``id`` 在
+    手工粘贴 token、拿不到官方登录名时会是哈希派生的 ``acct-xxxx``，照抄给
+    用户只会得到「未知用户」。
+    """
+    login = getattr(account, "name", "") or getattr(account, "id", "")
     hint = (
-        f"账号 {account_id} 的 GitHub 登录态被拒（HTTP {status}），"
-        f"请 `gh auth login --user {account_id}` 或在管理页重新导入 token"
+        f"账号 {login} 的 GitHub 登录态被拒（HTTP {status}），"
+        f"请 `gh auth login --user {login}` 或在管理页重新导入 token"
     )
     return f"{hint}；上游: {message}" if message else hint
 

@@ -53,16 +53,21 @@ def is_model_reject(code: int, error_code: str, message: str = "") -> bool:
 
     Copilot 对 SKU 不含的模型回 **400** 而不是 403/429（实测：
     ``{"error":{"message":"model not supported ...","code":"model_not_supported"}}``），
-    ``/v1/messages`` 不支持某模型时回 400
-    ``no_available_model_endpoints``。两者都属于「换账号/换时间都不会好，
+    ``/v1/messages`` 不支持某模型时回 400，码是
+    ``no_available_model_endpoints``、文案是 ``no model endpoints available``
+    （码和文案都对不上，两条都要认）。两者都属于「换账号/换时间都不会好，
     但同账号其它模型没事」——只冷却模型，不冷却账号。
+
+    403 也认：个人号的订阅不含某模型时常回 403 而非 400。
     """
-    if code != 400:
+    if code not in (400, 403):
         return False
     if error_code in _MODEL_REJECT_CODES:
         return True
     text = (message or "").lower()
-    return "model not supported" in text or "no model endpoints available" in text
+    return ("model not supported" in text
+            or "no model endpoints available" in text
+            or "no_available_model_endpoints" in text)
 
 
 def is_quota_signal(code: int, error_code: str = "") -> bool:
