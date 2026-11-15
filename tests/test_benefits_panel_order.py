@@ -24,6 +24,8 @@ EXPECTED_ORDER = [
     "traeintl-panel",
     "kimi-panel",
     "codex-panel",
+    # copilot 紧跟 codex：两者都是「本地已登录订阅」类的编程助手通道（2026-11-15 新增）
+    "copilot-panel",
     "qoder-panel",
     "qoderintl-panel",
     "antigravity-panel",

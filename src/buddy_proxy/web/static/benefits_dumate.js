@@ -194,6 +194,7 @@ const ACCT_LOADERS = {
   codebuddyintl: () => loadCodebuddyIntlAccounts(),
   kimi: () => loadKimiAccounts(),
   codex: () => loadCodexAccounts(),
+  copilot: () => loadCopilotAccounts(),
   dumate: () => loadDumateAccounts(),
   kiro: () => loadKiroAccounts(),
 };

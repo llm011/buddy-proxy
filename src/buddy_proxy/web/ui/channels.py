@@ -1127,3 +1127,158 @@ async def ui_kiro_account_rename(request: Request):
             "message": str(exc)}}) from exc
     return {"ok": True, "accounts": [
         {"id": a.id, "label": a.label, "alias": a.label} for a in accounts]}
+
+
+# ---------------------------------------------------------------------------
+# copilot（GitHub Copilot 订阅通道）
+# ---------------------------------------------------------------------------
+
+def _copilot_modules():
+    try:
+        from ...copilot import credentials as creds
+        from ...copilot import failover
+    except Exception:  # noqa: BLE001 - 通道文件缺失/导入失败
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "copilot 通道不可用"}}) from None
+    return creds, failover
+
+
+@app.get("/ui/api/copilot/accounts")
+async def ui_copilot_accounts(request: Request):
+    """copilot 各账号本地状态（纯本地，不触网，不含 token）。"""
+    _ensure_local(request)
+    _creds, failover = _copilot_modules()
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/copilot/accounts/order")
+async def ui_copilot_accounts_order(request: Request):
+    """调整 copilot 账号 failover 顺位（提交完整 id 顺序）。"""
+    _ensure_local(request)
+    creds, failover = _copilot_modules()
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 ids（账号 id 的完整顺序列表）"}})
+    try:
+        await asyncio.to_thread(creds.reorder_accounts, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/copilot/accounts/delete")
+async def ui_copilot_accounts_delete(request: Request):
+    """删除一个 copilot 账号（索引条目 + cred 文件 + 冷却标记）。"""
+    _ensure_local(request)
+    creds, failover = _copilot_modules()
+    body = await request.json()
+    aid = body.get("id")
+    if not isinstance(aid, str) or not aid.strip():
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（要删除的账号 id）"}})
+    aid = aid.strip()
+    removed = await asyncio.to_thread(creds.delete_account, aid)
+    if not removed:
+        raise HTTPException(status_code=404,
+                            detail={"error": {"message": f"账号不存在: {aid}"}})
+    await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/copilot/accounts/rename")
+async def ui_copilot_accounts_rename(request: Request):
+    """改一个 copilot 账号的本地别名（只改显示名，顺位与凭据不动）。"""
+    _ensure_local(request)
+    creds, failover = _copilot_modules()
+    body = await request.json()
+    aid, alias = body.get("id"), body.get("alias")
+    if not isinstance(aid, str) or not aid.strip() or not isinstance(alias, str):
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id 或 alias"}})
+    if len(alias.strip()) > 64:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "别名过长（≤64 字符）"}})
+    try:
+        await asyncio.to_thread(creds.rename_account, aid.strip(), alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/copilot/accounts/import")
+async def ui_copilot_accounts_import(request: Request):
+    """导入一把 GitHub token（面板「导入账号」入口，与 CLI 共用落盘逻辑）。
+
+    body ``{"token": "gho_..."}``。token 只经 ``/user`` 探测身份后落盘 0600，
+    不回显、不写日志。**不走 keychain**：能拿到 token 的受支持路径只有
+    ``gh auth token``（``buddy login copilot --gh``）或这里手工粘贴。
+    """
+    _ensure_local(request)
+    creds, failover = _copilot_modules()
+    body = await request.json()
+    token = body.get("token", body.get("access_token"))
+    token = token.strip() if isinstance(token, str) else ""
+    if not token:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 token（GitHub token，gho_ 开头）"}})
+    if not creds.is_gho_token(token):
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "这不像 GitHub token（应以 gho_/ghp_/ghu_ 开头）"}})
+    try:
+        await asyncio.to_thread(creds.save_token, token, source="panel")
+    except creds.AuthError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}}) from exc
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.get("/ui/api/copilot/gh-accounts")
+async def ui_copilot_gh_accounts(request: Request):
+    """本机 gh CLI 已登录的 GitHub 账号（供面板「从 gh 导入」直接点选）。
+
+    只解析 ``gh auth status`` 的账号名，不读 token。
+    """
+    _ensure_local(request)
+    creds, _failover = _copilot_modules()
+    return {"accounts": await asyncio.to_thread(creds.gh_accounts)}
+
+
+@app.post("/ui/api/copilot/accounts/import-gh")
+async def ui_copilot_accounts_import_gh(request: Request):
+    """用 ``gh auth token --user`` 导入一个（或全部）本机已登录账号。"""
+    _ensure_local(request)
+    creds, failover = _copilot_modules()
+    body = await request.json() if await request.body() else {}
+    user = body.get("user") if isinstance(body, dict) else None
+    users = [user] if isinstance(user, str) and user.strip() else await asyncio.to_thread(
+        creds.gh_accounts)
+    if not users:
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": "本机 gh CLI 没有已登录的账号：请先 `gh auth login`，"
+                       "或在下方直接粘贴 GitHub token"}})
+    errors: list[str] = []
+    for name in users:
+        try:
+            await asyncio.to_thread(creds.save_token,
+                                    await asyncio.to_thread(creds.gh_token, name),
+                                    source=f"gh:{name}")
+        except creds.AuthError as exc:
+            errors.append(f"{name}: {exc}")
+    status = await asyncio.to_thread(failover.accounts_status)
+    if errors:
+        status["errors"] = errors
+    return status
+
+
+@app.post("/ui/api/copilot/models/refresh")
+async def ui_copilot_models_refresh(request: Request):
+    """强制从上游刷新 copilot 模型目录（管理页「刷新模型」按钮）。"""
+    _ensure_local(request)
+    provider = getattr(get_state(), "providers", {}).get("copilot")
+    if provider is None:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "copilot 通道未启用"}})
+    count = await provider.refresh_models(force=True)
+    return {"ok": True, "count": count, "models": list(provider.models()),
+            "error": provider.health().get("catalog_error", "")}
