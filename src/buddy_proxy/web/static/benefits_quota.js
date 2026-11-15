@@ -431,7 +431,7 @@ function quotaAccountTotal(groups, opts) {
     const pct = Math.round((1 - rem / total) * 100);
     return pct >= 85 ? 'var(--err)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)';
   };
-  // unit → {unit, counted, skipped: [组名], series: Map<key, {label, rem, total}>}
+  // unit → {unit, counted, skipped: [组名], series: Map<key, {label, rem, total, count}>}
   const buckets = new Map();
   const bucket = unit => {
     if (!buckets.has(unit)) {
@@ -465,8 +465,8 @@ function quotaAccountTotal(groups, opts) {
       const sum = quotaSumOf(list, true);
       if (!sum) { bucket(unit).skipped.push(name); continue; }
       const b = bucket(unit);
-      const g = b.series.get('__sum__') || {label: '', rem: 0, total: 0};
-      g.rem += sum.rem; g.total += sum.total;
+      const g = b.series.get('__sum__') || {label: '', rem: 0, total: 0, count: 0};
+      g.rem += sum.rem; g.total += sum.total; g.count += 1;
       b.series.set('__sum__', g);
       b.counted += 1;
       continue;
@@ -488,9 +488,10 @@ function quotaAccountTotal(groups, opts) {
         key = `${key}#${k}`;
       }
       seenKeys.add(key);
-      const g = b.series.get(key) || {label: rawLabel, rem: 0, total: 0};
+      const g = b.series.get(key) || {label: rawLabel, rem: 0, total: 0, count: 0};
       g.rem += Number(it.remaining);
       g.total += Number(it.total);
+      g.count += 1;
       b.series.set(key, g);
     }
     b.counted += 1;
@@ -538,13 +539,16 @@ function quotaAccountTotal(groups, opts) {
     // 多组（尤其 2 组）不写上限会和「剩 X / Y」分数撞形，用括号写明各组上限
     const capText = sameTotal && totals[0] > 0
       ? `（各 ${fmtNum(totals[0])}）`
-      : (totals.some(t => t > 0) ? `（上限 ${totals.map(fmtNum).join(' / ')}）` : '');
+      : (totals.some(t => t > 0)
+        ? `（上限 ${totals.map(t => (t > 0 ? fmtNum(t) : '未知')).join(' / ')}）` : '');
     const tipLines = [
       `${b.counted > 1 ? '跨账号合计（按组顺序）' : '各分组剩余（按顺序）'}：`,
       ...series.map((g, i) => {
         const name = g.label || `第 ${i + 1} 组`;
+        const totText = g.total > 0 ? ` / ${fmtNum(g.total)}` : '';
         const u = g.total > 0 ? `（已用 ${Math.round((1 - g.rem / g.total) * 100)}%）` : '';
-        return `${i + 1}. ${name}：剩 ${fmtNum(g.rem)} / ${fmtNum(g.total)}${u}`;
+        const part = b.counted > 1 && g.count < b.counted ? `（${g.count}/${b.counted} 账号）` : '';
+        return `${i + 1}. ${name}：剩 ${fmtNum(g.rem)}${totText}${u}${part}`;
       }),
     ];
     if (skipped) tipLines.push(`未计入 ${skipped} 个：${b.skipped.concat(droppedNames).join('、')}`);

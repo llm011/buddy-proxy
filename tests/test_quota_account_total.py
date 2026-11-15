@@ -300,8 +300,22 @@ quotaAccountTotal(new Map([
 ]))""")
     assert re.search(r"剩 1,200.*?/.*800.*?/.*1,900", out, re.S), f"缺失中间组不应错位相加: {out}"
     assert "（上限 2,000 / 1,000 / 2,000）" in out, out
+    assert "（1/2 账号）" in out, f"缺组行应在悬停提示标明计入账号比: {out}"
     assert "千分制水位" in out, f"说明条/percent 不得把 permille 污染成 credit: {out}"
     assert "兜底比例" not in out and "本轮失败" not in out, out
+
+
+def test_multi_group_zero_total_does_not_show_zero_cap():
+    """某组上限异常 <= 0 时不拼出「/ 0」，括号和悬停改标未知或省略分母。"""
+    out = _render("""
+quotaAccountTotal(new Map([
+  ['A', [
+    {label: '主池', remaining: 1200, total: 2000, unit: 'credit'},
+    {label: '异常池', remaining: 50, total: 0, unit: 'credit'},
+  ]],
+]))""")
+    assert "（上限 2,000 / 未知）" in out, out
+    assert "/ 0" not in out, out
 
 
 def test_all_accounts_failed_renders_nothing():
