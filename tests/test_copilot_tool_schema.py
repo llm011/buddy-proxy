@@ -11,7 +11,10 @@ import pytest
 
 from buddy_proxy.copilot.catalog import ModelEntry
 from buddy_proxy.copilot.provider import CopilotProvider
-from buddy_proxy.copilot.schema import sanitize_anthropic_tools
+from buddy_proxy.copilot.schema import (
+    sanitize_anthropic_tools,
+    sanitize_chat_tools,
+)
 
 
 def _tool(name: str, schema: dict) -> dict:
@@ -219,16 +222,17 @@ def test_payload_for_anthropic_passthrough_keeps_clean_tools():
     assert payload["tools"][0] is tool
 
 
-def test_payload_for_openai_client_on_anthropic_model_uses_chat_unsanitized():
-    # chat 端点不吃严格校验，没必要改工具定义。
-    tool = _tool("t", {"type": ["null", "string"]})
+def test_payload_for_openai_client_on_anthropic_model_sanitizes_chat_tools():
+    # chat 端点与 /v1/messages 共用同一套严格校验（实测同样整条 400），也得收敛。
+    dirty = {"type": ["null", "string"]}
     chat_body = {"messages": [{"role": "user", "content": "hi"}],
-                 "tools": [{"type": "function", "function": tool}]}
+                 "tools": [_chat_tool("t", dirty)]}
     payload = CopilotProvider()._payload_for(
         chat_body, chat_body, None, _anthropic_entry(),
         upstream_model="gemini-4-hydrogen", protocol="openai", stream=True,
     )
-    assert payload["tools"] == chat_body["tools"]
+    assert payload["tools"][0]["function"]["parameters"] == _EMPTY_OBJECT
+    assert chat_body["tools"][0]["function"]["parameters"] is dirty
 
 
 def test_payload_for_anthropic_only_model_still_rejects_openai_client():
@@ -239,3 +243,84 @@ def test_payload_for_anthropic_only_model_still_rejects_openai_client():
             upstream_model="gemini-4-hydrogen", protocol="openai", stream=True,
         )
     assert "只提供 /v1/messages 上游端点" in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# chat 形态（``tools[].function.parameters``）：copilot 的 `/chat/completions`
+# 与 `/v1/messages` 共用同一套严格校验，静态目录里绝大多数模型只声明 chat 端点，
+# 这条路不收敛的话「大工具集必 400」照样复现。
+# ---------------------------------------------------------------------------
+
+def _chat_tool(name: str, schema: dict) -> dict:
+    return {"type": "function", "function": {"name": name, "parameters": schema}}
+
+
+def _clean_chat_tools(tools: list[dict]) -> list[dict]:
+    fixed, _ = sanitize_chat_tools(tools)
+    return fixed
+
+
+def test_chat_tools_top_level_array_becomes_object_with_properties():
+    tools = [_chat_tool("t", {"type": "array", "items": {}})]
+    assert _clean_chat_tools(tools)[0]["function"]["parameters"] == _EMPTY_OBJECT
+
+
+def test_chat_tools_nested_rules_apply_to_parameters():
+    dirty = {"type": "object", "properties": {
+        "x": {"type": ["null", "string"]},
+        "y": {"type": "array"},
+        "z": {"type": "string", "items": {}},
+    }}
+    fixed = _clean_chat_tools([_chat_tool("t", dirty)])[0]["function"]["parameters"]
+    assert fixed["properties"]["x"] == {"type": "string"}
+    assert fixed["properties"]["y"] == {"type": "array", "items": {}}
+    assert fixed["properties"]["z"] == {"type": "string"}
+
+
+def test_chat_tools_flat_shape_is_sanitized_too():
+    tools = [{"name": "t", "parameters": {"type": "array", "items": {}}}]
+    assert _clean_chat_tools(tools)[0]["parameters"] == _EMPTY_OBJECT
+
+
+def test_chat_tools_do_not_mutate_input():
+    dirty = {"type": ["null", "string"]}
+    tools = [_chat_tool("t", dirty)]
+    _clean_chat_tools(tools)
+    assert tools[0]["function"]["parameters"] is dirty
+    assert dirty == {"type": ["null", "string"]}
+
+
+def test_chat_tools_clean_tool_keeps_same_object():
+    tool = _chat_tool("t", {"type": "object", "properties": {}})
+    fixed, changed = sanitize_chat_tools([tool])
+    assert changed == 0
+    assert fixed[0] is tool
+
+
+def test_chat_tools_without_parameters_left_alone():
+    tool = {"type": "function", "function": {"name": "t"}}
+    fixed, changed = sanitize_chat_tools([tool])
+    assert changed == 0
+    assert fixed[0] is tool
+
+
+def test_chat_tools_non_list_passthrough():
+    fixed, changed = sanitize_chat_tools(None)
+    assert fixed is None and changed == 0
+
+
+def test_payload_for_chat_endpoint_sanitizes_tools():
+    # 静态目录里的模型（如 gemini-4-hydrogen）只声明 /chat/completions。
+    entry = ModelEntry(id="gemini-4-hydrogen", name="Gemini 4 Hydrogen",
+                       vendor="google", endpoint="/chat/completions",
+                       endpoints=("/chat/completions",))
+    chat_body = {"messages": [{"role": "user", "content": "hi"}],
+                 "tools": [_chat_tool("t", {"type": "array", "items": {}})]}
+    payload = CopilotProvider()._payload_for(
+        chat_body, chat_body, None, entry,
+        upstream_model="gemini-4-hydrogen", protocol="openai", stream=True,
+    )
+    assert payload["tools"][0]["function"]["parameters"] == _EMPTY_OBJECT
+    # 客户端请求体不能被就地改坏。
+    assert chat_body["tools"][0]["function"]["parameters"] == {
+        "type": "array", "items": {}}

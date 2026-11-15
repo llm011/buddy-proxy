@@ -43,7 +43,7 @@ from ..providers.base import BaseProvider
 from . import failover
 from .catalog import ModelEntry, ModelIndex, load_fallback_catalog, parse_catalog
 from .credentials import AuthError, ensure_account_token, list_accounts
-from .schema import sanitize_anthropic_tools
+from .schema import sanitize_anthropic_tools, sanitize_chat_tools
 from .upstream import (
     API_BASE,
     PATH_CHAT,
@@ -702,6 +702,15 @@ def _chat_payload(chat_body: dict[str, Any], model: str, stream: bool, *,
     payload = {k: v for k, v in chat_body.items() if not k.startswith("_")}
     payload["model"] = model
     payload["stream"] = stream
+    # chat 端点与 /v1/messages 共用同一套严格 schema 校验（逐条实测：顶层 array、
+    # 空 schema、anyOf+type、多类型联合、缺 items 的 array……同样整条 400）。
+    # 随包静态目录里绝大多数模型只声明 /chat/completions，这条路不收敛的话，
+    # 「copilot 大工具集必 400」在那些模型上照样复现。
+    tools, changed = sanitize_chat_tools(payload.get("tools"))
+    if changed:
+        payload["tools"] = tools
+        log.debug("copilot %s: 收敛了 %d 个工具的 parameters 以适配 chat 端点",
+                  model, changed)
     options = payload.get("stream_options")
     if not isinstance(options, dict):
         options = {}

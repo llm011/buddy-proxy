@@ -1,8 +1,9 @@
-"""把 MCP / Claude Code 风格的宽松 JSON Schema 收敛成 Copilot ``/v1/messages`` 能接受的形状。
+"""把 MCP / Claude Code 风格的宽松 JSON Schema 收敛成 Copilot 能接受的形状。
 
-**为什么必须做这件事**：Copilot 的 Anthropic 兼容端点对 ``tools[].input_schema``
-做严格校验，只要有一个 schema 命中下面任意一条，整条请求就回
-``400 invalid request body``（``code: invalid_request_body``），连错误定位都不给：
+**为什么必须做这件事**：Copilot 的 ``/v1/messages`` 与 ``/chat/completions``
+两个端点共用同一套工具 schema 校验，只要有一个 schema 命中下面任意一条，整条
+请求就回 ``400 invalid request body``（``code: invalid_request_body``），连错误
+定位都不给：
 
 1. **组合关键字与同级 ``type`` 并存**：``{"anyOf": […], "type": "string"}``。
    JSON Schema 规范允许，Copilot 拒绝。
@@ -20,9 +21,15 @@ MCP 服务器（本机就有几十个）和 Claude Code 的工具集正好大量
 于是 ``/model copilot/gemini-4-hydrogen`` 这种请求**一律** 400——不是模型不行，
 是历史会话里随便哪个工具的 schema 都足以把整条请求打死。
 
-**同一份 schema 走 chat 端点 ``/chat/completions`` 是可以通过的**（实测 249 个
-工具全带上照样 200），所以只在 anthropic 透传这条路上收敛，别的出口保持原样：
-客户端拿到的工具定义不能被我们悄悄改窄，只有上游不接受时才降级。
+**两个端点都要收敛**（chat 端点用同样的规则逐条实测过：顶层 array、``{}``、
+``anyOf``+``type``、多类型联合、``type`` 联合、缺 ``items`` 的 array、挂在
+非 array 上的 ``items`` 全是 400）。早先只在 anthropic 透传分支收敛，漏掉了
+chat 出口——而随包静态目录里绝大多数模型（含 ``gemini-4-hydrogen``）只声明
+``/chat/completions``，于是「copilot 没修好」的现场一直复现。``/responses``
+端点不校验 schema（实测原始 249 工具 200），保持原样。
+
+客户端拿到的工具定义不能被我们悄悄改窄，所以只在**我们→上游**这一跳降级；
+收敛本身只删不改语义。
 
 收敛是**只删不改语义**的：联合里的 ``null`` 去掉（可选性已经由 ``required``
 表达）、多类型联合优先保留 ``object``/``array`` 的形状信息、被拒的组合关键字
@@ -60,6 +67,43 @@ def sanitize_anthropic_tools(tools: Any) -> tuple[Any, int]:
             out.append(tool)
             continue
         out.append({**tool, "input_schema": fixed})
+        changed += 1
+    return out, changed
+
+
+def sanitize_chat_tools(tools: Any) -> tuple[Any, int]:
+    """收敛一份 chat ``tools`` 列表；返回（新列表, 被改动的工具数）。
+
+    schema 位置有两种写法，上游都收（实测），两种都要处理：
+
+    - 标准包装 ``{"type": "function", "function": {"name": …, "parameters": {…}}}``；
+    - 扁平写法 ``{"name": …, "parameters": {…}}``。
+
+    客户端（含 Claude Code 转 chat 出口时）常把 anthropic 风格的宽松 schema
+    原样塞进 ``parameters``，上游 chat 端点照样整条 400，所以这条路必须收敛。
+    """
+    if not isinstance(tools, list):
+        return tools, 0
+    out: list[Any] = []
+    changed = 0
+    for tool in tools:
+        if not isinstance(tool, dict):
+            out.append(tool)
+            continue
+        func = tool.get("function")
+        holder, key = (func, "parameters") if isinstance(func, dict) else (tool, "parameters")
+        schema = holder.get(key)
+        if not isinstance(schema, dict):
+            out.append(tool)
+            continue
+        fixed = _sanitize_node(schema, root=True)
+        if fixed == schema:
+            out.append(tool)
+            continue
+        if holder is tool:
+            out.append({**tool, key: fixed})
+        else:
+            out.append({**tool, "function": {**func, key: fixed}})
         changed += 1
     return out, changed
 
