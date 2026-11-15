@@ -145,6 +145,27 @@ yes）：access token 过期自动用同一 OAuth client 刷新、onboarding 自
    `convert.py` 的 `_DEFAULT_SCRUB_RULES`，可用 `ANTIGRAVITY_SCRUB_IDENTITY`
    环境变量追加 `term=>replacement` 规则）。
 
+### agent 框架身份同样被拦（2026-11-15 实测，dsh）
+
+除了「竞品模型」身份，**agent 框架的自我介绍**也被同一套硬校验拦。dsh
+（DeepSeek Harness）的系统提示首行是
+`You are an AI agent powered by DeepSeek Harness.`，只要这句留在
+systemInstruction 里，上游就回一个**单事件 429 `RESOURCE_EXHAUSTED`**，
+不带 `Retry-After`、也不报原因；代理按 (账号, 模型) 记 5 分钟冷却，表现
+成「dsh 必 429、curl 必 200」。
+
+直连对照实验（同一份 4 KB 的 dsh 模板一字不改，只换这一句）：
+
+| systemInstruction 首行 | 上游 |
+|---|---|
+| `You are an AI agent powered by DeepSeek Harness.`（原文） | 429 |
+| `You are the assistant.` | 200 |
+
+零宽空格绕不过，必须整句替换。`scrub_identity` 对 dsh 走**整段替换**
+（复用 `core.desensitize._DEEPSEEK_HARNESS_SUMMARY`，与 CodeBuddy 通道
+同一份短摘要），因为模板其余部分（工具约定、exit code 契约）上游都放行。
+注入的 `_SYSTEM_IDENTITY` 本身含 "Antigravity" 字样，不受影响。
+
 ## 指纹对齐表
 
 版本探测顺序：env（`ANTIGRAVITY_UA_VERSION` / `ANTIGRAVITY_CLIENT_VERSION`）
