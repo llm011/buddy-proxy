@@ -60,6 +60,9 @@ buddy login [provider]     # upstream login (codebuddy(=workbuddy, =codebuddyint
                            # trae/qoder/codebuddy accept --region cn|global (accounts differ per region); other providers ignore it
                            # traeintl/qoderintl/codebuddyintl are login aliases meaning --region global; logging in a global account also enables the
                            # traeintl/qoderintl/codebuddyintl channels — separate quota cards in the UI
+buddy usage                # per-channel / per-account plan, remaining quota, reset & expiry
+buddy logs                 # request stats: success rate, latency p50/p95, TTFT, tokens, cache, credits
+buddy doctor               # health check: service / settings / channels / metrics / disk
 buddy ui                   # just open the admin UI (starts the proxy if needed)
 buddy update               # update to the latest code (git pull -> uv sync -> restart)
 
@@ -71,6 +74,45 @@ buddy service uninstall
 
 - When the service is installed, `buddy start/stop/restart` automatically use `launchctl`; otherwise they fall back to `proxy.sh`'s pid management.
 - Env vars `PROXY_HOST` (default `0.0.0.0`), `PROXY_PORT` (default `8787`) and `PROXY_EXTRA_ARGS` apply to both `start` and `service install`.
+- `buddy usage` / `buddy logs` / `buddy doctor` are local tools for the running proxy. Details below.
+
+### Usage / logs / doctor from the terminal
+
+The admin UI is not always the right place to look. These three subcommands answer the questions you ask *outside* the UI — "how much is left on each account", "was that batch slow", "why did the proxy not start".
+
+```bash
+buddy usage                       # every channel → every account: plan items, remaining, reset, expiry
+buddy usage -p trae -p qoder      # only these channels (ids from `buddy usage --list-providers`)
+buddy usage -a '#2'               # only account #2 (the `#N` printed by `buddy usage`)
+buddy usage --refresh kimi        # force a real upstream quota refresh (default reads the panel cache)
+buddy usage --json                # full structured view for scripts
+```
+
+- Data comes from the running proxy's `/ui/api/benefits` panel cache, **merged with local account state** (`failover.accounts_status()`): quota rows show remaining / total / used% / reset / expiry per item, while cooldown and "credential expires in < 24h" only exist locally — an account cooling down after a 429 still shows 80% left and looks fine if you read quota alone.
+- If the proxy is **not running**, `buddy usage` still lists the locally known accounts (read-only, no network) and tells you to `buddy start` for quota.
+- Exit code: `0` all fine, `2` something needs attention (expiry within the urgent window, or a low-balance warning), `1` execution failure. Handy for `buddy usage -p trae || notify`.
+
+```bash
+buddy logs                        # stats over all history: totals, success rate, p50/p90/p95/p99, TTFT, tokens + cache hit, credits
+buddy logs --today                # or --days 3 / --start 2026-11-01 --end 2026-11-07
+buddy logs -p codebuddy -m claude-sonnet-4-5
+buddy logs -a '#2' -n 50          # last 50 requests of one account
+buddy logs --csv > logs.csv       # every filtered row, machine readable
+buddy logs --json                 # same numbers as the text view
+buddy logs --raw                  # plain `tail -f` of the service log (old behaviour)
+```
+
+- Sources are the on-disk `metrics.jsonl` plus its per-day archives, i.e. the same rows as `/ui/api/logs` — so history is available **even when the proxy is down**, which is exactly when you need it.
+- `-p/-m/-c/-a` are exact matches; `-a '#2'` also matches rows where the account was recorded without the `#`. Stats and the request list share one filter, so the numbers always match the rows.
+- The per-account table only shows a channel column when the same id appears under several channels, and folds long UUIDs — the point is to spot one bad account, not to dump 36-char ids.
+
+```bash
+buddy doctor                      # service / settings files / channel accounts / metrics file / disk
+buddy doctor --json
+```
+
+- Exit code is non-zero when the proxy is not listening or any `settings.json` fails to parse — a broken settings file is silently ignored by the service (all your toggles fall back to defaults), so this is the only place you will see it.
+- It uses the same metrics directory derivation as `buddy logs`, so "metrics file" always means the file the service actually writes.
 - `buddy update` runs `git pull --ff-only` in the repo it was installed from, then `uv sync`, then restarts the service. It **refuses to run when the working tree has uncommitted changes** — it will not stash, merge or otherwise touch work in progress, so a half-finished edit can never be silently overwritten. The refusal prints the offending files and a hint tailored to what is actually dirty: if any untracked file is present it suggests `git stash -u` (plain `git stash` leaves untracked files behind, so following that advice would land you right back on the same refusal), otherwise plain `git stash`. `--ff-only` means a diverged branch fails loudly instead of creating a surprise merge commit — the failure message quotes git's own wording (`Not possible to fast-forward` vs `Could not read from remote`) so you can tell a diverged branch from an unreachable remote. If `uv sync` fails the service is left running rather than restarted onto broken dependencies. Running it on an already-current checkout is harmless: it just re-syncs dependencies and restarts.
 
 ### The `proxy.sh` management script

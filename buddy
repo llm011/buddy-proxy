@@ -6,7 +6,10 @@
 #   buddy stop               停止
 #   buddy restart            重启
 #   buddy status             查看状态
-#   buddy logs               跟踪日志
+#   buddy usage              按通道/账号看套餐余量与到期时间（-p 通道、-a #N、--json）
+#   buddy logs               请求日志统计：成功率/耗时p95/首字/token/缓存/积分/分通道分账号；
+#                            筛选 -p/-m/-c/-a/--days/--today，导出 --csv，原始跟踪 --raw
+#   buddy doctor             体检：服务/配置/通道/指标落盘/磁盘（退出码非 0 = 有问题）
 #   buddy cleanup            删除 15 天前的历史日志（保留窗口可用 BUDDY_LOG_KEEP_DAYS 覆盖）；
 #                            超过 10MB 的 service.log / proxy.sh.log 顺带 copytruncate 轮转
 #   buddy login [provider]   登录上游账号（codebuddy(=workbuddy, =codebuddyintl 海外)/trae(=traeintl 海外)/zcode/glm/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/codex/copilot/deepseek；
@@ -41,6 +44,11 @@ PROXY_PORT="${PROXY_PORT:-8787}"
 # 不一致，装成 launchd 服务后兜底通道和手跑脚本时是两个，排查极易被带偏。
 EXTRA_ARGS="${PROXY_EXTRA_ARGS:---desensitize --trae --doubao --dumate --zcode --glm --ark --deepseek --yuntoken --zcode-start --mimo --qoder --antigravity --kimi --codex --copilot --kiro --qwenpc --default-provider codebuddy}"
 
+# `buddy usage|logs|doctor` 走包内的只读 CLI（python -m buddy_proxy.cli）。
+# 用 PROXY_PORT 而不是写死 8787：proxy.sh 在非默认端口起实例时，
+# `buddy usage` 也得找对那一个。
+CLI_PORT="${PROXY_PORT:-8787}"
+
 SERVICE_LABEL="com.buddy.proxy"
 PLIST="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 UI_URL="http://127.0.0.1:${PROXY_PORT}/ui"
@@ -53,6 +61,16 @@ python_bin() {
     else
         command -v python3
     fi
+}
+
+# 包内只读 CLI（usage/logs/doctor）。PYTHONPATH 指到 src：通过 `buddy install`
+# 装的 wrapper 只注入 BUDDY_HOME，venv 里装了可编辑模式时才不需要这一句；
+# 没有它，直接用未 `uv sync` 过的源码树跑会 import 不到 buddy_proxy。
+# 不 exec：`buddy usage` 的退出码 2 = 「有紧急项」，那是给脚本判的，不是错误；
+# exec 本身没问题，但保留为普通调用方便以后在前后加东西（比如提示面板地址）。
+run_cli() {
+    PYTHONPATH="$BUDDY_HOME/src${PYTHONPATH:+:$PYTHONPATH}" \
+        "$(python_bin)" -m buddy_proxy.cli "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -311,7 +329,7 @@ wait_healthy() {
         fi
         sleep 0.5
     done
-    log "警告: /health 30s 内未就绪（查看日志: buddy logs）"
+    log "警告: /health 30s 内未就绪（看启动报错: buddy logs --raw；体检: buddy doctor）"
     return 1
 }
 
@@ -541,7 +559,24 @@ case "${1:-}" in
     stop)         cmd_stop ;;
     restart)      cmd_restart ;;
     status)       cmd_status ;;
-    logs)         exec "$PROXY_SH" logs ;;
+    usage)        shift; run_cli usage --base-url "http://127.0.0.1:${CLI_PORT}" "$@" ;;
+    logs)
+        shift
+        # `--raw` 才走以前那条 tail -F（`buddy logs --raw | grep …` 的老脚本照旧能用）；
+        # 其余一律走统计视图。这里不 exec PROXY_SH：tail -F 是常驻的，统计视图不是。
+        for a in "$@"; do
+            if [[ "$a" == "--raw" ]]; then
+                rest=()
+                for b in "$@"; do [[ "$b" == "--raw" ]] || rest+=("$b"); done
+                # tail 只认 -n；多给的筛选参数别静默吞掉，提示一声再用 -n。
+                if (( ${#rest[@]} )); then
+                    log "注意: --raw 只透传 tail 参数（-n），忽略: ${rest[*]}"
+                fi
+                exec "$PROXY_SH" logs
+            fi
+        done
+        run_cli logs "$@" ;;
+    doctor)       shift; run_cli doctor --port "$CLI_PORT" "$@" ;;
     cleanup)      cmd_cleanup ;;
     login)        shift; exec "$PROXY_SH" login "$@" ;;
     ui)
