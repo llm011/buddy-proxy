@@ -82,6 +82,14 @@ def _scrub_rules() -> list[tuple[str, str]]:
     return _DEFAULT_SCRUB_RULES + (_parse_env_rules(env) if env else [])
 
 
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
+
+
+def _strip_zero_width(text: str) -> str:
+    """去掉零宽字符，只用于身份声明匹配（不改动发出去的正文）。"""
+    return text.translate(_ZERO_WIDTH)
+
+
 def scrub_identity(text: str) -> str:
     """清洗 system 文本里的竞品身份断言（大小写不敏感的整词替换）。
 
@@ -106,7 +114,9 @@ def scrub_identity(text: str) -> str:
     # dsh 走整段替换而不是词级替换：下游模板（工具约定、exit code 契约等）
     # 都是上游放行的普通指令，只有那句身份声明被拦；复用 CodeBuddy 那份
     # 已经过实测的短摘要，保持两条通道对同一客户端的行为一致。
-    if _DEEPSEEK_HARNESS_MARKER in text.lower():
+    # 匹配前先抹掉零宽字符：客户端把这句话拆开（词间塞 U+200B 之类）上游照样拦，
+    # 所以大小写和零宽都要容忍，宁可多换一次也不能漏。
+    if _DEEPSEEK_HARNESS_MARKER in _strip_zero_width(text).lower():
         return _DEEPSEEK_HARNESS_SUMMARY
     for term, repl in _scrub_rules():
         text = re.sub(re.escape(term), repl, text, flags=re.IGNORECASE)

@@ -119,6 +119,12 @@ def test_scrub_identity_replaces_dsh_identity_sentence():
     # 大小写变体也命中（上游同样拦）
     assert convert.scrub_identity(marker.lower()) == _DEEPSEEK_HARNESS_SUMMARY
 
+    # 词间塞零宽空格也命中：上游拦的是这句话，客户端把它拆开照样过不去
+    # （CodeBuddy 通道同结论），所以匹配必须容忍零宽字符。
+    zw = "​"
+    spaced = "You are an AI agent powered by DeepSeek" + zw + " Harness."
+    assert convert.scrub_identity(spaced) == _DEEPSEEK_HARNESS_SUMMARY
+
     # 近似句式不误伤：去掉一个词就是上游放行的普通指令
     near = "You are an AI agent powered by DeepSeek."
     assert convert.scrub_identity(near) == near

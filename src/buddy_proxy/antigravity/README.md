@@ -164,6 +164,10 @@ systemInstruction 里，上游就回一个**单事件 429 `RESOURCE_EXHAUSTED`**
 零宽空格绕不过，必须整句替换。`scrub_identity` 对 dsh 走**整段替换**
 （复用 `core.desensitize._DEEPSEEK_HARNESS_SUMMARY`，与 CodeBuddy 通道
 同一份短摘要），因为模板其余部分（工具约定、exit code 契约）上游都放行。
+匹配前会先抹掉零宽字符，客户端把这句话拆开也一样命中。副作用是：整段
+替换后那些工具约定与 exit code 契约也一并变成摘要——实测这是安全的，
+dsh 侧的契约由客户端自己执行（读工具结果），不依赖模型记住这段话；若要
+保留，得改成只剪掉身份句、其余原样，但那样要多测一轮上游，暂不做。
 注入的 `_SYSTEM_IDENTITY` 本身含 "Antigravity" 字样，不受影响。
 
 ## 指纹对齐表
