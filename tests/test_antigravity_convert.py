@@ -174,7 +174,7 @@ def test_fingerprint_headers(monkeypatch):
 
     h = fp.auth_headers("tok", "gemini-3.8-flash", stream=True)
     assert h["Authorization"] == "Bearer tok"
-    assert h["User-Agent"].startswith("antigravity/2.18.1 ")
+    assert h["User-Agent"].startswith("antigravity/hub/2.18.1 (aidev_client; ")
     assert h["User-Agent"].endswith(" gemini-3.8-flash")
     assert h["X-Client-Name"] == "antigravity"
     assert h["X-Client-Version"] == "1.110.0"
@@ -201,16 +201,18 @@ def test_fingerprint_fallback_without_product_json(monkeypatch):
 
 
 def test_fallback_ua_clears_upstream_version_gate(monkeypatch):
-    """fallback UA 必须过上游版本门槛；退回旧值会让流式恒吐提示文本。
+    """fallback UA 必须同时过版本门槛并带 hub 形态；否则 gemini-4/流式都废。
 
-    2026-11-15 实测（两个账号、交错 A/B 多轮）：antigravity/2.0.3 的
-    streamGenerateContent 返回单事件固定文案「This version of Antigravity is
-    no longer supported.」，没有 usageMetadata / finishReason，是网关短路、
-    没进模型；2.9.0 起才给真回复。X-Client-Version 不是门槛，单独改它无效，
-    所以只有 UA 的 fallback 升到 3.0.0（留一档余量）。
+    2026-11-15 实测（两个账号、交错 A/B 多轮）：
+    1. 版本门槛：antigravity/2.0.3 的 streamGenerateContent 返回单事件固定文案
+       「This version of Antigravity is no longer supported.」，没进模型；2.9.0
+       起才给真回复。X-Client-Version 不是门槛，单独改它无效。
+    2. 形态门槛：生成 4 族只认 ``antigravity/hub/<v> (aidev_client; ...)``；
+       旧形态 ``antigravity/<v> <os>/<arch>`` 对 gemini-4-* 恒 404（其余正常），
+       且 UA 版本 < 2.23.0 同样拿不到。
 
-    锁具体值而不是只锁「等于常量」：上一版常量就是 2.0.3，若有人把它改回
-    旧值，这条断言当场红，而不是等用户在 dsh 里选模型才发现拿到的是废话。
+    锁具体值而不是只锁「等于常量」：上一版常量就是 2.0.3，若有人改回旧值，
+    这条断言当场红，而不是等用户选模型才发现拿到 404 或废话。
     """
     from buddy_proxy.antigravity import fingerprint as fp
 
@@ -220,10 +222,48 @@ def test_fallback_ua_clears_upstream_version_gate(monkeypatch):
     monkeypatch.setattr(fp, "_CLIENT_VERSION", None)
     monkeypatch.setattr(fp, "_product_json_paths", lambda: [])
 
-    assert fp.FALLBACK_UA_VERSION == "3.0.0"
-    assert fp.user_agent("gemini-3.8-flash-tiered").startswith("antigravity/3.0.0 ")
+    assert fp.FALLBACK_UA_VERSION == "2.32.1"
+    assert fp._at_least(fp.FALLBACK_UA_VERSION, fp.MIN_UA_VERSION)
+    assert fp.user_agent("gemini-3.8-flash-tiered").startswith(
+        "antigravity/hub/2.32.1 (aidev_client; os_type="
+    )
     # 门槛只在 UA：X-Client-Version 保持参考实现的值不动。
     assert fp.FALLBACK_CLIENT_VERSION == "1.110.0"
     h = fp.auth_headers("tok", stream=True)
     assert h["X-Client-Version"] == "1.110.0"
-    assert h["User-Agent"].startswith("antigravity/3.0.0 ")
+    assert h["User-Agent"].startswith("antigravity/hub/2.32.1 (aidev_client; ")
+
+
+def test_user_agent_shape_unlocks_gemini4_family():
+    """UA 必须是 ``antigravity/hub/<v> (<meta>)``：hub/ 路径段与圆括号缺一不可。
+
+    实测矩阵（2026-11-15，gemini-4-hydrogen-high）：只有带 hub/ 且带括号元数据
+    的形态返回 200；缺任一项均 404。这里锁死形态，避免「优化」成别的样子。
+    """
+    from buddy_proxy.antigravity import fingerprint as fp
+
+    ua = fp.user_agent()
+    assert ua.startswith("antigravity/hub/")
+    assert ")" in ua
+    metadata = ua.split("(", 1)[1]
+    assert metadata.startswith("aidev_client; os_type=")
+    assert "; arch=" in metadata
+    # 尾巴可选，但不应影响形态判定。
+    assert fp.user_agent("gemini-4-argon-high").startswith(ua + " ")
+
+
+def test_local_product_json_below_floor_falls_back(monkeypatch, tmp_path):
+    """本机装的是老客户端时，UA 版本仍抬到 fallback（Gemini 4 有 ≥2.23.0 门槛）。"""
+    from buddy_proxy.antigravity import fingerprint as fp
+
+    monkeypatch.delenv("ANTIGRAVITY_UA_VERSION", raising=False)
+    monkeypatch.delenv("ANTIGRAVITY_CLIENT_VERSION", raising=False)
+    monkeypatch.setattr(fp, "_UA_VERSION", None)
+    monkeypatch.setattr(fp, "_CLIENT_VERSION", None)
+    product = tmp_path / "product.json"
+    product.write_text('{"ideVersion": "2.10.0", "version": "1.90.0"}', encoding="utf-8")
+    monkeypatch.setattr(fp, "_product_json_paths", lambda: [product])
+
+    ua_ver, client_ver = fp._detect_versions()
+    assert ua_ver == fp.FALLBACK_UA_VERSION  # 低于门槛 -> 抬到 fallback
+    assert client_ver == "1.90.0"  # X-Client-Version 跟随本机，不抬
