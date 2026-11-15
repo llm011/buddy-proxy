@@ -612,6 +612,8 @@ console.log(JSON.stringify({
     {label: 'a@x.y', unit: 'percent', percent: 9.0, used: null, total: null, remaining: null},
   ]),
   numericRemainingWithNullTotal: quotaRemaining({remaining: 386, used: null, total: null}),
+  emptyRemainingWithPercent: quotaRemaining({remaining: '', unit: 'percent', percent: 9}),
+  nonNumericRemaining: quotaRemaining({remaining: '余额未知'}),
   // 说明条 + 一条有余额：这组卡是画得出来的，不能整块折掉
   partial: quotaProviderExhausted([{remaining: 0, query_failed: true}, {remaining: 5}]),
 }));
@@ -622,6 +624,8 @@ console.log(JSON.stringify({
     assert r["resetOnly"] is True and r["nullUsed"] is True, r
     assert r["codexActive"] is False and r["percentOnlyActive"] is False, r
     assert r["numericRemainingWithNullTotal"] == 386, r
+    assert r["emptyRemainingWithPercent"] == 91, r
+    assert r["nonNumericRemaining"] is None, r
     # 但「部分失败 + 部分有余额」必须保持展开：失败那组是用户要看的信息
     assert r["partial"] is False, r
 

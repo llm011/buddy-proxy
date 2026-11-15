@@ -233,11 +233,10 @@ function quotaSpent(it) {
 // 不能反手把有效余量抹成 null（否则「剩 91%」会整卡挂出「无剩余额度」）。
 function quotaRemaining(it) {
   const numeric = v => v != null && v !== '' && typeof v !== 'boolean' && Number.isFinite(Number(v));
-  let r = it.remaining;
+  let r = numeric(it.remaining) ? Number(it.remaining) : null;
   if (r == null && numeric(it.used) && numeric(it.total)) r = Number(it.total) - Number(it.used);
   if (r == null && it.unit === 'percent' && numeric(it.percent)) r = 100 - Number(it.percent);
-  if (!numeric(r)) return null;
-  return Number(r);
+  return r;
 }
 
 // ---- provider 级折叠：没额度的通道都收起来 ----

@@ -208,6 +208,7 @@ function renderCodexPanel() {
       return `Codex #${acct.index}`;
     }
     if (groups.size === 1 && groups.has('Codex')
+        && !/^Codex #\d+(?: · |$)/.test(who)
         && (!CODEX_ACCTS || CODEX_ACCTS.length <= 1)) {
       return 'Codex';
     }

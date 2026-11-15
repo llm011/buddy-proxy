@@ -565,3 +565,25 @@ console.log(JSON.stringify({
 """ % json.dumps(_provider(items)))
     init_data = json.loads(out_initial.strip().splitlines()[-1])
     assert init_data["cards"] == 1 and init_data["resetLines"] == 1 and init_data["hasReset"]
+    # 多账号首屏（CODEX_ACCTS=null）：即便只有单号进了 'Codex' 组，带 `Codex #2 · ` 的券也不得被并到 'Codex' 卡
+    multi_items = [
+        {"label": "a@x.y", "used": None, "total": None,
+         "remaining": 91.0, "percent": 9.0, "unit": "percent",
+         "reset_ts": 1793000000, "expire_ts": None, "note": "business 套餐"},
+        _reset_item("Codex #2 · b@x.y", 1, 1),
+    ]
+    out_multi = _run_js("""
+globalThis.BENEFITS = {providers: [%s]};
+CODEX_ACCTS = null;
+globalThis.api = async () => ({enabled: true, accounts: []});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+renderCodexPanel();
+const html = PANEL.innerHTML;
+console.log(JSON.stringify({
+  cards: html.split('pat-pkg-name').length - 1,
+  resetLines: html.split('data-reset-credit').length - 1,
+}));
+""" % json.dumps(_provider(multi_items)))
+    multi_data = json.loads(out_multi.strip().splitlines()[-1])
+    assert multi_data["cards"] == 2 and multi_data["resetLines"] == 1
