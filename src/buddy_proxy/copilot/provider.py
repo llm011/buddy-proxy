@@ -43,6 +43,7 @@ from ..providers.base import BaseProvider
 from . import failover
 from .catalog import ModelEntry, ModelIndex, load_fallback_catalog, parse_catalog
 from .credentials import AuthError, ensure_account_token, list_accounts
+from .schema import sanitize_anthropic_tools
 from .upstream import (
     API_BASE,
     PATH_CHAT,
@@ -431,6 +432,16 @@ class CopilotProvider(BaseProvider):
                 payload = {k: v for k, v in original.items() if not k.startswith("_")}
                 payload["model"] = upstream_model
                 payload["stream"] = stream
+                # 上游 anthropic 端点对 tools[].input_schema 是严格校验的：MCP/Claude
+                # Code 风格的宽松 schema（联合 type、anyOf + type 并存、游离 items）
+                # 会让**整条**请求 400 invalid request body，连哪个工具错了都不说。
+                # 同一份 schema 走 chat 端点没问题（实测 249 工具照样 200），所以
+                # 只在这条透传路上收敛；没被改动的工具原样保留。
+                tools, changed = sanitize_anthropic_tools(payload.get("tools"))
+                if changed:
+                    payload["tools"] = tools
+                    log.debug("copilot %s: 收敛了 %d 个工具的 input_schema 以适配上"
+                              "游 /v1/messages", upstream_model, changed)
                 return payload
             if PATH_CHAT not in entry.endpoints:
                 raise HTTPException(status_code=400, detail={"error": {
