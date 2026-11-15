@@ -603,6 +603,11 @@ class AntigravityProvider(BaseProvider):
                 if gate.timed_out:
                     last_status, last_detail = 504, "首事件前读超时"
                     failover.mark_cooldown(acct.id, reason="首事件前读超时")
+                elif gate.empty:
+                    # 上游只想了没答（0 token 空内容）：不是账号问题，不冷却，
+                    # 单纯换号重试；全部账号都空时对外报 502，让客户端明确重试
+                    last_status = 502
+                    last_detail = f"空内容（finishReason={gate.message or 'n/a'}）"
                 await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
 
@@ -673,6 +678,16 @@ class AntigravityProvider(BaseProvider):
                         if last_status == 429 else "")
         states = "；".join(part for part in (report, model_report) if part)
         tail = f"最后错误 HTTP {last_status or 'n/a'}{(': ' + last_detail) if last_detail else ''}"
+        if last_status == 502 and last_detail.startswith("空内容"):
+            # 所有账号都只给了空内容：不说「全部不可用」，直接点明上游空成功，
+            # 客户端（dsh 等）据此重试比拿到「成功但没有内容」好得多。
+            raise HTTPException(
+                status_code=502,
+                detail={"error": {
+                    "message": f"antigravity {upstream_model} stream returned no content（{last_detail}）",
+                    "type": "bad_gateway",
+                }},
+            )
         raise HTTPException(
             status_code=last_status if last_status in (401, 403, 429, 504) else 502,
             detail={"error": {
@@ -690,9 +705,16 @@ class AntigravityProvider(BaseProvider):
 
         非流式：全量解析 JSON，``error.code ∈ {429,403}`` 视为账号级错误
         （此时一个字节都没出网，换号绝对安全）。流式：缓冲原始 SSE 行直到
-        第一条能定性的事件——见 candidates 即语义已至（committed，缓冲行随
-        透传补放，客户端无损）；error 节点按 code 分类；只有 usageMetadata
-        则继续等；语义事件前断流/EOF 按 eof 处理（换号）。
+        第一条能定性的事件——见**真负载**（text / functionCall / inlineData）
+        即语义已至（committed，缓冲行随透传补放，客户端无损）；error 节点按
+        code 分类；只有 usageMetadata 或纯 thinking（``thought: true``）则继续
+        等；真负载出现前断流/EOF 按 eof 处理（换号）。
+
+        纯 thinking 不算 commit：上游偶发「只想不答」的流——输出 0 token、
+        finish=STOP、parts 里只有 thought 或干脆为空。这种流以前一见
+        ``candidates`` 就透传，客户端拿到的是「成功但没有内容」，dsh 归类
+        EMPTY_RESPONSE 重试 5 次后中止整轮。上游都没产出真负载时网关还一个
+        字节没出网，换号重试是安全且正确的。
         """
         if not stream:
             try:
@@ -705,10 +727,15 @@ class AntigravityProvider(BaseProvider):
                 if code in (429, 403):
                     return _Gate(resp=resp, account_error=True, code=code,
                                  message=str(err.get("message") or ""))
-            return _Gate(resp=resp, committed=True,
-                         payload=payload if isinstance(payload, dict) else None)
+            if not isinstance(payload, dict) or _has_real_payload(payload):
+                return _Gate(resp=resp, committed=True,
+                             payload=payload if isinstance(payload, dict) else None)
+            # 有 candidates 但只有 thinking/空 parts：假成功（空内容），换号
+            return _Gate(resp=resp, eof=True, empty=True,
+                         message=_gate_finish_reason(_gate_candidates(payload)))
 
         buffered: list[str] = []
+        saw_candidates = False  # 见过 candidates 但没有真负载（纯 thinking/空 parts）
         # httpx 响应流一次性消费：迭代器只创建这一次，所有 return 都把它
         # 带上（透传时 _ReplayStream 续跑、换号时 _drain_and_close 排空）。
         lines = resp.aiter_lines()
@@ -742,16 +769,26 @@ class AntigravityProvider(BaseProvider):
                                      message=str(err.get("message") or ""), lines=lines)
                     # 其它带内错误（400 等）：换号没意义，缓冲行随透传交给转换器
                     return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
-                if inner.get("candidates"):
+                if _has_real_payload(payload):
                     return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
-                # 仅 usageMetadata 等非语义事件：继续等下一条
+                if _gate_candidates(payload):
+                    saw_candidates = True
+                finish_reason = _gate_finish_reason(_gate_candidates(payload))
+                if finish_reason:
+                    # 已收尾的 chunk 仍只有 thinking/空 parts：只想了没答，
+                    # 换号重试（客户端还没收到任何字节）
+                    return _Gate(resp=resp, eof=True, empty=True,
+                                 message=finish_reason, lines=lines)
+                # 仅 usageMetadata / 纯 thinking：继续等下一条
         except httpx.TimeoutException:
             # 首事件前读超时（上游排队/挂死）：与 EOF 同为「没出字节可换号」，
             # 但带 timed_out 标记让调用方短冷却——挂死账号别每轮都被首选。
             return _Gate(resp=resp, eof=True, timed_out=True, lines=lines)
         except httpx.HTTPError:
-            return _Gate(resp=resp, eof=True, lines=lines)
-        return _Gate(resp=resp, eof=True, lines=lines)  # 语义事件前 EOF：假成功，换号
+            return _Gate(resp=resp, eof=True, empty=saw_candidates, lines=lines)
+        # 真负载前 EOF：假成功，换号；没有 finishReason 就断流的纯 thinking
+        # 同样算空内容（saw_candidates），全部账号都这样时报 502
+        return _Gate(resp=resp, eof=True, empty=saw_candidates, lines=lines)
 
     # ---- 内部 ----
 
@@ -1241,6 +1278,41 @@ def _primary_token() -> str:
         ) from exc
 
 
+def _gate_candidates(payload: Any) -> list[dict[str, Any]]:
+    """取 v1internal envelope（或裸响应）里的 candidates，形状不对就当空。"""
+    if not isinstance(payload, dict):
+        return []
+    inner = payload.get("response") if isinstance(payload.get("response"), dict) else payload
+    cands = inner.get("candidates") if isinstance(inner, dict) else None
+    return [c for c in (cands or []) if isinstance(c, dict)] if isinstance(cands, list) else []
+
+
+def _has_real_payload(payload: Any) -> bool:
+    """candidates 里是否已有真负载：text / functionCall / inlineData。
+
+    纯 thinking（``thought: true``）不算——它是过程不是回答；只有它没有
+    回答的流对客户端就是空响应（见 _gate_first_event 的说明）。
+    """
+    for cand in _gate_candidates(payload):
+        parts = (cand.get("content") or {}).get("parts") if isinstance(cand.get("content"), dict) else None
+        for part in parts or []:
+            if not isinstance(part, dict):
+                continue
+            if "functionCall" in part or "inlineData" in part or "inline_data" in part:
+                return True
+            if part.get("text") and part.get("thought") is not True:
+                return True
+    return False
+
+
+def _gate_finish_reason(cands: list[dict[str, Any]]) -> str:
+    for cand in cands:
+        reason = str(cand.get("finishReason") or "")
+        if reason:
+            return reason
+    return ""
+
+
 @dataclass
 class _Gate:
     """首事件闸门的判定结果。
@@ -1261,6 +1333,9 @@ class _Gate:
     message: str = ""
     eof: bool = False  # 语义事件前断流/EOF：假成功，换号
     timed_out: bool = False  # eof 的细分：读超时（区别于干净 EOF，调用方要短冷却）
+    # 上游只给了 thinking/空内容（message=finishReason）。流式时是 eof 的细分；
+    # 非流式没有 EOF 概念，复用同一字段表示「响应存在但无真负载」。
+    empty: bool = False
 
 
 class _ReplayStream:

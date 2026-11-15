@@ -1535,6 +1535,15 @@ OpenAI 协议的扩展字段里有容身之处，Anthropic 客户端（Claude Co
 完整表格与复测脚本（`tools/bench_antigravity.py`）见
 [`docs/antigravity-bench.md`](docs/antigravity-bench.md)。
 
+**空内容不再当成功**（2026-11-16）——上游偶发「只想了没答」：流里
+`outputTokens: 0`、`finishReason: STOP`，parts 只有 `thought: true` 或干脆为空。
+旧闸门一见 `candidates` 就透传，客户端收到的是「成功但没有内容」，dsh 归类
+`EMPTY_RESPONSE` 重试 5 次后中止整轮（实测 `gemini-4-hydrogen` 长上下文第 6–8 轮
+连续复现）。现在闸门只在见到**真负载**（`text` / `functionCall` / `inlineData`）
+时才 commit，纯 thinking 继续等；真负载前 EOF 或带 `finishReason` 的空 candidates
+都按空内容换号（不冷却账号，这不是账号问题），全部账号都空时明确返回 502
+`antigravity <model> stream returned no content`，非流式同理。
+
 模型（2026-11-15 每个默认档都实测 200；表在
 `src/buddy_proxy/antigravity/models.json`）：
 `antigravity/gemini-4-argon`（默认 `-medium`，可 `-low`/`-high`；**独立周池**，

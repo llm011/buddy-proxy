@@ -509,6 +509,37 @@ def test_stream_gate_one_shot_body_not_double_consumed(two_accounts, monkeypatch
     assert '"usage"' in text and '"prompt_tokens": 1' in text  # 第二事件（闸门缓冲行之后）没有丢
 
 
+def test_stream_gate_thinking_then_text_single_loop(two_accounts, monkeypatch):
+    """纯 thinking 不算 commit：闸门续读同一条流直到真文本（单 loop，同生产）。
+
+    thinking 帧留在缓冲里，既不丢弃也不提前透传；真文本到达后连同它一起按
+    committed 补放——即使上游用的是不可重放的 chunked body。
+    """
+    provider, up = two_accounts
+    think = json.dumps({"candidates": [{"content": {"parts": [{"text": "think", "thought": True}]}}]})
+    text = json.dumps({"candidates": [{"content": {"parts": [{"text": "hello"}]}, "finishReason": "STOP"}]})
+    up.plan["tok-u@x.com"] = (
+        200,
+        _ChunkedBody([f"data: {think}\n\n".encode(), f"data: {text}\n\n".encode()]),
+        {"content-type": "text/event-stream"},
+    )
+    _patch_token(monkeypatch)
+
+    async def _forward_and_collect() -> str:
+        from buddy_proxy.antigravity.provider import MODELS
+
+        body = {**_BODY, "model": f"antigravity/{MODELS[0]['id']}", "stream": True}
+        sr = await provider.forward(body, "openai")
+        chunks = []
+        async for chunk in sr.body_iterator:
+            chunks.append(chunk.encode() if isinstance(chunk, str) else chunk)
+        return b"".join(chunks).decode()
+
+    text_out = asyncio.run(_forward_and_collect())
+    assert "hello" in text_out and "think" in text_out  # thinking 随 commit 补放，不丢
+    assert up.calls == ["tok-u@x.com"]
+
+
 def test_stream_gate_switches_on_in_band_429(two_accounts, monkeypatch):
     """HTTP 200 但首条 SSE 事件是 429 error：未出字节，冷却换号。"""
     from buddy_proxy.antigravity import failover
@@ -559,6 +590,86 @@ def test_stream_gate_eof_switches_without_cooldown(two_accounts, monkeypatch):
     assert sr.status_code == 200
     assert "pong" in _stream_text(sr)
     assert failover.cooldown_left("u@x.com") == (0.0, "")
+    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+
+
+# 上游偶发「只想了没答」：output 0 token、finish=STOP、parts 里只有 thought。
+# 旧闸门一见 candidates 就 commit，客户端拿到「成功但没有内容」（dsh →
+# EMPTY_RESPONSE 重试 5 次后中止整轮）；现在按空内容换号。
+_SSE_THOUGHT_ONLY = _sse([
+    json.dumps({"candidates": [{"content": {"parts": [{"text": "plan...", "thought": True}],
+                                           "role": "model"},
+                                "finishReason": "STOP"}]}),
+    json.dumps({"usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 0}}),
+])
+# 空 parts 且没有 finishReason 的纯 thinking 帧，最后靠 EOF 收尾
+_SSE_THOUGHT_THEN_EOF = _sse([
+    json.dumps({"candidates": [{"content": {"parts": [{"text": "hmm", "thought": True}]}}]}),
+])
+
+
+@pytest.mark.parametrize("empty_body", [_SSE_THOUGHT_ONLY, _SSE_THOUGHT_THEN_EOF])
+def test_stream_gate_empty_switches_account(two_accounts, monkeypatch, empty_body):
+    """上游只给 thinking/空内容：未出字节，换号重试且不冷却账号。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, empty_body, {})
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    sr = _run(provider, stream=True)
+    assert sr.status_code == 200
+    text = _stream_text(sr)
+    assert "pong" in text
+    assert "plan..." not in text and "hmm" not in text  # 失败账号的 thought 不得透传
+    assert failover.cooldown_left("u@x.com") == (0.0, "")
+    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+
+
+def test_stream_gate_empty_all_accounts_raises(two_accounts, monkeypatch):
+    """所有账号都只给 thinking：明确 502 no content，而不是「成功但没有内容」。"""
+    from fastapi import HTTPException
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, _SSE_THOUGHT_ONLY, {})
+    up.plan["tok-v@y.com"] = (200, _SSE_THOUGHT_ONLY, {})
+    _patch_token(monkeypatch)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(provider, stream=True)
+    assert ei.value.status_code == 502
+    assert "returned no content" in json.dumps(ei.value.detail, ensure_ascii=False)
+    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+
+
+def test_stream_gate_thinking_then_text_commits(two_accounts, monkeypatch):
+    """先 thinking 后真文本：仍在闸门内，见到 text 才 commit，切回同一账号。"""
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, _sse([
+        json.dumps({"candidates": [{"content": {"parts": [{"text": "think", "thought": True}]}}]}),
+        json.dumps({"candidates": [{"content": {"parts": [{"text": "pong"}]},
+                                    "finishReason": "STOP"}]}),
+    ]), {})
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    text = _stream_text(_run(provider, stream=True))
+    assert "pong" in text
+    assert up.calls == ["tok-u@x.com"]
+
+
+def test_nonstream_empty_switches_account(two_accounts, monkeypatch):
+    """非流式同理：candidates 只有 thinking → 换号，不把空内容当成功。"""
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, {"candidates": [{
+        "content": {"parts": [{"text": "plan...", "thought": True}], "role": "model"},
+        "finishReason": "STOP"}]}, {})
+    up.plan["tok-v@y.com"] = (200, _gemini_ok(), {})
+    _patch_token(monkeypatch)
+
+    resp = _run(provider)
+    assert resp.status_code == 200 and b"pong" in resp.body
     assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
 
 
