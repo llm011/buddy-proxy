@@ -53,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "copilot")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -1004,6 +1004,87 @@ def _login_kiro(**_kwargs) -> int:
     return 1
 
 
+def _login_copilot(open_browser: bool = True, *, gh_user: str = "",
+                   token: str = "", **_kwargs) -> int:
+    """GitHub Copilot 登录：**优先复用 gh CLI 已登录的账号**，不另开授权页。
+
+    Copilot 没有可替换的 token 刷新链（``/copilot_internal/v2/token`` 对个人
+    订阅已 403），能用的凭据就是一把 GitHub OAuth token。本机装了 gh 且已
+    ``gh auth login`` 时，``gh auth token`` 拿到的就是同一把钥匙——多一步设备码
+    授权只会多一个需要用户记住的浏览器标签。
+
+    三条路（都不打印 token 本身）：
+
+    1. ``--token gho_...``：显式给一把（脚本/CI）；
+    2. 默认：列出 ``gh auth status`` 里的账号让用户选（或 ``--gh-user`` 指定），
+       逐个 ``gh auth token`` → ``/user`` 探测身份 → 落盘；
+    3. 没装 gh / 全失败：GitHub OAuth **device flow**（``--no-browser`` 只打印码）。
+    """
+    import sys
+
+    from buddy_proxy.copilot import credentials as cpc
+
+    def _save(raw: str, *, source: str) -> int:
+        try:
+            ref = cpc.save_token(raw, source=source)
+        except cpc.AuthError as exc:
+            print(f"[!] 导入失败: {exc}")
+            return 1
+        print(f"[OK] 已保存 Copilot 账号 {ref.id}（顺位 {ref.priority}）")
+        return 0
+
+    if token:
+        if not cpc.is_gho_token(token):
+            print("[!] 这个看起来不是 GitHub token（应以 gho_/ghp_/ghu_ 开头）")
+            return 1
+        return _save(token, source="token")
+
+    if not gh_user:
+        users = cpc.gh_accounts()
+        if users:
+            print("本机 gh CLI 已登录的账号：")
+            for i, user in enumerate(users, 1):
+                print(f"  {i}. {user}")
+            picked: list[str] = []
+            if sys.stdin.isatty():
+                try:
+                    raw = input("要导入哪些账号？（序号或逗号分隔，回车=全部）: ").strip()
+                except EOFError:
+                    raw = ""
+                if raw:
+                    try:
+                        picked = [users[int(x) - 1] for x in raw.split(",") if x.strip()]
+                    except (ValueError, IndexError):
+                        print("[!] 序号不合法")
+                        return 1
+            for user in picked or users:
+                try:
+                    _save(cpc.gh_token(user), source=f"gh:{user}")
+                except cpc.AuthError as exc:
+                    print(f"[!] {user}: {exc}")
+            return 0
+        gh_user = ""
+    elif gh_user:
+        try:
+            return _save(cpc.gh_token(gh_user), source=f"gh:{gh_user}")
+        except cpc.AuthError as exc:
+            print(f"[!] {exc}")
+            return 1
+
+    print("[copilot] 没有可复用的 gh 登录态，改用 GitHub device flow…")
+    try:
+        cred = cpc.device_flow_login(open_browser=open_browser)
+    except cpc.AuthError as exc:
+        print(f"\n[X] Copilot 登录失败: {exc}")
+        return 1
+    except KeyboardInterrupt:
+        print("\n[copilot] 已取消。")
+        return 1
+    ref = cpc.save_account_cred(cred)
+    print(f"[OK] 已保存 Copilot 账号 {ref.id}（顺位 {ref.priority}）")
+    return 0
+
+
 _DISPATCH = {
     "codebuddy": _login_codebuddy,
     "trae": _login_trae,
@@ -1020,6 +1101,7 @@ _DISPATCH = {
     "deepseek": _login_deepseek,
     "yuntoken": _login_yuntoken,
     "kiro": _login_kiro,
+    "copilot": _login_copilot,
 }
 
 
@@ -1049,9 +1131,16 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy, =codebuddyintl 海外) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi / codex，默认 codebuddy")
+                        help="codebuddy(=workbuddy, =codebuddyintl 海外) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi / codex / copilot，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi/codex 登录不自动打开浏览器，只打印链接")
+    parser.add_argument("--gh", action="store_true",
+                        help="copilot：复用本机 gh CLI 已登录的账号（默认就是这条路径，"
+                             "加不加都一样；显式写出来便于脚本表达意图）")
+    parser.add_argument("--gh-user", default="",
+                        help="copilot：只导入 gh CLI 里指定的这个 GitHub 账号")
+    parser.add_argument("--token", default="",
+                        help="copilot：直接给一把 GitHub token（gho_...），不读 gh/keychain")
     parser.add_argument("--region", default=None,
                         help="trae/qoder/codebuddy 登录区域：cn（国内版）/ global（海外版）。"
                              "不给且是交互终端时会问一句；两区账号不通用。"
@@ -1067,6 +1156,9 @@ def main() -> int:
         parser.error(f"未知 provider: {args.provider}（支持: {', '.join(KNOWN_PROVIDERS)}，"
                      f"workbuddy 是 codebuddy 的别名；traeintl/qoderintl 是 "
                      f"trae/qoder 的海外登录别名）")
+    if provider == "copilot":
+        return handler(open_browser=not args.no_browser, region=region,
+                       gh_user=args.gh_user, token=args.token)
     return handler(open_browser=not args.no_browser, region=region)
 
 

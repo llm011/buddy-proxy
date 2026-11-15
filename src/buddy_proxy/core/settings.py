@@ -233,7 +233,7 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 KNOWN_PROVIDER_IDS = frozenset(
     {"codebuddy", "codebuddyintl", "zcode", "glm", "ark", "mimo", "qoder", "qoderintl",
      "doubao", "dumate", "trae", "traepat", "traeintl", "kimi", "codex", "deepseek",
-     "yuntoken"}
+     "yuntoken", "copilot"}
 )
 
 #: 通道没启用时，告诉用户**怎么启用**。值是要打印给用户看的短句。
@@ -259,6 +259,8 @@ PROVIDER_ENABLE_HINTS: dict[str, str] = {
     "qoderintl": "先 `buddy login qoder --region global` 登录海外账号，再加 --qoder",
     "codebuddyintl": "先 `buddy login codebuddy --region global` 登录海外账号，重启 Buddy 自动注册",
     "kimi": "加 --kimi（或设 KIMI_ENABLED=1）",
+    "copilot": "加 --copilot（或设 COPILOT_ENABLED=1），先用 `gh auth login` 登录 GitHub "
+               "再 `buddy login copilot`（或在管理页导入 token）",
     "codex": "加 --codex（或设 CODEX_ENABLED=1），先 `buddy login codex` 登录 ChatGPT 订阅账号",
     "deepseek": "加 --deepseek（或设 DEEPSEEK_ENABLED=1），并配置 DEEPSEEK_API_KEY "
                 "或 ~/.buddy-proxy/deepseek_api_key",

@@ -34,6 +34,8 @@ where = ["src"]
 # 随包的 per-account 覆盖表/静态目录，漏带会在 wheel 安装下静默退回兜底
 "buddy_proxy.qoder" = ["models.json"]
 "buddy_proxy.kimi" = ["models.json"]
+# copilot 的静态兜底目录：漏带会让冷启动/离线时 /v1/models 全空
+"buddy_proxy.copilot" = ["catalog_fallback.json"]
 
 [dependency-groups]
 dev = [

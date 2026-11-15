@@ -57,7 +57,7 @@ of every module and fails the build when a boundary is crossed:
 - **`core`** must not import a channel package at module level. Reading channel
   constants is done inside a function with a fallback (`core/credit_estimate.py` is
   the only current case), so a missing channel can never take the core down at import.
-- **Channels** (`trae`, `qoder`, `gemini`, `codex`, `doubao`, …) must not import each
+- **Channels** (`trae`, `qoder`, `gemini`, `codex`, `copilot`, `doubao`, …) must not import each
   other at module level. Cross-channel coupling is allowed, but each pair must be
   listed in `_DECLARED_COUPLING` with a reason and marked `module` or `lazy`; the test
   compares the list to reality in both directions, so new coupling forces a decision
@@ -173,7 +173,7 @@ workers, or explicit provider shutdown lifecycles.
 ## Multi-account state
 
 Each multi-account channel (trae / kimi / qoder / antigravity / codex /
-codebuddy) keeps its own state dir `~/.buddy-proxy/<ch>/` with `index.json` (the
+codebuddy / copilot) keeps its own state dir `~/.buddy-proxy/<ch>/` with `index.json` (the
 account list) plus one 0600 credential file per account. The storage layer —
 0600 atomic write, in-process lock + `flock`, self-heal, priority ordering,
 reorder validation — lives in `core/account_store.AccountStore` and is used by
