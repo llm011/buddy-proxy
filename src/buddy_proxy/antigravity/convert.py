@@ -13,7 +13,9 @@ API 家族，转换规则一致）；本模块只做 antigravity 特有的三件
 3. **身份清洗**：用户 system 里「You are Claude/Codex/…」式断言会触发
    cloudcode-pa 的 429 RESOURCE_EXHAUSTED（Adrian De Vera 逆向实测），替换
    成中性表述。Claude Code 的 agent 模板另有一条精确句式指纹，命中必须整段
-   换成短摘要（见 :func:`scrub_identity`）。``ANTIGRAVITY_SCRUB_IDENTITY``
+   换成短摘要（见 :func:`scrub_identity`）；dsh（DeepSeek Harness）的固定
+   身份声明同样整段替换（2026-11-15 实测：单独一句即 429，换成中性句即 200）。
+   ``ANTIGRAVITY_SCRUB_IDENTITY``
    （``term=>replacement,…``）可加规则。
 
 响应方向（Gemini → OpenAI / SSE 解析）与 gemini 完全同构，直接复用。
@@ -26,7 +28,12 @@ import re
 import uuid
 from typing import Any
 
-from ..core.desensitize import _CLAUDE_HARNESS_MARKERS, _CLAUDE_HARNESS_SUMMARY
+from ..core.desensitize import (
+    _CLAUDE_HARNESS_MARKERS,
+    _CLAUDE_HARNESS_SUMMARY,
+    _DEEPSEEK_HARNESS_MARKER,
+    _DEEPSEEK_HARNESS_SUMMARY,
+)
 from ..gemini.convert import gemini_response_to_chat, iter_gemini_sse_payloads  # noqa: F401 - re-export 供 provider 用
 from ..gemini.convert import chat_to_gemini_request
 
@@ -50,6 +57,12 @@ _DEFAULT_SCRUB_RULES: list[tuple[str, str]] = [
     ("You are Codex", "You are the assistant"),
     ("You are ChatGPT", "You are the assistant"),
     ("You are GPT", "You are the assistant"),
+    # dsh（DeepSeek Harness）TUI 的固定身份声明。CodeBuddy 通道早就按它整单
+    # 400（见 core.desensitize），antigravity 则是伪装成 429 的同一套硬校验：
+    # 2026-11-15 直连实测，只把这一句塞进 systemInstruction 就稳定
+    # RESOURCE_EXHAUSTED；换成 "You are the assistant." 同一份 4KB dsh 模板
+    # 立刻 200，其余一个字没动。
+    ("You are an AI agent powered by DeepSeek Harness.", "You are the assistant."),
 ]
 
 
@@ -67,6 +80,14 @@ def _parse_env_rules(raw: str) -> list[tuple[str, str]]:
 def _scrub_rules() -> list[tuple[str, str]]:
     env = os.environ.get("ANTIGRAVITY_SCRUB_IDENTITY", "").strip()
     return _DEFAULT_SCRUB_RULES + (_parse_env_rules(env) if env else [])
+
+
+_ZERO_WIDTH = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff"))
+
+
+def _strip_zero_width(text: str) -> str:
+    """去掉零宽字符，只用于身份声明匹配（不改动发出去的正文）。"""
+    return text.translate(_ZERO_WIDTH)
 
 
 def scrub_identity(text: str) -> str:
@@ -90,6 +111,13 @@ def scrub_identity(text: str) -> str:
     """
     if _CLAUDE_HARNESS_MARKERS[0] in text:
         return _CLAUDE_HARNESS_SUMMARY
+    # dsh 走整段替换而不是词级替换：下游模板（工具约定、exit code 契约等）
+    # 都是上游放行的普通指令，只有那句身份声明被拦；复用 CodeBuddy 那份
+    # 已经过实测的短摘要，保持两条通道对同一客户端的行为一致。
+    # 匹配前先抹掉零宽字符：客户端把这句话拆开（词间塞 U+200B 之类）上游照样拦，
+    # 所以大小写和零宽都要容忍，宁可多换一次也不能漏。
+    if _DEEPSEEK_HARNESS_MARKER in _strip_zero_width(text).lower():
+        return _DEEPSEEK_HARNESS_SUMMARY
     for term, repl in _scrub_rules():
         text = re.sub(re.escape(term), repl, text, flags=re.IGNORECASE)
     return text

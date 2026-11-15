@@ -99,6 +99,45 @@ def test_scrub_identity_replaces_claude_code_agent_template():
         "You are the assistant, made by Anthropic"
 
 
+def test_scrub_identity_replaces_dsh_identity_sentence():
+    """dsh 的身份声明在 antigravity 上是伪装 429，必须整段换摘要。
+
+    2026-11-15 直连 cloudcode-pa 实测（gemini-4-hydrogen-xhigh，两个账号一致）：
+    dsh 4KB system 模板原样进 systemInstruction → 429 RESOURCE_EXHAUSTED；
+    只把 ``You are an AI agent powered by DeepSeek Harness.`` 换成
+    ``You are the assistant.`` → 同一份模板 200。整段替换是 CodeBuddy 通道
+    已验证的做法（零宽空格绕不过），这里锁住行为一致。
+    """
+    from buddy_proxy.antigravity import convert
+    from buddy_proxy.core.desensitize import _DEEPSEEK_HARNESS_SUMMARY
+
+    marker = "You are an AI agent powered by DeepSeek Harness."
+    real = (marker + "\n\nYou are a coding agent powered by the gemini-4-hydrogen model.\n"
+            "Check the [exit code: N] marker on every bash result.")
+    assert convert.scrub_identity(real) == _DEEPSEEK_HARNESS_SUMMARY
+
+    # 大小写变体也命中（上游同样拦）
+    assert convert.scrub_identity(marker.lower()) == _DEEPSEEK_HARNESS_SUMMARY
+
+    # 词间塞零宽空格也命中：上游拦的是这句话，客户端把它拆开照样过不去
+    # （CodeBuddy 通道同结论），所以匹配必须容忍零宽字符。
+    zw = "​"
+    spaced = "You are an AI agent powered by DeepSeek" + zw + " Harness."
+    assert convert.scrub_identity(spaced) == _DEEPSEEK_HARNESS_SUMMARY
+
+    # 近似句式不误伤：去掉一个词就是上游放行的普通指令
+    near = "You are an AI agent powered by DeepSeek."
+    assert convert.scrub_identity(near) == near
+
+
+def test_scrub_identity_keeps_antigravity_identity_with_dsh_prefix():
+    """Antigravity 自己的两段身份断言不能被 dsh 规则误伤。"""
+    from buddy_proxy.antigravity import convert
+
+    own = convert._SYSTEM_IDENTITY
+    assert convert.scrub_identity(own) == own
+
+
 def test_chat_to_antigravity_request_neutralizes_claude_system():
     """从 Claude Code 风格的 chat body 走完整 envelope，user system 必须是摘要。"""
     from buddy_proxy.antigravity.convert import chat_to_antigravity_request
