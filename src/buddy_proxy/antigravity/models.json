@@ -68,6 +68,7 @@
     },
     {
       "id": "claude-opus-5-5",
+      "upstream": "claude-opus-5-5",
       "group": "claude-gpt",
       "efforts": ["low", "medium", "high"],
       "default_effort": "medium",
@@ -78,6 +79,7 @@
     },
     {
       "id": "claude-sonnet-5-5",
+      "upstream": "claude-sonnet-5-5",
       "group": "claude-gpt",
       "efforts": ["low", "medium", "high"],
       "default_effort": "medium",

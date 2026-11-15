@@ -465,8 +465,10 @@ def test_models_table_upstream_names():
     assert by_id["gemini-4-hydrogen"].get("efforts") == ["low", "medium", "high", "xhigh"]
     assert by_id["gemini-3.8-flash"].get("default_effort") == "tiered"
     assert by_id["gemini-4-argon"].get("default_effort") == "medium"
-    # claude 系裸名可用，无 upstream 覆盖
-    assert "upstream" not in by_id["claude-sonnet-5-5"]
+    # claude 系 upstream 写成家族名（上游回传 claude-sonnet-5-5-medium），
+    # 刷新时按「家族前缀」并回同一条目，对外 id 不漂移
+    assert by_id["claude-sonnet-5-5"].get("upstream") == "claude-sonnet-5-5"
+    assert apply_effort_suffix(by_id["claude-sonnet-5-5"], None) == "claude-sonnet-5-5-medium"
 
 
 # ---------------------------------------------------------------------------

@@ -413,6 +413,26 @@ required` / `Expected the 'id'`）。三族都容忍哨兵值
   `claude-sonnet-4-6` / `claude-opus-4-6-thinking`）本身**不再标 verified**，所以
   上游即使用旧目录回传也不会被钉回来；前两族还有 `blocked_prefixes` 兜底。
 
+### 对外 id 必须稳定（2026-11-16 修）
+
+刷新合并时**只按精确 base 匹配**静态条目是个坑：上游回传的是带档位的家族变体
+（`gemini-4-hydrogen-xhigh`、`claude-opus-5-5-medium`、`gpt-oss-120b-medium`），
+静态条目的 `upstream` 写的是家族名，去后缀后对不上，就会另起一条**同前缀的
+动态 id**。结果 `/v1/models` 里出现 `gemini-4-hydrogen-xhigh`、`claude-opus-5-5`
+之类的名字，客户端按 `gemini-4-hydrogen` 配置的请求直接 400「未知模型」——
+「昨天还能用、刷新一下就不认识了」就是它。
+
+现在的合并规则（`model_catalog._resolve_local_for_base`）：
+
+- 先精确匹配 base，再按**最长** `f"{key}-"` 前缀命中本地条目；命中即**沿用
+  本地条目声明的 `id`**，上游变体名只当路由细节。
+- 档位取并集（本地声明顺序在前，上游新见档位追加），已有 `default_effort`
+  不改——刷新不会改默认路由行为。
+- `claude-opus-5-5` / `claude-sonnet-5-5` 补上了 `upstream`（家族名），
+  这样它们也能被上游变体命中而不是凭空消失。
+- 单测：`test_refresh_keeps_curated_ids_when_upstream_returns_effort_variants`、
+  `test_refresh_union_appends_new_upstream_effort_without_changing_default`。
+
 改 `blocked_prefixes` 时务必复核：任何前缀都不能命中某个 verified 条目的
 upstream base（有单测 `test_refresh_blocks_stale_families_and_pins_verified_curated`
 守着这条）。

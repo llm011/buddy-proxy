@@ -118,6 +118,47 @@ def _is_blocked_base(base: str) -> bool:
     return name not in PREFIX_EXCEPTIONS
 
 
+def _resolve_local_for_base(
+    local_by_base: dict[str, dict[str, Any]], base: str
+) -> dict[str, Any] | None:
+    """给远端基名找回对应的本地条目：先精确匹配，再试「带档位的家族前缀」。
+
+    ``upstream`` 可以写成家族名（如 ``claude-opus-5-5``，上游真名是
+    ``claude-opus-5-5-medium``），此时精确匹配拿不到，就按 **最长的**
+    ``f"{key}-"`` 前缀命中——保证对外 id / 路由规则稳定在 models.json
+    声明的名字上，而不是跟着上游回传的变体名漂移。命中条件与 ``discovered``
+    的 key 同源（key 来自去掉已知 effort 后缀），故残段必然是一个档位；
+    无命中返回 None，由调用方按上游变体推导动态条目。
+    """
+    local = local_by_base.get(base)
+    if local is not None:
+        return local
+    best: str | None = None
+    # 家族前缀只吸收两侧都是已知 effort 档位的残段：``claude-opus-5-5`` ->
+    # ``claude-opus-5-5-medium`` 的残段 ``medium``；而 ``gemini-4-hydrogen-air``
+    # 的残段 ``air`` 不是档位，说明它是独立模型，不能被吞进 ``gemini-4-hydrogen``。
+    if base.rsplit("-", 1)[-1] not in _EFFORTS:
+        return None
+    best_local: dict[str, Any] | None = None
+    for key, candidate in local_by_base.items():
+        if not key or not base.startswith(f"{key}-"):
+            continue
+        # 只让 curated（verified）条目做家族前缀归一：自定义的 `foo` 不能把上游
+        # 真实新模型 `foo-bar` 吞进来，新模型仍按动态条目原样暴露。
+        if not candidate.get("verified"):
+            continue
+        if best is None or len(key) > len(best):
+            best, best_local = key, candidate
+    return best_local
+
+
+def _merge_efforts(
+    local_efforts: Sequence[str], variant_efforts: Sequence[str]
+) -> list[str]:
+    """本地声明档位在前（保持主动排序 → default_effort），上游新见档位追加。"""
+    return list(dict.fromkeys([*local_efforts, *variant_efforts]))
+
+
 def _default_effort(efforts: Sequence[str]) -> str:
     """为动态条目选择保守且可路由的默认档位。"""
     for preferred in ("medium", "tiered", "low", "high", "extra-low", "xhigh"):

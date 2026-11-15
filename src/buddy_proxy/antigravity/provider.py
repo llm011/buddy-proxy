@@ -54,6 +54,8 @@ from .model_catalog import (
     _load_models as _load_catalog_models,
     _default_effort,
     _group_for_model,
+    _merge_efforts,
+    _resolve_local_for_base,
     _is_blocked_base,
     _is_public_upstream_model,
     _split_effort_suffix,
@@ -352,14 +354,39 @@ class AntigravityProvider(BaseProvider):
 
         merged: list[dict[str, Any]] = []
         seen_ids: set[str] = set()
+        # 对外 id 只在首次出现时确定；后续并入同一本地条目的远端变体不重复追加。
+        id_to_entry: dict[str, dict[str, Any]] = {}
         for base, variants in discovered.items():
-            local = local_by_base.get(base)
+            efforts = [effort for _, effort in variants if effort is not None]
+            # 一个 base 的同档位可能来自多个账号；保持首次发现顺序并去重。
+            efforts = list(dict.fromkeys(efforts))
+            local = _resolve_local_for_base(local_by_base, base)
             if local is not None:
-                entry = dict(local)
+                # 本地条目（含 models.json curated）永远以自己声明的 id / upstream
+                # 对外：上游回传的变体名只是路由细节。早期版本在这里只做精确匹配，
+                # 上游一旦回传带 effort 后缀的家族变体（如 gemini-4-hydrogen-xhigh、
+                # claude-opus-5-5-medium）就会另起一条同前缀动态 id，对外 id 漂移，
+                # 客户端按旧 id 配置的请求直接 400 未知模型。
+                entry = id_to_entry.get(str(local["id"]))
+                if entry is None:
+                    entry = dict(local)
+                    id_to_entry[str(entry["id"])] = entry
+                # 档位取并集：本地实测的档位优先排序，上游新见档位追加；已有
+                # default_effort 不动，保证默认路由行为不变。前提：默认档至少
+                # 有一档上游仍在供（verified 条目实测通过）；若某天默认档被上游
+                # 下线，需人工改 models.json，而不是靠刷新自动切换默认路由。
+                if entry.get("efforts") or efforts:
+                    entry["efforts"] = _merge_efforts(
+                        list(entry.get("efforts") or ()), efforts
+                    )
+                    entry.setdefault(
+                        "default_effort", _default_effort(entry["efforts"])
+                    )
             else:
-                efforts = [effort for _, effort in variants if effort is not None]
-                # 一个 base 的同档位可能来自多个账号；保持首次发现顺序并去重。
-                efforts = list(dict.fromkeys(efforts))
+                if base in id_to_entry:
+                    # 防御：不同 base 归一到同一动态 id（理论不可达），留痕便于排查。
+                    log.warning("antigravity 模型目录 base %s 归一冲突，已跳过", base)
+                    continue
                 entry = {
                     "id": base,
                     "upstream": base,
@@ -369,6 +396,7 @@ class AntigravityProvider(BaseProvider):
                 if efforts:
                     entry["efforts"] = efforts
                     entry["default_effort"] = _default_effort(efforts)
+                id_to_entry[base] = entry
             model_id = str(entry["id"])
             if model_id not in seen_ids:
                 seen_ids.add(model_id)
