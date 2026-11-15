@@ -17,6 +17,7 @@ import json
 from buddy_proxy.cli import doctor as cli_doctor
 from buddy_proxy.cli import usage as cli_usage
 from buddy_proxy.cli.render import Palette
+from buddy_proxy.cli.usage import humanize_ts
 
 NO_COLOR = Palette(False)
 
@@ -219,6 +220,31 @@ def test_warnings_merge_and_annotate():
     assert "~" in text  # 合并后写时间区间
     assert "该窗口周期短" in text
     assert "将在 7 天内到期" in text
+
+
+def test_warnings_same_expiry_ts_renders_single_time():
+    # Trae 会同一时刻发几份签到包；右端若「后到覆盖」就会依赖输入顺序，
+    # 这里故意把较早的排在后面，要求区间仍取最大值。
+    expiring = [
+        {"provider": "trae", "provider_name": "Trae", "label": "签到奖励",
+         "remaining": 100, "unit": "credit", "days_left": 1,
+         "expire_ts": 1_763_500_000},
+        {"provider": "trae", "provider_name": "Trae", "label": "签到奖励",
+         "remaining": 100, "unit": "credit", "days_left": 1,
+         "expire_ts": 1_763_300_000},
+    ]
+    view = {"expiring": expiring, "expiry_warn_days": 7,
+            "expiry_urgent_days": 4, "low_quota": []}
+    text = "\n".join(cli_usage._render_warnings(view, NO_COLOR))
+    head = humanize_ts(1_763_300_000)[5:]
+    tail = humanize_ts(1_763_500_000)[5:]
+    assert f"{head} ~ {tail}" in text
+
+    same = [{**e, "expire_ts": 1_763_300_000} for e in expiring]
+    text = "\n".join(cli_usage._render_warnings(
+        {**view, "expiring": same}, NO_COLOR))
+    assert f"（{head}）" in text
+    assert "~" not in text
 
 
 def test_warnings_overflow_summary():

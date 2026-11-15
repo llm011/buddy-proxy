@@ -85,6 +85,19 @@ def _sum_credits(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _is_error(rec: dict[str, Any]) -> bool:
+    """一条记录算不算失败。
+
+    日志里 ``status`` 缺失时视为成功（老记录没这字段），``error`` 字段有值
+    就算失败——网关会把上游异常折成 200+error，只看状态码会漏掉这类。
+    """
+    try:
+        code = int(rec.get("status") if rec.get("status") is not None else 200)
+    except (TypeError, ValueError):
+        code = 200
+    return code >= 400 or bool(rec.get("error"))
+
+
 class MetricsCollector:
     """线程安全的请求指标收集器。"""
 
@@ -255,7 +268,7 @@ class MetricsCollector:
         if slot is None:
             slot = self._model_counts[key] = [0, 0]
         slot[0] += 1
-        if rec.get("status", 200) >= 400 or rec.get("error"):
+        if _is_error(rec):
             slot[1] += 1
 
     def _bucket(self, date: str, provider: str, model: str) -> dict[str, Any]:
@@ -278,9 +291,8 @@ class MetricsCollector:
 
     @staticmethod
     def _bucket_add(b: dict[str, Any], rec: dict[str, Any]) -> None:
-        is_error = rec["status"] >= 400 or bool(rec["error"])
         b["count"] += 1
-        b["errors"] += 1 if is_error else 0
+        b["errors"] += 1 if _is_error(rec) else 0
         b["duration_ms_sum"] += rec["duration_ms"]
         b["duration_ms_max"] = max(b["duration_ms_max"], rec["duration_ms"])
         b["prompt_tokens"] += rec["prompt_tokens"]
@@ -631,8 +643,7 @@ class MetricsCollector:
             idx = max(0, -(-int(p * 100) * len(sorted_vals) // 100) - 1)
             return sorted_vals[min(idx, len(sorted_vals) - 1)]
 
-        errors = [r for r in matched
-                  if int(r.get("status") or 0) >= 400 or r.get("error")]
+        errors = [r for r in matched if _is_error(r)]
         prompt = sum(int(r.get("prompt_tokens") or 0) for r in matched)
         completion = sum(int(r.get("completion_tokens") or 0) for r in matched)
         cached = sum(int(r.get("cached_tokens") or 0) for r in matched)
@@ -659,7 +670,7 @@ class MetricsCollector:
                 b = buckets.setdefault(name, {"name": name, "count": 0,
                                              "errors": 0, "duration_ms_sum": 0})
                 b["count"] += 1
-                if int(r.get("status") or 0) >= 400 or r.get("error"):
+                if _is_error(r):
                     b["errors"] += 1
                 if isinstance(r.get("duration_ms"), (int, float)):
                     b["duration_ms_sum"] += int(r["duration_ms"])
@@ -683,7 +694,7 @@ class MetricsCollector:
             b = by_day.setdefault(d, {"date": d, "count": 0, "errors": 0,
                                       "duration_ms_sum": 0})
             b["count"] += 1
-            if int(r.get("status") or 0) >= 400 or r.get("error"):
+            if _is_error(r):
                 b["errors"] += 1
             if isinstance(r.get("duration_ms"), (int, float)):
                 b["duration_ms_sum"] += int(r["duration_ms"])
@@ -954,7 +965,7 @@ class MetricsCollector:
             if rec.get("ts", 0) >= now - 86400:
                 total_24h += 1
                 dur_sum_24h += rec.get("duration_ms", 0)
-                if rec.get("status", 200) >= 400 or rec.get("error"):
+                if _is_error(rec):
                     errors_24h += 1
 
         return {

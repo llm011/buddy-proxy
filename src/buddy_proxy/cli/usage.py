@@ -537,11 +537,20 @@ def _render_warnings(view: dict[str, Any], palette: Palette) -> list[str]:
         for e in ranked:
             key = (e.get("provider"), e.get("label"), e.get("remaining"), e.get("unit"))
             m = merged.get(key)
+            ts = e.get("expire_ts")
             if m is None:
-                merged[key] = {**e, "count": 1}
+                # 区间两端都从这一条起步；之后的条目各取 min/max，而不是「后到覆盖」——
+                # ranked 只按 days_left 排，同一通道内 expire_ts 的先后不定，
+                # 靠顺序定右端会把区间写反。
+                merged[key] = {**e, "count": 1, "first_ts": ts, "last_ts": ts}
             else:
                 m["count"] += 1
-                m["last_ts"] = e.get("expire_ts")
+                if ts:
+                    lo = m.get("first_ts")
+                    if lo is None or ts < lo:
+                        m["first_ts"] = ts
+                    if ts > (m.get("last_ts") or 0):
+                        m["last_ts"] = ts
         picked = list(merged.values())[:_WARN_LINES]
         for m in picked:
             days = m.get("days_left") or 0
@@ -552,8 +561,12 @@ def _render_warnings(view: dict[str, Any], palette: Palette) -> list[str]:
             if m.get("count", 1) > 1:
                 # 区间而不是单点：N 个包到期时间不同，写最早那个会让人以为只有一份。
                 label = f"{m.get('label')} ×{m['count']}"
+                first_ts = m.get("first_ts") or m.get("expire_ts")
                 last = m.get("last_ts")
-                when = f"{humanize_ts(m.get('expire_ts'))[5:]} ~ {humanize_ts(last)[5:] if last else '?'}"
+                head = humanize_ts(first_ts)[5:]
+                tail = humanize_ts(last)[5:] if last else "?"
+                # 几份包恰好同一时刻到期（Trae 会这样）时写成 ``11-17 ~ 11-17`` 反而像出错了。
+                when = head if head == tail else f"{head} ~ {tail}"
 
             else:
                 label = m.get("label") or "额度"
