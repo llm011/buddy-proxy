@@ -175,23 +175,42 @@ function renderCodexPanel() {
     groups.get(grp).push(Object.assign({}, it, {label: sub}));
   }
   // 只有券、没有窗口的账号也要出卡片（空组照常渲染按钮，quotaItemsHtml([])
-  // 返回空串）。同一账号的券行要并进它的卡片：券的 who 常带 `Codex #N · `
-  // 前缀（多账号），也可能被别名改写或单账号无前缀——先按完整 who 认，再按
-  // 位次认（`Codex #N` 与 `Codex #N · X` 实为同一张卡），最后按账号名认；
-  // 都认不出才单开一卡。
+  // 返回空串）。同一账号的券行要并进它的卡片：
+  // - 多账号时窗口分组键可能是 `Codex #N` 或 `Codex #N · X`，券的 who 带
+  //   `Codex #N · X`（或无前缀的别名/账号名）；
+  // - 单账号且只有单个窗口（或单账号只有券/窗口）时，provider.py 不拼 ` · 窗口名`，
+  //   于是上面 `idx = it.label.indexOf(' · ')` 会把窗口归进 `'Codex'` 组，而
+  //   券的 `who` 是裸账号名（如 `calvinlai@goldeninfinity.io`）——两者键不相等，
+  //   会拆出第二张「只有重置券、标题还是同一个账号」的幽灵卡。
+  //   因此优先按完整 who / 去掉前缀的后缀 / `Codex #N` 位次 / 账号快照归属；
+  //   单账号兜底并入唯一的 `'Codex'` 组（或单账号卡本身就是那一个账号）。
   const grpByWho = new Map();
   for (const grp of groups.keys()) {
     grpByWho.set(grp, grp);
     const m = grp.match(/^Codex #\d+ · (.*)$/);
     if (m && !grpByWho.has(m[1])) grpByWho.set(m[1], grp);
   }
+  // 单账号无前缀且只有单窗口时，window item.label 就是裸 who（不含 ' · '），被放进
+  // 'Codex' 组；把每个子条目的原始标题外貌也登记到对应组名，who 就能直接对上。
+  if (groups.has('Codex')) {
+    for (const subIt of groups.get('Codex')) {
+      if (subIt.label && !grpByWho.has(subIt.label)) grpByWho.set(subIt.label, 'Codex');
+    }
+  }
   const grpKey = who => {
     if (grpByWho.has(who)) return grpByWho.get(who);
+    const stripped = who.replace(/^Codex #\d+ · /, '');
+    if (grpByWho.has(stripped)) return grpByWho.get(stripped);
     const m = who.match(/^Codex #(\d+)(?: · |$)/);
     if (m && groups.has(`Codex #${m[1]}`)) return `Codex #${m[1]}`;
     const acct = _codex_acct_by_title(who);
     if (acct && acct.index != null && groups.has(`Codex #${acct.index}`)) {
       return `Codex #${acct.index}`;
+    }
+    if (groups.size === 1 && groups.has('Codex')
+        && !/^Codex #\d+(?: · |$)/.test(who)
+        && (!CODEX_ACCTS || CODEX_ACCTS.length <= 1)) {
+      return 'Codex';
     }
     return who;
   };
