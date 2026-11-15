@@ -426,6 +426,10 @@ async def _forward_with_order(
     # None），末尾要报「渠道封禁」而不是笼统的「均处于冷却或时段限制」——后者会让
     # 用户以为等冷却就好，而实际是客户端身份被上游拒了，得换通道/改客户端。
     channel_skipped = 0
+    # 被停用/不在可用时段的候选条数。与 channel_skipped 同理：全部候选都被这一档
+    # 跳过时，要如实说「候选被停用」，而不是笼统的「均处于冷却或时段限制」——
+    # 后者会让人以为等一会儿就好，实际得去管理页重新启用。
+    gated_targets: list[str] = []
     for target in targets:
         provider_id, model = _split_target(target)
         if cooldown_mod.is_marked(provider_id, model):
@@ -433,6 +437,7 @@ async def _forward_with_order(
             continue
         if _target_gated_out(state, provider_id, model):
             diagnostic("model_order_skip", model=key, target=target, reason="gated")
+            gated_targets.append(target)
             continue
         if _target_blocked(provider_id, model):
             diagnostic("model_order_skip", model=key, target=target,
@@ -506,6 +511,18 @@ async def _forward_with_order(
                                 "channel），且其余候选均不可用。请换一条通道，"
                                 "或调整客户端的请求特征后重试。"),
                     "type": "channel_blocked",
+                }
+            },
+        )
+    if last_exc is None and gated_targets and len(gated_targets) == len(targets):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": {
+                    "message": (f"模型 {key} 的候选上游全部被停用或不在可用时段"
+                                f"（{'、'.join(gated_targets)}），"
+                                "请在管理页 /ui 重新启用或调整可用时段后重试"),
+                    "type": "upstream_unavailable",
                 }
             },
         )

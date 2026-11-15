@@ -442,6 +442,23 @@ def test_marked_target_is_skipped(tmp_path, monkeypatch):
     assert len(b.calls) == 1
 
 
+def test_all_targets_gated_reports_disabled_not_cooldown(tmp_path, monkeypatch):
+    """全部候选都被停用 → 502 要明说「被停用」，而不是「均处于冷却」。
+
+    2026-11-16 实测：``antigravity/gemini-4-hydrogen`` 被管理页停用后，裸名
+    ``gemini-4-hydrogen`` 的候选里这一档被跳过，最后的 502 文案是「均处于冷却
+    或被停用/时段限制」，看起来像等冷却就好，实际得去 /ui 重新启用。
+    """
+    client, state, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"])
+    state.disabled_models = {"pa/m1", "pb/m1"}
+    r = _post(client)
+    assert r.status_code == 502
+    assert "全部被停用" in r.text
+    assert "pa/m1" in r.text and "pb/m1" in r.text
+    assert "均处于冷却" not in r.text
+    assert a.calls == [] and b.calls == []
+
+
 def test_all_targets_marked_or_gated_reports_unavailable(tmp_path, monkeypatch):
     """全部候选被标记/停用 → 502 且文案说明原因（不是笼统 internal error）。"""
     client, state, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"])
