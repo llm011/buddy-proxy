@@ -63,6 +63,7 @@ copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影
   `cooldown_report()` 逐账号画像（谁在冷却剩多久/疑似拉黑）。
 - **超时分级**（2026-10-03 实测驱动）：流式 read 90s（相邻两次读上限——
   首事件前卡死在闸门抛 TimeoutException、`_Gate.timed_out` 短冷却换号；流中
+  （首事件前的空内容不冷却，见下面「流式防重复计费」）
   卡死在转换器断）；非流式 read 120s（一次读拿全响应=总上限，实测成功最长
   16s）；connect 15s。旧值 600s 曾让挂死调用白等 10 分钟（5 单 504 实录）。
   failover 循环带 180s 尝试期预算（`_ATTEMPT_DEADLINE_S`，首个账号不受挡）：
@@ -73,9 +74,16 @@ copy 迁移为账号 #1（旧文件保留作备份，迁移失败只告警不影
 - **防串号**：`ensure_account_token(account_id)` 把 token 与 cred 快照同源
   返回，project_id 从同一份快照取；每账号独立刷新锁 + 锁内重读双检。
 - **流式防重复计费**：首事件闸门（`_gate_first_event`）压住第一个上游事件
-  再定性——带内 429/403 error（一个字节没出网）冷却换号；语义事件
-  （candidates）出现即 committed，缓冲行经 `_ReplayStream` 补放、绝不重放；
-  语义前 EOF 视为假成功换号（不冷却）。闸门只创建一次 `resp.aiter_lines()`
+  再定性——带内 429/403 error（一个字节没出网）冷却换号；**真负载**
+  （`text` / `functionCall` / `inlineData`）出现即 committed，缓冲行经
+  `_ReplayStream` 补放、绝不重放；语义前 EOF 视为假成功换号（不冷却）。
+  **纯 thinking 不算 commit**（2026-11-16）：上游偶发只发了 `thought: true`
+  的 parts（或空 candidates）就 `finishReason: STOP`、0 output token 收尾，
+  以前见 candidates 就透传，客户端拿到「成功但空内容」（dsh → EMPTY_RESPONSE
+  重试 5 次后中止）；现在继续等真负载，带 finishReason 仍无真负载、或真负载前
+  EOF，一律按空内容换号（不冷却），全部账号都空时 502
+  `stream returned no content`。非流式走同一判定（`_has_real_payload`）。
+  闸门只创建一次 `resp.aiter_lines()`
   并把它（`_Gate.lines`）传下去：httpx 响应流一次性消费，重开必抛
   StreamConsumed 静默丢光剩余事件（claude 流式曾因此完全空流）。
 - **可观测**：每次转发把实际服务的账号写入 `ACCOUNT_META`（metrics 落库可

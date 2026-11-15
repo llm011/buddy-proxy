@@ -365,7 +365,9 @@ def test_refreshed_model_routes_and_drives_quota_mapping(monkeypatch):
         return object()
 
     async def fake_send(_client, _method, _body, _headers, _stream):
-        return httpx.Response(200, json={})
+        # 有真文本才算成功：空 candidates 会被首事件闸门判为「空内容」换号
+        return httpx.Response(200, json={"candidates": [{
+            "content": {"parts": [{"text": "pong"}], "role": "model"}}]})
 
     monkeypatch.setattr(provider, "ensure_auth", lambda: None)
     monkeypatch.setattr(prov.failover, "available_accounts",
