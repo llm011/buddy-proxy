@@ -602,6 +602,16 @@ console.log(JSON.stringify({
   freeEmpty: quotaProviderExhausted([{remaining: 0, query_empty: true}]),
   resetOnly: quotaProviderExhausted([{remaining: 0, unit: 'reset_credit'}]),
   nullUsed: quotaProviderExhausted([{remaining: 0, used: null, total: null}]),
+  // 真实 Codex / Antigravity 形状：used/total 为 null 但有正数 remaining/percent，
+  // 必须算「有剩余额度」（不能被 used: null 一杆子打成 null 导致整卡挂红标收起）。
+  codexActive: quotaProviderExhausted([
+    {unit: 'reset_credit', used: null, total: null, remaining: null, percent: null},
+    {label: 'a@x.y', unit: 'percent', percent: 9.0, used: null, total: null, remaining: 91.0},
+  ]),
+  percentOnlyActive: quotaProviderExhausted([
+    {label: 'a@x.y', unit: 'percent', percent: 9.0, used: null, total: null, remaining: null},
+  ]),
+  numericRemainingWithNullTotal: quotaRemaining({remaining: 386, used: null, total: null}),
   // 说明条 + 一条有余额：这组卡是画得出来的，不能整块折掉
   partial: quotaProviderExhausted([{remaining: 0, query_failed: true}, {remaining: 5}]),
 }));
@@ -610,6 +620,8 @@ console.log(JSON.stringify({
     assert r["unknown"] and r["failed"] and r["unreachable"] and r["freeEmpty"], r
     # 只有重置券的通道同样收起；带 used=null 的零剩余仍是零
     assert r["resetOnly"] is True and r["nullUsed"] is True, r
+    assert r["codexActive"] is False and r["percentOnlyActive"] is False, r
+    assert r["numericRemainingWithNullTotal"] == 386, r
     # 但「部分失败 + 部分有余额」必须保持展开：失败那组是用户要看的信息
     assert r["partial"] is False, r
 

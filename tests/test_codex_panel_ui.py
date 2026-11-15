@@ -513,3 +513,55 @@ console.log(JSON.stringify({cards, line: html.includes('重置券 4 张 · 当�
     with_line = [c for c in data["cards"] if "重置券" in c]
     assert len(with_line) == 1, "券只挂一张卡"
     assert "data-codex-idx=\"2\"" in with_line[0], "券跟着 b@x.y（快照位次 2）走"
+
+
+def test_codex_single_account_single_window_merges_reset_credits():
+    """单账号只有 1 个窗口 + 重置券：不拆出第二张幽灵卡（两张卡同名却分开）。
+
+    单账号单窗口时后端 label 是裸账号名（不含 `` · ``），窗口会进 ``'Codex'``
+    分组，而券行 ``who`` 也是裸账号名。两者必须合进同一张卡片。
+    """
+    items = [
+        _reset_item("a@x.y", 3, 0),
+        {"label": "a@x.y", "used": None, "total": None,
+         "remaining": 91.0, "percent": 9.0, "unit": "percent",
+         "reset_ts": 1793000000, "expire_ts": None, "note": "business 套餐"},
+    ]
+    accts = """[{id: 'u1', name: 'a@x.y', index: 1, plan_type: 'business', cooling: []}]"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [%s]};
+CODEX_ACCTS = %s;
+globalThis.api = async () => ({enabled: true, accounts: CODEX_ACCTS});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+renderCodexPanel();
+const html = PANEL.innerHTML;
+console.log(JSON.stringify({
+  cards: html.split('pat-pkg-name').length - 1,
+  resetLines: html.split('data-reset-credit').length - 1,
+  hasQuota: html.includes('a@x.y'),
+  hasReset: html.includes('重置券 3 张 · 当前可用 0 张'),
+  html,
+}));
+""" % (json.dumps(_provider(items)), accts))
+    data = json.loads(out.strip().splitlines()[-1])
+    assert data["cards"] == 1, f"单账号单窗口+重置券应只有 1 张卡，实际:\n{data['html']}"
+    assert data["resetLines"] == 1
+    assert data["hasQuota"] and data["hasReset"]
+    # 快照尚未到位（首屏首渲 CODEX_ACCTS 为 null）时同样不能拆成两张卡
+    out_initial = _run_js("""
+globalThis.BENEFITS = {providers: [%s]};
+CODEX_ACCTS = null;
+globalThis.api = async () => ({enabled: true, accounts: []});
+globalThis.toast = () => {};
+globalThis.refreshAll = () => {};
+renderCodexPanel();
+const html = PANEL.innerHTML;
+console.log(JSON.stringify({
+  cards: html.split('pat-pkg-name').length - 1,
+  resetLines: html.split('data-reset-credit').length - 1,
+  hasReset: html.includes('重置券 3 张 · 当前可用 0 张'),
+}));
+""" % json.dumps(_provider(items)))
+    init_data = json.loads(out_initial.strip().splitlines()[-1])
+    assert init_data["cards"] == 1 and init_data["resetLines"] == 1 and init_data["hasReset"]

@@ -227,15 +227,16 @@ function quotaSpent(it) {
 }
 
 // 数值余量的唯一判读口径：null / 说明文字 / 空串都不是 0；百分比窗口可由
-// 100-percent 推出。非法 total/used 也不允许经 Number(null) 伪装成有数据。
+// 100-percent 推出。非法 total/used 只阻止从 total-used 反推，不允许经
+// Number(null) 伪装成有数据；但后端显式发来 {used: null, total: null} 搭配
+// 有效 remaining / percent 时（Codex/Antigravity/Copilot 等无绝对总量通道），
+// 不能反手把有效余量抹成 null（否则「剩 91%」会整卡挂出「无剩余额度」）。
 function quotaRemaining(it) {
   const numeric = v => v != null && v !== '' && typeof v !== 'boolean' && Number.isFinite(Number(v));
   let r = it.remaining;
-  if (('used' in it && !numeric(it.used)) || ('total' in it && !numeric(it.total))) return null;
   if (r == null && numeric(it.used) && numeric(it.total)) r = Number(it.total) - Number(it.used);
-  if (r == null && it.unit === 'percent' && it.percent != null
-      && Number.isFinite(Number(it.percent))) r = 100 - Number(it.percent);
-  if (r == null || r === '' || typeof r === 'boolean' || !Number.isFinite(Number(r))) return null;
+  if (r == null && it.unit === 'percent' && numeric(it.percent)) r = 100 - Number(it.percent);
+  if (!numeric(r)) return null;
   return Number(r);
 }
 
