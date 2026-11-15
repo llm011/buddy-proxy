@@ -158,27 +158,52 @@ yes）：access token 过期自动用同一 OAuth client 刷新、onboarding 自
 | 端点 | `daily-cloudcode-pa.googleapis.com` → `cloudcode-pa.googleapis.com` | 参考实现同序；`CLOUD_CODE_URL` env 可覆盖（agy 内置） |
 | `X-Client-Name` | `antigravity` | 参考实现 |
 | `X-Client-Version` | 本机 product.json `version`（fallback `1.110.0`） | version-detector 同策略 |
-| UA | `antigravity/<ideVersion> <os>/<arch>[ <model>]`（ideVersion fallback `3.0.0`） | 见下方「UA 版本门槛」 |
+| UA | `antigravity/hub/<ideVersion> (aidev_client; os_type=<os>; arch=<arch>)[ <model>]`（ideVersion fallback `2.32.1`） | 见下方「UA 形态与版本门槛」 |
 | `x-goog-api-client` | `gl-node/18.18.2 fire/0.8.6 grpc/1.10.x` | 参考实现（Electron 内嵌 Node） |
 | CLIENT_METADATA | 数字枚举 `{ideType: 9, platform: 1-5, pluginType: 2}` | agy 是数字枚举（与 gemini 通道的字符串枚举不同） |
 | redirect path | `/oauth-callback`（PKCE S256 + state） | agy strings |
 
-### UA 版本门槛（2026-11-15 实测）
+### UA 形态与版本门槛（2026-11-15 实测）
 
-上游按 User-Agent 里的 `antigravity/<ideVersion>` 做版本校验，旧版**流式端点**
-（`streamGenerateContent`）被短路：
+上游对 User-Agent 有两层校验，**形态**和**版本**都得对：
+
+**1. 形态（Gemini 4 族的准入开关）**——只有带字面 `hub/` 路径段 + 圆括号元数据
+的形态能路由 `gemini-4-*`：
+
+| UA | `gemini-4-hydrogen-high` |
+|---|---|
+| `antigravity/3.0.0 darwin/arm64` | 404 |
+| `antigravity/3.0.0 darwin/arm64 gemini-4-hydrogen-high` | 404 |
+| `antigravity/3.0.0 (aidev_client; os_type=darwin; arch=arm64)` | 404 |
+| `antigravity/2.32.1 (aidev_client; os_type=darwin; arch=arm64)` | 404 |
+| **`antigravity/hub/2.32.1 (aidev_client; os_type=darwin; arch=arm64)`** | **200** |
+| `antigravity/hub/2.32.1 (...)` + 尾部模型名 | **200** |
+
+`hub/` 前缀与圆括号元数据**缺一不可**；尾部模型名无害（buddy 仍附带，便于上游对账）。
+旧形态对其余模型全部正常，所以过去只表现为「gemini-4 就是没有」。
+
+同一 UA 下 `fetchAvailableModels` 返回 **31** 个模型（含 gemini-4 的
+argon/hydrogen 各档 + `gemini-4-carbon-disabled`）；旧形态只回 **23** 个、零个
+gemini-4。所以**修 UA 后模型目录自动恢复**，无需手工 seed。
+
+**2. 版本（流式端点）**——旧版 `streamGenerateContent` 被网关短路：
 
 | ideVersion | 流式响应 | 耗时 |
 |---|---|---|
-| `2.0.3`（旧 fallback）、`2.5.0` | 单事件固定文案「This version of Antigravity is no longer supported.」，无 `usageMetadata` / `finishReason` | ~0.7s |
-| `2.9.0`、`3.0.0`、`3.5.0`、`4.0.0` | 真回复，带完整 `usageMetadata` / `finishReason: STOP` | 2.5–3.4s |
+| `2.0.3`（更早的 fallback）、`2.5.0` | 单事件固定文案「This version of Antigravity is no longer supported.」，无 `usageMetadata` / `finishReason` | ~0.7s |
+| `2.9.0`、`3.0.0`、`3.5.0`、`4.0.0`、`2.32.1` | 真回复，带完整 `usageMetadata` / `finishReason: STOP` | 2.5–3.4s |
 
-那 0.7s 不是「快」，是网关没跑模型直接吐常量，不能拿来和真回复比速度。
+更严的下限来自 Gemini 4：`MIN_UA_VERSION = 2.23.0`（云码端低于该版本拒绝新模型，
+与 CLIProxyAPI 注释一致）。所以 `_detect_versions` 在本机 product.json 版本
+**低于门槛时抬到 fallback**，装老客户端也不会把新模型锁死；env 显式覆盖不抬升，
+留给排障时压测旧版本。
+
 `X-Client-Version` 不是门槛：单独把它从 `1.110.0` 提到 `2.0.0` 仍是提示文本，
-所以只有 UA 的 fallback 升到 `3.0.0`。留一档余量（2.9.0 刚好过线）。
+所以它保持 `1.110.0` 不动。
 
 判断某次响应是不是短路，看有没有 `usageMetadata` 即可——单事件、只有
 `candidates`、无 `finishReason` 的就是被版本门槛挡了，别当成模型回答。
+对 gemini-4 返回 **404**（而非 429）则先怀疑 UA 形态被改坏了。
 
 ## 配额结构（2026-10-04 实测，两个 g1-pro-tier 账号）
 
@@ -201,9 +226,29 @@ agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h �
 - 所以 **weekly 池的剩余根本没有接口可查**——CLIProxyAPI 那种「Five Hour /
   Weekly Limit」两条是它自己把两个字段本地推算出来的，不是上游真有两条。
 
-管理面板按 upstream 名前缀归模型、按组聚合（**组内取最小剩余**代表水位；满额时
-全组都是 1，退化为「满额」），展示用千分制（0.9987 → `989.9 / 1000`）。
+管理面板按 upstream 名前缀归模型，再**按额度池**聚合（**池内取最小剩余**代表水位；
+满额时全池都是 1，退化为「满额」），展示用千分制（0.9987 → `989.9 / 1000`）。
 `percent` / `used` 是**已用**（进度条约定，由 `1 - worst` 反推）。
+
+**分池判据是 `resetTime`**（2026-11-15 实测，两个账号一致）：组内出现次数最多的
+`resetTime` 是主池，比主池晚一天以上的视为独立周池，缺失或只差分钟级的并回主池。
+于是面板会拆成三条：
+
+| 条目 | 成员 | resetTime |
+|---|---|---|
+| `Gemini 组（其余 Gemini 模型 5 小时池）` | 3.8-flash、gemini-4-hydrogen 各档 | 当日 5 小时窗口 |
+| `Gemini 组（Gemini 4 Argon 周池）` | gemini-4-argon 各档 | 一周后（周一） |
+| `Claude/GPT 组` | claude 系、gpt-oss | 当日 5 小时窗口 |
+
+此前只按 `group` 合并、组内取 min，argon 的独立水位被 hydrogen 掩盖成「Gemini 组」
+一个数；现在两池各自可见。组内只有一个池时标签不加后缀，维持旧文案。
+
+**实测计量口径**（2026-11-15，固定 prompt、每模型 6–10 次取前后水位差）：
+- 旧代 Flash（`gemini-2.5-*`、`3-flash`、`3.1-flash-*`、`3.5-flash-lite`）**完全不扣**水位
+  （9259 token 10 次，Δ=0），等于免费；
+- 计费池按 token 成本比例扣：3.8-flash 各档 ≈ `5.5e-5 /1k token`，
+  gemini-4-hydrogen ≈ `8.1e-5`，gemini-4-argon ≈ `1.7e-4`（约氢的 2.1 倍、3.8 的 3 倍）；
+- claude 组另一池：sonnet ≈ `1.4e-3`、opus ≈ `2.9e-3 /1k token`。
 
 **读数的坑（用户实际反馈过）**：满额时 `used=0`、进度条是空的，容易被读成
 「额度是 0」。要清楚这是**剩余**语义：CLIProxyAPI 显示 `100%` 是剩余比例，

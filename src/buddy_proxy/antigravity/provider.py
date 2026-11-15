@@ -124,6 +124,65 @@ def _quota_failure_notice(failed: int, total: int) -> dict[str, Any]:
     }
 
 
+#: 组内 resetTime 比主池晚多少秒才算「独立周池」。argon 实测晚整整一周
+#: （5 小时池 resetTime 在当日，周池落在下周一），取一天作门槛足够区分，
+#: 又不至于把上游对同池的分钟级抖动/时钟偏差误判成新池。
+_QUOTA_SEPARATE_POOL_MIN_GAP_S = 24 * 3600
+
+
+def _cluster_pools(
+    fracs: list[tuple[float, float, str]]
+) -> list[list[tuple[float, float, str]]]:
+    """组内按 resetTime 拆额度池：主池 + 显著更晚的独立池（argon 周池）。
+
+    主池 = 组内出现次数最多的 resetTime（缺失按 0 计，作为一个合法取值参与投票）。
+    其余 resetTime 与主池相差超过 ``_QUOTA_SEPARATE_POOL_MIN_GAP_S`` 的各自成池，
+    差的并回主池。返回顺序：主池在前，其余按 resetTime 升序。
+    """
+    # 缺失 resetTime（0）不参与主池投票：它本身不代表「另一池」，只说明上游没给。
+    counts: dict[float, int] = {}
+    for _frac, reset, _name in fracs:
+        if reset:
+            counts[reset] = counts.get(reset, 0) + 1
+    if not counts:
+        return [list(fracs)]  # 全都没 resetTime：只有一池，无从拆
+    # 频次最高者为主池；平票取更早的 resetTime（5 小时池早于周池）。
+    main_reset = min(counts, key=lambda r: (-counts[r], r))
+    main: list[tuple[float, float, str]] = []
+    others: dict[float, list[tuple[float, float, str]]] = {}
+    for item in fracs:
+        reset = item[1]
+        # 缺失（0）无条件并回主池；有值的按与主池的间隔判定是否独立成池。
+        if not reset or abs(reset - main_reset) <= _QUOTA_SEPARATE_POOL_MIN_GAP_S:
+            main.append(item)
+        else:
+            others.setdefault(reset, []).append(item)
+    pools = [main] if main else []
+    pools.extend(others[r] for r in sorted(others))
+    return pools
+
+
+def _quota_pool_suffix(
+    group: str, fracs: list[tuple[float, float, str]], *, multi_pool: bool
+) -> str:
+    """池标签后缀：同组多池时才加，让用户一眼分清 argon 周池与其余 Gemini 池。
+
+    ``multi_pool`` 为假（该组只有一个池）时返回空串，标签维持「Gemini 组」/
+    「Claude/GPT 组」原样，避免既有 UI/文案/断言无谓变动。多池时按池内是否含
+    ``gemini-4-argon`` 命名——argon 是本账号下唯一独立成池的 Gemini 4 变体
+    （``resetTime`` 落在下周一，其余 Gemini 共享 5 小时窗口），名字好认；其余
+    池统称「其余 Gemini 模型」，不硬编码「5 小时池」这类会随上游变化的措辞。
+    """
+    if not multi_pool:
+        return ""
+    bases = {_strip_effort_suffix(name) for _, _, name in fracs}
+    if any("gemini-4-argon" in b for b in bases):
+        return "（Gemini 4 Argon 周池）"
+    if group == "gemini":
+        return "（其余 Gemini 模型 5 小时池）"
+    return "（Claude/GPT 5 小时池）"
+
+
 def _run_sync(factory):
     """协程工厂 → 独立事件循环执行（/ui 线程安全，见 mimo/provider._run_sync）。"""
     def _runner():
@@ -808,30 +867,39 @@ class AntigravityProvider(BaseProvider):
         return self._quota_items_from(data, prefix), bool(data["models"])
 
     def _quota_items_from(self, data: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
-        """fetchAvailableModels 响应 → 按组聚合的额度条目（prefix 拼在 label 前）。
+        """fetchAvailableModels 响应 → 按**额度池**聚合的额度条目（prefix 拼在 label 前）。
 
-        组内共享 5 小时 + 每周两个额度池，上游对组内每个模型变体只回**同一个**
-        ``remainingFraction``（满额时恒为 1，且只在逼近池上限时才下调），没有分池
-        字段、也没有任何接口能查到每周池的剩余（``retrieveUserQuota`` 返回同一份
-        数据，``fetchUserStatus``/``fetchCredits``/``getUserQuota`` 均 404）。
-        所以这里：
+        上游对同一池内每个模型变体回**同一个** ``remainingFraction`` + ``resetTime``
+        （满额时恒为 1，且只在逼近池上限时才下调），没有分池字段、也没有任何接口
+        能查到每周池的剩余（``retrieveUserQuota`` 返回同一份数据，
+        ``fetchUserStatus``/``fetchCredits``/``getUserQuota`` 均 404）。
 
-        * 组内取**最紧水位**（min）作为该组读数，并把「谁最紧」记进 note——
-          满额时全组都是 1，此时不点名也无妨；
-        * ``reset_ts`` 取组内任一**带 resetTime** 的模型的值（它只是下一个 5 小时
-          窗口的滚动刷新点，不代表整组重置、更不代表每周池）——**不强制取最紧那个**：
-          resetTime 在做标题行信息展示，因为「最紧的那个恰好没带 resetTime」就让
-          整组不显示，是信息损失。
+        **池的判据是 ``resetTime``**（2026-11-15 实测，两个账号一致）：
+
+        * 2.5/3/3.1/3.5/3.8 + gemini-4-hydrogen 四档 → 同一 5 小时窗口；
+        * gemini-4-argon 三档 → 独立周池（``resetTime`` 落在下周一，与上面差一周）；
+        * claude / gpt-oss → 另一个 5 小时窗口。
+
+        早先只按 ``group``（gemini / claude-gpt）聚合，把 argon 并进「Gemini 组」，
+        组内取 min 后 argon 的独立水位被 hydrogen 掩盖——界面上的「Gemini 组」其实
+        是两池混成一个数。这里在组内再按 ``resetTime`` 聚类拆池，每池一条：
+
+        * 组内**频次最高**的 resetTime 是主池（其余 Gemini / Claude+GPT 都是它）；
+        * 比主池**晚一天以上**的 resetTime 视为独立周池（argon 实测晚整整一周）；
+        * resetTime 缺失或与主池只差几秒/几分钟的杂项并回主池——上游可以对同一
+          池的个别变体省略/抖动 resetTime，不能让界面碎成一堆单模型条目。
+
+        * 池内取**最紧水位**（min）作为该池读数，并把「谁最紧」记进 note；
+        * ``reset_ts`` 取池内任一**带 resetTime** 的模型的值（它只是该池下一次
+          滚动刷新点，不代表每周池重置）；
         * ``used`` 由 ``1 - frac`` 反推成千分制，与 ``remaining/total`` 同量纲：
-          上游只给剩余，这是唯一诚实的「已用」口径（此前留 None，前端走「已用未知」
-          分支，满额被渲染成空进度条，用户读成「额度是 0」）。
+          上游只给剩余，这是唯一诚实的「已用」口径。
         """
         upstream = data["models"]
         # group -> [(frac, reset_epoch, upstream_model_name)]
         by_group: dict[str, list[tuple[float, float, str]]] = {}
         for m in self._models:
             base = str(m.get("upstream") or m["id"])
-            fracs: list[tuple[float, float, str]] = []
             for key, q in upstream.items():
                 if key != base and not key.startswith(f"{base}-"):
                     continue  # 变体名（-low/-medium/-high/-tiered）也算这个模型的
@@ -841,12 +909,21 @@ class AntigravityProvider(BaseProvider):
                 frac = info.get("remainingFraction")
                 if not isinstance(frac, (int, float)):
                     continue
-                fracs.append((float(frac), _iso_to_epoch(info.get("resetTime")), key))
-            if fracs:
-                by_group.setdefault(str(m.get("group") or "gemini"), []).extend(fracs)
+                reset = _iso_to_epoch(info.get("resetTime"))
+                by_group.setdefault(str(m.get("group") or "gemini"), []).append(
+                    (float(frac), reset, key))
+        # (group, 池序) -> fracs；池序 0 是主池，其余按 reset 升序
+        ordered: list[tuple[str, list[tuple[float, float, str]]]] = []
+        for group in sorted(by_group):
+            ordered.extend((group, pool) for pool in _cluster_pools(by_group[group]))
+        # 每个 group 下有几个池：>1 时需要标签带池的区分后缀，否则沿用旧标签。
+        pools_per_group: dict[str, int] = {}
+        for group, _fracs in ordered:
+            pools_per_group[group] = pools_per_group.get(group, 0) + 1
         items: list[dict[str, Any]] = []
-        for group, fracs in by_group.items():
-            label = "Gemini 组" if group == "gemini" else "Claude/GPT 组"
+        for group, fracs in ordered:
+            pool_suffix = _quota_pool_suffix(group, fracs, multi_pool=pools_per_group[group] > 1)
+            label = ("Gemini 组" if group == "gemini" else "Claude/GPT 组") + pool_suffix
             worst_frac, worst_reset, worst_model = min(fracs, key=lambda t: t[0])
             # worst_frac 钳到 [0,1]：上游理论上只发 0~1，但发过 >1（观察到的余量）
             # 会让 remaining>total、used 为负、percent 负值，前端渲染成「剩 1,500 /
@@ -871,9 +948,8 @@ class AntigravityProvider(BaseProvider):
                 # 换行、右侧「已用 0%」也断行——用户截图骂丑）。挪 note 字段给前端
                 # 渲染成说明行 / title。
                 "label": f"{prefix}{label}",
-                "note": (f"组内包含：{'、'.join(names)}。共享 5 小时 + 每周双池，"
-                         f"按 token 成本比例消耗；上游只在逼近池上限时才下调读数，"
-                         f"此处取组内最紧水位，{tightness}"),
+                "note": (f"本池包含：{'、'.join(names)}。按 token 成本比例消耗；"
+                         f"上游只在逼近池上限时才下调读数，此处取池内最紧水位，{tightness}"),
                 "models_in_group": names,
                 "used": round((1 - frac) * 1000, 1),
                 "total": 1000,
