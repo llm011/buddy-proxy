@@ -1333,7 +1333,9 @@ class _Gate:
     message: str = ""
     eof: bool = False  # 语义事件前断流/EOF：假成功，换号
     timed_out: bool = False  # eof 的细分：读超时（区别于干净 EOF，调用方要短冷却）
-    empty: bool = False  # eof 的细分：上游只给了 thinking/空内容（message=finishReason）
+    # 上游只给了 thinking/空内容（message=finishReason）。流式时是 eof 的细分；
+    # 非流式没有 EOF 概念，复用同一字段表示「响应存在但无真负载」。
+    empty: bool = False
 
 
 class _ReplayStream:
