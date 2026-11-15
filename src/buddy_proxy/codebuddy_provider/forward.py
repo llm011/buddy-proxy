@@ -422,28 +422,27 @@ async def _forward_with_order(
     """
     last_exc: HTTPException | None = None
     last_note = ""
-    # 本模型的候选里有几条被渠道封禁跳过。全部候选都因封禁被跳过时（last_exc 仍是
-    # None），末尾要报「渠道封禁」而不是笼统的「均处于冷却或时段限制」——后者会让
-    # 用户以为等冷却就好，而实际是客户端身份被上游拒了，得换通道/改客户端。
-    channel_skipped = 0
-    # 被停用/不在可用时段的候选条数。与 channel_skipped 同理：全部候选都被这一档
-    # 跳过时，要如实说「候选被停用」，而不是笼统的「均处于冷却或时段限制」——
-    # 后者会让人以为等一会儿就好，实际得去管理页重新启用。
-    gated_targets: list[str] = []
+    # 按原因记下被跳过的候选：``cooldown``（冷却中）/ ``gated``（管理页停用或不在
+    # 可用时段）/ ``channel_blocked``（整条通道被上游风控拦截）。全部候选都被跳过、
+    # last_exc 仍是 None 时，末尾按原因如实报（见下方三个分支）：只说「均处于冷却或
+    # 时段限制」会让用户以为等一会儿就好，实际可能是得去 /ui 重新启用、或换通道/改
+    # 客户端。同一个目标若因多种原因命中，只记第一次（循环里 skip 即 continue）。
+    skipped_by_reason: dict[str, list[str]] = {}
     for target in targets:
         provider_id, model = _split_target(target)
         if cooldown_mod.is_marked(provider_id, model):
             diagnostic("model_order_skip", model=key, target=target, reason="cooldown")
+            skipped_by_reason.setdefault("cooldown", []).append(target)
             continue
         if _target_gated_out(state, provider_id, model):
             diagnostic("model_order_skip", model=key, target=target, reason="gated")
-            gated_targets.append(target)
+            skipped_by_reason.setdefault("gated", []).append(target)
             continue
         if _target_blocked(provider_id, model):
             diagnostic("model_order_skip", model=key, target=target,
                        reason="channel_blocked",
                        remaining_s=cooldown_mod.remaining(provider_id, "*"))
-            channel_skipped += 1
+            skipped_by_reason.setdefault("channel_blocked", []).append(target)
             continue
         try:
             resp = await _dispatch_once(state, provider_id, model, body, protocol, original)
@@ -500,28 +499,41 @@ async def _forward_with_order(
 
     if last_exc is not None:
         raise last_exc
-    if channel_skipped:
+    blocked_targets = skipped_by_reason.get("channel_blocked", [])
+    gated_targets = skipped_by_reason.get("gated", [])
+    cooled_targets = skipped_by_reason.get("cooldown", [])
+    all_skipped = len(cooled_targets) + len(gated_targets) \
+        + len(blocked_targets) == len(targets)
+    if blocked_targets:
         # 不落回被挡的通道硬撞（那只会再吃一次 400），直接把这个事实报出来。
+        # 同一请求里也有被停用/冷却的候选时一并列出，省得再排查一轮。
+        others = [t for t in (*gated_targets, *cooled_targets)]
         raise HTTPException(
             status_code=502,
             detail={
                 "error": {
-                    "message": (f"模型 {key} 的候选里有 {channel_skipped} 条通道"
+                    "message": (f"模型 {key} 的候选里有 {len(blocked_targets)} 条通道"
                                 "被上游风控整条拦截（如 400+11128 unapproved "
                                 "channel），且其余候选均不可用。请换一条通道，"
-                                "或调整客户端的请求特征后重试。"),
+                                "或调整客户端的请求特征后重试。"
+                                + (f"其余不可用候选：{'、'.join(others)}。" if others else "")),
                     "type": "channel_blocked",
                 }
             },
         )
-    if last_exc is None and gated_targets and len(gated_targets) == len(targets):
+    if all_skipped:
+        parts: list[str] = []
+        if gated_targets:
+            parts.append(f"被停用或不在可用时段（{'、'.join(gated_targets)}），"
+                         "请在管理页 /ui 重新启用或调整可用时段")
+        if cooled_targets:
+            parts.append(f"处于冷却（{'、'.join(cooled_targets)}），冷却结束后可重试")
         raise HTTPException(
             status_code=502,
             detail={
                 "error": {
-                    "message": (f"模型 {key} 的候选上游全部被停用或不在可用时段"
-                                f"（{'、'.join(gated_targets)}），"
-                                "请在管理页 /ui 重新启用或调整可用时段后重试"),
+                    "message": (f"模型 {key} 的候选上游全部不可用："
+                                + "；".join(parts) + "。"),
                     "type": "upstream_unavailable",
                 }
             },

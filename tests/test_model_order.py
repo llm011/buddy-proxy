@@ -453,9 +453,23 @@ def test_all_targets_gated_reports_disabled_not_cooldown(tmp_path, monkeypatch):
     state.disabled_models = {"pa/m1", "pb/m1"}
     r = _post(client)
     assert r.status_code == 502
-    assert "全部被停用" in r.text
+    assert "全部不可用" in r.text and "被停用" in r.text
     assert "pa/m1" in r.text and "pb/m1" in r.text
-    assert "均处于冷却" not in r.text
+    # 文案要指向真因（去 /ui 重新启用），而不是让人干等冷却。
+    assert "冷却" not in r.text and "/ui" in r.text
+    assert a.calls == [] and b.calls == []
+
+
+def test_mixed_gated_and_cooled_lists_both(tmp_path, monkeypatch):
+    """一条被停用、一条冷却 → 全部不可用，且两种原因都要列出来（别误判成「全部停用」）。"""
+    client, state, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"])
+    state.disabled_models = {"pa/m1"}
+    cooldown_mod.mark_failed("pb", "m1")
+    r = _post(client)
+    assert r.status_code == 502
+    assert "候选上游全部不可用" in r.text
+    assert "pa/m1" in r.text and "pb/m1" in r.text
+    assert "不在可用时段" in r.text and "处于冷却" in r.text
     assert a.calls == [] and b.calls == []
 
 
