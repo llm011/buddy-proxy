@@ -19,6 +19,16 @@ zcode（GLM Coding Plan）的 /api/monitor/usage/quota/limit 计数器批量聚�
 更新（0~90s 抖动）且无按请求流水——单次积分官方虽无 API 回传，但订阅文档
 公布了完整抵扣公式与系数（见 providers/zcode.py CREDIT_COEFFS），按它算
 是官方口径而非粗估；系数变化（新模型/调价/活动）时改那张表即可。
+
+antigravity（Google Antigravity 免费额度）既无积分字段也无公开抵扣公式，
+唯一可观测的计费信号是 ``fetchAvailableModels.quotaInfo.remainingFraction``
+——**池级水位**（同一 quota 组内的模型共享）。于是用「请求前后水位的下降」
+作为本次消耗，见 :func:`record_quota_mark` / :func:`estimate_credit`：
+
+- 水位精度只有 4 位有效数字（0.9987 这类），一次小请求的落差是 0.001~0.005，
+  也就是 0~0.5 的积分粒度——**单次估算是粗的**；
+- 水位**只在接近上限时才降**（轻用时长期读 1.0），所以估出来的 0 不等于真免费；
+- 某个模型/账号的目录接口读不到水位时返回 None（记 ``—``，不瞎猜）。
 """
 
 from __future__ import annotations
@@ -172,6 +182,62 @@ def reset_baselines() -> None:
     _LAST_PROMPT.clear()
 
 
+#: antigravity 的「上一条请求结束时的水位」记忆：key 为 ``(account, quota_key)``，
+#: 值是 (remainingFraction, ts)。按账号分别记，多账号互不污染。
+_QUOTA_MARKS: dict[tuple[str, str], tuple[float, float]] = {}
+#: antigravity 一次请求最多折算多少积分。水位是 4 位精度，一次小请求的落差
+#: 通常就是 0.001（≈0.1 积分）；放大到 1000 是为了让主流差落在 0~1 的
+#: 可读区间，而不是被 round(2) 抹成 0。**这个系数是标定值，不是官方口径。**
+_ANTIGRAVITY_CREDITS_PER_WATERMARK = 1000.0
+
+
+def record_quota_mark(account: str, quota_key: str, remaining: float | None,
+                      ts: float | None = None) -> tuple[float, float] | None:
+    """记下账号某配额组的当前水位（antigravity provider 在请求**后**调用），
+    返回**覆盖前**记的那条 ``(剩余水位, ts)``（没有则 None），供算落差用。
+
+    返回时间戳是为了「一次请求一行账」：落差算出来的消耗属于上一条请求，
+    若两条请求在同一秒收尾，它上面也挂着同一个 ts 时那个 0 值才是它的真读数。
+    这类 0 由 provider 在记账时写回，见 ``antigravity.provider._credit_probe``。
+
+    ``remaining`` 为 None / 非数字（这次读不到）时清掉该键并返回旧值：
+    读不到就当作没有这段水位历史，下一次请求重新铺基线。
+    """
+    key = (str(account or ""), str(quota_key or ""))
+    if not account or not quota_key:
+        return None
+    prev = _QUOTA_MARKS.pop(key, None)
+    if not isinstance(remaining, (int, float)) or isinstance(remaining, bool):
+        return prev
+    _QUOTA_MARKS[key] = (float(remaining), time.time() if ts is None else float(ts))
+    return prev
+
+
+def _estimate_antigravity_drop(previous: float, after: float,
+                               prompt_tokens: int | None = None,
+                               completion_tokens: int | None = None) -> float | None:
+    """前一次水位 - 这一次水位 → 这一段（通常就是一条请求）的积分消耗。
+
+    调用顺序（antigravity provider 保证）：拿到响应后查询一次水位，先取出
+    上一次记录的水位 ``previous``，再 ``record_quota_mark`` 覆盖成 ``after``，
+    然后用两者调本函数。水位**没有下降**（轻用时长期读 1.0）或略升（上游
+    批量刷新/回填）时返回 None——记 0 等于断言「没花钱」，那是假的确定结论。
+
+    token 数**不参与计算**（上游没有 token 口径的积分公式），只是可选的
+    「这条请求真出了内容」旁证：调用方传了且两者皆空（错误响应/空流）时直接
+    None，避免把错误帧的假水位变化算成消耗。
+    """
+    if (prompt_tokens is not None or completion_tokens is not None) and \
+            not prompt_tokens and not completion_tokens:
+        return None
+    drop = float(previous) - float(after)
+    if drop <= 1e-9:
+        # 水位没降（轻用时常读 1.0）或略升（上游合并刷新/回填）：记 0 会让
+        # 「有没有花钱」变成假的确定答案，干脆返回 None，日志里显示 —。
+        return None
+    return round(drop * _ANTIGRAVITY_CREDITS_PER_WATERMARK, 2)
+
+
 def estimate_credit(
     provider: str,
     model: str,
@@ -192,7 +258,14 @@ def estimate_credit(
     缓存命中口径：上游给了 ``cached_tokens`` 就用它；没给（Trae 实测恒 0）则
     退化为「本账号本模型上一条 prompt」作基线算增量（见 ``_LAST_PROMPT``）。
     没配命中价的模型（老三元组）忽略该分支，行为与改动前一致。
+
+    antigravity 不经过这里：它的上游没有 token 口径的积分公式，消耗只在
+    **下一条请求**收尾时才能看到（水位落差），所以由 provider 在请求后
+    :func:`record_quota_mark` 时一次性结算并写进 metrics（见
+    ``antigravity.provider._credit_probe``）；本函数对它恒返回 None。
     """
+    if provider == "antigravity":
+        return None  # 消耗在上一条请求收尾时已结算，见 record_quota_mark
     if provider in ("zcode", "glm"):
         # glm 是 zcode 的子类通道（同上游同套餐计价），官方系数原样复用；
         # 漏掉它 glm 请求的 Credit 列会掉进倍率粗估并因无倍率表返回 None。

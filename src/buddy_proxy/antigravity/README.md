@@ -235,8 +235,9 @@ gemini-4。所以**修 UA 后模型目录自动恢复**，无需手工 seed。
 agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h 滚动双池，
 按 token 成本比例消耗：
 
-- **GEMINI MODELS**：gemini-3.x 系（`group: "gemini"`）
-- **CLAUDE AND GPT MODELS**：claude-sonnet/opus、gpt-oss（`group: "claude-gpt"`）
+- **GEMINI MODELS**：gemini-3.x / 4.x 系（`group: "gemini"`；其中 gemini-4-argon
+  在上游是自己的周池，见下）
+- **CLAUDE AND GPT MODELS**：claude-opus/sonnet-5-5、gpt-oss（`group: "claude-gpt"`）
 
 **上游只给单值，且只在逼近池上限时才下调**：`fetchAvailableModels` 每个模型变体带
 `quotaInfo.remainingFraction`（0~1）+ `resetTime`（下一个 5 小时窗口的滚动刷新点），
@@ -255,18 +256,23 @@ agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h �
 满额时全池都是 1，退化为「满额」），展示用千分制（0.9987 → `989.9 / 1000`）。
 `percent` / `used` 是**已用**（进度条约定，由 `1 - worst` 反推）。
 
-**分池判据是 `resetTime`**（2026-11-15 实测，两个账号一致）：组内出现次数最多的
-`resetTime` 是主池，比主池晚一天以上的视为独立周池，缺失或只差分钟级的并回主池。
+**分池判据是 `resetTime`（精确相等）**（2026-11-15 实测，两个账号一致）：同一池
+内各模型的 `resetTime` **严格相等**（秒级字面值都一样），不同池差整周（argon 的
+周池 resetTime 是 2026-11-22）。所以组内出现次数最多的 `resetTime` 是主池，
+**其余每个不同的 `resetTime` 各成一池**，缺失 `resetTime` 的并回主池——不做
+「差多少分钟才算另一池」的容差判断（早期版本有 `_QUOTA_SEPARATE_POOL_MIN_GAP_S`
+阈值，会漏掉只差几分钟的新池）。更早的实现按 `group` 合并、组内取 min，argon
+的独立水位被 hydrogen 掩盖成「Gemini 组」一个数；现在两池各自可见。
 于是面板会拆成三条：
 
 | 条目 | 成员 | resetTime |
 |---|---|---|
-| `Gemini 组（其余 Gemini 模型 5 小时池）` | 3.8-flash、gemini-4-hydrogen 各档 | 当日 5 小时窗口 |
+| `Gemini 组（其余 Gemini 模型 5 小时池）` | 3.8-flash 各档、gemini-4-hydrogen 各档 | 当日 5 小时窗口 |
 | `Gemini 组（Gemini 4 Argon 周池）` | gemini-4-argon 各档 | 一周后（周一） |
-| `Claude/GPT 组` | claude 系、gpt-oss | 当日 5 小时窗口 |
+| `Claude/GPT 组` | claude-opus/sonnet-5-5、gpt-oss | 当日 5 小时窗口 |
 
-此前只按 `group` 合并、组内取 min，argon 的独立水位被 hydrogen 掩盖成「Gemini 组」
-一个数；现在两池各自可见。组内只有一个池时标签不加后缀，维持旧文案。
+组内只有一个池时标签不加后缀，维持旧文案。`_quota_items_from` 与 `_pool_key`
+共用同一个 `_exact_pools` 拆分，避免「面板显示的池」与「缓存 key 的池」口径不一致。
 
 池后缀按池内是否含 `gemini-4-argon` 命名。若以后上游换了名字、冒出认不出的独立池，
 两个池会落到同一个通用后缀而撞名——此时第二条起改用该池的**下次重置时刻**
@@ -290,12 +296,22 @@ buddy 显示「剩 1000 / 1000 · 已用 0%」是同一份数据的另一种口�
 
 上游**只认 `fetchAvailableModels` 列表里的名字**，2026-10-02 实测：
 
-- gemini 3 系**裸名直接 429 `RESOURCE_EXHAUSTED`**（伪装成配额错误的
-  「模型不存在」），必须带 `-low/-medium/-high` 后缀；各模型可用档位不同
-  （3.1-pro 只有 low/high，3.6-flash 有 low/medium/high），且
-  `gemini-3.1-pro-high` 实测 400 `INVALID_ARGUMENT`。
-- `gemini-3.8-flash` 只有 `-tiered` 变体（自动档），`gpt-oss-120b` 只有
-  `-medium`；claude 系裸名可用。
+- gemini 3/4 系**裸名会被伪装拒绝**——早期（2026-10-02）是 429
+  `RESOURCE_EXHAUSTED`（伪装成配额错误的「模型不存在」），2026-11-15 复测多为
+  404 `NOT_FOUND`——必须带 effort 后缀；各模型可用档位不同
+  （`gemini-4-argon` low/medium/high，`gemini-4-hydrogen` 另有 `-xhigh`）。
+- `gemini-3.8-flash` 的默认变体是 `-tiered`（自动档），实测 `-low`/`-medium`/
+  `-high` 也可用（不是只有 `-tiered`，旧结论已被推翻）；`gpt-oss-120b` 只有
+  `-medium`；claude 系**裸名已不可用**（见下一条），现在是 `claude-*-5-5`
+  + `-low/-medium/-high`。
+- **下架模型有两种伪装**：`gemini-3.1-pro`（`-low`/`-high` 均 404）、
+  `gemini-3.6-flash`（裸名 404，`-medium` 两账号全 429 后挂起）；claude 这边
+  更阴——`claude-sonnet-4-6` / `claude-opus-4-6-thinking` 直接回 **200**，正文却是
+  「Claude Opus 4.6 is no longer available. Please switch to Claude Opus 5.5.」的
+  空壳。所以「200 且非空」不等于模型可用，验新模型时要看正文。
+- `upstream` 写**裸基名**、档位交给 `efforts`——写成 `gemini-3.8-flash-tiered`
+  再加 `tiered` 档会拼成 `gemini-3.8-flash-tiered-tiered`（2026-11-15 真实 404
+  事故，`test_models_table_upstream_names` 守着）。
 - 上游列表还有 2.5 系、3.5 系、`*-agent`、`*-image` 等变体和 `chat_*`/
   `tab_*` 内部条目，模型表只暴露了实测可用的主力模型，其余见
   `models.json` 的 `_comment`。
@@ -317,7 +333,7 @@ required` / `Expected the 'id'`）。三族都容忍哨兵值
 
 | 模型族 | fc.id/fr.id | thoughtSignature | 哨兵 |
 |---|---|---|---|
-| gemini-3 系 | 带上要成对 | 必带（缺 → 400） | ✓ 200 |
+| gemini-3/4 系 | 带上要成对 | 必带（缺 → 400） | ✓ 200 |
 | claude 系 | 必须成对 | 不需要 | ✓ 200 |
 | gpt-oss | 必须成对 | 不需要 | ✓ 200 |
 
@@ -340,8 +356,10 @@ required` / `Expected the 'id'`）。三族都容忍哨兵值
 
 同 gemini 通道：改 `models.json` → 重启代理。新模型先看
 `fetchAvailableModels` 列表确认上游名（带对后缀），加条目（`upstream` +
-`efforts`/`default_effort`），实测一发再置 `verified: true`。下线的模型挪进
-`_comment` 记一笔。
+`efforts`/`default_effort`），实测一发再置 `verified: true`。下线的模型**从
+`models` 里删掉**、挪进 `_comment` 记一笔，整族已下架的再把基名前缀加进
+`blocked_prefixes`（否则刷新会把它们灌回来）。实测判据是**正文**不是状态码
+（下架模型也能 200）。
 
 ### 运行期「重新拉取」为什么不是全信上游目录
 
@@ -349,18 +367,57 @@ required` / `Expected the 'id'`）。三族都容忍哨兵值
 不能当权威（2026-10-14 实测两账号均如此）：
 
 - **脏**：仍回传已淘汰的旧代/内部变体（`gemini-2.5-*`、`gemini-3-flash(-agent)`、
-  `gemini-3.1-flash-lite/-image`、`gemini-3.5-flash-*` 等）。全收进来 `/v1/models`
-  就被灌满旧模型。→ `models.json` 的 `blocked_prefixes` 列这些**去 effort 后缀后**
+  `gemini-3.1-flash-lite/-image`、`gemini-3.5-flash-*`，以及已下架的
+  `gemini-3.1-pro*` / `gemini-3.6-flash*`）。全收进来 `/v1/models`
+  就被灌满旧模型——用户「点一下刷新就拉下一堆没用的模型」就是这个原因。
+  → `models.json` 的 `blocked_prefixes` 列这些**去 effort 后缀后**
   的基名前缀，刷新时命中即丢。只拦旧代，真·新模型（如 `gemini-4-argon`，不在表里）
   照常被发现收录。
-- **缺**：**不回传** `gemini-3.1-pro` / `gemini-3.6-flash` 这类 premium curated
-  条目（它们在 IDE 可见、也能直接路由，但目录接口不吐）。全账号成功时若按上游
-  目录下架，就把人工校验过的好模型连旧模型一起洗掉。→ 刷新时无条件把
-  `verified: true` 的条目按其 upstream base 注入发现集，保证**永不下架**。
+- **`-disabled` 占位条目**：`gemini-4-carbon-disabled` 也照常回传，但它是列表里
+  **唯一没有 `quotaInfo`** 的条目，`generateContent` 直接 404
+  `Requested entity was not found.`。它落在 `gemini-4-*` 这个「真·新模型」区间里，
+  前缀表拦不住，由 `model_catalog._BLOCKED_BASE_SUFFIXES`（`-disabled` 后缀）
+  单独丢弃（2026-11-15 实测后加，此前刷新会把它灌进目录）。
+- **缺**：**不回传**能路由但目录接口不吐的条目（claude/gpt-oss 族——上游只给单变体，
+  收进来会把多档并成一个 effort 档）。全账号成功时若按上游目录下架，就把人工
+  校验过的好模型洗掉。→ 刷新时无条件把 `verified: true` 的条目按其 upstream base
+  注入发现集，保证**永不下架**。
+- 2026-11-15 起删除的 4 个（`gemini-3.1-pro` / `gemini-3.6-flash` /
+  `claude-sonnet-4-6` / `claude-opus-4-6-thinking`）本身**不再标 verified**，所以
+  上游即使用旧目录回传也不会被钉回来；前两族还有 `blocked_prefixes` 兜底。
 
 改 `blocked_prefixes` 时务必复核：任何前缀都不能命中某个 verified 条目的
 upstream base（有单测 `test_refresh_blocks_stale_families_and_pins_verified_curated`
 守着这条）。
+
+## 延迟、限频与可用性（2026-11-15 实测）
+
+完整表格见仓库根 `docs/antigravity-bench.md`，复测脚本 `tools/bench_antigravity.py`。
+要点：
+
+- **TTFT**（上游名、短 prompt、`maxOutputTokens=4096`）：`gemini-2.5-flash` /
+  `gemini-3.5-flash-lite` ≈1 s，`gemini-3.8-flash-tiered` 7–10 s，
+  `gemini-4-hydrogen-xhigh` 9–14 s、`-high` ≈11 s，`gemini-4-argon` 80–86 s，
+  `claude-sonnet-5-5-medium` ≈1.7 s，`claude-opus-5-5-medium` ≈3.7 s，
+  `gpt-oss-120b-medium` ≈1.4 s。hydrogen 四个 effort 档的耗时**不随档位单调**
+  （`-low` 反而 34 s，思考 token 量才是主因）。argon 是周池，同为重推理但会排在
+  其他请求之后（连测两次，后一次更慢）。
+- **限频**：快档 20 req/s 连打 5 秒（100 次）全部 200，未触上限；免费层的主要
+  约束是配额而非速率。
+- **`remainingFraction` ≠ 排队深度**：它是池级水位，≈1.0 时 3.8-flash 仍可能
+  等 30–70 s 首字。别用配额条推断"现在快不快"。
+- **`maxOutputTokens` 太小 → 空正文**：思考占满预算时上游回
+  `finishReason: MAX_TOKENS` + `continuationToken` + 空 text，Anthropic 侧表现为
+  `content: []`。至少 4096。
+- **当天已确认下架并清理**：`gemini-3.1-pro`（404 `NOT_FOUND`）、`gemini-3.6-flash`
+  （裸名 404，`-medium` 无 system 也 429 / 挂起）、`claude-sonnet-4-6` 与
+  `claude-opus-4-6-thinking`（200 空壳 "no longer available"）；
+  `gemini-4-carbon-disabled`（404 `NOT_FOUND`，上游占位条目，按 `-disabled`
+  后缀挡在刷新之外，不在 `models` 里）。
+- **目录缺口**：`gemini-2.5-flash` / `gemini-3.5-flash-lite` 直连可用且快，但上游
+  不给它们 `quotaInfo`，故不放进对外目录（`models.json` 的 `_pinned_not_exposed`
+  记着）；真要用可以显式请求上游名，或把基名挪进 `blocked_prefix_exceptions`
+  当 verified 条目（需同步单测）。
 
 ## 封号风险与已知边界
 

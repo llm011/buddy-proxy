@@ -71,9 +71,16 @@ DEFAULT_MODELS: dict[str, str] = {
 _MODEL_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODELS}
 
 # 只去掉已知 effort 后缀；thinking/image/agent 等是模型身份的一部分。
-_EFFORT_SUFFIXES = ("-extra-low", "-low", "-medium", "-high", "-tiered")
+# -xhigh 是 hydrogen 的最高档（2026-11-15 实测上游有）；漏了它会把
+# gemini-4-hydrogen-xhigh 拆成「新基名」并在刷新时多出一条只有 -xhigh 的条目。
+_EFFORT_SUFFIXES = ("-extra-low", "-xhigh", "-low", "-medium", "-high", "-tiered")
 _EFFORTS = tuple(suffix.removeprefix("-") for suffix in _EFFORT_SUFFIXES)
 _INTERNAL_MODEL_PREFIXES = ("chat_", "tab_")
+# 上游用名字里的 `-disabled` 标记「已关闭、不可路由」的占位条目。2026-11-15 实测
+# `gemini-4-carbon-disabled`：fetchAvailableModels 照常回传（且是列表里唯一没有
+# quotaInfo 的条目），但 generateContent 直接 404 `Requested entity was not found.`。
+# 前缀表拦不住它——它在 gemini-4-* 这个「真·新模型」区间里，只能按后缀识别。
+_BLOCKED_BASE_SUFFIXES = ("-disabled",)
 
 
 def _split_effort_suffix(name: str) -> tuple[str, str | None]:
@@ -96,18 +103,24 @@ def _is_blocked_base(base: str) -> bool:
 
     命中 ``BLOCKED_PREFIXES`` 即旧代/内部模型，不收录；``PREFIX_EXCEPTIONS``
     里的精确基名豁免（如 ``gemini-3.1-flash-image``）。表为空则一律放行。
+    另外 ``_BLOCKED_BASE_SUFFIXES`` 命中的名字（上游的 `-disabled` 占位条目）
+    一律丢弃，与前缀表独立——它落在 gemini-4 区间里，前缀拦不住。
     curated（verified）模型不走这里判定——它们在 refresh 时被直接 seed 进目录，
     例外表与其保持一致（见 models.json 注释）。
     """
     name = (base or "").lower()
-    if not name or not name.startswith(BLOCKED_PREFIXES):
+    if not name:
+        return False
+    if name.endswith(_BLOCKED_BASE_SUFFIXES):
+        return True
+    if not name.startswith(BLOCKED_PREFIXES):
         return False
     return name not in PREFIX_EXCEPTIONS
 
 
 def _default_effort(efforts: Sequence[str]) -> str:
     """为动态条目选择保守且可路由的默认档位。"""
-    for preferred in ("medium", "tiered", "low", "high", "extra-low"):
+    for preferred in ("medium", "tiered", "low", "high", "extra-low", "xhigh"):
         if preferred in efforts:
             return preferred
     return efforts[0]

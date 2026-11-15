@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 
 import pytest
 
@@ -17,7 +18,11 @@ def test_models_table(provider):
     models = provider.models()
     assert models, "models 表为空"
     ids = {m["id"] for m in models}
-    assert "gemini-3.1-pro" in ids and "claude-sonnet-4-6" in ids
+    # 2026-11-15 实测可用的一批（3.1-pro/3.6-flash 404、claude-4-6 空壳已下架）
+    assert {"gemini-3.8-flash", "gemini-4-hydrogen", "gemini-4-argon",
+            "claude-opus-5-5", "claude-sonnet-5-5", "gpt-oss-120b"} <= ids
+    assert not {"gemini-3.1-pro", "gemini-3.6-flash",
+                "claude-opus-4-6-thinking", "claude-sonnet-4-6"} & ids
     for m in models:
         assert m["owned_by"] == "antigravity"
         assert m["object"] == "model"
@@ -106,12 +111,12 @@ def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
         # 同池模型共享同一 resetTime（2026-11-15 实测），这里照实刻画；
         # 个别变体缺 resetTime 也应并回主池，不能碎成单模型条目。
         return {"models": {
-            "gemini-3.1-pro-low": _quota(0.9, "2026-10-02T20:28:46Z"),
-            "gemini-3.1-pro-high": _quota(0.8, "2026-10-02T20:28:46Z"),
-            "gemini-3.6-flash-medium": _quota(0.5, "2026-10-02T20:28:46Z"),
-            "gemini-3.8-flash-tiered": _quota(0.7),  # 缺 resetTime → 并回主池
-            "claude-sonnet-4-6": _quota(1.0, "2026-10-02T20:30:52Z"),
-            "claude-opus-4-6-thinking": _quota(1.0, "2026-10-02T20:30:52Z"),
+            "gemini-3.8-flash-tiered": _quota(0.9, "2026-10-02T20:28:46Z"),
+            "gemini-4-hydrogen-high": _quota(0.5, "2026-10-02T20:28:46Z"),
+            "gemini-4-argon-medium": _quota(0.8, "2026-10-02T20:28:46Z"),
+            "gemini-3.8-flash-low": _quota(0.7),  # 缺 resetTime → 并回主池
+            "claude-sonnet-5-5-medium": _quota(1.0, "2026-10-02T20:30:52Z"),
+            "claude-opus-5-5-medium": _quota(1.0, "2026-10-02T20:30:52Z"),
             "gpt-oss-120b-medium": _quota(0.99, "2026-10-02T20:30:52Z"),
             "chat_20706": _quota(0.1),  # 内部条目不该被算进来
         }}
@@ -139,16 +144,19 @@ def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
     # reset_note 讲清「这只是 5 小时窗口滚动刷新点」
     assert "5 小时" in gemini["reset_note"]
     # note 里点名最紧模型 + 列出池内模型清单
-    assert "gemini-3.6-flash" in gemini["note"]
-    assert gemini["models_in_group"] == ["gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.8-flash"]
-    assert cgpt["models_in_group"] == ["claude-opus-4-6-thinking", "claude-sonnet-4-6", "gpt-oss-120b"]
+    # models_in_group 按名字排序；最紧的是谁看 note。
+    assert gemini["models_in_group"] == ["gemini-3.8-flash", "gemini-4-argon",
+                                         "gemini-4-hydrogen"]
+    assert "gemini-4-hydrogen" in gemini["note"]  # 最紧（0.5）的点名
+    assert sorted(cgpt["models_in_group"]) == sorted(
+        ["claude-sonnet-5-5", "claude-opus-5-5", "gpt-oss-120b"])
     # 缺 resetTime 的变体不能单独成池：reset_ts 只反映「有 resetTime 的多数派」
     assert prov._iso_to_epoch("2026-10-02T20:28:46Z") == gemini["reset_ts"]
     assert not any("tiered" in i["label"] for i in quota["items"])
 
 
 def test_quota_pool_split_ignores_missing_reset_in_fixture():
-    """``_cluster_pools`` 单测：缺 resetTime 无条件并回主池，残留池按 reset 排序。"""
+    """``_exact_pools`` 单测：缺 resetTime 并回主池，其余 resetTime 精确各成一池。"""
     import buddy_proxy.antigravity.provider as prov
 
     fracs = [
@@ -157,16 +165,25 @@ def test_quota_pool_split_ignores_missing_reset_in_fixture():
         (0.5, 0.0, "gemini-no-reset"),
         (0.8, prov._iso_to_epoch("2026-11-22T08:12:41Z"), "gemini-4-argon-high"),
     ]
-    pools = prov._cluster_pools(fracs)
+    pools = prov._exact_pools(fracs)
     assert len(pools) == 2
     assert [n for _f, _r, n in pools[0]] == [
         "gemini-3.8-flash-tiered", "gemini-4-hydrogen-high", "gemini-no-reset"]
     assert [n for _f, _r, n in pools[1]] == ["gemini-4-argon-high"]
 
     # 全部缺 resetTime / 空输入：不分裂，也不抛异常
-    assert prov._cluster_pools([]) == [[]]
+    assert prov._exact_pools([]) == []
     only_missing = [(0.4, 0.0, "a"), (0.3, 0.0, "b")]
-    assert len(prov._cluster_pools(only_missing)) == 1
+    assert len(prov._exact_pools(only_missing)) == 1
+
+    # 只差几分钟的 resetTime 也是独立池（同池实测严格相等，容差并池是误伤）
+    near = [
+        (0.9, prov._iso_to_epoch("2026-11-15T12:28:46Z"), "gemini-3.8-flash-tiered"),
+        (0.9, prov._iso_to_epoch("2026-11-15T12:28:46Z"), "gemini-4-hydrogen-high"),
+        (0.6, prov._iso_to_epoch("2026-11-15T12:33:46Z"), "gemini-other"),
+    ]
+    near_pools = prov._exact_pools(near)
+    assert len(near_pools) == 2 and [n for _f, _r, n in near_pools[1]] == ["gemini-other"]
 
 
 def test_quota_splits_argon_weekly_pool(provider, tmp_path, monkeypatch):
@@ -274,9 +291,9 @@ def test_quota_full_quota_reads_as_full_not_zero(provider, tmp_path, monkeypatch
 
     async def _fake_fetch(account_id=None):
         return {"models": {
-            "gemini-3.1-pro-low": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
-            "gemini-3.6-flash-medium": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
-            "claude-sonnet-4-6": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
+            "gemini-3.8-flash-tiered": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
+            "gemini-4-hydrogen-xhigh": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
+            "claude-sonnet-5-5-medium": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
             "gpt-oss-120b-medium": {"quotaInfo": {"remainingFraction": 1, "resetTime": "2026-10-04T21:40:18Z"}},
         }}
 
@@ -310,9 +327,9 @@ def test_quota_reset_falls_back_when_tightest_has_no_resettime(provider, tmp_pat
     async def _fake_fetch(account_id=None):
         return {"models": {
             # 最紧的（0.5）没有 resetTime，另一个有
-            "gemini-3.6-flash-medium": {"quotaInfo": {"remainingFraction": 0.5}},
-            "gemini-3.1-pro-low": {"quotaInfo": {"remainingFraction": 0.9,
-                                                 "resetTime": "2026-10-02T20:28:46Z"}},
+            "gemini-4-hydrogen-high": {"quotaInfo": {"remainingFraction": 0.5}},
+            "gemini-3.8-flash-tiered": {"quotaInfo": {"remainingFraction": 0.9,
+                                                      "resetTime": "2026-10-02T20:28:46Z"}},
         }}
 
     import buddy_proxy.antigravity.provider as prov
@@ -337,8 +354,8 @@ def test_quota_clamps_out_of_range_fraction(provider, tmp_path, monkeypatch):
 
     async def _fake_fetch(account_id=None):
         return {"models": {
-            "gemini-3.1-pro-low": {"quotaInfo": {"remainingFraction": 1.5,
-                                                 "resetTime": "2026-10-02T20:28:46Z"}},
+            "gemini-3.8-flash-tiered": {"quotaInfo": {"remainingFraction": 1.5,
+                                                      "resetTime": "2026-10-02T20:28:46Z"}},
         }}
 
     import buddy_proxy.antigravity.provider as prov
@@ -395,9 +412,9 @@ def test_quota_multi_account_labels_and_failure_notice(provider, tmp_path, monke
     monkeypatch.setattr(provider, "_fetch_available_models", lambda account_id: (
         (_ for _ in ()).throw(RuntimeError("down")) if account_id == "v@y.com"
         else {"models": {
-            "gemini-3.1-pro-low": {"quotaInfo": {"remainingFraction": 0.9,
-                                                 "resetTime": "2026-10-02T20:28:46Z"}},
-            "claude-sonnet-4-6": {"quotaInfo": {"remainingFraction": 1.0}},
+            "gemini-3.8-flash-tiered": {"quotaInfo": {"remainingFraction": 0.9,
+                                                      "resetTime": "2026-10-02T20:28:46Z"}},
+            "claude-sonnet-5-5-medium": {"quotaInfo": {"remainingFraction": 1.0}},
         }}))
     # _quota_one 的工厂直跑（绕开临时事件循环，mock 是普通函数不是 coroutine）
     monkeypatch.setattr(prov, "_run_sync", lambda factory: factory())
@@ -436,9 +453,212 @@ def test_models_table_upstream_names():
     import buddy_proxy.antigravity.provider as prov
 
     by_id = {m["id"]: m for m in prov.MODELS}
-    assert by_id["gemini-3.8-flash"].get("upstream") == "gemini-3.8-flash-tiered"
+    # upstream 是「裸基名」，档位由 efforts 后缀拼：gemini-3.8-flash + tiered。
+    # 曾写成 upstream=gemini-3.8-flash-tiered，结果拼出 -tiered-tiered（404）。
+    assert by_id["gemini-3.8-flash"].get("upstream") == "gemini-3.8-flash"
+    from buddy_proxy.antigravity.convert import apply_effort_suffix
+
+    assert apply_effort_suffix(by_id["gemini-3.8-flash"], None) == "gemini-3.8-flash-tiered"
+    assert apply_effort_suffix(by_id["gemini-4-argon"], "high") == "gemini-4-argon-high"
+    assert apply_effort_suffix(by_id["claude-opus-5-5"], None) == "claude-opus-5-5-medium"
     assert by_id["gpt-oss-120b"].get("upstream") == "gpt-oss-120b-medium"
-    assert by_id["gemini-3.1-pro"].get("efforts") == ["low", "high"]
-    assert by_id["gemini-3.6-flash"].get("default_effort") == "medium"
-    # claude 系裸名可用，无 efforts
-    assert "efforts" not in by_id["claude-sonnet-4-6"]
+    assert by_id["gemini-4-hydrogen"].get("efforts") == ["low", "medium", "high", "xhigh"]
+    assert by_id["gemini-3.8-flash"].get("default_effort") == "tiered"
+    assert by_id["gemini-4-argon"].get("default_effort") == "medium"
+    # claude 系裸名可用，无 upstream 覆盖
+    assert "upstream" not in by_id["claude-sonnet-5-5"]
+
+
+# ---------------------------------------------------------------------------
+# 单次消耗估算（水位落差）：PoolKey / _credit_probe / _ReplayStream 结算
+# ---------------------------------------------------------------------------
+
+def _iso(text: str) -> float:
+    import buddy_proxy.antigravity.provider as prov
+
+    return prov._iso_to_epoch(text)
+
+
+def _ag_quota(frac, reset=None):
+    info = {"remainingFraction": frac}
+    if reset:
+        info["resetTime"] = reset
+    return {"quotaInfo": info}
+
+
+def test_pool_key_maps_model_to_its_pool(provider):
+    """上游模型名 → 池键（组|resetTime），与面板分池同口径；读不到就空串。"""
+    reset = "2026-10-02T20:28:46Z"
+    data = {"models": {
+        "gemini-3.8-flash-tiered": _ag_quota(0.99, reset),
+        "gemini-4-hydrogen-low": _ag_quota(0.98, reset),
+        "claude-sonnet-5-5-medium": _ag_quota(1.0, "2026-10-02T20:30:52Z"),
+    }}
+    import buddy_proxy.antigravity.provider as prov
+    from buddy_proxy.antigravity.convert import apply_effort_suffix
+
+    epoch = int(prov._iso_to_epoch(reset))
+    # 运行期传的是**上游真名**（apply_effort_suffix 拼过档位），不是裸基名。
+    tid = apply_effort_suffix(provider._model_by_id["gemini-3.8-flash"], None)
+    assert provider._pool_key(data, tid) == f"gemini|{epoch}"
+    assert provider._pool_key(data, "gemini-9-nope") == ""
+
+
+def test_credit_probe_uses_watermark_drop(provider, monkeypatch):
+    """第一笔只铺基线（None）；水位下降后第二笔按落差 × 系数估算。"""
+    from buddy_proxy.core import credit_estimate
+
+    credit_estimate._QUOTA_MARKS.clear()
+    reset = "2026-10-02T20:28:46Z"
+    fracs = iter([0.9990, 0.9950])
+
+    async def _fake_fetch(account_id):
+        return {"models": {"gemini-3.8-flash-tiered": _ag_quota(next(fracs), reset)}}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    async def _run():
+        first = await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+        assert first == (None, None)  # 没有上一条水位可比
+        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+
+    second, _prev_ts = asyncio.run(_run())
+    expected = round((0.9990 - 0.9950) * credit_estimate._ANTIGRAVITY_CREDITS_PER_WATERMARK, 2)
+    assert second == expected
+    assert _prev_ts  # 落差起点：调用方据此把账挂到上一条请求上
+
+
+def test_credit_probe_returns_none_when_flat_or_unreadable(provider, monkeypatch):
+    """水位没降 / 查询失败 → None（记 —），不拿 0 冒充免费。"""
+    from buddy_proxy.core import credit_estimate
+
+    credit_estimate._QUOTA_MARKS.clear()
+    reset = "2026-10-02T20:28:46Z"
+
+    async def _flat(account_id):
+        return {"models": {"gemini-3.8-flash-tiered": _ag_quota(1.0, reset)}}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _flat)
+
+    async def _flat_twice():
+        await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+
+    credit, prev_ts = asyncio.run(_flat_twice())
+    assert credit is None  # 水位没降 → 记 —
+    assert prev_ts  # 但读数时刻照记，下次有落差时它就是起点
+
+    async def _boom(account_id):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _boom)
+
+    async def _fail():
+        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+
+    assert asyncio.run(_fail()) == (None, None)
+
+
+def test_replay_stream_reports_usage_to_on_close():
+    """转换器 aclose 收尾时把流里最后的 token 数交给 on_close，且只回调一次。"""
+    import buddy_proxy.antigravity.provider as prov
+
+    class _Resp:
+        async def aclose(self):
+            self.closed = True
+
+    seen: list[tuple[int | None, int | None]] = []
+
+    async def _on_close(p, c):
+        seen.append((p, c))
+        return 1.23
+
+    resp = _Resp()
+    replay = prov._ReplayStream(
+        resp, ["data: {\"usageMetadata\": {\"promptTokenCount\": 157}}"],
+        on_close=_on_close,
+    )
+    async def _drive():
+        lines = [ln async for ln in replay.aiter_lines()]
+        assert lines  # 缓冲行照常透传
+        await replay.aclose()
+        await replay.aclose()  # 幂等：只回调一次
+
+    asyncio.run(_drive())
+    assert seen == [(157, None)]
+
+
+def test_settle_frame_books_drop_on_previous_request(provider, monkeypatch):
+    """本次收尾算出的落差属于「上一条」：写进它的帧，本帧排队等下一次。"""
+    from buddy_proxy.core import credit_estimate
+
+    credit_estimate._QUOTA_MARKS.clear()
+    reset = "2026-10-02T20:28:46Z"
+    fracs = iter([0.9990, 0.9950, 0.9910])
+
+    async def _fake_fetch(account_id):
+        return {"models": {"gemini-3.8-flash-tiered": _ag_quota(next(fracs), reset)}}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    # 真帧形如 observability 放的那只 dict（provider 写入 account 后才可进队）。
+    first: dict = {"account": "u@x.com"}
+    second: dict = {"account": "u@x.com"}
+    third: dict = {"account": "u@x.com"}
+
+    async def _run():
+        # 第一条：铺基线，没有账可结（本次读数 0.999 只作为下一次的起点）。
+        assert await provider._settle_frame(
+            "u@x.com", "gemini-3.8-flash-tiered", first, 100, 20) is None
+        # 第二条：本次读到 0.9950，落差 0.004。这一笔本该属于第一条，但第一条
+        # 从没进过等结算槽（它铺基线时还没有「更早读数」），所以没有归属——丢弃。
+        credit = await provider._settle_frame(
+            "u@x.com", "gemini-3.8-flash-tiered", second, 100, 20)
+        # 第三条：再读 0.9910，落差 0.004 属于第二条。
+        await provider._settle_frame(
+            "u@x.com", "gemini-3.8-flash-tiered", third, 100, 20)
+        return credit
+
+    credit = asyncio.run(_run())
+    unit = credit_estimate._ANTIGRAVITY_CREDITS_PER_WATERMARK
+    # 第三条收尾读到的落差（0.995 → 0.991）算到第二条头上——这条才是落库时
+    # observability 读到的数字（第二条自己的落差要等第三条收尾才可见）。
+    assert credit == round(0.004 * unit, 2)
+    assert second["ag_credit"] == round(0.004 * unit, 2)
+    # 第一条的账在第二条收尾时也算过一次落差，但那次因槽里没有更早请求被丢弃；
+    # 第三条自己还在等下一次收尾，本次没给它记数。
+    assert "ag_credit" not in first
+    assert "ag_credit" not in third
+
+
+def test_settle_frame_skips_stale_frame(provider, monkeypatch):
+    """上一条已落库（ag_done）或换了账号：不把账挂到别人身上。"""
+    from buddy_proxy.core import credit_estimate
+
+    credit_estimate._QUOTA_MARKS.clear()
+    reset = "2026-10-02T20:28:46Z"
+    fracs = iter([0.9990, 0.9950])
+
+    async def _fake_fetch(account_id):
+        return {"models": {"gemini-3.8-flash-tiered": _ag_quota(next(fracs), reset)}}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    dead: dict = {"ag_done": True}
+
+    async def _run():
+        await provider._settle_frame("u@x.com", "gemini-3.8-flash-tiered", dead, 100, 20)
+        return await provider._settle_frame(
+            "u@x.com", "gemini-3.8-flash-tiered", {}, 100, 20)
+
+    asyncio.run(_run())
+    assert "ag_credit" not in dead
+
+
+def test_frame_credit_reads_settlement_and_marks_done():
+    """observability 从请求帧读结算值，读不到记 —，读完打 ag_done。"""
+    from buddy_proxy.codebuddy_provider.observability import _frame_credit
+
+    meta: dict = {"ag_credit": 0.42}
+    assert _frame_credit(meta) == 0.42
+    assert meta["ag_done"] is True
+    assert _frame_credit({"ag_credit": None}) is None
+    assert _frame_credit({}) is None
+    assert _frame_credit(None) is None

@@ -181,7 +181,8 @@ def test_bad_model_429_does_not_poison_other_models(two_accounts, monkeypatch):
     """线上事故回归：一个下架模型的伪装 429 不能连坐毒死整个通道。
 
     2026-11-14 实测：``gemini-3.6-flash`` 已不在上游目录，两个账号依次收到
-    ``429 RESOURCE_EXHAUSTED``；旧逻辑按账号级冷却 5min，随后
+    ``429 RESOURCE_EXHAUSTED``（该模型 2026-11-15 已从 models.json 删除，
+    这里仍用「未知模型 id」直接构造请求验 429 隔离逻辑，不依赖表里有它）；旧逻辑按账号级冷却 5min，随后
     ``available_accounts()`` 为空，连正常的 ``gemini-3.8-flash`` 都 429。
     修复后 429 只冷却 (账号, 模型)，别的模型仍能用同一批账号。
     """
@@ -193,7 +194,9 @@ def test_bad_model_429_does_not_poison_other_models(two_accounts, monkeypatch):
     from buddy_proxy.antigravity.provider import MODELS
 
     by_id = {m["id"]: m for m in MODELS}
-    bad = apply_effort_suffix(by_id["gemini-3.6-flash"], None)
+    model_id = "gemini-legacy-429"  # 模拟「已下架但仍在表里」的坏条目
+    bad = apply_effort_suffix({"id": model_id, "efforts": ["medium"],
+                               "default_effort": "medium"}, None)
     good = apply_effort_suffix(by_id["gemini-3.8-flash"], None)
     seen: list[str] = []
 
@@ -209,6 +212,8 @@ def test_bad_model_429_does_not_poison_other_models(two_accounts, monkeypatch):
     provider, _up = two_accounts
     import buddy_proxy.antigravity.provider as prov
 
+    provider._model_by_id[model_id] = {"id": model_id, "efforts": ["medium"],
+                                       "default_effort": "medium", "group": "gemini"}
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(route),
                                          timeout=prov._TIMEOUT)
     _patch_token(monkeypatch)
@@ -216,7 +221,7 @@ def test_bad_model_429_does_not_poison_other_models(two_accounts, monkeypatch):
     # 1) 坏模型：两个账号都 429，按模型冷却。
     with pytest.raises(HTTPException) as ei:
         asyncio.run(provider.forward(
-            {**_BODY, "model": f"antigravity/gemini-3.6-flash", "stream": False},
+            {**_BODY, "model": f"antigravity/{model_id}", "stream": False},
             "openai"))
     assert ei.value.status_code == 429
     assert failover.model_cooldown_left("u@x.com", bad)[0] > 0

@@ -54,6 +54,10 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any],
     上一条 prompt」作会话基线算增量（见 ``credit_estimate._LAST_PROMPT``）。
     没有账号信息时退回全价，不猜。
 
+    antigravity 走不到这里，也不走 usage：它读不到 token 口径的积分公式，只在
+    响应收尾时查池水位、按落差结算，把值写进请求帧的 ``ag_credit``（见
+    ``antigravity.provider._settle_frame`` 与 :func:`_frame_credit`）。
+
     返回 (credit, credit_estimated)；估算失败/无 token 数据时为 (None, False)。
     """
     if norm.get("credit") is not None:
@@ -62,6 +66,22 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any],
                           norm.get("prompt_tokens"), norm.get("completion_tokens"),
                           norm.get("cached_tokens"), account=account)
     return (est, True) if est is not None else (None, False)
+
+
+def _frame_credit(meta: dict[str, Any] | None) -> Optional[float]:
+    """读请求帧上 antigravity 结算好的积分（provider 写、hash 标记是否估算）。
+
+    没有该键 = 这条请求没走到 antigravity 估算（其它通道），返回 None；
+    键存在但值为 None = 读不到水位/本次是铺基线，也按「无数据」记 —。
+    读完后打 ``ag_done``：provider 的等结算槽据此丢掉已落库的帧，不留泄漏。
+    """
+    if not isinstance(meta, dict):
+        return None
+    meta["ag_done"] = True
+    val = meta.get("ag_credit")
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        return None
+    return float(val)
 
 
 def _remember_baseline(provider_id: str, model_id: str, norm: dict[str, Any],
@@ -208,6 +228,10 @@ async def _instrument(
         "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "credit": None}
     credit, credit_estimated = _credit_or_estimate(
         provider_id, model_id, norm, account=account_meta.get("account", ""))
+    settled = _frame_credit(account_meta)
+    if settled is not None:
+        # antigravity 的水位落差结算优先于 token 估算（它才是上游真账单口径）。
+        credit, credit_estimated = settled, True
     _remember_baseline(provider_id, model_id, norm, account_meta.get("account", ""))
     metrics.record(
         provider=provider_id, model=model_id, protocol=protocol,
@@ -254,6 +278,9 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
             error = f"in-band error: {err_extractor.message}"
         credit, credit_estimated = _credit_or_estimate(
             provider_id, model_id, u, account=(account_meta or {}).get("account", ""))
+        settled = _frame_credit(account_meta)
+        if settled is not None:
+            credit, credit_estimated = settled, True
         _remember_baseline(provider_id, model_id, u, (account_meta or {}).get("account", ""))
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=500 if error else 200, duration_ms=_elapsed_ms(started),
