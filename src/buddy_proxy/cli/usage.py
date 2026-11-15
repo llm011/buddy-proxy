@@ -389,6 +389,24 @@ def _expiry_text(it: dict[str, Any]) -> str:
     return humanize_ts(last)[5:] if last else "—"
 
 
+def _used_percent(it: dict[str, Any]) -> Optional[float]:
+    """已用百分比：优先用后端给的 ``percent``，缺失时按 used/total 推。
+
+    进度条与颜色分档（``render.bar``）都按「已用」理解百分比，但各家
+    provider 是自己算 ``percent`` 的，迟早有通道漏给或算反（Copilot 曾按剩余
+    算，导致剩 99% 画成满格红条）。有条目同时给了 used/total、偏偏没给
+    percent 时，CLI 自己推一份，至少不会整列显示「—」。
+    """
+    percent = it.get("percent")
+    if isinstance(percent, (int, float)) and not isinstance(percent, bool):
+        return float(percent)
+    used, total = it.get("used"), it.get("total")
+    if isinstance(used, (int, float)) and isinstance(total, (int, float)) \
+            and not isinstance(used, bool) and not isinstance(total, bool) and total:
+        return round(used / total * 100, 1)
+    return None
+
+
 def _item_rows(acc: dict[str, Any], palette: Palette, *, show_name: bool) -> list[list[str]]:
     rows = []
     out = []
@@ -400,7 +418,7 @@ def _item_rows(acc: dict[str, Any], palette: Palette, *, show_name: bool) -> lis
             row = ["—", "—", "—", "", "—", "—"]
         else:
             unit = it.get("unit")
-            percent = it.get("percent")
+            percent = _used_percent(it)
             pct_text = (f"{float(percent):.0f}%"
                         if isinstance(percent, (int, float)) else "—")
             row = [

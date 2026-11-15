@@ -202,6 +202,24 @@ def test_message_items_stay_out_of_tables():
     assert rendered == ""
 
 
+def test_used_percent_falls_back_to_used_over_total():
+    assert cli_usage._used_percent({"percent": 12.5, "used": 9, "total": 10}) == 12.5
+    assert cli_usage._used_percent({"used": 9, "total": 10}) == 90.0
+    assert cli_usage._used_percent({"used": 9}) is None
+    assert cli_usage._used_percent({"used": 9, "total": 0}) is None
+    # 布尔也是 int 的子类，不能当数字算
+    assert cli_usage._used_percent({"used": True, "total": 10}) is None
+
+
+def test_item_rows_render_used_percent_from_used_total():
+    rows = cli_usage._item_rows({"items": [
+        {"label": "Premium 交互", "remaining": 1491, "total": 1500,
+         "used": 9, "unit": "次"},
+    ]}, NO_COLOR, show_name=False)
+    assert rows[0][2] == "1%"
+    assert "████" not in rows[0][3]
+
+
 def test_warnings_merge_and_annotate():
     expiring = [
         {"provider": "trae", "provider_name": "Trae", "label": "签到奖励",

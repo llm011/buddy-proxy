@@ -114,7 +114,7 @@ def _provider(items):
 def _item(n, note=""):
     """真实形态：``Copilot #N · Premium 交互``，unit=次，带 remaining/total。"""
     it = {"label": f"Copilot #{n} · Premium 交互", "used": 10, "total": 300,
-          "remaining": 290, "percent": 96.7, "unit": "次",
+          "remaining": 290, "percent": 3.3, "unit": "次",
           "reset_ts": None, "expire_ts": None}
     if note:
         it["note"] = note

@@ -308,9 +308,14 @@ def parse_user_usage(data: dict[str, Any]) -> list[dict[str, Any]]:
         used = None
         if total is not None and remaining is not None:
             used = max(total - remaining, 0)
+        # percent 是**已用**百分比（``providers/base.py`` 的契约，进度条按
+        # 它填色：≥85% 红、≥60% 黄）。上游给的是 ``remaining``/``entitlement``，
+        # 这里按剩余算会把「还剩 99%」画成满格红条——用户 2026-11-16 截图反馈
+        # 的正是这个：剩 1,491 / 1,500 却显示「已用 99.4%」。
+        # 从 ``used`` 出发算，和上面的字段自洽；remaining 缺失时按 0 已用。
         percent = None
         if total:
-            percent = round(max(remaining or 0, 0) / total * 100, 1)
+            percent = round(max(total - (remaining or 0), 0) / total * 100, 1)
         items.append({
             "label": label,
             "used": used,

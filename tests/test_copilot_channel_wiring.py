@@ -192,6 +192,20 @@ def test_parse_user_usage_builds_quota_rows():
     assert rows[0]["total"] == 300
     assert rows[0]["used"] == 180
     assert rows[0]["unit"] == "次"
+    # ``percent`` 是**已用**（进度条 / 颜色按它分档），上游只给 remaining。
+    # 按剩余算就会「剩得越多越红」，正好反了。
+    assert rows[0]["percent"] == 60.0
+
+
+def test_parse_user_usage_percent_is_used_not_remaining():
+    """剩 1491 / 1500（用户 2026-11-16 截图）：已用 0.6%，进度条应几乎空。"""
+    rows = upstream.parse_user_usage({
+        "quota_snapshots": {
+            "premium_interactions": {"entitlement": 1500, "remaining": 1491},
+        },
+    })
+    assert rows[0]["percent"] == 0.6
+    assert rows[0]["used"] == 9
 
 
 def test_health_surfaces_catalog_error():
