@@ -32,6 +32,28 @@ CLAIM_FAIL_ALERT_STREAK = 3
 # 自动打卡巡检周期；失败重试间隔
 CHECK_INTERVAL_S = 600
 RETRY_THROTTLE_S = 1800
+#: 打卡失败后的**指数退避**上限（秒）。
+#:
+#: 为什么需要这个（2026-11-16 的真实教训）：豆包的 ``landing/checkin`` 从
+#: 11-04 起恒回 ``710010702``，而自动打卡每 30 分钟重试一次 —— 13 天累计
+#: **318 次失败**（平均 24.5 次/天）。这种频率有三个坏处：
+#:
+#: 1. 一旦上游是按账号/设备做风控，高频失败请求本身就是加重因素，可能让
+#:    「临时失效」变成「长期封禁」；
+#: 2. ``checkin.jsonl`` 被失败记录刷满，真正有信息量的那几行被埋掉；
+#: 3. 面板上每半小时跳一次「打卡失败」，而用户真正需要知道的是「这条通道
+#:    从哪天起就一直失败、别再指望它」。
+#:
+#: 退避从 :data:`RETRY_THROTTLE_S` 起翻倍，到本值封顶（4 小时）。恢复成功
+#: 立即清零，所以偶发网络抖动不会被这个机制惩罚太久。
+CLAIM_RETRY_BACKOFF_MAX_S = 4 * 3600
+#: 连续失败达到这个次数后，自动打卡**当天不再重试**该通道。
+#:
+#: 318 次里只有 2 次是真成功，剩下全是同一个接口恒错 —— 这种同步失败是
+#: 配置/上游层面的问题，几分钟内不会自愈。继续打只会产生噪音和风控风险，
+#: 所以直接退到「明天再看」，把上限定在 3 次（启动首轮 + 两次重试），
+#: 与 :data:`CLAIM_FAIL_ALERT_STREAK` 对齐。
+CLAIM_GIVE_UP_STREAK = 3
 # 状态/额度缓存 TTL：管理页 30s 自动刷新，不能每次都打上游
 SNAPSHOT_TTL_S = 300
 # 失败结果缓存 TTL：短得多，让网络抖动几秒恢复后下一轮就能自愈
@@ -560,6 +582,10 @@ class BenefitsManager:
         #: 各通道的**连续**打卡失败次数（成功即清零）。用于 :meth:
         #: 判断是否该升级告警——避免像 2026-11 那样静默失败三周没人发现。
         self._claim_fail_streak: dict[str, int] = {}
+        #: 各通道下一次允许尝试的时刻（单调递增的 ``time.time()``）。
+        #: 失败按 :data:`CLAIM_RETRY_BACKOFF_MAX_S` 指数退避，避免对一个恒错的
+        #: 接口每 30 分钟重复打 13 天（318 次）——见那两个常量的注释。
+        self._claim_next_try: dict[str, float] = {}
         self._startup_seen: set[str] = set()
         self._cache: dict[str, tuple[float, Any]] = {}
         # 后台刷新在飞任务（stale-while-revalidate 用）：同键去重
@@ -843,16 +869,37 @@ class BenefitsManager:
                 log.info("打卡连续失败已恢复：%s（此前 %d 次）",
                          provider_id, streak[provider_id])
             streak.pop(provider_id, None)
+            self._claim_next_try.pop(provider_id, None)
             return
         streak[provider_id] = streak.get(provider_id, 0) + 1
         n = streak[provider_id]
+        # 指数退避：第 1 次失败后等 RETRY_THROTTLE_S，之后翻倍，封顶
+        # CLAIM_RETRY_BACKOFF_MAX_S。达到 CLAIM_GIVE_UP_STREAK 就退到「明天
+        # 再说」——同一个接口连续 3 次同步失败不会在几分钟内自愈，继续打只会
+        # 刷噪音并加重可能的账号风控（见 CLAIM_RETRY_BACKOFF_MAX_S 的注释）。
+        if n >= CLAIM_GIVE_UP_STREAK:
+            delay = self._seconds_until_tomorrow()
+        else:
+            delay = min(RETRY_THROTTLE_S * (2 ** (n - 1)),
+                        CLAIM_RETRY_BACKOFF_MAX_S)
+        self._claim_next_try[provider_id] = time.time() + delay
         if n >= CLAIM_FAIL_ALERT_STREAK:
             # 只在刚达到阈值时打一次 ERROR，之后每 6 倍阈值再提醒一次，
             # 免得每天刷屏把日志淹掉
             if n == CLAIM_FAIL_ALERT_STREAK or n % (CLAIM_FAIL_ALERT_STREAK * 6) == 0:
                 log.error(
-                    "打卡连续失败 %d 次（%s）：%s —— 请检查凭据/渠道参数是否过期",
-                    n, provider_id, str(result.get("message") or "")[:200])
+                    "打卡连续失败 %d 次（%s）：%s —— 请检查凭据/渠道参数是否过期"
+                    "（下次自动重试在 %d 分钟后）",
+                    n, provider_id, str(result.get("message") or "")[:200],
+                    int(delay // 60))
+
+    @staticmethod
+    def _seconds_until_tomorrow() -> float:
+        """到明天 00:05 的秒数（留 5 分钟余量避开零点边界）。"""
+        now = datetime.now()
+        tomorrow = (now + timedelta(days=1)).replace(
+            hour=0, minute=5, second=0, microsecond=0)
+        return max(60.0, (tomorrow - now).total_seconds())
 
     async def _claim_and_record_inner(self, provider_id: str, provider: Any) -> dict[str, Any]:
         try:
@@ -982,6 +1029,10 @@ class BenefitsManager:
             if not due_today and not first_run:
                 continue
             if time.time() - self._last_attempt.get(pid, 0.0) < RETRY_THROTTLE_S:
+                continue
+            # 失败退避（见 CLAIM_RETRY_BACKOFF_MAX_S）：连续失败时不再每 30 分钟
+            # 重打一个恒错的接口。手动「立即打卡」不走这里，不受退避限制。
+            if time.time() < self._claim_next_try.get(pid, 0.0):
                 continue
             # 先查状态再决定是否领：避免对「已签到/当天无活动」的上游反复打 claim。
             # 走 _cached（与 snapshot 同一份，TTL 300s），管理页开着时这里几乎

@@ -57,6 +57,12 @@ build/
 # AGENTS.md 是给 agent / 协作者的公开工作约定（分支策略、worktree 规则、
 # 新通道检查清单），和 README 同属"该入库的公开文档"——不是本地分析记录。
 !AGENTS.md
+# 豆包签到的排查全记录：这是一份**未解决**事故的交接文档，里面记着已排除
+# 的全部可能、被证伪的三次"修复"，以及一个专门骗过验证的接口行为
+# （idempotent:true 是幂等空操作，不是领取成功）。它必须入库——否则下一个人
+# 会把同样的实验再跑一遍，而这份记录存在的唯一理由就是防止那个。
+# 文中不含任何凭据明文（抓包存档走 tools/capture_doubao_checkin.py 统一脱敏）。
+!docs/doubao-checkin-investigation.md
 
 # VS Code 扩展文件
 *.vsix

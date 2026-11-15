@@ -1,0 +1,474 @@
+{
+ "captured_at": "2026-11-16T02:36:23",
+ "port": 9223,
+ "targets": [
+  {
+   "id": "E95474420EE6F3BFEA305CBBE02FEA5F",
+   "type": "webview",
+   "url": "https://www.doubao.com/pc/agent-explore"
+  },
+  {
+   "id": "E7C845644F4D3E08518642335B9D7E11",
+   "type": "page",
+   "url": "doubaowork://doubaowork-chat/chat/38453987908933122"
+  },
+  {
+   "id": "3EE3F43BFC6C5F1DDBCD12164A8DEABB",
+   "type": "iframe",
+   "url": "https://www.doubao.com/drive-iframe/drive/home/"
+  },
+  {
+   "id": "143EC87944E8229A0FF5EC8231CEFF6C",
+   "type": "iframe",
+   "url": "https://www.doubao.com/partner/ccm-office/preheat?clientId=wiki-preheat-office-preheat-pool%3A1794767734772%3A1&instanceId=office-preheat-pool%3A1794767734772%3A1&preheat=1&sheetChatPerfOptimize=1&useMessageV2=1&preheatBiz=docx&multiTabCanvas=1&officeBasePreheat=1"
+  },
+  {
+   "id": "53B74C405B0C6DC133F71D5422B25C97",
+   "type": "iframe",
+   "url": "https://accounts.feishu.cn/session-tools/refresh"
+  },
+  {
+   "id": "D051F1C3431849D08BDA838F29B50200",
+   "type": "other",
+   "url": "doubaowork://doubaowork-chat/cross-site-support/"
+  },
+  {
+   "id": "9791E144723ED24A7F1B535959BE2B6D",
+   "type": "page",
+   "url": "doubaowork://doubaowork-background/"
+  },
+  {
+   "id": "EDB12302ABCBB44516607B02CAD2FE0C",
+   "type": "service_worker",
+   "url": "chrome-extension://okbmmmmdjniddmeiclcmdbmobclmhbfa/background.js"
+  },
+  {
+   "id": "A7C0C4BBDAD3D91377DFCB5BDB4AF9AA",
+   "type": "service_worker",
+   "url": "chrome-extension://obkcimipmjdkghadnfcjojepocldeggd/static/js/background.js"
+  }
+ ],
+ "contexts": [
+  {
+   "type": "webview",
+   "url": "https://www.doubao.com/pc/agent-explore",
+   "id": "E95474420EE6F3BFEA305CBBE02FEA5F",
+   "reloaded": true,
+   "href": "https://www.doubao.com/pc/agent-explore",
+   "has_bdms": "object",
+   "has_acrawler": "object",
+   "app_requests": [
+    {
+     "params": [
+      "a_bogus",
+      "aid",
+      "device_id",
+      "device_platform",
+      "doubao_device_platform",
+      "doubao_pc_version",
+      "language",
+      "msToken",
+      "pc_version",
+      "pkg_type",
+      "real_aid",
+      "region",
+      "runtime",
+      "runtime_version",
+      "samantha_web",
+      "sys_region",
+      "tea_uuid",
+      "use-olympus-account",
+      "version_code",
+      "web_id",
+      "web_platform",
+      "web_tab_id"
+     ],
+     "param_count": 22,
+     "has_msToken": true,
+     "has_a_bogus": true,
+     "aid": "497858",
+     "doubao_device_platform": "web",
+     "web_platform": "work_desktop",
+     "pc_version": "2.36.15",
+     "origin_path": "/alice/ug/campaign/v3/detail/"
+    },
+    {
+     "params": [
+      "a_bogus",
+      "aid",
+      "device_id",
+      "device_platform",
+      "doubao_device_platform",
+      "doubao_pc_version",
+      "language",
+      "msToken",
+      "pc_version",
+      "pkg_type",
+      "real_aid",
+      "region",
+      "runtime",
+      "runtime_version",
+      "samantha_web",
+      "sys_region",
+      "tea_uuid",
+      "use-olympus-account",
+      "version_code",
+      "web_id",
+      "web_platform",
+      "web_tab_id"
+     ],
+     "param_count": 22,
+     "has_msToken": true,
+     "has_a_bogus": true,
+     "aid": "497858",
+     "doubao_device_platform": "web",
+     "web_platform": "work_desktop",
+     "pc_version": "2.36.15",
+     "origin_path": "/alice/ug/campaign/v3/detail/"
+    },
+    {
+     "params": [
+      "a_bogus",
+      "aid",
+      "device_id",
+      "device_platform",
+      "doubao_device_platform",
+      "doubao_pc_version",
+      "language",
+      "msToken",
+      "pc_version",
+      "pkg_type",
+      "real_aid",
+      "region",
+      "runtime",
+      "runtime_version",
+      "samantha_web",
+      "sys_region",
+      "tea_uuid",
+      "use-olympus-account",
+      "version_code",
+      "web_id",
+      "web_platform",
+      "web_tab_id"
+     ],
+     "param_count": 22,
+     "has_msToken": true,
+     "has_a_bogus": true,
+     "aid": "497858",
+     "doubao_device_platform": "web",
+     "web_platform": "work_desktop",
+     "pc_version": "2.36.15",
+     "origin_path": "/alice/ug/campaign/item/reward/claim/"
+    }
+   ],
+   "login": {
+    "error": "AttributeError"
+   },
+   "detail": {
+    "http": 200,
+    "code": 0,
+    "daily_checkin": {
+     "checked_in_today": false,
+     "continuous_days": 8,
+     "last_checkin_date": "2026-11-15",
+     "reward": {
+      "reward_amount": 400,
+      "reward_type": "quota_grant"
+     },
+     "total_days": 13
+    },
+    "task_status": 1
+   },
+   "page_requests": []
+  },
+  {
+   "type": "page",
+   "url": "doubaowork://doubaowork-chat/chat/38453987908933122",
+   "id": "E7C845644F4D3E08518642335B9D7E11",
+   "reloaded": true,
+   "href": "chrome://doubaowork-chat/chat/38453987908933122",
+   "has_bdms": "object",
+   "has_acrawler": "undefined",
+   "app_requests": [
+    {
+     "params": [
+      "a_bogus",
+      "aid",
+      "channel",
+      "chromium_version",
+      "client_platform",
+      "device_id",
+      "device_platform",
+      "doubao_device_platform",
+      "doubao_pc_version",
+      "fp",
+      "language",
+      "msToken",
+      "pc_version",
+      "pkg_type",
+      "real_aid",
+      "region",
+      "runtime",
+      "runtime_version",
+      "samantha_web",
+      "sys_region",
+      "tea_uuid",
+      "use-olympus-account",
+      "version_code",
+      "web_id",
+      "web_platform",
+      "web_tab_id"
+     ],
+     "param_count": 26,
+     "has_msToken": true,
+     "has_a_bogus": true,
+     "aid": "1044603",
+     "doubao_device_platform": "desktop",
+     "web_platform": "desktop",
+     "pc_version": "2.36.15",
+     "origin_path": "/alice/ug/campaign/landing/report"
+    },
+    {
+     "params": [
+      "a_bogus",
+      "aid",
+      "channel",
+      "chromium_version",
+      "client_platform",
+      "device_id",
+      "device_platform",
+      "doubao_device_platform",
+      "doubao_pc_version",
+      "fp",
+      "language",
+      "msToken",
+      "pc_version",
+      "pkg_type",
+      "real_aid",
+      "region",
+      "runtime",
+      "runtime_version",
+      "samantha_web",
+      "sys_region",
+      "tea_uuid",
+      "use-olympus-account",
+      "version_code",
+      "web_id",
+      "web_platform",
+      "web_tab_id"
+     ],
+     "param_count": 26,
+     "has_msToken": true,
+     "has_a_bogus": true,
+     "aid": "1044603",
+     "doubao_device_platform": "desktop",
+     "web_platform": "desktop",
+     "pc_version": "2.36.15",
+     "origin_path": "/alice/ug/campaign/landing/get"
+    },
+    {
+     "params": [
+      "a_bogus",
+      "aid",
+      "channel",
+      "chromium_version",
+      "client_platform",
+      "device_id",
+      "device_platform",
+      "doubao_device_platform",
+      "doubao_pc_version",
+      "fp",
+      "language",
+      "msToken",
+      "pc_version",
+      "pkg_type",
+      "real_aid",
+      "region",
+      "runtime",
+      "runtime_version",
+      "samantha_web",
+      "sys_region",
+      "tea_uuid",
+      "use-olympus-account",
+      "version_code",
+      "web_id",
+      "web_platform",
+      "web_tab_id"
+     ],
+     "param_count": 26,
+     "has_msToken": true,
+     "has_a_bogus": true,
+     "aid": "1044603",
+     "doubao_device_platform": "desktop",
+     "web_platform": "desktop",
+     "pc_version": "2.36.15",
+     "origin_path": "/alice/ug/campaign/v3/detail/"
+    }
+   ],
+   "login": {
+    "error": "AttributeError"
+   },
+   "detail": {
+    "http": 200,
+    "code": 0,
+    "daily_checkin": {
+     "checked_in_today": false,
+     "continuous_days": 8,
+     "last_checkin_date": "2026-11-15",
+     "reward": {
+      "reward_amount": 400,
+      "reward_type": "quota_grant"
+     },
+     "total_days": 13
+    },
+    "task_status": 1
+   },
+   "page_requests": []
+  },
+  {
+   "type": "iframe",
+   "url": "https://www.doubao.com/drive-iframe/drive/home/",
+   "id": "3EE3F43BFC6C5F1DDBCD12164A8DEABB",
+   "hook_error": "WSClosed",
+   "reloaded": true,
+   "error": "target disappeared after reload",
+   "page_requests": []
+  },
+  {
+   "type": "iframe",
+   "url": "https://www.doubao.com/partner/ccm-office/preheat?clientId=wiki-preheat-office-preheat-pool%3A1794767734772%3A1&instanceId=office-preheat-pool%3A1794767734772%3A1&preheat=1&sheetChatPerfOptimize=1&useMessageV2=1&preheatBiz=docx&multiTabCanvas=1&officeBasePreheat=1",
+   "id": "143EC87944E8229A0FF5EC8231CEFF6C",
+   "hook_error": "WSClosed",
+   "reloaded": true,
+   "error": "target disappeared after reload",
+   "page_requests": []
+  },
+  {
+   "type": "iframe",
+   "url": "https://accounts.feishu.cn/session-tools/refresh",
+   "id": "53B74C405B0C6DC133F71D5422B25C97",
+   "hook_error": "WSClosed",
+   "reloaded": true,
+   "error": "target disappeared after reload",
+   "page_requests": []
+  },
+  {
+   "type": "page",
+   "url": "doubaowork://doubaowork-background/",
+   "id": "9791E144723ED24A7F1B535959BE2B6D",
+   "reloaded": true,
+   "href": "chrome://doubaowork-background/",
+   "has_bdms": "object",
+   "has_acrawler": "undefined",
+   "app_requests": [],
+   "login": {
+    "error": "AttributeError"
+   },
+   "detail": {
+    "http": 200,
+    "code": 0,
+    "daily_checkin": {
+     "checked_in_today": false,
+     "continuous_days": 8,
+     "last_checkin_date": "2026-11-15",
+     "reward": {
+      "reward_amount": 400,
+      "reward_type": "quota_grant"
+     },
+     "total_days": 13
+    },
+    "task_status": 1
+   },
+   "page_requests": []
+  }
+ ],
+ "replay": {
+  "error": "WSClosed",
+  "detail": "websocket Runtime.evaluate failed: [Errno 54] Connection reset by peer"
+ },
+ "click": {
+  "clicked": true,
+  "toast": "签到 | 签到 | 签到失败，请稍后重试",
+  "requests": [
+   {
+    "kind": "xhr",
+    "path": "/alice/ug/campaign/landing/checkin",
+    "query": {
+     "params": [
+      "aid",
+      "device_id",
+      "device_platform",
+      "doubao_device_platform",
+      "doubao_pc_version",
+      "language",
+      "pc_version",
+      "pkg_type",
+      "real_aid",
+      "region",
+      "runtime",
+      "runtime_version",
+      "samantha_web",
+      "sys_region",
+      "tea_uuid",
+      "use-olympus-account",
+      "version_code",
+      "web_id",
+      "web_platform",
+      "web_tab_id"
+     ],
+     "param_count": 20,
+     "has_msToken": false,
+     "has_a_bogus": false,
+     "aid": "497858",
+     "doubao_device_platform": "web",
+     "web_platform": "work_desktop",
+     "pc_version": "2.36.15",
+     "origin_path": "/alice/ug/campaign/landing/checkin"
+    },
+    "req_body": "{\"scene\":\"pc_incentive_task_mvp_v3\"}",
+    "status": 200,
+    "resp": "{\"data\":null,\"code\":710010702,\"msg\":\"系统错误\",\"message\":\"system error\",\"error\":{\"code\":710010702,\"message\":\"系统错误\",\"locale\":\"zh\"}}"
+   },
+   {
+    "kind": "xhr",
+    "path": "/alice/ug/campaign/v3/detail/",
+    "query": {
+     "params": [
+      "aid",
+      "device_id",
+      "device_platform",
+      "doubao_device_platform",
+      "doubao_pc_version",
+      "language",
+      "pc_version",
+      "pkg_type",
+      "real_aid",
+      "region",
+      "runtime",
+      "runtime_version",
+      "samantha_web",
+      "sys_region",
+      "tea_uuid",
+      "use-olympus-account",
+      "version_code",
+      "web_id",
+      "web_platform",
+      "web_tab_id"
+     ],
+     "param_count": 20,
+     "has_msToken": false,
+     "has_a_bogus": false,
+     "aid": "497858",
+     "doubao_device_platform": "web",
+     "web_platform": "work_desktop",
+     "pc_version": "2.36.15",
+     "origin_path": "/alice/ug/campaign/v3/detail/"
+    },
+    "req_body": "{\"campaign_group_code\":\"pc_incentive_task_mvp_v3\"}",
+    "status": 200,
+    "resp": "{\"data\":{\"campaign_code\":\"pc_incentive_task_mvp_v3\",\"example_cases\":[{\"cover_url\":\"https://p3-flow-imagex-sign.byteimg.com/tos-cn-i-8j1ei62asr/pc-incentive-v3-example-covers-20260923/01.png~tplv-a9rns2rl98-image.image?lk3s=8e244e95\\u0026rcl=20261116023725C3F561114131FAF26A71\\u0026rrcfp=d38ff4d5\\u0026x-expires=1795372645\\u0026x-signature=we5Yrjq4%2BkZ01mmZmtjvNysu4UQ%3D\",\"skill\":{\"name\":\"文档\\n多维表格\",\"prompt\":\"文档+多维表格 读取我上传的目标岗位 JD 和个人经历，同时调用｢文档｣和｢多维表格｣两 个技能，一次完成并输出两个产物：1. 简历优化稿 (Word)—— 把每段经历按 STAR 法则重写，突出结果和量化数据；从 JD 中提取关键词自然嵌入，提升与岗位的匹配 度；写一段 100 字左右的自我评价；2. 面试准备表 (多维表格)—— 包含高频面试问 题 (按考察方向分类)､每题回答思路和要点､反问环节建议问题､公司背调要点 (主 营业务 / 核心产品 / 竞品 / 近期动态); 带准备状态字段，勾选后自动统计完成进度｡ 两个产物一次性输出\",\"skill_id\":\"341767695106\"},\"title\":\"如何用豆包agent做好准备，提升你的面试通过率\",\"video_url\":\"https://v26-videoweb.doubao.com/c807f4d057cbf61cfc8e440ddef7cc7a/6b0336f6/video/tos/cn/tos-cn-v-7ff2cb/ooaziq0NEJd4oFv2xQEE0ABiRyIsCeDifELfRI"
+   }
+  ]
+ },
+ "conclusion": "**App 自己的签到按钮也失败**（同样的 710010702）。说明问题在上游服务端或账号风控，不在代理的参数/上下文。继续调参数没有意义：要么换干净账号验证风控，要么等上游恢复。"
+}
