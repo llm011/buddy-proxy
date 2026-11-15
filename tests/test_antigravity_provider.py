@@ -142,6 +142,31 @@ def test_quota_aggregates_groups(provider, tmp_path, monkeypatch):
     assert "gemini-3.6-flash" in gemini["note"]
     assert gemini["models_in_group"] == ["gemini-3.1-pro", "gemini-3.6-flash", "gemini-3.8-flash"]
     assert cgpt["models_in_group"] == ["claude-opus-4-6-thinking", "claude-sonnet-4-6", "gpt-oss-120b"]
+    # 缺 resetTime 的变体不能单独成池：reset_ts 只反映「有 resetTime 的多数派」
+    assert prov._iso_to_epoch("2026-10-02T20:28:46Z") == gemini["reset_ts"]
+    assert not any("tiered" in i["label"] for i in quota["items"])
+
+
+def test_quota_pool_split_ignores_missing_reset_in_fixture():
+    """``_cluster_pools`` 单测：缺 resetTime 无条件并回主池，残留池按 reset 排序。"""
+    import buddy_proxy.antigravity.provider as prov
+
+    fracs = [
+        (0.9, prov._iso_to_epoch("2026-11-15T12:28:46Z"), "gemini-3.8-flash-tiered"),
+        (0.9, prov._iso_to_epoch("2026-11-15T12:28:46Z"), "gemini-4-hydrogen-high"),
+        (0.5, 0.0, "gemini-no-reset"),
+        (0.8, prov._iso_to_epoch("2026-11-22T08:12:41Z"), "gemini-4-argon-high"),
+    ]
+    pools = prov._cluster_pools(fracs)
+    assert len(pools) == 2
+    assert [n for _f, _r, n in pools[0]] == [
+        "gemini-3.8-flash-tiered", "gemini-4-hydrogen-high", "gemini-no-reset"]
+    assert [n for _f, _r, n in pools[1]] == ["gemini-4-argon-high"]
+
+    # 全部缺 resetTime / 空输入：不分裂，也不抛异常
+    assert prov._cluster_pools([]) == [[]]
+    only_missing = [(0.4, 0.0, "a"), (0.3, 0.0, "b")]
+    assert len(prov._cluster_pools(only_missing)) == 1
 
 
 def test_quota_splits_argon_weekly_pool(provider, tmp_path, monkeypatch):
@@ -195,6 +220,41 @@ def test_quota_splits_argon_weekly_pool(provider, tmp_path, monkeypatch):
     assert shared["models_in_group"] == ["gemini-3.8-flash", "gemini-4-hydrogen"]
     assert argon["reset_ts"] == prov._iso_to_epoch("2026-11-22T08:12:41Z")
     assert shared["reset_ts"] == prov._iso_to_epoch("2026-11-15T12:28:46Z")
+
+
+def test_quota_pool_labels_stay_unique_when_pools_unrecognized(provider, tmp_path, monkeypatch):
+    """两个独立池都不含 argon → 通用后缀会撞车，兜底加重置时刻保证 label 唯一。"""
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            "gemini-3.8-flash-tiered": {"quotaInfo": {"remainingFraction": 0.9,
+                                                      "resetTime": "2026-11-15T12:28:46Z"}},
+            "gemini-4-hydrogen-high": {"quotaInfo": {"remainingFraction": 0.9,
+                                                     "resetTime": "2026-11-15T12:28:46Z"}},
+            "gemini-5-neo-high": {"quotaInfo": {"remainingFraction": 0.6,
+                                                "resetTime": "2026-11-21T03:00:00Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+    provider._models = [
+        {"id": "gemini-3.8-flash", "upstream": "gemini-3.8-flash-tiered", "group": "gemini"},
+        {"id": "gemini-4-hydrogen", "group": "gemini"},
+        {"id": "gemini-5-neo", "group": "gemini"},
+    ]
+
+    labels = [i["label"] for i in provider.quota()["items"]]
+    assert len(labels) == 2
+    assert len(set(labels)) == 2  # 不撞车
+    assert any("重置" in lab for lab in labels)
 
 
 def test_quota_full_quota_reads_as_full_not_zero(provider, tmp_path, monkeypatch):

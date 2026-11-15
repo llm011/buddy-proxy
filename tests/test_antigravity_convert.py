@@ -267,3 +267,25 @@ def test_local_product_json_below_floor_falls_back(monkeypatch, tmp_path):
     ua_ver, client_ver = fp._detect_versions()
     assert ua_ver == fp.FALLBACK_UA_VERSION  # 低于门槛 -> 抬到 fallback
     assert client_ver == "1.90.0"  # X-Client-Version 跟随本机，不抬
+
+
+def test_local_product_json_prerelease_suffix_kept(monkeypatch, tmp_path):
+    """带预发布后缀的本机版本仍按数字段比较，达标就别无谓掉回 fallback。"""
+    from buddy_proxy.antigravity import fingerprint as fp
+
+    monkeypatch.delenv("ANTIGRAVITY_UA_VERSION", raising=False)
+    monkeypatch.delenv("ANTIGRAVITY_CLIENT_VERSION", raising=False)
+    monkeypatch.setattr(fp, "_UA_VERSION", None)
+    monkeypatch.setattr(fp, "_CLIENT_VERSION", None)
+    product = tmp_path / "product.json"
+    product.write_text(
+        '{"ideVersion": "2.32.1-beta.3", "version": "1.110.0"}', encoding="utf-8"
+    )
+    monkeypatch.setattr(fp, "_product_json_paths", lambda: [product])
+
+    assert fp._version_tuple("2.32.1-beta.3") == (2, 32, 1)
+    assert fp._version_tuple("2.32.1+build") == (2, 32, 1)
+    assert fp._version_tuple("") is None
+    assert fp._version_tuple("garbage") is None
+    ua_ver, _client_ver = fp._detect_versions()
+    assert ua_ver == "2.32.1-beta.3"  # >= MIN_UA_VERSION，保留本机真实版本

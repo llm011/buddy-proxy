@@ -58,8 +58,11 @@ def _product_json_paths() -> list[Path]:
 
 
 def _version_tuple(text: str) -> tuple[int, ...] | None:
+    # 截掉 ``2.32.1-beta`` / ``2.32.1+build`` 这类预发布/构建后缀，只比数字段；
+    # 否则带后缀的本机真实版本会被判成不可解析，无谓地掉回 fallback。
+    core = text.strip().split("-", 1)[0].split("+", 1)[0]
     try:
-        return tuple(int(part) for part in text.split("."))
+        return tuple(int(part) for part in core.split("."))
     except ValueError:
         return None
 

@@ -921,9 +921,19 @@ class AntigravityProvider(BaseProvider):
         for group, _fracs in ordered:
             pools_per_group[group] = pools_per_group.get(group, 0) + 1
         items: list[dict[str, Any]] = []
+        seen_labels: set[str] = set()
         for group, fracs in ordered:
             pool_suffix = _quota_pool_suffix(group, fracs, multi_pool=pools_per_group[group] > 1)
             label = ("Gemini 组" if group == "gemini" else "Claude/GPT 组") + pool_suffix
+            # 兜底：多池但两个池都落到同一个通用后缀（上游换了模型名 / 冒出新的独立池
+            # 模型，认不出是哪个池），标签会撞车，面板上两行分不清。撞车时改用该池的
+            # 下次重置时刻做区分，保证 label 唯一。
+            if label in seen_labels:
+                pool_reset = next((t for _, t, _ in fracs if t > 0), 0)
+                stamp = (time.strftime("%m-%d %H:%M", time.localtime(pool_reset))
+                         if pool_reset else "无重置时间")
+                label = f"{label}（{stamp} 重置）"
+            seen_labels.add(label)
             worst_frac, worst_reset, worst_model = min(fracs, key=lambda t: t[0])
             # worst_frac 钳到 [0,1]：上游理论上只发 0~1，但发过 >1（观察到的余量）
             # 会让 remaining>total、used 为负、percent 负值，前端渲染成「剩 1,500 /
