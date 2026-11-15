@@ -397,12 +397,17 @@ def _used_percent(it: dict[str, Any]) -> Optional[float]:
     算，导致剩 99% 画成满格红条）。有条目同时给了 used/total、偏偏没给
     percent 时，CLI 自己推一份，至少不会整列显示「—」。
     """
-    percent = it.get("percent")
-    if isinstance(percent, (int, float)) and not isinstance(percent, bool):
-        return float(percent)
-    used, total = it.get("used"), it.get("total")
-    if isinstance(used, (int, float)) and isinstance(total, (int, float)) \
-            and not isinstance(used, bool) and not isinstance(total, bool) and total:
+    def num(v: Any) -> Optional[float]:
+        # bool 是 int 的子类：``True`` 不能当 1 用
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        return None
+
+    percent = num(it.get("percent"))
+    if percent is not None:
+        return percent
+    used, total = num(it.get("used")), num(it.get("total"))
+    if used is not None and total:
         return round(used / total * 100, 1)
     return None
 

@@ -312,10 +312,10 @@ def parse_user_usage(data: dict[str, Any]) -> list[dict[str, Any]]:
         # 它填色：≥85% 红、≥60% 黄）。上游给的是 ``remaining``/``entitlement``，
         # 这里按剩余算会把「还剩 99%」画成满格红条——用户 2026-11-16 截图反馈
         # 的正是这个：剩 1,491 / 1,500 却显示「已用 99.4%」。
-        # 从 ``used`` 出发算，和上面的字段自洽；remaining 缺失时按 0 已用。
-        percent = None
-        if total:
-            percent = round(max(total - (remaining or 0), 0) / total * 100, 1)
+        # ``used`` 拿不到时 ``percent`` 留 None（面板显示「已用未知」），不按
+        # 0 已用算——上游只回包容量、还没回用量时，按 0 算会画出满格绿条，
+        # 把「未知」说成「一点没用」，比不显示更误导（同 trae/pat/quota.py）。
+        percent = round(used / total * 100, 1) if total and used is not None else None
         items.append({
             "label": label,
             "used": used,

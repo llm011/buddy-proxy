@@ -208,6 +208,15 @@ def test_parse_user_usage_percent_is_used_not_remaining():
     assert rows[0]["used"] == 9
 
 
+def test_parse_user_usage_percent_unknown_without_remaining():
+    """只回了容量、没回用量：percent 留 None，别当成「一点没用」。"""
+    rows = upstream.parse_user_usage({
+        "quota_snapshots": {"premium_interactions": {"entitlement": 300}},
+    })
+    assert rows[0]["total"] == 300
+    assert rows[0]["percent"] is None
+
+
 def test_health_surfaces_catalog_error():
     p = CopilotProvider()
     p._refresh_error = "boom"
