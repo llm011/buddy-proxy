@@ -372,7 +372,9 @@ class AntigravityProvider(BaseProvider):
                     entry = dict(local)
                     id_to_entry[str(entry["id"])] = entry
                 # 档位取并集：本地实测的档位优先排序，上游新见档位追加；已有
-                # default_effort 不动，保证默认路由行为不变。
+                # default_effort 不动，保证默认路由行为不变。前提：默认档至少
+                # 有一档上游仍在供（verified 条目实测通过）；若某天默认档被上游
+                # 下线，需人工改 models.json，而不是靠刷新自动切换默认路由。
                 if entry.get("efforts") or efforts:
                     entry["efforts"] = _merge_efforts(
                         list(entry.get("efforts") or ()), efforts
@@ -382,7 +384,9 @@ class AntigravityProvider(BaseProvider):
                     )
             else:
                 if base in id_to_entry:
-                    continue  # 防御：不同 base 归一到同一动态 id（理论不可达）
+                    # 防御：不同 base 归一到同一动态 id（理论不可达），留痕便于排查。
+                    log.warning("antigravity 模型目录 base %s 归一冲突，已跳过", base)
+                    continue
                 entry = {
                     "id": base,
                     "upstream": base,

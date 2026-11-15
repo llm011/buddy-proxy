@@ -212,6 +212,28 @@ def test_refresh_union_appends_new_upstream_effort_without_changing_default(monk
     assert argon["description"].startswith("Gemini 4 Argon")
 
 
+def test_family_prefix_match_only_folds_into_verified_entries(monkeypatch):
+    """家族前缀归一限定在 curated（verified）条目，不吞上游真实新模型。"""
+    provider = prov.AntigravityProvider()
+    monkeypatch.setattr(prov, "list_accounts", lambda: [_account("a1")])
+
+    async def fake_fetch(_account_id: str):
+        return {"models": {
+            "gemini-4-hydrogen-xhigh": {},
+            "gemini-4-hydrogen-air-xhigh": {},
+        }}
+
+    monkeypatch.setattr(provider, "_fetch_available_models", fake_fetch)
+    asyncio.run(provider.refresh_models())
+    ids = _ids(provider)
+
+    # verified 的 gemini-4-hydrogen 继续以基名对外
+    assert "gemini-4-hydrogen" in ids
+    assert "gemini-4-hydrogen-xhigh" not in ids
+    # 同前缀但不在 models.json 里的真·新模型照常独立暴露
+    assert "gemini-4-hydrogen-air" in ids  # -xhigh 去掉后是独立基名
+
+
 def test_blocked_prefix_keeps_gross_prefix_with_explicit_exception():
     """旧代前缀保持粗粒度，生图模型靠显式例外放行。"""
     from buddy_proxy.antigravity.model_catalog import _is_blocked_base
