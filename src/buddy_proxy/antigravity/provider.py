@@ -239,15 +239,16 @@ class AntigravityProvider(BaseProvider):
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
+        #: 积分探测专用的长连接 client（见 _fetch_watermark）。
+        self._probe_client: httpx.AsyncClient | None = None
         # 模块级 MODELS 只是冷启动种子。运行时目录归实例持有，刷新一个 provider
         # 不能污染其它实例（测试、多 app 同进程也不会串目录）。
         self._models: list[dict[str, Any]] = [dict(m) for m in MODELS]
         self._model_by_id: dict[str, dict[str, Any]] = {
             str(m["id"]): m for m in self._models
         }
-        # 积分估算的落点状态（见 _settle_frame / _settle_credit）：池键 → 等结算的
-        # 那条请求帧；"_last_pool" 是 (账号|上游模型) → 池键 的缓存。
-        self._credit_state: dict[str, Any] = {}
+        # 积分估算只需要一个「上次读数」：存在 core.credit_estimate._QUOTA_MARKS
+        # （按 账号|池键），每次收尾现算池键，不缓存——少一份会和面板口径漂移的副本。
 
     # ---- BaseProvider 接口 ----
 
@@ -587,18 +588,13 @@ class AntigravityProvider(BaseProvider):
             if stream:
                 from ..gemini.provider import _to_anthropic_stream, _to_openai_stream
 
-                # 流结束后旁路查水位、算落差，把「上一条」的结算写进它的帧
-                # （见 _credit_probe / _settle_credit / _ReplayStream.on_close）。
+                # 流结束后旁路查水位、算落差，把本次请求的估算写进本帧的
+                # ag_credit（见 _credit_probe / _ReplayStream.on_close）。
                 async def _estimate(
                     p: int | None, c: int | None,
                 ) -> float | None:
-                    credit = await self._settle_frame(
+                    return await self._settle_frame(
                         acct.id, upstream_model, frame, p, c)
-                    if isinstance(frame, dict):
-                        # 本条自己的数字：整条流只见到 usage、没有读数是铺垫，记 —。
-                        frame["ag_credit"] = credit
-                        frame["ag_estimated"] = True
-                    return credit
 
                 replay = _ReplayStream(gate.resp, gate.buffered, gate.lines,
                                        on_close=_estimate)
@@ -624,9 +620,13 @@ class AntigravityProvider(BaseProvider):
                 )
             await gate.resp.aclose()
             chat = gemini_response_to_chat(payload, model=upstream_model)
-            # 单次消耗估算（水位落差）：结算值写进那条请求的归属帧 ag_credit，
-            # observability 落库时读帧（流式同样走帧，见 _metrics_stream）。
-            usage = payload.get("usageMetadata") or {}
+            # 单次消耗估算（水位落差）：写进本请求的帧 ag_credit，observability
+            # 落库时读帧（与流式同一条路径，只是触发点不同）。
+            # usage 在 envelope 的 response 里（顶层只有 response/traceId/metadata），
+            # 读顶层会恒为 0——token 数只用来分摊区间落差，读 0 会让分摊失准。
+            resp_obj = payload.get("response") if isinstance(payload, dict) else None
+            usage = (resp_obj.get("usageMetadata")
+                     if isinstance(resp_obj, dict) else None) or {}
             await self._settle_frame(
                 acct.id, upstream_model, frame,
                 usage.get("promptTokenCount"), usage.get("candidatesTokenCount"),
@@ -900,18 +900,18 @@ class AntigravityProvider(BaseProvider):
         prefix = f"AG #{index} · " if multi else ""
         return self._quota_items_from(data, prefix), bool(data["models"])
 
-    # -- 单次消耗估算（水位落差）------------------------------------------
+    # -- 消耗估算（池水位落差）--------------------------------------------
     #
     # 上游没有积分字段、也没有公开抵扣公式，唯一可观测的计费信号是
     # ``quotaInfo.remainingFraction``（池级水位，4 位精度），见
     # ``core.credit_estimate`` 模块文档。流程：
     #
-    #   请求前 = ``_QUOTA_MARKS`` 里上一条请求收尾时记的水位；
-    #   请求后（响应体读完）异步查一次 fetchAvailableModels，取该模型所属池的水位；
-    #   落差 > 0 → 估算积分（``estimate_credit("antigravity", ..., quota_key=池)``）。
+    # 每条请求收尾时用**固定长连接**查一次 fetchAvailableModels（``_fetch_watermark``，
+    # 必须固定连接的原因见那里的实测），取该模型所属池的水位，与上次读数相减
+    # 结算本条请求（``core.credit_estimate.record_quota_mark``）：
     #
-    # 关键取舍：**先记 mark 再估算**（与 Trae 的 prompt 基线同序）；水位没降 /
-    # 读不到都记 None（面板显示 —），不拿 0 冒充「免费」。
+    #   固定连接上水位逐条单调下降，落差就是这一条请求的消耗；没跌（首次观测 /
+    #   刚换过连接）或读不到都记 None（面板显示 —），不拿 0 冒充「免费」。
 
     def _pool_key(self, data: dict[str, Any], upstream_model: str) -> str:
         """上游模型名 → 它所在的额度池键（同一 resetTime 聚类的池共用）。
@@ -958,157 +958,57 @@ class AntigravityProvider(BaseProvider):
     ) -> float | None:
         """响应收尾的积分结算入口（流式/非流式共用）。
 
-        顺序要紧：先取走「等结算」的上一条（这次读到的落差是给它的），再查水位
-        算落差，最后把本帧放回槽里等下一次。本帧入队条件：这次确实读到了一条
-        更早的同池读数（``prev_ts`` 非空）——那是它在本条发出前的状态，下一次
-        收尾拿它对比才有意义；连读数都没读到就返回 None，让下一次重新铺基线。
+        查一次池水位（固定连接），与上次读数相减，把这条请求的水位落差换成积分
+        写进本帧的 ``ag_credit``，再由 observability 落库。
+
+        固定连接上水位逐条单调下降，所以归属口径是**本条**：差值就是这条请求的
+        消耗。首次观测 / 连接刚重建 / 水位没动时返回 None（面板记 —），不拿 0
+        冒充「免费」。
         """
-        pool = self._pool_key_cached(account_id, upstream_model)
-        waiting = self._claim_waiting(pool, account_id, frame)
-        credit, prev_ts = await self._credit_probe(
-            account_id, upstream_model,
-            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
-        if credit is None:
-            # 水位没降（轻用时长期读 1.0）或读不到：本次收尾结算不了任何东西。
-            # 排队的那条继续等——别把它的位置让给一条还没结算的请求。
-            self._requeue_waiting(pool, waiting)
-            return None
-        return self._settle_credit(pool, account_id, prev_ts, frame, credit, waiting)
-
-    def _requeue_waiting(self, pool: str, waiting: dict[str, Any] | None) -> None:
-        """把取出来但结算不了的上一条放回槽里（保持「谁在排队」不丢）。"""
-        if pool and isinstance(waiting, dict) and not self._credit_state.get(pool, {}).get("waiting"):
-            self._credit_state.setdefault(pool, {})["waiting"] = waiting
-
-    def _pool_key_cached(self, account_id: str, upstream_model: str) -> str:
-        """最近一次探测得到的池键（探测本身会刷新它）。"""
-        return (self._credit_state.get("_last_pool") or {}).get(
-            f"{account_id}|{upstream_model}", "")
+        total = int(prompt_tokens or 0) + int(completion_tokens or 0)
+        credit, _ = await self._credit_probe(
+            account_id, upstream_model, tokens=total)
+        if credit is not None and isinstance(frame, dict):
+            frame["ag_credit"] = credit
+        return credit
 
     async def _credit_probe(
         self, account_id: str, upstream_model: str,
-        prompt_tokens: int | None = None,
-        completion_tokens: int | None = None,
+        tokens: int = 0,
     ) -> tuple[float | None, float | None]:
-        """响应收尾时查一次水位，按与上一条的落差结算「上一条请求」的积分。
+        """响应收尾时查一次池水位，把本条请求的消耗结出来。
 
-        返回 ``(credit, previous_ts)``：
+        返回 ``(credit, observed_ts)``：
 
-        * ``credit``：估算积分；首次铺基线 / 读不到 / 水位没降都为 None
-          （面板显示 —，不拿 0 冒充「免费」）。
-        * ``previous_ts``：落差起点那条读数的记录时刻（epoch 秒）。调用方用它
-          判断「这次结算属不属于自己这条请求」（见 :func:`_settle_credit`）。
+        * ``credit``：估算积分；首次观测 / 读不到 / 水位没动（含刚换过连接）/
+          水位回落 / 落差小到 round(2) 归零 都为 None（面板显示 —，
+          不拿 0 冒充「免费」）。
+        * ``observed_ts``：本次观测时刻（epoch 秒），仅供诊断。
 
-        时序说明：水位是**池级、批量刷新**的读数，一条请求自己的成本在它收尾时
-        通常还读不到（读到的是它发出前的水位）。所以这里算的是**上一条**请求的
-        消耗，账挂在上一条上，不是这一条上。任何异常都吞掉：估算只是旁路，
-        不能把已经成功的请求变成失败。
+        ``tokens`` 是本条请求的总 token（prompt + completion），不参与换算。
+
+        任何异常都吞掉：估算只是旁路，不能把已经成功的请求变成失败。
         """
-        from ..core.credit_estimate import (
-            _estimate_antigravity_drop,
-            record_quota_mark,
-        )
+        from ..core.credit_estimate import record_quota_mark
 
         try:
             data = await asyncio.wait_for(
-                self._fetch_available_models(account_id),
+                self._fetch_watermark(account_id),
                 timeout=_CREDIT_PROBE_TIMEOUT_S,
             )
             pool = self._pool_key(data, upstream_model) if data else ""
             if not pool:
                 return None, None
-            self._credit_state.setdefault("_last_pool", {})[
-                f"{account_id}|{upstream_model}"] = pool
             after = None
             q = (data.get("models") or {}).get(upstream_model)
             if isinstance(q, dict):
                 frac = (q.get("quotaInfo") or {}).get("remainingFraction")
                 if isinstance(frac, (int, float)) and not isinstance(frac, bool):
                     after = float(frac)
-            previous = record_quota_mark(account_id, pool, after)
-            if previous is None or after is None:
-                return None, None
-            # 这一步结算的是「上一条请求」的消耗（previous 是那条收尾时记的水位），
-            # 不是本条的——上游水位按池批量刷新，只有请求之后才看得到本次成本。
-            # 落点判据见 _settle_credit。
-            return _estimate_antigravity_drop(
-                previous[0], after, prompt_tokens, completion_tokens), previous[1]
+            return record_quota_mark(account_id, pool, after, tokens=tokens)
         except Exception as exc:  # noqa: BLE001 - 旁路，绝不影响主链路
             log.debug("antigravity 积分估算失败（忽略）: %s: %s", type(exc).__name__, exc)
             return None, None
-
-    # -- 落差结算的归属 ----------------------------------------------------
-    #
-    # 上游水位按池批量刷新：一条请求**自己**的落差，通常要等下一次同池收尾才看得到
-    # （收尾时读到的还是它发出前的读数）。所以「本次收尾算出的落差」属于
-    # **上一次**同池收尾的那条请求，账要挂过去。
-    #
-    # 归属对象是 observability 放在 ACCOUNT_META 里的请求帧（dict），每池一个
-    # 「等结算」槽（_credit_state[pool]["waiting"] = {frame, ts, account}）：
-    #
-    #   收尾 → _claim_waiting  取走上一条的槽（本帧的落差就是给它的）
-    #        → 查水位、算落差
-    #        → _settle_credit   把落差值写进那条的 frame["ag_credit"]，
-    #                           再把本帧（连同读数时刻 ts）放回槽里等下一次
-    #
-    # observability 落库时读本帧的 ag_credit（= 上一条的结算）并记 credit_estimated
-    # = False；读不到就是 None（记 —），不拿 0 冒充免费。进程级 dict 即可：单进程
-    # 部署下同池请求都经过这里；多进程各读各的池水位，最多漏结算、不会算错。
-
-    def _claim_waiting(self, pool: str, account_id: str,
-                       frame: dict[str, Any] | None) -> dict[str, Any] | None:
-        """取走本池「等结算」的**上一条**请求（可能为 None）。
-
-        槽里挂的是「还没结算过的请求」，它可能已经落库（observability 打了
-        ``ag_done``，账由另一条收尾时补记进了帧）——那种槽仍然要先取走，否则
-        后面的请求永远排不上队；但取走之后不再对它写 ``ag_credit``。
-        """
-        if not pool:
-            return None
-        slot = self._credit_state.get(pool) or {}
-        waiting = slot.pop("waiting", None)
-        if not isinstance(waiting, dict):
-            return None
-        if waiting.get("account") != account_id:
-            return None
-        return waiting
-
-    @staticmethod
-    def _frame_alive(frame: Any) -> bool:
-        """等结算帧是否还活着：observability 落库后会写 ag_done，避免一直持有引用。"""
-        return isinstance(frame, dict) and not frame.get("ag_done")
-
-    @staticmethod
-    def _frame_is_reusable(frame: Any) -> bool:
-        """本次请求能不能进「等结算」队列。
-
-        只有 observability 给的真帧可以：流式时本帧的数字要等下一次收尾才写进去，
-        它必须活到那时——没有埋点（直接 forward / 测试传空 dict）就没有落库对象，
-        让它进队只会把水位序列搅乱。
-        """
-        return isinstance(frame, dict) and "account" in frame
-
-    def _settle_credit(self, pool: str, account_id: str, ts: float | None,
-                       frame: dict[str, Any] | None,
-                       credit: float | None, waiting: dict[str, Any] | None) -> float | None:
-        """把这次算出的落差挂到上一条请求上，并登记本条等下一次结算。
-
-        返回 ``credit``（给 observability 记本条：这同样是「上一条」的数字，
-        两者一致；本条的自己数字要等下一次收尾）。
-        """
-        if credit is not None and isinstance(waiting, dict):
-            owner = waiting.get("frame")
-            if self._frame_alive(owner):
-                owner["ag_credit"] = credit
-        if waiting is None and credit is not None:
-            # 池里没有可挂的请求：要么是铺基线后的第一笔、上一条一直没进队列，
-            # 要么跨进程/重启。这笔账没主，丢了不瞎猜。
-            log.debug("antigravity 积分结算无归属（%s）：%.2f 丢弃", pool, credit)
-        if pool and ts is not None and self._frame_is_reusable(frame):
-            self._credit_state.setdefault(pool, {})["waiting"] = {
-                "frame": frame, "ts": ts, "account": account_id,
-            }
-        return credit
 
     def _quota_items_from(self, data: dict[str, Any], prefix: str) -> list[dict[str, Any]]:
         """fetchAvailableModels 响应 → 按**额度池**聚合的额度条目（prefix 拼在 label 前）。
@@ -1234,6 +1134,9 @@ class AntigravityProvider(BaseProvider):
         复用缓存的 ``self._client`` 会把连接池绑到这个短命 loop 上——loop 关闭
         后主循环的转发请求复用它就 ``RuntimeError: Event loop is closed``
         （未捕获 → internal error）。quota 是低频管理操作，新建开销可忽略。
+
+        只给**面板**用。积分探测必须走 :meth:`_fetch_watermark`：本方法每次新建
+        连接，而水位读数按连接缓存（见那里的实测），新建连接读到的快照会跳。
         """
         from .fingerprint import auth_headers
 
@@ -1248,6 +1151,45 @@ class AntigravityProvider(BaseProvider):
                 return resp.json()
             finally:
                 await resp.aclose()
+
+    async def _fetch_watermark(self, account_id: str) -> dict[str, Any]:
+        """积分探测专用：**固定一条长连接**读 fetchAvailableModels。
+
+        为什么不能复用 :meth:`_fetch_available_models`（每次新建 client）——
+        2026-11-16 实测（同一账号、同一模型，打 daily 端点）：
+
+        * 每次新建连接读：``0.7551521 / 0.7562798 / 0.7592398`` 三者间**随机
+          跳动**，甚至会「回升」，8 次采样里三个值都出现过；
+        * 复用同一条连接连读 8 次：**恒为 0.7551521**，纹丝不动；
+        * 在这条固定连接上发 4 条请求，每条收尾再读：``0.7562798 → 0.75617707
+          → 0.7560655 → 0.7559592 → 0.7558411``，逐条**单调下降**，且每条落差
+          与该条请求的体量对得上（260~310 token → 约 0.0001）。
+
+        结论：水位是**按连接/接入节点缓存**的，换连接就换了一份快照。探测器若不
+        固定连接，读到的相邻两点来自不同快照，差值毫无意义（这正是早先「网关路径
+        水位在窄带里跳、同样代码直连却单调下降」的全部原因）。固定连接后，相邻两
+        次读数之间的落差就是这两次之间真实发生的消耗。
+
+        连接绑在本实例上（不是模块级）：provider 与主事件循环同生命周期，探测都在
+        主循环里跑，不存在 ``Event loop is closed`` 那类跨 loop 复用。连接断了
+        （``is_closed``）就换一条新的——新连接会重新铺基线，下一次读数不结算。
+        """
+        from .fingerprint import auth_headers
+
+        token, _cred = await asyncio.to_thread(ensure_account_token, account_id)
+        client = self._probe_client
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(timeout=_TIMEOUT)
+            self._probe_client = client
+        resp = await self._send_with_fallback(
+            client, "fetchAvailableModels", {}, auth_headers(token), stream=False
+        )
+        try:
+            if resp.status_code >= 400:
+                return {}
+            return resp.json()
+        finally:
+            await resp.aclose()
 
 
 # ---------------------------------------------------------------------------

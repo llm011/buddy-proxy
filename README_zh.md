@@ -1407,7 +1407,7 @@ buddy start
 所以 `reasoning_effort` 按模型表声明的档位映射后缀（`models.json` 的
 `efforts`/`default_effort`——如 `gemini-4-hydrogen` 默认 `-high`（另有 `-xhigh`）、
 `gemini-3.8-flash` 实发 `gemini-3.8-flash-tiered`、`claude-opus-5-5` 实发
-`claude-opus-5-5-medium`、`gpt-oss-120b` 实发 `gpt-oss-120b-medium`）。模型页手动刷新会遍历所有可用账号、取
+`claude-opus-5-5-medium`、`gpt-oss-120b` 实发 `gpt-oss-120b-medium`）。档位**不进模型 id**：对外和客户端里只有基名（`antigravity/gemini-4-hydrogen`），档位取请求体 `reasoning_effort`、缺省用 `default_effort`，所以 `antigravity/gemini-4-hydrogen-xhigh` 这种写法是未知模型（400）。模型页手动刷新会遍历所有可用账号、取
 `fetchAvailableModels` 并集，只裁掉已知 effort 后缀（绝不泛化裁掉 `-thinking` /
 `-image` / `-agent` 这类模型身份），已知条目保留人工 metadata，新发现项立即可路由。
 Kimi 的同一刷新按钮走官方 `GET /v1/models`；两者目录都归 provider 实例持有，整轮失败
@@ -1456,6 +1456,18 @@ OpenAI 协议的扩展字段里有容身之处，Anthropic 客户端（Claude Co
 管理面板配额区在 `fetchAvailableModels` 可达时按组显示真进度条（组内取最紧
 水位）：剩余量用千分制展示（如 `989.9 / 1000`，小数看着直观）并带下次重置
 时间；拿不到（未登录/接口失败）退化为静态说明。
+
+**请求日志的 Credit 列**——上游没有积分字段、也没有公开的抵扣公式，唯一可观测
+的计费信号就是池水位 `quotaInfo.remainingFraction`。每条请求的值 = **收尾时读到
+的水位与上一次读数之差**（×1000，**标定系数，不是官方口径**）。读数必须来自
+**一条固定的长连接**：水位按连接/接入节点缓存，每次新建连接读到的是另一份快照
+（`0.7551521 / 0.7562798 / 0.7592398` 随机跳，还会回升）；固定在一条连接上则
+逐条单调下降（`0.7562798 → 0.75617707 → 0.7560655 → 0.7559592 → 0.7558411`），
+落差与该条请求体量对得上（1 token ≈ 0.0000015，4393 token ≈ 0.0008）。但精度
+只够**看量级**：水位只有 4 位有效数字，同样规模的一条请求实测 0.11 / 0.12，也
+出现过 6.41；上游还会自己回升（空转 30 s 实测 +0.0014）。回升、读不到水位、或
+落差小到 round(2) 归零时一律记 `—`（不拿 0 冒充免费），回升时基线跟到新读数，
+免得下一次落差虚增。当量级参考，不要当账单。
 
 **多账号 + 自动 failover**——换一个 Google 账号再跑一次
 `buddy login antigravity` 即追加为备用账号（相同邮箱登录 = 更新该账号凭据、

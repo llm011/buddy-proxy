@@ -515,16 +515,16 @@ def test_credit_probe_uses_watermark_drop(provider, monkeypatch):
     async def _fake_fetch(account_id):
         return {"models": {"gemini-3.8-flash-tiered": _ag_quota(next(fracs), reset)}}
 
-    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(provider, "_fetch_watermark", _fake_fetch)
     async def _run():
-        first = await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+        first = await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", tokens=120)
         assert first == (None, None)  # 没有上一条水位可比
-        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", tokens=120)
 
-    second, _prev_ts = asyncio.run(_run())
+    second, observed_ts = asyncio.run(_run())
     expected = round((0.9990 - 0.9950) * credit_estimate._ANTIGRAVITY_CREDITS_PER_WATERMARK, 2)
     assert second == expected
-    assert _prev_ts  # 落差起点：调用方据此把账挂到上一条请求上
+    assert observed_ts  # 本次观测时刻（诊断用）
 
 
 def test_credit_probe_returns_none_when_flat_or_unreadable(provider, monkeypatch):
@@ -537,23 +537,23 @@ def test_credit_probe_returns_none_when_flat_or_unreadable(provider, monkeypatch
     async def _flat(account_id):
         return {"models": {"gemini-3.8-flash-tiered": _ag_quota(1.0, reset)}}
 
-    monkeypatch.setattr(provider, "_fetch_available_models", _flat)
+    monkeypatch.setattr(provider, "_fetch_watermark", _flat)
 
     async def _flat_twice():
-        await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
-        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+        await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", tokens=120)
+        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", tokens=120)
 
-    credit, prev_ts = asyncio.run(_flat_twice())
+    credit, observed_ts = asyncio.run(_flat_twice())
     assert credit is None  # 水位没降 → 记 —
-    assert prev_ts  # 但读数时刻照记，下次有落差时它就是起点
+    assert observed_ts  # 账本仍在，只是没跌
 
     async def _boom(account_id):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(provider, "_fetch_available_models", _boom)
+    monkeypatch.setattr(provider, "_fetch_watermark", _boom)
 
     async def _fail():
-        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", 100, 20)
+        return await provider._credit_probe("u@x.com", "gemini-3.8-flash-tiered", tokens=120)
 
     assert asyncio.run(_fail()) == (None, None)
 
@@ -587,50 +587,48 @@ def test_replay_stream_reports_usage_to_on_close():
     assert seen == [(157, None)]
 
 
-def test_settle_frame_books_drop_on_previous_request(provider, monkeypatch):
-    """本次收尾算出的落差属于「上一条」：写进它的帧，本帧排队等下一次。"""
+def test_settle_frame_books_single_request(provider, monkeypatch):
+    """固定连接上水位逐条下降：每条收尾的落差就是这条请求的账。
+
+    实测依据见 ``antigravity.provider._fetch_watermark``：同一连接上连发 4 条，
+    收尾读数逐条单调下降（0.7562798 → 0.75617707 → …），落差与该条体量对得上。
+    """
     from buddy_proxy.core import credit_estimate
 
     credit_estimate._QUOTA_MARKS.clear()
     reset = "2026-10-02T20:28:46Z"
-    fracs = iter([0.9990, 0.9950, 0.9910])
+    # 第一条铺基线，第二条跌 0.004，第三条再跌 0.001。
+    fracs = iter([0.9990, 0.9950, 0.9940])
 
     async def _fake_fetch(account_id):
         return {"models": {"gemini-3.8-flash-tiered": _ag_quota(next(fracs), reset)}}
 
-    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
-    # 真帧形如 observability 放的那只 dict（provider 写入 account 后才可进队）。
+    monkeypatch.setattr(provider, "_fetch_watermark", _fake_fetch)
     first: dict = {"account": "u@x.com"}
     second: dict = {"account": "u@x.com"}
     third: dict = {"account": "u@x.com"}
 
     async def _run():
-        # 第一条：铺基线，没有账可结（本次读数 0.999 只作为下一次的起点）。
-        assert await provider._settle_frame(
-            "u@x.com", "gemini-3.8-flash-tiered", first, 100, 20) is None
-        # 第二条：本次读到 0.9950，落差 0.004。这一笔本该属于第一条，但第一条
-        # 从没进过等结算槽（它铺基线时还没有「更早读数」），所以没有归属——丢弃。
-        credit = await provider._settle_frame(
+        c1 = await provider._settle_frame(
+            "u@x.com", "gemini-3.8-flash-tiered", first, 100, 20)
+        c2 = await provider._settle_frame(
             "u@x.com", "gemini-3.8-flash-tiered", second, 100, 20)
-        # 第三条：再读 0.9910，落差 0.004 属于第二条。
-        await provider._settle_frame(
+        c3 = await provider._settle_frame(
             "u@x.com", "gemini-3.8-flash-tiered", third, 100, 20)
-        return credit
+        return c1, c2, c3
 
-    credit = asyncio.run(_run())
+    c1, c2, c3 = asyncio.run(_run())
     unit = credit_estimate._ANTIGRAVITY_CREDITS_PER_WATERMARK
-    # 第三条收尾读到的落差（0.995 → 0.991）算到第二条头上——这条才是落库时
-    # observability 读到的数字（第二条自己的落差要等第三条收尾才可见）。
-    assert credit == round(0.004 * unit, 2)
-    assert second["ag_credit"] == round(0.004 * unit, 2)
-    # 第一条的账在第二条收尾时也算过一次落差，但那次因槽里没有更早请求被丢弃；
-    # 第三条自己还在等下一次收尾，本次没给它记数。
+    assert c1 is None  # 第一条只铺基线
+    assert c2 == round(0.004 * unit, 2) == 4.0
+    assert c3 == round(0.001 * unit, 2) == 1.0
     assert "ag_credit" not in first
-    assert "ag_credit" not in third
+    assert second["ag_credit"] == 4.0
+    assert third["ag_credit"] == 1.0
 
 
-def test_settle_frame_skips_stale_frame(provider, monkeypatch):
-    """上一条已落库（ag_done）或换了账号：不把账挂到别人身上。"""
+def test_settle_frame_skips_placeholder_frame(provider, monkeypatch):
+    """没埋点（frame 不是 dict）时照常推进水位，但不往任何地方写。"""
     from buddy_proxy.core import credit_estimate
 
     credit_estimate._QUOTA_MARKS.clear()
@@ -640,25 +638,114 @@ def test_settle_frame_skips_stale_frame(provider, monkeypatch):
     async def _fake_fetch(account_id):
         return {"models": {"gemini-3.8-flash-tiered": _ag_quota(next(fracs), reset)}}
 
-    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
-    dead: dict = {"ag_done": True}
+    monkeypatch.setattr(provider, "_fetch_watermark", _fake_fetch)
 
     async def _run():
-        await provider._settle_frame("u@x.com", "gemini-3.8-flash-tiered", dead, 100, 20)
-        return await provider._settle_frame(
-            "u@x.com", "gemini-3.8-flash-tiered", {}, 100, 20)
+        await provider._settle_frame("u@x.com", "gemini-3.8-flash-tiered", None, 100, 20)
+        return await provider._settle_frame("u@x.com", "gemini-3.8-flash-tiered", None, 100, 20)
+
+    # 第二条照样能结算出数值（给调用方返回），只是没有帧可写。
+    assert asyncio.run(_run()) == round(
+        0.004 * credit_estimate._ANTIGRAVITY_CREDITS_PER_WATERMARK, 2)
+
+
+def test_record_quota_mark_rebases_on_rise(provider):
+    """水位回升（换了连接快照 / 上游重算）：本次记 —，且基线跟到新读数。
+
+    不跟的话，下一次真跌到 0.994 时拿 0.999 的旧基线比，落差会虚增一倍。
+    """
+    from buddy_proxy.core import credit_estimate
+
+    credit_estimate._QUOTA_MARKS.clear()
+    credit_estimate.record_quota_mark("u@x.com", "gemini|1", 0.9990)
+    credit, _ = credit_estimate.record_quota_mark("u@x.com", "gemini|1", 0.9995)
+    assert credit is None
+    credit, _ = credit_estimate.record_quota_mark("u@x.com", "gemini|1", 0.9955)
+    # 0.9995 → 0.9955 = 0.004，而不是 0.999 → 0.9955 的 0.0035。
+    assert credit == 4.0
+
+
+def test_record_quota_mark_keeps_baseline_when_unreadable(provider):
+    """读不到水位时不动基线：下次观测仍是「与最后一条真实读数」的落差。"""
+    from buddy_proxy.core import credit_estimate
+
+    credit_estimate._QUOTA_MARKS.clear()
+    credit_estimate.record_quota_mark("u@x.com", "gemini|1", 0.9990)
+    credit, observed_ts = credit_estimate.record_quota_mark("u@x.com", "gemini|1", None)
+    assert credit is None
+    assert observed_ts  # 返回上一条真实读数的时刻，只是不结算
+    credit, _ = credit_estimate.record_quota_mark("u@x.com", "gemini|1", 0.9960)
+    assert credit == 3.0
+
+
+def test_record_quota_mark_isolates_accounts(provider):
+    """多账号各记各的基线，互不污染。"""
+    from buddy_proxy.core import credit_estimate
+
+    credit_estimate._QUOTA_MARKS.clear()
+    credit_estimate.record_quota_mark("a@x.com", "gemini|1", 0.9990)
+    credit_estimate.record_quota_mark("b@x.com", "gemini|1", 0.5000)
+    a, _ = credit_estimate.record_quota_mark("a@x.com", "gemini|1", 0.9970)
+    b, _ = credit_estimate.record_quota_mark("b@x.com", "gemini|1", 0.5000)
+    assert a == 2.0
+    assert b is None
+
+
+def test_fetch_watermark_pins_connection(provider, monkeypatch):
+    """积分探测必须复用同一个 client：换了连接就读到另一份快照（实测会跳）。"""
+    import httpx
+
+    import buddy_proxy.antigravity.provider as prov
+
+    created: list[httpx.AsyncClient] = []
+
+    class _Resp:
+        status_code = 200
+        request = None
+
+        def json(self):
+            return {"models": {"gemini-3.8-flash-tiered": _ag_quota(0.75, "2026-10-02T20:28:46Z")}}
+
+        async def aclose(self):
+            pass
+
+    class _Client:
+        is_closed = False
+
+        def __init__(self, *a, **kw):
+            created.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def send(self, req, stream=False):
+            return _Resp()
+
+        def build_request(self, *a, **kw):
+            return None
+
+    monkeypatch.setattr(prov.httpx, "AsyncClient", _Client)
+    monkeypatch.setattr(prov, "ensure_account_token", lambda aid: ("tok", {}))
+
+    async def _run():
+        await provider._fetch_watermark("u@x.com")
+        await provider._fetch_watermark("u@x.com")
+        # 面板路径仍然每次新建，两条路径不能混用同一个 client。
+        await provider._fetch_available_models("u@x.com")
 
     asyncio.run(_run())
-    assert "ag_credit" not in dead
+    assert len(created) == 2  # 探测 1 条（复用）+ 面板 1 条（新建）
 
 
-def test_frame_credit_reads_settlement_and_marks_done():
-    """observability 从请求帧读结算值，读不到记 —，读完打 ag_done。"""
+def test_frame_credit_reads_settlement():
+    """observability 从请求帧读结算值，读不到记 —。"""
     from buddy_proxy.codebuddy_provider.observability import _frame_credit
 
     meta: dict = {"ag_credit": 0.42}
     assert _frame_credit(meta) == 0.42
-    assert meta["ag_done"] is True
     assert _frame_credit({"ag_credit": None}) is None
     assert _frame_credit({}) is None
     assert _frame_credit(None) is None

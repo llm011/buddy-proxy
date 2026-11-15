@@ -278,9 +278,27 @@ agy `/usage` 显示两组**独立**限额，组内各模型共享 weekly + 5h �
 两个池会落到同一个通用后缀而撞名——此时第二条起改用该池的**下次重置时刻**
 （如 `Gemini 组（其余 Gemini 模型 5 小时池）（11-21 03:00 重置）`）做区分，保证 label 唯一。
 
-**实测计量口径**（2026-11-15，固定 prompt、每模型 6–10 次取前后水位差）：
-- 旧代 Flash（`gemini-2.5-*`、`3-flash`、`3.1-flash-*`、`3.5-flash-lite`）**完全不扣**水位
-  （9259 token 10 次，Δ=0），等于免费；
+**水位落差 → 积分（请求日志 Credit 列）**：上游没有积分字段，也没有公开抵扣公式，
+唯一可观测的计费信号就是这个 `remainingFraction`。口径是**每条请求收尾读一次水位、
+与上一次读数相减**（`core.credit_estimate.record_quota_mark`，水位差 ×1000 记成积分，
+**标定值不是官方口径**）。前提是读数**必须来自固定连接**——2026-11-16 实测：
+
+- 每次新建连接读：`0.7551521 / 0.7562798 / 0.7592398` 随机跳，还会「回升」——
+  水位按连接/接入节点缓存，换连接就换了一份快照。**所以面板路径每次新建 client 没事
+  （只看当前值），积分探测必须复用一个长连接**（`provider._fetch_watermark`）；
+- 复用同一条连接连读 8 次：恒为同一值；
+- 固定连接上连发 4 条请求，逐条收尾读数 `0.7562798 → 0.75617707 → 0.7560655 →
+  0.7559592 → 0.7558411`，落差与该条请求体量对得上（1 token ≈ 0.0000015，
+  4393 token ≈ 0.0008）。
+
+**结论是「只能看量级」**：落差精度只有 4 位有效数字，同样规模的一条请求实测
+0.11 / 0.12，也出现过 6.41（约 60 倍）；上游还会不规律回升（空转 30 s 实测
++0.0014，比一次大请求还多），回升那条记 `—` 并把基线跟到新读数。读不到水位、
+水位没动、或落差 round(2) 归零时一律记 `—`，不拿 0 冒充「免费」。
+
+**旧的按数计费口径**（2026-11-15，固定 prompt、每模型 6–10 次取前后水位差；量级仍可参考）：
+- 旧代 Flash（`gemini-2.5-*`、`3-flash`、`3.1-flash-*`、`3.5-flash-lite`）当时**测不出**
+  水位下降（9259 token 10 次 Δ=0），但不能断言 0 成本，需长时段验证；
 - 计费池按 token 成本比例扣：3.8-flash 各档 ≈ `5.5e-5 /1k token`，
   gemini-4-hydrogen ≈ `8.1e-5`，gemini-4-argon ≈ `1.7e-4`（约氢的 2.1 倍、3.8 的 3 倍）；
 - claude 组另一池：sonnet ≈ `1.4e-3`、opus ≈ `2.9e-3 /1k token`。
@@ -318,6 +336,15 @@ buddy 显示「剩 1000 / 1000 · 已用 0%」是同一份数据的另一种口�
 
 所以 effort 后缀由模型表逐模型声明（`efforts` / `default_effort` /
 `upstream`），`convert.apply_effort_suffix` 解析成上游真名，不按名字前缀猜。
+
+**档位不进模型 id**：`/v1/models` 与已存的客户端配置里**只有基名**
+（`antigravity/gemini-4-hydrogen`），档位取自**请求体**的 `reasoning_effort`，
+缺省用 `default_effort`（hydrogen 是 `high`）。所以旧版文档里
+`/model antigravity/gemini-4-hydrogen-xhigh` 这种写法现在会 400
+`未知模型`——不是模型下架，而是 id 变了。要 xhigh 就在请求里带
+`reasoning_effort: "xhigh"`（Claude Code 侧表现为「思考强度」设定），
+或直接发 `xhigh` 之外的档位；`-xhigh` 等后缀只出现在上游真名与
+`fetchAvailableModels` 里。
 
 ## thoughtSignature 与 functionCall id（实测，2026-10-03）
 
@@ -405,7 +432,8 @@ upstream base（有单测 `test_refresh_blocks_stale_families_and_pins_verified_
 - **限频**：快档 20 req/s 连打 5 秒（100 次）全部 200，未触上限；免费层的主要
   约束是配额而非速率。
 - **`remainingFraction` ≠ 排队深度**：它是池级水位，≈1.0 时 3.8-flash 仍可能
-  等 30–70 s 首字。别用配额条推断"现在快不快"。
+  等 30–70 s 首字。别用配额条推断"现在快不快"。水位读数还**按连接缓存**
+  （见上文积分口径），跨连接比较水位差值没有意义。
 - **`maxOutputTokens` 太小 → 空正文**：思考占满预算时上游回
   `finishReason: MAX_TOKENS` + `continuationToken` + 空 text，Anthropic 侧表现为
   `content: []`。至少 4096。

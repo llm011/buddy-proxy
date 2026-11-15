@@ -229,6 +229,82 @@ async def run_burst(token, project_id, model, rate, secs) -> None:
     summary(f"{model} burst rate={rate}/s total={total}", list(results))
 
 
+async def read_watermark(client, token, project_id, model) -> float | None:
+    """读该模型所属池的 remainingFraction（读不到返回 None）。
+
+    必须传**同一条 client** 反复读：实测固定连接上读数纹丝不动，而「新建连接
+    → 读一次」会读到不同的快照值（0.7551521/0.7562798/0.7592398），差值毫无意义。
+    """
+    for host in HOSTS:
+        try:
+            r = await client.post(f"{host}/v1internal:fetchAvailableModels",
+                                  json={"project": project_id},
+                                  headers=auth_headers(token))
+        except httpx.HTTPError:
+            continue
+        if r.status_code != 200:
+            continue
+        info = ((r.json().get("models") or {}).get(model) or {}).get("quotaInfo") or {}
+        frac = info.get("remainingFraction")
+        if isinstance(frac, (int, float)) and not isinstance(frac, bool):
+            return float(frac)
+    return None
+
+
+async def run_watermark(token, project_id, model, idle_secs) -> None:
+    """验证「水位落差属于哪一条请求」——积分估算的归属前提。
+
+    三段各测一个前提，结论是**估算只能是粗的**：
+
+    1. **固定连接**：同一条 client 连读数次应纹丝不动（换连接就会换快照）；
+    2. **逐条落差**：连发几条请求、各自收尾读一次，落差应随请求体量变化
+       （1 token ≈ 0.000002，4393 token ≈ 0.0008），说明水位确实反映消耗；
+    3. **空转**：不发请求空转 ``idle_secs`` 秒，读数可能**回升**（2026-11-16 实测
+       30 秒回升 0.0014，比一次大请求的消耗还多）——上游会重算/回填。
+
+    所以「上次读数 → 本次读数」的落差记到本条头上，只在第 2 段那种稳定窗口里
+    成立；第 3 段这种回升出现时那条记 ``—``（不记负数、不记 0），受影响的相邻
+    一两条误差可达几条请求的量级。
+    """
+    big = ("请逐条列出并详细解释 HTTP/1.1 与 HTTP/2 在以下方面的差异：多路复用、"
+           "头部压缩、服务端推送、流优先级、连接迁移、队头阻塞、二进制分帧、TLS 要求。"
+           "每条至少 150 字，给出具体报文示例。")
+    async with make_client() as client:
+        print("[1] 固定连接稳定性", flush=True)
+        seen = [await read_watermark(client, token, project_id, model) for _ in range(5)]
+        print(f"    5 连读={seen} 稳定={len({v for v in seen}) == 1}", flush=True)
+
+        print("[2] 逐条落差", flush=True)
+        prev = await read_watermark(client, token, project_id, model)
+        for label, max_out, prompt in (("tiny", 16, "hi"), ("tiny", 16, "hi"),
+                                       ("big", 8192, big)):
+            body = make_body(project_id, model)
+            body["request"]["generationConfig"]["maxOutputTokens"] = max_out
+            body["request"]["contents"] = [{"role": "user", "parts": [{"text": prompt}]}]
+            payload: dict = {}
+            for host in HOSTS:
+                r = await client.post(f"{host}/v1internal:generateContent", json=body,
+                                      headers=auth_headers(token))
+                if r.status_code == 200:
+                    payload = r.json()
+                    break
+            usage = ((payload.get("response") or {}).get("usageMetadata")
+                     or payload.get("usageMetadata") or {})
+            after = await read_watermark(client, token, project_id, model)
+            drop = "n/a" if prev is None or after is None else f"{prev - after:.7f}"
+            print(f"    {label:5s} out={usage.get('candidatesTokenCount')} "
+                  f"before={prev} after={after} drop={drop}", flush=True)
+            prev = after
+
+        if idle_secs > 0:
+            print(f"[3] 空转 {idle_secs:.0f}s（不发请求）", flush=True)
+            before = await read_watermark(client, token, project_id, model)
+            await asyncio.sleep(idle_secs)
+            after = await read_watermark(client, token, project_id, model)
+            drop = "n/a" if before is None or after is None else f"{before - after:.7f}"
+            print(f"    before={before} after={after} drop={drop}", flush=True)
+
+
 async def main_async(args) -> None:
     acct = pick_account(args.account)
     token, cred = await asyncio.to_thread(ensure_account_token, acct.id)
@@ -246,6 +322,8 @@ async def main_async(args) -> None:
         raise SystemExit(f"{args.cmd} 需要模型名")
     if args.cmd == "ttft":
         await run_ttft(token, project_id, args.model, args.n, args.conc)
+    elif args.cmd == "watermark":
+        await run_watermark(token, project_id, args.model, args.idle)
     else:
         await run_burst(token, project_id, args.model, args.rate, args.secs)
 
@@ -261,6 +339,10 @@ def main() -> None:
         p.add_argument("--conc", type=int, default=1, help="ttft: 并发（默认 1）")
         p.add_argument("--rate", type=float, default=1.0, help="burst: 每秒条数")
         p.add_argument("--secs", type=float, default=5.0, help="burst: 持续秒数")
+    wm = sub.add_parser("watermark", help="验证水位落差归属（积分估算前提）")
+    wm.add_argument("model", nargs="?", default="gemini-3.8-flash-tiered")
+    wm.add_argument("--account")
+    wm.add_argument("--idle", type=float, default=45.0, help="末尾空转秒数（默认 45）")
     sweep = sub.add_parser("sweep", help="对一组模型依次跑 ttft")
     sweep.add_argument("--models", required=True, help="逗号分隔的上游模型名")
     sweep.add_argument("--account")

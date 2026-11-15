@@ -55,8 +55,9 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any],
     没有账号信息时退回全价，不猜。
 
     antigravity 走不到这里，也不走 usage：它读不到 token 口径的积分公式，只在
-    响应收尾时查池水位、按落差结算，把值写进请求帧的 ``ag_credit``（见
-    ``antigravity.provider._settle_frame`` 与 :func:`_frame_credit`）。
+    响应收尾时用固定连接查一次池水位、与上一次读数的落差结算**本条**请求，把值
+    写进请求帧的 ``ag_credit``（见 ``antigravity.provider._settle_frame`` 与
+    :func:`_frame_credit`）。
 
     返回 (credit, credit_estimated)；估算失败/无 token 数据时为 (None, False)。
     """
@@ -71,13 +72,11 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any],
 def _frame_credit(meta: dict[str, Any] | None) -> Optional[float]:
     """读请求帧上 antigravity 结算好的积分（provider 写、hash 标记是否估算）。
 
-    没有该键 = 这条请求没走到 antigravity 估算（其它通道），返回 None；
-    键存在但值为 None = 读不到水位/本次是铺基线，也按「无数据」记 —。
-    读完后打 ``ag_done``：provider 的等结算槽据此丢掉已落库的帧，不留泄漏。
+    没有该键 = 这条请求没结算出数字（其它通道 / 首次铺基线 / 读不到水位），
+    返回 None，面板记 —（不拿 0 冒充「免费」）。
     """
     if not isinstance(meta, dict):
         return None
-    meta["ag_done"] = True
     val = meta.get("ag_credit")
     if isinstance(val, bool) or not isinstance(val, (int, float)):
         return None
