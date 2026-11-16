@@ -9,6 +9,7 @@
 #   buddy usage              按通道/账号看套餐余量与到期时间（-p 通道、-a #N、--json）
 #   buddy logs               请求日志统计：成功率/耗时p95/首字/token/缓存/积分/分通道分账号；
 #                            筛选 -p/-m/-c/-a/--days/--today，导出 --csv，原始跟踪 --raw
+#   buddy logs -f            实时跟踪新请求（Ctrl-C 退出；-p/-m/-c/-a 等筛选照常生效）
 #   buddy doctor             体检：服务/配置/通道/指标落盘/磁盘（退出码非 0 = 有问题）
 #   buddy cleanup            删除 15 天前的历史日志（保留窗口可用 BUDDY_LOG_KEEP_DAYS 覆盖）；
 #                            超过 10MB 的 service.log / proxy.sh.log 顺带 copytruncate 轮转
@@ -563,7 +564,8 @@ case "${1:-}" in
     logs)
         shift
         # `--raw` 才走以前那条 tail -F（`buddy logs --raw | grep …` 的老脚本照旧能用）；
-        # 其余一律走统计视图。这里不 exec PROXY_SH：tail -F 是常驻的，统计视图不是。
+        # 其余一律走统计视图（`-f` 是统计视图的实时模式，跟着 metrics.jsonl）。
+        # 这里不 exec PROXY_SH：tail -F 是常驻的，统计视图不是。
         for a in "$@"; do
             if [[ "$a" == "--raw" ]]; then
                 rest=()

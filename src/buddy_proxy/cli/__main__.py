@@ -53,6 +53,8 @@ def build_parser() -> argparse.ArgumentParser:
                       metavar="NAME", help="按客户端过滤")
     logs.add_argument("-a", "--account", action="append", default=[],
                       metavar="#N", help="按账号过滤")
+    logs.add_argument("-f", "--follow", action="store_true",
+                      help="实时跟踪新请求（Ctrl-C 退出；筛选参数照常生效）")
     logs.add_argument("--csv", action="store_true", help="导出筛选后明细 CSV")
     logs.add_argument("--state-dir", default=None, help="状态目录（默认按 BUDDY_PROXY_STATE_DIR）")
     _add_common(logs)

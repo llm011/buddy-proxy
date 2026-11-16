@@ -4,8 +4,13 @@
 最常问的三个问题——「刚才那批请求慢不慢」「哪家通道在报错」「这个月花了多少
 积分」。纯 tail 还会被服务自己的启动/重试噪音淹没。
 
-所以默认布局是「总览 → 分通道/分账号 → 按天 → Top 模型 → 最近 N 条明细」，
-tail 语义保留在 ``--raw``（直接转给 ``proxy.sh logs``，行为与以前一字不差）。
+所以默认布局是「总览 → 分通道/分账号 → 按天 → Top 模型 → 最近 N 条明细」。
+
+要看**正在发生**的请求用 ``-f/--follow``：先打最近 N 条明细，再按文件偏移增量
+读 ``metrics.jsonl`` 持续追加，``-p/-m/-c/-a`` 与统计视图同一个判据
+（``log_matches``）。它跟的是请求记录而不是 ``buddy-proxy.jsonl`` 的服务事件流，
+因为只有前者带通道/模型/账号这些能筛的字段；纯服务日志仍走
+``buddy logs --raw``（wrapper 直接转给 ``proxy.sh logs`` 的 ``tail -F``）。
 
 数据源是**磁盘上的 metrics.jsonl + 按天归档**（与 ``/ui/api/logs`` 同一批行），
 所以服务挂了也能查历史——那通常正是最需要它的时刻。
@@ -22,7 +27,8 @@ import sys
 import time
 from typing import Any, Optional
 
-from buddy_proxy.core.metrics import MetricsCollector
+from buddy_proxy.core.metrics import MetricsCollector, is_error
+from buddy_proxy.core.metrics_protocol import log_matches
 
 from .render import (
     Palette, display_width, humanize_number, humanize_ms, humanize_ts, pad, table,
@@ -94,7 +100,12 @@ def _split_list(values: Optional[list[str]]) -> Optional[list[str]]:
     return out or None
 
 
-def collect(args: Any) -> dict[str, Any]:
+def _scan_filters(args: Any) -> dict[str, Any]:
+    """``log_matches`` 的筛选参数：统计视图和 ``-f`` 共用这一份归一化。
+
+    两处各写一份，最容易漂移的是 ``-a #2``（日志存 ``2``）和 ``--start/--end``
+    写反这两种情况——同一个命令换个视图结果不同，用户只会觉得「日志在乱记」。
+    """
     days = getattr(args, "days", None)
     start = getattr(args, "start", None)
     end = getattr(args, "end", None)
@@ -111,13 +122,19 @@ def collect(args: Any) -> dict[str, Any]:
         # 两种都认，而不是要求用户先 `buddy usage` 去抄 id。
         accounts = list(dict.fromkeys(
             accounts + [a.lstrip("#") for a in accounts]))
+    return {
+        "start": start,
+        "end": end,
+        "providers": _split_list(getattr(args, "provider", None)),
+        "models": _split_list(getattr(args, "model", None)),
+        "clients": _split_list(getattr(args, "client", None)),
+        "accounts": accounts,
+    }
+
+
+def collect(args: Any) -> dict[str, Any]:
     return build_collector(getattr(args, "state_dir", None)).logs_scan(
-        start=start,
-        end=end,
-        providers=_split_list(getattr(args, "provider", None)),
-        models=_split_list(getattr(args, "model", None)),
-        clients=_split_list(getattr(args, "client", None)),
-        accounts=accounts,
+        **_scan_filters(args),
         detail_limit=max(0, int(getattr(args, "limit", 0) or 0)),
     )
 
@@ -332,8 +349,271 @@ def render_csv(scan: dict[str, Any]) -> str:
     return buf.getvalue()
 
 
+def _follow_line(r: dict[str, Any], palette: Palette) -> str:
+    """一条请求记录 → 单行。列与统计视图的「最近 N 条」一致，额外带宽（到秒）。"""
+    code = int(r.get("status") or 0)
+    code_text = str(code) if code else "-"
+    if is_error(r):
+        code_text = palette.bad(code_text)
+    elif code >= 400:
+        code_text = palette.warn(code_text)
+    ts = r.get("ts")
+    try:
+        clock = time.strftime("%H:%M:%S", time.localtime(float(ts))) if ts else "--:--:--"
+    except (TypeError, ValueError, OSError):
+        clock = "--:--:--"
+    fields = [
+        clock,
+        pad(r.get("provider") or "-", 12),
+        pad(_short_account(r.get("account") or "-"), _ACCOUNT_WIDTH),
+        pad(r.get("model") or "-", 26),
+        pad(code_text, 3, "right"),
+        pad(humanize_ms(r.get("duration_ms")), 7, "right"),
+        pad(humanize_number(r.get("prompt_tokens")), 6, "right"),
+        pad(humanize_number(r.get("completion_tokens")), 6, "right"),
+    ]
+    line = "  ".join(fields).rstrip()
+    if r.get("error"):
+        line += "  " + palette.bad((r.get("error") or "")[:60])
+    return line
+
+
+#: follow 轮询间隔。写一行是纯追加，半秒一次的 stat+读增量几乎无开销；
+#: 再快也没意义——``tail -f`` 默认也要等 1 秒。
+_FOLLOW_POLL_S = 0.5
+
+
+def _replay_args(args: Any, limit: int) -> Any:
+    """回放用的参数副本：``-f`` 下 ``-n`` 的含义是「先回放几条」，0 不回放。"""
+    import argparse
+    ns = argparse.Namespace(**vars(args))
+    ns.limit = limit
+    ns.follow = False
+    return ns
+
+
+class _FollowState:
+    """``metrics.jsonl`` 的增量读取器（含按天轮转、copytruncate）。
+
+    只读上次偏移之后的新字节，不重读整个文件——``metrics.jsonl`` 一天能到几十
+    MB，每次从 0 读既慢又会吃掉半行。文件身份记 (dev, inode)：路径换成了新
+    inode 就是轮转，从头读新文件。
+
+    偏移按**字节**算，所以必须用 ``rb`` 打开：文本模式的 ``tell()`` 返回的其实是
+    opaque cookie，再叠加 ``len(str)`` 判断残行长度，碰到中文（日志里的上游
+    error 基本是中文）就会错位，拼出 ``{"{"model":…`` 这种怪行。
+    """
+
+    def __init__(self, path: pathlib.Path) -> None:
+        self.path = path
+        self._id: Optional[tuple[int, int]] = None
+        self._offset = 0
+        self._buf = ""
+        # 常驻 fd：指向**当前正在跟的那个 inode**。轮转时它仍指向旧 inode，
+        # 是唯一还能读到旧文件剩余字节的东西——按天轮转走 os.replace，旧路径
+        # 随即消失，光靠路径重开只能打开新文件。
+        self._fh: Any = None
+        # 构造那一刻文件是否存在。决定「首次看到文件」时该不该把已有内容当历史
+        # 跳过：构造时就在 → 是历史（回放已负责）；构造时不在 → 那个文件是之后
+        # 新建的，内容全属于本轮。详见 read_new() 里的分支说明。
+        self._existed_at_init = path.exists()
+
+    def _stat(self) -> Optional[os.stat_result]:
+        try:
+            return os.stat(self.path)
+        except OSError:
+            return None
+
+    def _close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except OSError:
+                pass
+        self._fh = None
+
+    def _open_at(self, offset: int) -> Any:
+        try:
+            # 以 ``os.open`` 打开再包成文件对象：``os.stat`` 按路径在看，
+            # 而这里要的正是「上次那个 inode 的文件」——轮转后旧文件已改名，
+            # 只有保留下来的描述符还能读到它（Linux 上改名后打开旧路径会
+            # 直接命中新文件，残行就丢了）。
+            fd = os.open(self.path, os.O_RDONLY)
+        except OSError:
+            return None
+        fh = os.fdopen(fd, "rb")
+        try:
+            fh.seek(offset)
+        except OSError:
+            fh.close()
+            return None
+        return fh
+
+    def _read_from(self, fh: Any, tail_mode: bool = False) -> list[str]:
+        """读到文件尾，只把以换行结尾的整行交出去；残行留在缓冲。
+
+        ``tail_mode``：旧文件已经不再是当前路径（轮转/删除），末尾那截没换行的
+        残行就是它的全部内容了，吐出来，别留给一个再也不会被追加的文件。
+        """
+        chunk = fh.read()
+        if not chunk:
+            return []
+        self._buf += chunk.decode("utf-8", errors="replace")
+        parts = self._buf.split("\n")
+        self._buf = parts.pop()  # 最后一段没有换行：还没写完，等下一轮
+        if tail_mode and self._buf:
+            parts.append(self._buf)
+            self._buf = ""
+        return parts
+
+    def _drain_rotated(self) -> list[str]:
+        """轮转前把**旧 inode** 读到尾。
+
+        新路径此刻已指向新文件，按路径重开只能打开新文件，所以必须用常驻 fd
+        （它仍绑定旧 inode）。末尾没换行的残行按 ``tail`` 的规矩吐出来——那是
+        旧文件的最后一条，服务恰好崩在 write 中间才会这样，丢掉就永远看不到了。
+        """
+        if self._fh is None:
+            return []
+        try:
+            self._fh.seek(self._offset)
+            return self._read_from(self._fh, tail_mode=True)
+        except OSError:
+            return []
+
+    def read_new(self) -> list[str]:
+        """返回自上次以来新出现的完整行（不含换行符）。"""
+        st = self._stat()
+        if st is None:
+            return []
+        sig = (st.st_dev, st.st_ino)
+        if self._id is None:
+            # 首次看到这个文件。
+            #
+            # 两种情形必须分开，否则要么丢日志、要么重放历史：
+            #
+            #  · **构造时文件就在**（`follow()` 的常规路径）：历史行由回放
+            #    （collect）负责，这里只记位置、不重放。末尾若正卡着一条写了一半
+            #    的行，它属于已跳过的历史。
+            #  · **构造时文件不在**：赶上了轮转中间态（旧文件已 rename、新文件
+            #    还没建）。此刻出现的第一个文件是**新建**的，里面全是本轮之后
+            #    写的内容，一条都不能当历史跳过——否则 0 点前后那几秒的请求会
+            #    永久丢失，而且毫无提示，用户只会觉得「日志少了一截」。
+            fresh = not self._existed_at_init
+            self._existed_at_init = True
+            if fresh:
+                self._id, self._offset = sig, 0
+                self._close()
+                self._fh = self._open_at(0)
+            else:
+                self._id, self._offset = sig, st.st_size
+                self._close()
+                self._fh = self._open_at(self._offset)
+                return []
+        out: list[str] = []
+        if sig != self._id:
+            # 轮转：旧 inode 改名后已不在原路径上，只能靠「路径还是不是同一个
+            # inode」判断。先把旧文件在偏移之后的部分读完（含没换行的残行，
+            # 按 tail 的规矩吐出来，不能带到新文件的头上拼成怪行），再从 0 读
+            # 新文件——轮转瞬间已写进新文件的行也就不会漏。
+            out.extend(self._drain_rotated())
+            self._buf = ""
+            self._close()
+            self._id, self._offset = sig, 0
+            self._fh = self._open_at(0)
+        elif st.st_size < self._offset:
+            # copytruncate：文件被清零，停在旧偏移上会永远读不到新内容
+            self._offset = 0
+            self._buf = ""
+            self._close()
+            self._fh = self._open_at(0)
+        if self._fh is None:
+            self._fh = self._open_at(self._offset)
+        if self._fh is None:
+            return out
+        lines = self._read_from(self._fh)
+        self._offset = self._fh.tell()
+        return out + lines
+
+
+def _follow_header(palette: Palette, filters: dict[str, Any]) -> str:
+    extra = [f"{k}={','.join(v)}" for k, v in (
+        ("providers", filters["providers"]), ("models", filters["models"]),
+        ("clients", filters["clients"]), ("accounts", filters["accounts"])) if v]
+    scope = f"  筛选 {'  '.join(extra)}" if extra else ""
+    return "  ".join([
+        palette.dim("时间    "), pad(palette.dim("通道"), 12),
+        pad(palette.dim("账号"), _ACCOUNT_WIDTH), pad(palette.dim("模型"), 26),
+        pad(palette.dim("状态"), 3, "right"), pad(palette.dim("耗时"), 7, "right"),
+        pad(palette.dim("入"), 6, "right"), pad(palette.dim("出"), 6, "right"),
+    ]).rstrip() + palette.dim(scope)
+
+
+def follow(args: Any, palette: Palette) -> int:
+    """``buddy logs -f``：回放最近 N 条，然后持续输出新记录，直到 Ctrl-C。
+
+    为什么按**字节偏移**轮询而不是每次重读整个文件：``metrics.jsonl`` 一天能到
+    几十 MB，重读一遍既慢又会让非内存映射的读取器吃到半行。这里只读上次偏移
+    之后的新增字节，遇到不完整的最后一行就留在缓冲区等下一个 tick。
+
+    轮转：服务按天把当前文件改成 ``metrics.jsonl.YYYY-MM-DD`` 再新建。路径的
+    (dev, inode) 变了就是轮转——先靠常驻描述符把旧文件剩下的字节读完，再从 0 读
+    新文件，0 点前后那几秒的请求不会丢。copytruncate（大小突然小于偏移）同理，
+    从头读。
+
+    半行/坏行：写到一半的行不解析（留着等补全），解析失败的整行跳过——服务崩在
+    ``write()`` 中间时最后一行是残的，不该让 follow 直接退出。
+    """
+    sd = getattr(args, "state_dir", None)
+    base = pathlib.Path(sd).expanduser() if sd else metrics_dir()
+    path = base / "metrics.jsonl"
+    filters = _scan_filters(args)
+    as_json = bool(getattr(args, "json", False))
+    limit = max(0, int(getattr(args, "limit", 0) or 0))
+    if getattr(args, "csv", False):
+        # 常驻 + CSV 没有意义（谁会把 tail 重定向成表格？），明确拒绝而不是静默只出前 N 行
+        print("--csv 与 -f 不能同时使用；要导出全量明细请去掉 -f", file=sys.stderr)
+        return 2
+
+    # 表头不等回放：``-n 0`` 或回放为空时也得先告诉用户「在跟什么、筛了什么」
+    if not as_json:
+        print(_follow_header(palette, filters), flush=True)
+        print(palette.dim(f"跟踪 {path}（Ctrl-C 退出）"), flush=True)
+
+    # 回放：统计视图同一批行（当前文件 + 归档），取最近 limit 条，正序输出
+    if limit:
+        for r in reversed(collect(_replay_args(args, limit)).get("rows") or []):
+            if as_json:
+                print(json.dumps(r, ensure_ascii=False, default=str), flush=True)
+            else:
+                print(_follow_line(r, palette), flush=True)
+
+    state = _FollowState(path)
+    try:
+        while True:
+            for raw_line in state.read_new():
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(rec, dict) or not log_matches(rec, **filters):
+                    continue
+                if as_json:
+                    print(json.dumps(rec, ensure_ascii=False, default=str), flush=True)
+                else:
+                    print(_follow_line(rec, palette), flush=True)
+            time.sleep(_FOLLOW_POLL_S)
+    except KeyboardInterrupt:
+        return 130
+
+
 def run(args: Any) -> int:
     palette = Palette(False if getattr(args, "no_color", False) else None)
+    if getattr(args, "follow", False):
+        return follow(args, palette)
     scan = collect(args)
     if getattr(args, "csv", False):
         sys.stdout.write(render_csv(scan))
