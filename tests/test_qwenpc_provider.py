@@ -326,43 +326,42 @@ def test_credit_chunk_is_valid_sse():
 
 
 # ---------------------------------------------------------------------------
-# 倍率：实测标定值（不是估的）
+# 倍率：与客户端面板 & 网关 /api/desktop/chat-modes 对齐（2026-11-17）
 # ---------------------------------------------------------------------------
-#
-# 上游没有任何「模型单价」接口，只能靠调用前后的额度差反推。反推有两个坑，
-# 标定时必须控住：
-#
-# 1. **缓存命中大幅打折**：同一 prompt 第二次（cached_tokens 命中 87%）
-#    扣费只有第一次的 1/3.7。不控住的话测出来的数字偏低且不稳定。
-# 2. **结算抖动**：调用刚结束时读到的是临时值（低 5 或低 20）。
-#
-# 标定方法：固定 1600 字随机输入、max_tokens=1、每模型 2 次取均值、
-# 只留 cached_tokens == 0 的样本。
 
-def test_credit_rates_match_calibration():
-    """倍率必须与实测标定值一致（防止有人凭感觉改）。"""
+def test_credit_rates_match_panel_and_catalog():
+    """倍率与读图标志必须与面板/chat-modes 核对值一致。"""
     from buddy_proxy.qwenpc.provider import FALLBACK_MODELS
 
     expected = {
-        "qwen3.8-max": 1.0,
-        "qwen3.8-flash": 0.12,
-        "glm-5.3": 0.52,
-        "glm-5.3-flash": 0.04,
-        "deepseek-v4-pro": 0.42,
-        "deepseek-v4-flash": 0.05,
-        "kimi-k3.1-pro": 2.31,
-        "kimi-k3.1-pro-highspeed": 4.63,
+        "qwen4-max": (1.6, True),
+        "qwen3.8-max": (1.8, True),
+        "qwen3.8-flash": (0.1, True),
+        "ling-3.1-flash": (0.1, False),
+        "deepseek-v4.1-flash": (0.1, True),
+        "deepseek-v4-pro": (0.2, False),
+        "glm-5.3": (1.2, False),
+        "glm-5.3-flash": (0.2, False),
+        "kimi-k3.1-pro": (2.4, True),
+        "minimax-m3.1-flash": (0.2, True),
+        "step-5-preview": (0.7, True),
     }
-    actual = {m["id"]: m["credits"] for m in FALLBACK_MODELS}
-    assert actual == expected, f"倍率与标定不符: {actual}"
+    actual = {m["id"]: (m["credits"], bool(m.get("images"))) for m in FALLBACK_MODELS}
+    assert actual == expected, f"模型/倍率与面板不符: {actual}"
 
 
-def test_highspeed_is_most_expensive():
-    """kimi-k3.1-pro-highspeed 是最贵的（4.63），别被名字骗了当成免费档。"""
-    from buddy_proxy.qwenpc.provider import FALLBACK_MODELS
-
-    by_id = {m["id"]: m["credits"] for m in FALLBACK_MODELS}
-    assert by_id["kimi-k3.1-pro-highspeed"] == max(by_id.values())
+def test_new_models_accepts_and_context_window():
+    """2026-11-17 新增模型均已收录，且全部带 1M context_window。"""
+    p = QwenpcProvider()
+    for mid in ("qwen4-max", "ling-3.1-flash", "deepseek-v4.1-flash",
+                "minimax-m3.1-flash", "step-5-preview"):
+        assert p.accepts_model(mid), mid
+        assert p.accepts_model(f"qwenpc/{mid}"), mid
+    by_id = {m["id"]: m for m in p.models()}
+    assert all(m.get("context_window") == 1_000_000 for m in by_id.values())
+    assert by_id["kimi-k3.1-pro"]["credits"] == max(
+        m["credits"] for m in by_id.values()
+    )
 
 # 大请求的积分：上界必须随 token 数增长
 # ---------------------------------------------------------------------------

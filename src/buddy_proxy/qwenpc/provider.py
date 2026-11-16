@@ -8,7 +8,7 @@
 | Anthropic ``/v1/messages`` | ✅ | **原生支持**，连 ``thinking`` 块都给 |
 | 工具调用 | ✅ | OpenAI ``tool_calls`` / Anthropic ``tool_use`` |
 | ``usage`` | ✅ | 含 ``prompt_tokens_details.cached_tokens`` |
-| 模型目录 | ❌ | 上游没有 ``/v1/models`` |
+| 模型目录 | ⚠️ | MaaS 无 ``/v1/models``（404）；App 网关有 ``/api/desktop/chat-modes``（需 JWT） |
 
 因为是**原生双协议**，本 provider 不做任何协议转换——拿到请求体直接转发，
 把响应原样回给客户端。这比 kiro 那条通道简单得多（那边要自己拼
@@ -16,11 +16,11 @@
 
 ## 模型目录从哪来
 
-上游没给 models 接口，模型目录有两处来源：
-
-1. **本地静态表**（:data:`FALLBACK_MODELS`）——保证开箱可用
-2. App 的加密目录缓存 ``~/.qwenworkcn/.models/*/catalog-*``——**编码方式不是
-   safeStorage**（``UU1D`` 开头的自定义序列化），解不开，所以不用
+1. **本地静态表**（:data:`FALLBACK_MODELS`）——保证开箱可用，按网关
+   ``/api/desktop/chat-modes`` 与客户端面板核对（含 ``price_factor`` /
+   ``is_vl`` / 1M 上下文）
+2. App 的本地目录缓存 ``~/.qwenworkcn/.models/*/catalog-*``——``UU1D`` 开头
+   的自定义封装，不解它
 
 UI 上显示 ``Qwen3.8-Max``，但 API 只认全小写 ``qwen3.8-max``（踩过：大小写
 不对回 ``invalid_request``，且不提示"模型不存在"）。对外 id 统一小写，
@@ -50,52 +50,37 @@ from ..providers.base import BaseProvider
 
 log = logging.getLogger(__name__)
 
-#: 已知模型（上游无目录接口，这里是兜底表）。
+#: 已知模型（静态目录表）。
 #:
-#: ``credits`` 是相对倍率（``qwen3.8-max`` = 1.0 为基准）。
+#: 2026-11-17 更新：客户端新版已直接在选择器给出精确倍率（并可在网关
+#: ``/api/desktop/chat-modes`` 交叉核对 ``price_factor`` / ``is_vl`` /
+#: ``max_input_tokens``），取代早先「以 qwen3.8-max=1.0 手工标定」的估算表。
 #:
-#: **来自实测标定，不是估的**（2026-11-12）。上游没有任何「模型单价」接口，
-#: 只能靠「调用前后额度差」反推，而反推有两个坑，标定时必须控住：
-#:
-#: 1. **缓存命中会大幅打折**。同一段 prompt 第二次调用（``cached_tokens`` 命中
-#:    87%）扣费只有第一次的 1/3.7。所以标定必须用**每次全新随机内容**保证
-#:    ``cached_tokens == 0``，否则测出来的数字偏低且不稳定。
-#: 2. **结算有抖动窗口**。调用刚结束时上游返回的是临时值（低 5 或低 20），
-#:    要等结算完成（约 1.7s）再读数。
-#:
-#: 标定方法：固定 1600 字随机输入、``max_tokens=1``（把输出压到最小）、
-#: 每个模型测 2 次取均值、只保留 ``cached_tokens == 0`` 的样本。
-#:
-#: 结果（每千 token 单价 → 相对倍率）::
-#:
-#:     qwen3.8-max              0.2172  →  1.00
-#:     qwen3.8-flash            0.0264  →  0.12
-#:     glm-5.3                  0.1122  →  0.52
-#:     glm-5.3-flash            0.0080  →  0.04
-#:     deepseek-v4-pro          0.0902  →  0.42
-#:     deepseek-v4-flash        0.0100  →  0.05
-#:     kimi-k3.1-pro            0.5013  →  2.31
-#:     kimi-k3.1-pro-highspeed  1.0041  →  4.63
-#:
-#: ⚠ 这组数字**只反映输入侧（冷缓存）**的计价比。实际扣费还受缓存命中率影响，
-#: 同一段对话的第二轮往往只花第一轮的 1/4——所以倍率适合横向比较模型贵贱，
-#: 不适合估算具体一次调用花多少（那要看日志里的真实 ``credit``）。
+#: 11 个模型均已实测通过 ``/v1/chat/completions``（带 ``images=True`` 的均已
+#: 实测图片输入 200）；``DeepSeek-V4.1-Flash`` 在 ``chat-modes`` 里的 key 为
+#: ``deepseek-flash``，对外仍统一用全站一致的 ``deepseek-v4.1-flash``（实测
+#: 原样可直通且读图正常）；``Qwen3.8-Max`` 在 ``chat-modes`` key 为
+#: ``qwen3.8-max-preview``，对外保留 ``qwen3.8-max``（两条实测均可用）。
+#: ``ling-3.1-flash`` 的 ``0.1`` 为客户端当前「限时 1 折」活动价。
 FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
-    # 每个系列**只留最新版**（用户 2026-11-11 要求）：有 glm-5.3 就不要 glm-5.2。
-    # 上游确实同时提供旧版，但列出来只会让模型选择器变长、还容易选错。
-    #
     # ---- Qwen 系 ----
-    {"id": "qwen3.8-max", "name": "Qwen3.8-Max", "credits": 1.0, "images": True},
-    {"id": "qwen3.8-flash", "name": "Qwen3.8-Flash", "credits": 0.12, "images": True},
-    # ---- GLM 系（智谱）----
-    {"id": "glm-5.3", "name": "GLM-5.3", "credits": 0.52},
-    {"id": "glm-5.3-flash", "name": "GLM-5.3-Flash", "credits": 0.04},
+    {"id": "qwen4-max", "name": "Qwen4-Max", "credits": 1.6, "images": True, "context_window": 1_000_000},
+    {"id": "qwen3.8-max", "name": "Qwen3.8-Max", "credits": 1.8, "images": True, "context_window": 1_000_000},
+    {"id": "qwen3.8-flash", "name": "Qwen3.8-Flash", "credits": 0.1, "images": True, "context_window": 1_000_000},
+    # ---- 百灵（Ling）系 ----
+    {"id": "ling-3.1-flash", "name": "Ling-3.1-Flash", "credits": 0.1, "images": False, "context_window": 1_000_000},
     # ---- DeepSeek 系 ----
-    {"id": "deepseek-v4-pro", "name": "DeepSeek V4 Pro", "credits": 0.42},
-    {"id": "deepseek-v4-flash", "name": "DeepSeek V4 Flash", "credits": 0.05},
+    {"id": "deepseek-v4.1-flash", "name": "DeepSeek-V4.1-Flash", "credits": 0.1, "images": True, "context_window": 1_000_000},
+    {"id": "deepseek-v4-pro", "name": "DeepSeek-V4-Pro", "credits": 0.2, "images": False, "context_window": 1_000_000},
+    # ---- GLM 系（智谱）----
+    {"id": "glm-5.3", "name": "GLM-5.3", "credits": 1.2, "images": False, "context_window": 1_000_000},
+    {"id": "glm-5.3-flash", "name": "GLM-5.3-Flash", "credits": 0.2, "images": False, "context_window": 1_000_000},
     # ---- Kimi 系（月之暗面）----
-    {"id": "kimi-k3.1-pro", "name": "Kimi K3.1 Pro", "credits": 2.31},
-    {"id": "kimi-k3.1-pro-highspeed", "name": "Kimi K3.1 Pro (Highspeed)", "credits": 4.63},
+    {"id": "kimi-k3.1-pro", "name": "Kimi-K3.1-Pro", "credits": 2.4, "images": True, "context_window": 1_000_000},
+    # ---- MiniMax 系 ----
+    {"id": "minimax-m3.1-flash", "name": "MiniMax-M3.1-Flash", "credits": 0.2, "images": True, "context_window": 1_000_000},
+    # ---- StepFun（阶跃星辰）系 ----
+    {"id": "step-5-preview", "name": "Step-5-Preview", "credits": 0.7, "images": True, "context_window": 1_000_000},
 )
 
 _TIMEOUT = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=15.0)
@@ -307,6 +292,8 @@ def provider_models() -> list[dict[str, Any]]:
             model["images"] = item["images"]
         if "credits" in item:
             model["credits"] = item["credits"]
+        if "context_window" in item:
+            model["context_window"] = item["context_window"]
         out.append(model)
     return out
 
