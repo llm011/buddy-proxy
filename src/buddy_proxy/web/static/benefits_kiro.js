@@ -91,19 +91,21 @@ function renderKiroPanel() {
     </div>`;
   }).join('');
 
+  const items = (kiro.quota && kiro.quota.supported) ? (kiro.quota.items || []) : null;
+  const fold = quotaProviderFold(items && items.length ? items : (accts.length ? items : 'empty'), 'kiro');
   panel.innerHTML = `<div class="chart-card" data-kiro-panel>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
       <span style="font-weight:600">Kiro（AWS CodeWhisperer）</span>
-      <span class="muted" style="font-size:12px">${accts.length} 个账号</span>
+      <span class="muted" style="font-size:12px">${accts.length} 个账号</span>${fold.badge}
       <span style="flex:1"></span>
-      ${providerLoadBalanceToggle('kiro', accts.length > 1)}${providerRefreshButton('kiro')}
+      ${fold.toggle}${providerLoadBalanceToggle('kiro', accts.length > 1)}${providerRefreshButton('kiro')}
     </div>
-    ${rows || '<div class="empty" style="padding:10px 0">还没有账号</div>'}
+    ${fold.bodyStart}${rows || '<div class="empty" style="padding:10px 0">还没有账号</div>'}
     <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
       <button onclick="kiroOpenImport()">导入 auth 文件</button>
       <button class="ghost" onclick="kiroStartLogin()">浏览器授权</button>
     </div>
-    <div id="kiro-login-box" style="margin-top:10px"></div>
+    <div id="kiro-login-box" style="margin-top:10px"></div>${fold.bodyEnd}
   </div>`;
   if (!accts.length) loadKiroAccounts();
 }

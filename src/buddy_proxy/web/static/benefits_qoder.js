@@ -172,8 +172,7 @@ function renderQoderPanel() {
         <span class="muted" style="font-size:11px">${multi ? '403/额度尽自动冷却换号（按登录顺位）' : '403/额度尽自动切换下一个账号'}</span>
         ${fold.toggle}${providerLoadBalanceToggle('qoder', multi)}${providerRefreshButton('qoder')}
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login qoder</span>）</div>'}${fold.bodyEnd}
     </div>`;
   loadQoderAccounts();
@@ -275,8 +274,7 @@ function renderQoderIntlPanel() {
         ${quotaAccountTotal(groups, {sumItems: true})}
         ${fold.toggle}${providerLoadBalanceToggle('qoderintl', groups.size > 1)}${providerRefreshButton('qoderintl')}
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（登录后重启 Buddy 注册通道）</div>'}${fold.bodyEnd}
     </div>`;
   loadQoderIntlAccounts();

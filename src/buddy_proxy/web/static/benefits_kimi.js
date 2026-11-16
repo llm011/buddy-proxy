@@ -197,8 +197,7 @@ function renderKimiPanel() {
         ${fold.toggle}${providerLoadBalanceToggle('kimi', multi)}${providerRefreshButton('kimi')}
         <button class="ghost" title="粘贴 kimi cli 导出的 token JSON" onclick="openKimiImport()">导入账号</button>
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}
     </div>`;
   loadKimiAccounts();

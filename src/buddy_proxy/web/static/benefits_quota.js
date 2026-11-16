@@ -239,20 +239,40 @@ function quotaRemaining(it) {
   return r;
 }
 
-// ---- provider 级折叠：没额度的通道都收起来 ----
-// 与条目层 QUOTA_FOLD 完全独立。收起的两种情形：
+// ---- provider 级折叠：所有通道均可收起/展开 + localStorage 持久化 ----
+// 与条目层 QUOTA_FOLD 完全独立。
 //
-// 1. **明确全部耗尽**：每条可量化的剩余都 ≤ 0（重置券不计）
-// 2. **压根没有额度明细**：items 为空、或每组只有说明条（未登录 / 查询失败 /
-//    Free 的 query_empty），一张带可量化剩余的行都画不出来。这种卡展开只剩一句
-//    「暂无账号额度数据」，占满一屏却没内容（用户 2026-11-02 报障 Codex 账号
-//    登录着、卡里什么额度都没有还大敞着）。
-//
-// **一组有余额 + 另一组全失败**时照旧展开：失败那组要给用户看见。所以面板传进来
-// 的 items 由「渲染出来的东西」决定（见各 renderXxxPanel），不是原样透传。
-// 重置券既不算耗尽、也不算「有额度」——只有券的通道同样收起。
-// 收起后标题行留徽标与展开开关，点一下就能看回去。
+// 默认状态规则（未显式切换过时）：
+// 1. **有可用额度** → 默认展开；
+// 2. **全部耗尽 / 压根没有额度明细**（items === 'empty' 或每条可量化的剩余 ≤ 0，
+//    重置券与说明条不计）→ 默认收起，标题行留「无剩余额度 / 无额度数据」徽标；
+// 3. **用户点过「收起 / 展开」** → 记进 localStorage（key: `bp-quota-fold`，格式
+//    `{ [providerKey]: boolean }`），无论当前有无余额都在刷新页面 & 30s 轮询重绘后
+//    按用户选择恢复；只在点击展开且原本被折叠的内容暴露出来时顺手校准内部高度。
+const _PROVIDER_FOLD_STORAGE_KEY = 'bp-quota-fold';
 const PROVIDER_QUOTA_FOLD = { open: {} };
+
+function _loadProviderFoldState() {
+  try {
+    if (typeof localStorage === 'undefined' || !localStorage) return {};
+    const raw = JSON.parse(localStorage.getItem(_PROVIDER_FOLD_STORAGE_KEY) || '{}');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    const out = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (typeof v === 'boolean') out[k] = v;
+    }
+    return out;
+  } catch (e) {
+    return {};
+  }
+}
+
+function _persistProviderFoldState() {
+  try {
+    if (typeof localStorage === 'undefined' || !localStorage) return;
+    localStorage.setItem(_PROVIDER_FOLD_STORAGE_KEY, JSON.stringify(PROVIDER_QUOTA_FOLD.open));
+  } catch (e) {}
+}
 
 function quotaProviderExhausted(items) {
   for (const it of items || []) {
@@ -265,39 +285,52 @@ function quotaProviderExhausted(items) {
   return true;
 }
 
-// 普通卡和专属卡共用的外层折叠。有余额时永远展开，不让旧的「手动收起」
-// 覆盖值把新到账的额度藏住；只有耗尽卡才显示开关并记住用户选择。
-// items 传 'empty'（或 null）表示「面板压根画不出带额度的行」：没有可量化的
-// 剩余就收起。徽标写「无额度数据」而不是「无剩余额度」——后者是查到了、且确实
-// 是 0，前者是查不到。别的字符串（非数组）按「无从判断」处理，保持展开。
+// 普通卡和专属卡共用的外层折叠：每个通道卡片都带收起/展开开关，并记忆用户选择
+// （刷新页面后从 localStorage 恢复）。未保存过偏好时按余额决定默认态：有余额
+// 默认展开，耗尽/空态默认收起。
+// items 传 'empty' 表示「面板压根画不出带额度的行」；传入 null/非数组（如待命引导）
+// 保持非耗尽判定，但仍提供折叠开关让用户能自己收起整块面板。
 function quotaProviderFold(items, key) {
-  const exhausted = items === 'empty' || quotaProviderExhausted(items);
+  if (!PROVIDER_QUOTA_FOLD._loaded) {
+    PROVIDER_QUOTA_FOLD._loaded = true;
+    Object.assign(PROVIDER_QUOTA_FOLD.open, _loadProviderFoldState());
+  }
+  const exhausted = items === 'empty' || (Array.isArray(items) && quotaProviderExhausted(items));
   const empty = items === 'empty';
   const overridden = Object.prototype.hasOwnProperty.call(PROVIDER_QUOTA_FOLD.open, key);
-  const open = !exhausted || (overridden ? PROVIDER_QUOTA_FOLD.open[key] : false);
+  const open = overridden ? !!PROVIDER_QUOTA_FOLD.open[key] : !exhausted;
   const id = 'provider-quota-' + key.replace(/[^A-Za-z0-9_-]/g, (m, i) =>
     '-' + key.charCodeAt(i).toString(16) + '-');
   return {
     exhausted,
+    open,
     badge: exhausted ? '<span class="tag ' + (empty ? '' : 'bad') + '">'
       + (empty ? '无额度数据' : '无剩余额度') + '</span>' : '',
-    toggle: exhausted ? `<button class="ghost provider-quota-toggle" data-provider-fold="${esc(key)}" ` +
-      `aria-expanded="${open}" aria-controls="${esc(id)}" title="${open ? '收起' : '展开'}额度明细" ` +
-      `onclick="quotaProviderToggle(this)">${open ? '收起额度 ▴' : '展开额度 ▾'}</button>` : '',
+    toggle: `<button class="ghost provider-quota-toggle" data-provider-fold="${esc(key)}" ` +
+      `aria-expanded="${open}" aria-controls="${esc(id)}" title="${open ? '收起' : '展开'}面板" ` +
+      `onclick="quotaProviderToggle(this)">${open ? '收起 ▴' : '展开 ▾'}</button>`,
     bodyStart: `<div class="provider-quota-body" id="${esc(id)}"${open ? '' : ' hidden'}>`,
     bodyEnd: '</div>',
   };
 }
 
 function quotaProviderToggle(btn) {
+  if (!PROVIDER_QUOTA_FOLD._loaded) {
+    PROVIDER_QUOTA_FOLD._loaded = true;
+    Object.assign(PROVIDER_QUOTA_FOLD.open, _loadProviderFoldState());
+  }
   const key = btn.dataset.providerFold;
-  PROVIDER_QUOTA_FOLD.open[key] = btn.getAttribute('aria-expanded') !== 'true';
+  const open = btn.getAttribute('aria-expanded') !== 'true';
+  PROVIDER_QUOTA_FOLD.open[key] = open;
+  _persistProviderFoldState();
   const body = document.getElementById(btn.getAttribute('aria-controls'));
-  const open = PROVIDER_QUOTA_FOLD.open[key];
   if (body) body.hidden = !open;
   btn.setAttribute('aria-expanded', String(open));
-  btn.title = (open ? '收起' : '展开') + '额度明细';
-  btn.textContent = open ? '收起额度 ▴' : '展开额度 ▾';
+  btn.title = (open ? '收起' : '展开') + '面板';
+  btn.textContent = open ? '收起 ▴' : '展开 ▾';
+  // 原本默认收起的面板初次展开时，里面 .qbody 的 scrollHeight 之前是 0，
+  // 展开后再校准一次才能把「展开全部 N 项」按钮和裁剪高度算对。
+  if (open && typeof syncQuotaFold === 'function') syncQuotaFold();
 }
 
 // 展开/收起按钮。**必须**紧跟 .qbody 渲染（syncQuotaFold 靠

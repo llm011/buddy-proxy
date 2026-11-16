@@ -260,8 +260,7 @@ function renderCopilotPanel() {
         <button class="ghost" title="从上游重新拉取模型目录（新模型上线时用）" onclick="copilotRefreshModels(this)">刷新模型</button>
         <button class="ghost" title="粘贴 GitHub token，或从本机 gh 导入（无需安装 Copilot 客户端）" onclick="openCopilotImport()">导入账号</button>
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${ordered.length ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${ordered.length ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}
     </div>`;
   loadCopilotAccounts();

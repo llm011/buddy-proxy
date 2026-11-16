@@ -283,8 +283,7 @@ function renderCodexPanel() {
         ${fold.toggle}${providerLoadBalanceToggle('codex', multi)}${providerRefreshButton('codex')}
         <button class="ghost" title="粘贴 ~/.codex/auth.json 或同构 JSON（无需安装 Codex CLI）" onclick="openCodexImport()">导入账号</button>
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${allGrps.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${allGrps.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}
     </div>`;
   loadCodexAccounts();

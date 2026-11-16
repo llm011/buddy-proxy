@@ -31,7 +31,7 @@ BENEFITS_CORE_JS = STATIC / "benefits.js"
 PANELS_JS = [STATIC / name for name in (
     "benefits_panels.js", "benefits_antigravity.js", "benefits_qoder.js",
     "benefits_trae.js", "benefits_codebuddy.js", "benefits_kimi.js",
-    "benefits_codex.js", "benefits_dumate.js",
+    "benefits_codex.js", "benefits_dumate.js", "benefits_kiro.js",
 )]
 # DuMate 面板（benefits_dumate.js）单列：它有一条独一份的 status 驱动自重建，
 # 额度明细也走 quotaItemsHtml，一并进接线检查。
@@ -43,6 +43,7 @@ pytestmark = pytest.mark.skipif(
 
 _FNS = ("quotaSpent", "quotaRemaining", "quotaMoreButton", "quotaItemsHtml", "syncQuotaFold",
         "quotaFoldToggle", "quotaItemHtml", "fmtExpireMmdd", "quotaProviderExhausted",
+        "_loadProviderFoldState", "_persistProviderFoldState",
         "quotaProviderFold", "quotaProviderToggle", "remainSpan")
 
 
@@ -114,6 +115,7 @@ def _run(body: str) -> str:
     text = BENEFITS_JS.read_text(encoding="utf-8")
     src = "".join(_extract_fn(text, n) for n in _FNS)
     src += _extract_const(text, "QUOTA_FOLD")
+    src += _extract_const(text, "_PROVIDER_FOLD_STORAGE_KEY")
     src += _extract_const(text, "PROVIDER_QUOTA_FOLD")
     proc = subprocess.run(
         ["node", "-e", _STUB + _DOM_STUB + src + "\n" + body],
@@ -630,26 +632,94 @@ console.log(JSON.stringify({
     assert r["partial"] is False, r
 
 
-def test_provider_fold_defaults_manual_override_and_recovery():
+def test_provider_fold_defaults_manual_override_and_persistence():
+    """未记忆时按余额决定默认态（有余额展开、无余额收起）；任何通道都带开关且记入 localStorage，刷新后恢复。"""
     out = _run("""
+const store = {};
+globalThis.localStorage = {
+  getItem: k => Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null,
+  setItem: (k, v) => { store[k] = String(v); },
+};
 const body = {hidden: false};
-const btn = {dataset: {providerFold: 'trae'},
-  getAttribute: n => n === 'aria-expanded' ? 'false' : 'provider-quota-trae',
-  setAttribute() {}, title: '', textContent: ''};
-const first = quotaProviderFold([{remaining: 0}], 'trae');
-const initiallyHidden = first.bodyStart.includes(' hidden');
-const initiallyBadge = first.badge.includes('无剩余额度');
-quotaProviderToggle(btn);
-const manuallyOpen = quotaProviderFold([{remaining: 0}], 'trae').bodyStart;
-const replenished = quotaProviderFold([{remaining: 10}], 'trae');
-const restored = quotaProviderFold([{remaining: 0}], 'trae').bodyStart;
-console.log(JSON.stringify({initiallyHidden, initiallyBadge, manuallyOpen,
-  replenished, restored, toggleGone: replenished.toggle === ''}));
+globalThis.__providerBodies = {'provider-quota-trae': body, 'provider-quota-qoder': {hidden: false}};
+const mkBtn = (key, expanded) => {
+  const attrs = {'aria-expanded': String(expanded), 'aria-controls': 'provider-quota-' + key};
+  return {
+    dataset: {providerFold: key},
+    getAttribute: n => attrs[n] ?? null,
+    setAttribute: (n, v) => { attrs[n] = String(v); },
+    title: '', textContent: '',
+  };
+};
+
+// 1. 耗尽通道默认收起；有余额通道默认展开，且同样带折叠按钮
+const firstTrae = quotaProviderFold([{remaining: 0}], 'trae');
+const firstQoder = quotaProviderFold([{remaining: 10}], 'qoder');
+
+// 2. 手动展开耗尽通道、手动收起有余额通道 → 立即写入 localStorage
+quotaProviderToggle(mkBtn('trae', false));
+quotaProviderToggle(mkBtn('qoder', true));
+const saved = JSON.parse(store['bp-quota-fold']);
+
+// 3. 哪怕额度随后变化（trae 来新额度、或继续耗尽），用户手动偏好仍保持
+const traeOpen = quotaProviderFold([{remaining: 0}], 'trae').bodyStart;
+const qoderCollapsedEvenWithQuota = quotaProviderFold([{remaining: 10}], 'qoder').bodyStart;
+
+// 4. 模拟刷新页面：清空内存 PROVIDER_QUOTA_FOLD，只留 localStorage 重新加载
+PROVIDER_QUOTA_FOLD.open = {};
+PROVIDER_QUOTA_FOLD._loaded = false;
+const afterReloadTrae = quotaProviderFold([{remaining: 0}], 'trae');
+const afterReloadQoder = quotaProviderFold([{remaining: 10}], 'qoder');
+
+console.log(JSON.stringify({
+  traeInitHidden: firstTrae.bodyStart.includes(' hidden'),
+  traeBadge: firstTrae.badge.includes('无剩余额度'),
+  qoderInitHidden: firstQoder.bodyStart.includes(' hidden'),
+  qoderHasToggle: firstQoder.toggle.includes('provider-quota-toggle'),
+  saved,
+  traeOpenHidden: traeOpen.includes(' hidden'),
+  qoderCollapsedHidden: qoderCollapsedEvenWithQuota.includes(' hidden'),
+  reloadTraeHidden: afterReloadTrae.bodyStart.includes(' hidden'),
+  reloadQoderHidden: afterReloadQoder.bodyStart.includes(' hidden'),
+  reloadQoderBtnText: afterReloadQoder.toggle.includes('展开 ▾'),
+}));
 """)
     r = _last(out)
-    assert r["initiallyHidden"] is True and r["initiallyBadge"] is True
-    assert " hidden" not in r["manuallyOpen"] and " hidden" not in r["restored"]
-    assert " hidden" not in r["replenished"]["bodyStart"] and r["toggleGone"] is True
+    assert r["traeInitHidden"] is True and r["traeBadge"] is True
+    assert r["qoderInitHidden"] is False and r["qoderHasToggle"] is True
+    assert r["saved"] == {"trae": True, "qoder": False}
+    assert r["traeOpenHidden"] is False
+    assert r["qoderCollapsedHidden"] is True
+    assert r["reloadTraeHidden"] is False
+    assert r["reloadQoderHidden"] is True
+    assert r["reloadQoderBtnText"] is True
+
+
+def test_provider_fold_corrupt_storage_falls_back_gracefully():
+    """localStorage 损坏或含非法值时不崩溃，回退到默认规则。"""
+    out = _run("""
+globalThis.localStorage = {
+  getItem: () => '{bad json',
+  setItem: () => {},
+};
+const f = quotaProviderFold([{remaining: 5}], 'kimi');
+PROVIDER_QUOTA_FOLD._loaded = false;
+globalThis.localStorage = {
+  getItem: () => JSON.stringify({kimi: 'not-bool', codex: false}),
+  setItem: () => {},
+};
+const kimiF = quotaProviderFold([{remaining: 5}], 'kimi');
+const codexF = quotaProviderFold([{remaining: 5}], 'codex');
+console.log(JSON.stringify({
+  corruptOpen: !f.bodyStart.includes(' hidden'),
+  kimiOpen: !kimiF.bodyStart.includes(' hidden'),
+  codexCollapsed: codexF.bodyStart.includes(' hidden'),
+}));
+""")
+    r = _last(out)
+    assert r["corruptOpen"] is True
+    assert r["kimiOpen"] is True
+    assert r["codexCollapsed"] is True
 
 
 def test_provider_fold_markup_uses_stable_escaped_id_not_item_fold():
@@ -671,7 +741,7 @@ def test_every_provider_panel_uses_outer_fold_helper():
     assert "quotaProviderFold(" in core and ", p.id)" in core
     panels = "".join(p.read_text(encoding="utf-8") for p in PANELS_JS)
     expected = {"traepat", "antigravity", "qoder", "qoderintl", "trae", "traeintl",
-                "codebuddy", "codebuddyintl", "kimi", "codex", "dumate"}
+                "codebuddy", "codebuddyintl", "kimi", "codex", "dumate", "kiro"}
     # 第一个参数可能是「有卡才给 items、没卡给 'empty'」的条件式，[^)] 配平不了，
     # 这里只认「最后一个参数是通道 id」这一要点，不深究前面的表达式。
     calls = set(re.findall(r"quotaProviderFold\([^;\n]+?, '(\w+)'\)", panels))

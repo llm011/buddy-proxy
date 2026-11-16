@@ -167,8 +167,7 @@ function renderTraePanel() {
         <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
         ${fold.toggle}${providerLoadBalanceToggle('trae', multi)}${providerRefreshButton('trae')}
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login trae</span>）</div>'}${fold.bodyEnd}
     </div>`;
   loadTraeAccounts();
@@ -258,8 +257,7 @@ function renderTraeIntlPanel() {
         <span class="muted" style="font-size:11px">海外版无每日签到</span>
         ${fold.toggle}${providerLoadBalanceToggle('traeintl', groups.size > 1)}${providerRefreshButton('traeintl')}
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（<span class="mono">buddy login traeintl</span> 后重启 Buddy）</div>'}${fold.bodyEnd}
     </div>`;
 }

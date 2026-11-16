@@ -234,8 +234,7 @@ function renderAntigravityPanel() {
         <span class="muted" style="font-size:11px">429/403 自动冷却换号（按登录顺位）</span>
         ${fold.toggle}${providerLoadBalanceToggle('antigravity', n > 1)}${providerRefreshButton('antigravity')}
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}<div class="pat-quota-grid">${quotaHtml}</div>${fold.bodyEnd}
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}<div class="pat-quota-grid">${quotaHtml}</div>${fold.bodyEnd}
     </div>`;
   loadAntigravityAccounts();
 }
