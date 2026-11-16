@@ -12,12 +12,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import time
 
 import pytest
 
 from buddy_proxy.cli import logs as cli_logs
-from buddy_proxy.cli.render import Palette
+from buddy_proxy.cli.render import Palette, display_width
 from buddy_proxy.core.metrics import MetricsCollector
 from buddy_proxy.core.metrics_protocol import log_matches
 
@@ -589,6 +590,101 @@ def test_ttft_column_tells_missing_apart_from_not_applicable():
     assert cli_logs._ttft_text(_rec(stream=False, ttft_ms=None)) == "-"
     assert cli_logs._ttft_text(_rec(stream=True, ttft_ms=None)) == "—"
     assert cli_logs._ttft_text(_rec(stream=True, ttft_ms=812)) == "812ms"
+
+
+def test_follow_header_and_rows_are_aligned_columns():
+    """表头与数据行必须严格同列。
+
+    回归（2026-11-17 用户反馈）：``_follow_header`` 与 ``_follow_line`` 各自
+    写死一份宽度，加了「首字/积分」后两份对不上，表头和数据整体错位。现在两
+    者都由 ``_FOLLOW_COLUMNS`` 生成，这条测试按**显示宽度**逐列比对：
+
+    - 表头每个列名都从该列的起点开始；
+    - 分隔线每一段 ``─`` 恰好盖住一列；
+    - 数据行（含带 ANSI 颜色的状态码）按同样的列宽切出来，与表头列名对齐。
+    """
+    import re
+
+    def strip_ansi(text: str) -> str:
+        return re.sub(r"\033\[[0-9;]*m", "", text)
+
+    # 按**显示格子**切：宽字符拆成「本体 + 占位」，保证每个格子算 1 格，
+    # 这样数据行（全 ASCII）和表头（中英混排）用的是同一套坐标。
+    import unicodedata
+
+    def cells(line: str, widths: list[int]) -> list[str]:
+        wide: list[str] = []
+        for ch in line:
+            wide.append(ch)
+            if unicodedata.east_asian_width(ch) in ("W", "F"):
+                wide.append("")
+        out, pos = [], 0
+        for i, w in enumerate(widths):
+            out.append("".join(wide[pos:pos + w]).strip())
+            pos += w + (2 if i < len(widths) - 1 else 0)
+        return out
+
+    palette = Palette(False)
+    filters = {"providers": ["codebuddy"], "models": None,
+               "clients": None, "accounts": None}
+    header_lines = cli_logs._follow_header(palette, filters).splitlines()
+    head, rule = header_lines[0], header_lines[1]
+    widths = [w for _h, w, _a, _g in cli_logs._FOLLOW_COLUMNS]
+    heads = [h for h, *_ in cli_logs._FOLLOW_COLUMNS]
+
+    head_cells = cells(head, widths)
+    for want, cell in zip(heads, head_cells):
+        assert cell.startswith(want), (want, cell, head)
+
+    rule_part = rule.split("  筛选")[0]
+    rule_cells = cells(rule_part, widths)
+    for w, cell in zip(widths, rule_cells):
+        assert cell.rstrip() == "─" * w
+
+    rows = [
+        _rec(ttft_ms=812, credit=0.12, **{"pro​mpt_tokens": 193049}),
+        # 状态码带色：颜色不能把右边各列推歪
+        _rec(status=502, error="upstream 502", ttft_ms=None, stream=True),
+        _rec(status=429, stream=False),
+        # 36 位 UUID 账号会被 _short_account 截到 24 格，不能把右侧各列推歪
+        _rec(account="3f7a1c2e-1111-2222-3333-444455556666", ttft_ms=512,
+             duration_ms=1400, credit=0.25),
+    ]
+    colored = Palette(True)
+    for r in rows:
+        line = strip_ansi(cli_logs._follow_line(r, colored))
+        got = [c.strip() for c in cells(line, widths)]
+        assert got[0] == cli_logs._clock(r)
+        assert got[1] == (r.get("provider") or "-")[:widths[1]]
+        assert got[5] == cli_logs._ttft_text(r), (got, line)
+        assert got[6] == cli_logs.humanize_ms(r.get("duration_ms"))
+
+
+def test_follow_header_keeps_alignment_when_colored():
+    """表头先补格再上色：带 ANSI 的表头拿掉颜色后，与数据行仍逐列对齐。
+
+    回归：``pad(palette.dim("时间"), 8)`` 会按 ``len()`` 把 6 个 ANSI 字节算进
+    宽度，中文表头短一截，右侧整片左移。
+    """
+    filters = {"providers": None, "models": None, "clients": None,
+               "accounts": None}
+    plain = Palette(False)
+    colored = Palette(True)
+    bare_head = cli_logs._follow_header(plain, filters).splitlines()[0]
+    color_head = cli_logs._follow_header(colored, filters).splitlines()[0]
+    assert re.sub(r"\033\[[0-9;]*m", "", color_head) == bare_head
+
+
+def test_follow_columns_put_ttft_before_duration():
+    """首字紧挨在耗时前面（用户 2026-11-17 指定顺序），明细表同序。"""
+    heads = [h for h, *_ in cli_logs._FOLLOW_COLUMNS]
+    assert heads.index("首字") + 1 == heads.index("耗时")
+    scan = _scan_with([])
+    scan["rows"] = [_rec(ttft_ms=812)]
+    text = cli_logs._detail(scan, Palette(False))
+    head = next(ln for ln in text if "时间" in ln)
+    heads = head.split()
+    assert heads.index("首字") + 1 == heads.index("耗时")
 
 
 def test_follow_line_marks_estimated_credit():

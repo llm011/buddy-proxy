@@ -519,6 +519,11 @@ def _catalog() -> Catalog:
         ("QWEN3.8-MAX", "qmodel_38max"),
         ("qmodel_38max", "qmodel_38max"),
         ("Qwen3.7-Flash", "q37fmodel"),
+        # 2026-11-17 上游把 qmodel_latest 改名 Qwen4-Max；旧 id、新显示名、
+        # 上游 key 三种写法都要命中同一个 key。
+        ("Qwen4-Max", "qmodel_latest"),
+        ("qwen4-max", "qmodel_latest"),
+        ("Qwen4-Max-Preview", "qmodel_latest_preview"),
     ],
 )
 def test_resolve_model_accepts_display_name_and_key(given, expected):
@@ -608,7 +613,7 @@ def test_hidden_keys_are_not_listed_but_still_callable():
     """旧模型不展示（列表太长找不到要用的），但直接点名仍要能调通。"""
     catalog = _catalog()
     listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
-    for legacy in ("qwen3.7-max", "qwen3.7-plus", "qwen3.7-flash"):
+    for legacy in ("qwen3.7-plus", "qwen3.7-flash", "qwen4-max-preview"):
         assert legacy not in listed, f"{legacy} 不该出现在模型列表里"
         # 隐藏 ≠ 停用：仍然解析得到上游 key（点名可调）
         assert catalog.resolve_key(legacy) != legacy
@@ -623,7 +628,7 @@ def test_hidden_keys_do_not_hide_the_models_we_want():
     """
     catalog = _catalog()
     listed = [public_model_id(e) for e in catalog.fallback() if not is_hidden(e)]
-    for wanted in ("qwen3.8-max", "qwen3.8-flash"):
+    for wanted in ("qwen3.8-max", "qwen3.8-flash", "qwen4-max"):
         assert wanted in listed, f"{wanted} 被误隐藏"
 
 
@@ -940,7 +945,8 @@ def test_models_hide_legacy_but_keep_current():
     assert "qoder/minimax-m3.1-flash" in ids
     # 隐藏/停用/消失的：不展示
     assert "qoder/auto" not in ids
-    assert "qoder/qwen3.7-max" not in ids
+    assert "qoder/qwen3.7-plus" not in ids
+    assert "qoder/qwen4-max-preview" not in ids  # 用户点名不要的预览档
     assert "qoder/glm-5.2" not in ids
     assert "qoder/kimi-k2.8-preview" not in ids
     assert "qoder/cantus" not in ids

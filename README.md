@@ -105,7 +105,7 @@ buddy logs -f -p antigravity -a '#2' -n 0   # only new requests of one account, 
 ```
 
 - Sources are the on-disk `metrics.jsonl` plus its per-day archives, i.e. the same rows as `/ui/api/logs` — so history is available **even when the proxy is down**, which is exactly when you need it.
-- `-f/--follow` tails the **request records** (`metrics.jsonl`) rather than the service event log, because only those carry provider/model/client/account. `-p/-m/-c/-a` (and `--days` / `--today` / `--start` / `--end` for the replay) are applied with the same predicate as the stats view; `-n` is how many rows to replay first (`-n 0` = only new ones), `--json` prints one JSON object per line. Each row shows duration, **TTFT (first-token time)**, in/out tokens and **credit** (`★` = estimated from token pricing rather than billed upstream); rows without that data show `—` instead of `0`. It follows the current inode (so a rotated file's tail is still drained) and exits 130 on Ctrl-C; `--csv` is rejected with `-f`. Plain service log tail stays `buddy logs --raw`.
+- `-f/--follow` tails the **request records** (`metrics.jsonl`) rather than the service event log, because only those carry provider/model/client/account. `-p/-m/-c/-a` (and `--days` / `--today` / `--start` / `--end` for the replay) are applied with the same predicate as the stats view; `-n` is how many rows to replay first (`-n 0` = only new ones), `--json` prints one JSON object per line. The output is a fixed-width table (header plus rule, same column order as the `buddy logs` detail view); each row shows **TTFT (first-token time)**, duration, in/out tokens and **credit** (`★` = estimated from token pricing rather than billed upstream); rows without that data show `—` instead of `0`. It follows the current inode (so a rotated file's tail is still drained) and exits 130 on Ctrl-C; `--csv` is rejected with `-f`. Plain service log tail stays `buddy logs --raw`.
 - `-p/-m/-c/-a` are exact matches; `-a '#2'` also matches rows where the account was recorded without the `#`. Stats and the request list share one filter, so the numbers always match the rows.
 - The per-account table only shows a channel column when the same id appears under several channels, and folds long UUIDs — the point is to spot one bad account, not to dump 36-char ids.
 
@@ -176,32 +176,36 @@ The static catalog in `src/buddy_proxy/web/models_config.json` contains **52 Cod
 
 > Note on `glm-*`: the bare name resolves to whichever channel claims it first in registration order (**zcode**, which serves `glm-5.3` / `glm-5.3-flash`). For `glm-5.3-flashx` the zcode subscription reports `1311 当前订阅套餐暂未开放GLM-5.3-FlashX权限` while **CodeBuddy serves it fine** — so use the explicit `codebuddy/glm-5.3-flashx` prefix for that one. The official **`glm/`** channel (below) shares the same upstream and model table; use its explicit prefix to route a request over the official plan's key.
 
-**Trae Work channel** (15 domestic models listed; IDs are lowercase). Credit multipliers are the current catalog values:
+**Trae Work channel** (14 domestic models listed; IDs are lowercase). Credit multipliers are the current
+catalog values, re-priced 2026-11-17 from the client's "model multiplier" panel and CN `get_detail_param`
+(`glm-5.3` 0.78, `doubao-seed-2.1-turbo` 0.10, `doubao-seed-code` 0.03; the same update added
+`qwen4-max` at `x0.69`, which like `qwen3.8-flash` shows a membership-tier grey lock and returns `1005`
+on local CN accounts — the multiplier is recorded as published and actual availability is reported by
+the upstream per account):
 
 | id | credits |
 |---|---|
-| `glm-5.3` | x0.39 |
-| `glm-5.3-flash` | x0.06 |
+| `glm-5.3` | x0.78 |
+| `glm-5.3-flash` | x0.08 |
 | `glm-5.3-flashx` | x0.31 |
-| `deepseek-v4.1-flash` | x0.08 |
-| `doubao-seed-evolving` | x0.08 |
-| `doubao-seed-2.1-pro` | x0.08 |
-| `qwen3.8-max` | x1.50 |
-| `doubao-seed-2.1-turbo` | x0.20 |
+| `deepseek-v4.1-flash` | x0.06 |
+| `doubao-seed-evolving` | x0.80 |
+| `doubao-seed-2.1-pro` | x0.80 |
+| `qwen4-max` | x0.69 |
+| `doubao-seed-2.1-turbo` | x0.10 |
 | `step-5-preview` | x0.48 |
-| `doubao-seed-code` | x0.06 |
+| `doubao-seed-code` | x0.03 |
 | `mimo-v2.6-flash` | x0.06 |
 | `mimo-v2.6-pro` | x0.15 |
-| `qwen3.8-flash` | x0.08 |
 | `kimi-k3.1-pro` | x1.20 |
 | `minimax-m3.1-flash` | x0.09 |
 
 **Generation convergence**: once a family has a newer generation in the catalog, the older one stops
 being listed in `/v1/models` but stays callable by its explicit name (`trae/<old-id>`). The list above
 retires `glm-5.1` / `glm-5.2` (behind `glm-5.3`), `minimax-m3` (behind `minimax-m3.1-flash`),
-`kimi-k3` (behind `kimi-k3.1-pro`), `qwen-3.7-plus` (behind `qwen3.8-max` / `qwen3.8-flash`), and
-`deepseek-v4-pro` plus `deepseek-v4-flash-official` / `deepseek-v4-pro-official` (behind
-`deepseek-v4.1-flash`). Their multipliers stay in the static table so old configs keep working.
+`kimi-k3` (behind `kimi-k3.1-pro`), `qwen-3.7-plus` / `qwen3.8-max` / `qwen3.8-flash` (behind
+`qwen4-max`), and `deepseek-v4-pro` plus `deepseek-v4-flash-official` / `deepseek-v4-pro-official`
+(behind `deepseek-v4.1-flash`). Their multipliers stay in the static table so old configs keep working.
 Names with no parseable generation (e.g. `doubao-seed-*`, `mimo-*`) never converge and are always listed.
 
 `kimi-k3.1-pro` carries a "membership tier insufficient" grey lock in the client panel and returns
@@ -525,7 +529,8 @@ The client talks to Qoder's **COSY-signed** face (`/algo/api/v2/service/pro/sse/
 
 | Model id | Upstream key | Notes |
 |---|---|---|
-| `qoder/qwen3.8-max` | `qmodel_38max` | reasoning + vision |
+| `qoder/qwen4-max` | `qmodel_latest` | newest Qwen (0.4×, 1M context); the upstream key used to be `Qwen3.7-Max` — renamed in place 2026‑11‑17, so `qwen4-max` is the public id |
+| `qoder/qwen3.8-max` | `qmodel_38max` | reasoning + vision (currently 0.2× — off-peak promo) |
 | `qoder/qwen3.8-flash` | `qfmodel` | reasoning + vision |
 | `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
 | `qoder/kimi-k3.1-pro` | `kmodel_latest` | |
@@ -533,7 +538,7 @@ The client talks to Qoder's **COSY-signed** face (`/algo/api/v2/service/pro/sse/
 | `qoder/deepseek-v4-pro` | `dmodel` | |
 | `qoder/auto` | `auto` | platform-routed tier — the only tier upstream actually has; currently gated off upstream (directory `enable=false`) |
 
-Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.
+Older models (Qwen3.7 series, GLM-5.2, Kimi-K2.8-Preview, Qwen4-Max-Preview, Cantus, Sonus, DeepSeek-Flash) are **hidden from the list but still callable** — just less clutter in `/v1/models`. All three spelling forms work: the public id, the official display name (`Qwen3.8-Flash`), and the raw upstream key (`qfmodel`); the upstream key is echoed back as `upstream_key` for troubleshooting.
 
 **The model catalog is per-account and region-scoped** — a full account reports all 14 models while a restricted one may only see the Qwen3.8 pair (risk control; the gate is account-level, and it has been seen to drift). `refresh_models` therefore walks **every account in this provider's region** and publishes the union ("at least one account supports it"); a background loop fetches it on startup and re-fetches every `CACHE_TTL_S` (the catalog lives in memory only — without the warmup a restart used to leave the list at the bundled static fallback, which is how the UI once showed just 2 qoder models). When specific accounts lost specific models, the per-model allowlist lives in `qoder/models.json` (shipped next to the provider): entries `{"id": "glm-5.3", "accounts": ["<uuid>", ...]}` list the account ids (UUIDs, shown on the account card) that **support** the model — a model not listed, or `accounts: "all"`, means every account. Forwarding **skips** accounts that do not support the requested model (no cooldown, no failure — the account is healthy, it just lacks the entitlement) and fails fast with 404 when no account supports it at all, instead of paying a slow read-timeout / in-band 400 per unsupported account. The bundled fallback catalog mirrors the full-account measurements (third-party models restored with measured price factors); the admin UI tags limited models 「部分账号」 (hover for the supporting accounts) and each qoder account card notes its restrictions with the full model list in a hover tooltip. Editing the JSON requires a restart (loaded once, deliberately static).
 

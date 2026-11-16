@@ -112,7 +112,7 @@ buddy logs -f -p antigravity -a '#2' -n 0   # 只看某个账号的新请求，�
 ```
 
 - 数据源是磁盘上的 `metrics.jsonl` 及按天归档，即 `/ui/api/logs` 的同一批行，所以**服务挂了也查得到历史**——那往往正是最需要它的时候。
-- `-f/--follow` 跟的是**请求记录**（`metrics.jsonl`）而不是服务事件日志，因为只有前者带通道/模型/客户端/账号这些能筛的字段；纯服务日志 tail 仍是 `buddy logs --raw`。`-p/-m/-c/-a` 与统计视图同一个判据，`--days`/`--today`/`--start`/`--end` 约束回放的历史行；`-n` 是回放条数（`-n 0` 只打新请求），`--json` 每条一个 JSON。每行带耗时、**首字（TTFT）**、入/出 token 和**积分**（`★` 表示按 token 计价估算、不是上游实扣）；没有这些数据的行补 `—`，不当 0。跨过 0 点的按天轮转会先把旧文件尾巴读完再跟新文件（不丢也不重读），Ctrl-C 退出码 130，`--csv` 与 `-f` 互斥（报错退出 2）。
+- `-f/--follow` 跟的是**请求记录**（`metrics.jsonl`）而不是服务事件日志，因为只有前者带通道/模型/客户端/账号这些能筛的字段；纯服务日志 tail 仍是 `buddy logs --raw`。`-p/-m/-c/-a` 与统计视图同一个判据，`--days`/`--today`/`--start`/`--end` 约束回放的历史行；`-n` 是回放条数（`-n 0` 只打新请求），`--json` 每条一个 JSON。输出是列宽固定的表（表头 + 分隔线，与 `buddy logs` 明细表同一套列顺序），每行带**首字（TTFT）**、耗时、入/出 token 和**积分**（`★` 表示按 token 计价估算、不是上游实扣）；没有这些数据的行补 `—`，不当 0。跨过 0 点的按天轮转会先把旧文件尾巴读完再跟新文件（不丢也不重读），Ctrl-C 退出码 130，`--csv` 与 `-f` 互斥（报错退出 2）。
 - `-p/-m/-c/-a` 为精确匹配；`-a '#2'` 同时命中记录里不带 `#` 的账号。统计和明细共用同一套筛选，数字与行数永远对得上。
 - 按账号表只在同一 id 真的跨多个通道时才显示通道列，长 UUID 会折叠——目的是找出某个坏号，不是把 36 位 id 全铺出来。
 
@@ -665,32 +665,35 @@ curl -s http://127.0.0.1:8787/v1/tools/fetch \
 > ——这一个请显式写 `codebuddy/glm-5.3-flashx`。官方 **`glm/`** 渠道（下文）与
 > zcode 同上游同模型表，想走官方套餐的 key 时显式写 `glm/<模型>` 前缀。
 
-**Trae Work 通道**（对外列出 15 个国内模型，ID 统一小写）。倍率是当前目录值：
+**Trae Work 通道**（对外列出 14 个国内模型，ID 统一小写）。倍率是当前目录值
+（2026-11-17 按客户端「模型倍率」面板及 CN 目录 `get_detail_param` 跟价：`glm-5.3`
+0.78、`doubao-seed-2.1-turbo` 0.10、`doubao-seed-code` 0.03；同批新增 `qwen4-max`
+`x0.69`，面板上它与 `qwen3.8-flash` 都是会员档位灰锁，本机 CN 账号实测返回
+`1005`，能不能调由上游按账号裁决）：
 
 | 模型 ID | 倍率 |
 |---|---|
-| `glm-5.3` | x0.39 |
-| `glm-5.3-flash` | x0.06 |
+| `glm-5.3` | x0.78 |
+| `glm-5.3-flash` | x0.08 |
 | `glm-5.3-flashx` | x0.31 |
-| `deepseek-v4.1-flash` | x0.08 |
-| `doubao-seed-evolving` | x0.08 |
-| `doubao-seed-2.1-pro` | x0.08 |
-| `qwen3.8-max` | x1.50 |
-| `doubao-seed-2.1-turbo` | x0.20 |
+| `deepseek-v4.1-flash` | x0.06 |
+| `doubao-seed-evolving` | x0.80 |
+| `doubao-seed-2.1-pro` | x0.80 |
+| `qwen4-max` | x0.69 |
+| `doubao-seed-2.1-turbo` | x0.10 |
 | `step-5-preview` | x0.48 |
-| `doubao-seed-code` | x0.06 |
+| `doubao-seed-code` | x0.03 |
 | `mimo-v2.6-flash` | x0.06 |
 | `mimo-v2.6-pro` | x0.15 |
-| `qwen3.8-flash` | x0.08 |
 | `kimi-k3.1-pro` | x1.20 |
 | `minimax-m3.1-flash` | x0.09 |
 
 **代际收敛**：同一家族只要目录里有更高代际在列，旧代就不再出现在 `/v1/models`
 里，但**点名照样能调**（显式写 `trae/<旧名>` 即可）。上面这批把下面这些旧代收掉了：
 `glm-5.1` / `glm-5.2` 让位给 `glm-5.3`，`minimax-m3` 让位给 `minimax-m3.1-flash`，
-`kimi-k3` 让位给 `kimi-k3.1-pro`，`qwen-3.7-plus` 让位给 `qwen3.8-max` / `qwen3.8-flash`，
-`deepseek-v4-pro` 与 `deepseek-v4-flash-official` / `deepseek-v4-pro-official`
-让位给 `deepseek-v4.1-flash`。倍率仍按静态底表留着（旧配置继续可用）。
+`kimi-k3` 让位给 `kimi-k3.1-pro`，`qwen-3.7-plus` / `qwen3.8-max` / `qwen3.8-flash`
+让位给 `qwen4-max`，`deepseek-v4-pro` 与 `deepseek-v4-flash-official` /
+`deepseek-v4-pro-official` 让位给 `deepseek-v4.1-flash`。倍率仍按静态底表留着（旧配置继续可用）。
 解析不出代际的名字（如 `doubao-seed-*`、`mimo-*`）不参与收敛，照常列出。
 
 `kimi-k3.1-pro` 在客户端面板带「会员档位不足」灰锁，本机两个 CN 账号实测都回
@@ -1333,7 +1336,8 @@ response`）；`_describe_upstream_error` 会把它挖出来，并且失败按 A
 
 | 对外 id | 上游 key | 备注 |
 | --- | --- | --- |
-| `qoder/qwen3.8-max` | `qmodel_38max` | 推理 + 读图 |
+| `qoder/qwen4-max` | `qmodel_latest` | 最新一代 Qwen（0.4×，1M 上下文）；上游 key 原地改名（原名 Qwen3.7-Max），2026‑11‑17 起对外 id 是 `qwen4-max` |
+| `qoder/qwen3.8-max` | `qmodel_38max` | 推理 + 读图（当前 0.2×，错峰优惠） |
 | `qoder/qwen3.8-flash` | `qfmodel` | 推理 + 读图 |
 | `qoder/glm-5.3` / `qoder/glm-5.3-flash` | `gmodel` / `gfmodel` | |
 | `qoder/kimi-k3.1-pro` | `kmodel_latest` | |
@@ -1341,7 +1345,7 @@ response`）；`_describe_upstream_error` 会把它挖出来，并且失败按 A
 | `qoder/deepseek-v4-pro` | `dmodel` | |
 | `qoder/auto` | `auto` | 平台路由档位——上游实际**只有这一个档位**；当前也被上游关了（目录 `enable=false`） |
 
-旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K2.8-Preview、Cantus、Sonus、DeepSeek-Flash）
+旧模型（Qwen3.7 系列、GLM-5.2、Kimi-K2.8-Preview、Qwen4-Max-Preview、Cantus、Sonus、DeepSeek-Flash）
 **不列在列表里但仍可点名调用**——列表少一点，反而好找要用的。三种写法都接受：
 对外 id、官方显示名（`Qwen3.8-Flash`）、上游内部 key（`qfmodel`）；内部 key 会在
 `/v1/models` 里以 `upstream_key` 回显，便于排障对照。

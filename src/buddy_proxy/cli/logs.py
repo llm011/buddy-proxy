@@ -170,22 +170,6 @@ def _overview(scan: dict[str, Any], palette: Palette) -> list[str]:
     return [f"  {p}" for p in parts]
 
 
-#: 账号列宽。账号 id 是 UUID（36 格）、邮箱或 ``acct-…``，原样排表能把整张表
-#: 推到 100+ 列，右边四个数字全被挤到屏幕外；24 格足够认出是哪个号。
-_ACCOUNT_WIDTH = 24
-
-
-def _short_account(name: str) -> str:
-    if display_width(name) <= _ACCOUNT_WIDTH:
-        return name
-    out = ""
-    for ch in name:
-        if display_width(out + ch) > _ACCOUNT_WIDTH - 1:
-            break
-        out += ch
-    return out + "…"
-
-
 def _account_table(rows: list[dict[str, Any]], palette: Palette) -> list[str]:
     """账号分组：``providers`` 是同一 id 在多个通道下的出现（failover 换通道）。
 
@@ -300,15 +284,15 @@ def _detail(scan: dict[str, Any], palette: Palette) -> list[str]:
             _short_account(acct) if acct else "",
             r.get("model") or "",
             code_text,
-            humanize_ms(r.get("duration_ms")),
             _ttft_text(r),
+            humanize_ms(r.get("duration_ms")),
             humanize_number(r.get("prompt_tokens")),
             humanize_number(r.get("completion_tokens")),
             _credit_text(r),
             (r.get("error") or "")[:40],
         ])
     out.extend("  " + ln for ln in table(
-        ["时间", "通道", "账号", "模型", "状态", "耗时", "首字", "入", "出", "积分",
+        ["时间", "通道", "账号", "模型", "状态", "首字", "耗时", "入", "出", "积分",
          "错误"],
         table_rows, palette,
         ["left", "left", "left", "left", "right", "right", "right", "right",
@@ -352,10 +336,6 @@ def render_csv(scan: dict[str, Any]) -> str:
     return buf.getvalue()
 
 
-#: 「首字」「积分」列宽：``999,999`` / ``1,234.56★`` 都放得下，右边数字齐出一条线。
-_TTFT_WIDTH = 6
-_CREDIT_WIDTH = 10
-
 #: 「首字」列的三种状态：有数、非流式本来就无首字、流式却缺数（异常）。
 _TTFT_NA = "-"
 
@@ -382,32 +362,81 @@ def _credit_text(r: dict[str, Any]) -> str:
     return text
 
 
-def _follow_line(r: dict[str, Any], palette: Palette) -> str:
-    """一条请求记录 → 单行。列与统计视图的「最近 N 条」一致，额外带宽（到秒）。"""
+def _status_text(r: dict[str, Any]) -> str:
     code = int(r.get("status") or 0)
-    code_text = str(code) if code else "-"
-    if is_error(r):
-        code_text = palette.bad(code_text)
-    elif code >= 400:
-        code_text = palette.warn(code_text)
+    return str(code) if code else "-"
+
+
+def _error_style(r: dict[str, Any]) -> list[str]:
+    """状态码/错误文本该用的颜色；空列表 = 原样。"""
+    code = int(r.get("status") or 0)
+    if is_error(r) or code >= 500:
+        return ["bad"]
+    if code >= 400:
+        return ["warn"]
+    return []
+
+
+#: ``-f`` 的列宽。**固定宽度是这里的核心**：表格每次都要先量所有单元格才对齐，
+#: 而实时流是一行一行来的、后面的行还看不见，没法那样量。所以跟 ``tail -f``
+#: 同口径——列宽写死，再按显示宽度补齐。
+
+#: 「首字」「积分」列宽：``999,999`` / ``1,234.56★`` 都放得下，右边数字齐出一条线。
+_TTFT_WIDTH = 6
+_CREDIT_WIDTH = 10
+#: 账号列宽。账号 id 是 UUID（36 格）、邮箱或 ``acct-…``，原样排表能把整张表
+#: 推到 100+ 列，右边几个数字全被挤到屏幕外；24 格足够认出是哪个号。
+_ACCOUNT_WIDTH = 24
+
+#: follow 表的列定义：``(表头, 宽度, 对齐, 取值)``。表头行、分隔线和数据行都由
+#: 它生成——三处各写一份宽度正是上次「表头和数据错位」的来源。
+_FOLLOW_COLUMNS: tuple[tuple[str, int, str, Any], ...] = (
+    ("时间", 8, "left", lambda r: _clock(r)),
+    ("通道", 11, "left", lambda r: r.get("provider") or "-"),
+    ("账号", _ACCOUNT_WIDTH, "left", lambda r: _short_account(r.get("account") or "-")),
+    ("模型", 26, "left", lambda r: r.get("model") or "-"),
+    ("状态", 3, "right", lambda r: _status_text(r)),
+    ("首字", _TTFT_WIDTH, "right", lambda r: _ttft_text(r)),
+    ("耗时", 7, "right", lambda r: humanize_ms(r.get("duration_ms"))),
+    ("入", 6, "right", lambda r: humanize_number(r.get("prompt_tokens"))),
+    ("出", 6, "right", lambda r: humanize_number(r.get("completion_tokens"))),
+    ("积分", _CREDIT_WIDTH, "right", lambda r: _credit_text(r)),
+)
+
+
+def _clock(r: dict[str, Any]) -> str:
     ts = r.get("ts")
     try:
-        clock = time.strftime("%H:%M:%S", time.localtime(float(ts))) if ts else "--:--:--"
+        return time.strftime("%H:%M:%S", time.localtime(float(ts))) if ts else "--:--:--"
     except (TypeError, ValueError, OSError):
-        clock = "--:--:--"
-    fields = [
-        clock,
-        pad(r.get("provider") or "-", 12),
-        pad(_short_account(r.get("account") or "-"), _ACCOUNT_WIDTH),
-        pad(r.get("model") or "-", 26),
-        pad(code_text, 3, "right"),
-        pad(humanize_ms(r.get("duration_ms")), 7, "right"),
-        pad(humanize_number(r.get("prompt_tokens")), 6, "right"),
-        pad(humanize_number(r.get("completion_tokens")), 6, "right"),
-        pad(_ttft_text(r), _TTFT_WIDTH, "right"),
-        pad(_credit_text(r), _CREDIT_WIDTH, "right"),
-    ]
-    line = "  ".join(fields).rstrip()
+        return "--:--:--"
+
+
+def _short_account(name: str) -> str:
+    """账号超宽截断；表头/数据都按**显示宽**补格，宽字符才不会被多算一格。"""
+    if display_width(name) <= _ACCOUNT_WIDTH:
+        return name
+    out = ""
+    for ch in name:
+        if display_width(out + ch) > _ACCOUNT_WIDTH - 1:
+            break
+        out += ch
+    return out + "…"
+
+
+def _follow_line(r: dict[str, Any], palette: Palette) -> str:
+    """一条请求记录 → 单行。宽度与 ``_follow_header`` 同源（见 ``_FOLLOW_COLUMNS``）。
+
+    单元格先把**带颜色的**文本按显示宽度补齐（ANSI 不计宽），所以红/黄状态下
+    那一列不会把右边的列整体推歪；错误文本跟在最后，不占列。
+    """
+    styles = _error_style(r)
+    cells = []
+    for _head, width, align, getter in _FOLLOW_COLUMNS:
+        text = str(getter(r) or "-")
+        styled = palette(text, *styles) if styles and _head == "状态" else text
+        cells.append(pad(styled, width, align))
+    line = "  ".join(cells).rstrip()
     if r.get("error"):
         line += "  " + palette.bad((r.get("error") or "")[:60])
     return line
@@ -572,18 +601,25 @@ class _FollowState:
 
 
 def _follow_header(palette: Palette, filters: dict[str, Any]) -> str:
+    """表头 + 分隔线，列宽与 ``_follow_line`` 同源。
+
+    注意先 ``pad`` 再上色：表头是中文（显示宽 4 格），若先套 ANSI 再按
+    ``len()`` 补齐就会短一截，后面所有列跟着左移——正是要修的那种错位。
+    """
+    head = [
+        pad(h, width, align)
+        for h, width, align, _getter in _FOLLOW_COLUMNS
+    ]
+    head = [palette.head(cell) for cell in head]
+    rule = "  ".join("─" * width for _h, width, _a, _g in _FOLLOW_COLUMNS)
     extra = [f"{k}={','.join(v)}" for k, v in (
         ("providers", filters["providers"]), ("models", filters["models"]),
         ("clients", filters["clients"]), ("accounts", filters["accounts"])) if v]
     scope = f"  筛选 {'  '.join(extra)}" if extra else ""
-    return "  ".join([
-        palette.dim("时间    "), pad(palette.dim("通道"), 12),
-        pad(palette.dim("账号"), _ACCOUNT_WIDTH), pad(palette.dim("模型"), 26),
-        pad(palette.dim("状态"), 3, "right"), pad(palette.dim("耗时"), 7, "right"),
-        pad(palette.dim("首字"), _TTFT_WIDTH, "right"),
-        pad(palette.dim("入"), 6, "right"), pad(palette.dim("出"), 6, "right"),
-        pad(palette.dim("积分"), _CREDIT_WIDTH, "right"),
-    ]).rstrip() + palette.dim(scope)
+    return "\n".join([
+        "  ".join(head).rstrip(),
+        palette.dim(rule) + palette.dim(scope),
+    ])
 
 
 def follow(args: Any, palette: Palette) -> int:

@@ -42,7 +42,8 @@ CHAT_SCENES = ("chat", "developer", "assistant", "app")
 #: code 112 的 403）；2026-10-05 复测权益已恢复——那是**账号级**分桶而非
 #: 全局门：全量账号目录回到 14 条。本表按该全量目录重建
 #: （``cmodel``/``smodel`` 目录里彻底消失，不收）；price_factor 全部按实测
-#: 修正（qmodel_latest 0.1→0.5、q37fmodel 0.02→0.1）。个别账号仍受限的
+#: 修正（qmodel_latest 0.1→0.5、q37fmodel 0.02→0.1；``qmodel_latest`` 2026-11-17
+#: 随上游改名 Qwen4-Max 再改为 0.4）。个别账号仍受限的
 #: 情况走 :data:`MODEL_OVERRIDE`（per-account 白名单）处理，兜底表不管。
 FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
     # 2026-10-31 用户从客户端「模型倍率」面板截图核对：Qwen3.8-Max 是 0.5×
@@ -52,8 +53,15 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
      "is_vl": True, "price_factor": 0.5, "is_free": False, "max_input_tokens": 180000},
     {"key": "qfmodel", "display_name": "Qwen3.8-Flash", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.0, "is_free": True, "max_input_tokens": 180000},
-    {"key": "qmodel_latest", "display_name": "Qwen3.7-Max", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.5, "max_input_tokens": 1000000},
+    # 2026-11-17 上游目录：``qmodel_latest`` 已改名为 Qwen4-Max（0.4×，1M），
+    # 倍率与面板截图一致。
+    {"key": "qmodel_latest", "display_name": "Qwen4-Max", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.4, "is_free": False, "max_input_tokens": 1000000},
+    # 同批新增的预览档，用户点名不要（太烂）：照常映射成对外 id
+    # ``qwen4-max-preview``，再由 ``HIDDEN_KEYS`` 从列表摘掉——这样仍解析得到，
+    # 老客户端直接点名调用也不受影响。
+    {"key": "qmodel_latest_preview", "display_name": "Qwen4-Max-Preview", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.1, "is_free": False, "max_input_tokens": 1000000},
     {"key": "qmodel", "display_name": "Qwen3.7-Plus", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.04, "max_input_tokens": 1000000},
     {"key": "q37fmodel", "display_name": "Qwen3.7-Flash", "is_reasoning": True,
@@ -108,15 +116,16 @@ TIER_MODELS: tuple[dict[str, Any], ...] = (
 #: 2026-10-03 收缩：三方模型曾因上游 ``enable=false`` 由 :func:`is_enabled` 摘除；
 #: 上游恢复后会自动回到列表。这里仅隐藏仍可调用、但已过时的模型。
 HIDDEN_KEYS: frozenset[str] = frozenset({
-    "qmodel_latest",   # Qwen3.7-Max
-    "qmodel",          # Qwen3.7-Plus
-    "q37fmodel",       # Qwen3.7-Flash
-    "gm51model",       # GLM-5.2
-    "kmodel",          # Kimi-K2.8-Preview
+    "qmodel_latest_preview",  # Qwen4-Max-Preview（2026-11-17 新增，用户点名不要）
+    "qmodel",                 # Qwen3.7-Plus
+    "q37fmodel",              # Qwen3.7-Flash
+    "gm51model",              # GLM-5.2
+    "kmodel",                 # Kimi-K2.8-Preview
 })
-#: 注意：``kmodel_latest`` / ``mmodel`` **不能隐藏**——2026-10 上游是原地换的
-#: 显示名（Kimi-K3.1-Pro / MiniMax-M3.1-Flash），这两个 key 就是当前一代；
-#: 按名字误判成旧模型会把它从列表里整个删掉。
+#: 注意：``kmodel_latest`` / ``mmodel`` / ``qmodel_latest`` **不能隐藏**——上游
+#: 都是原地换显示名（Kimi-K3.1-Pro / MiniMax-M3.1-Flash / 2026-11-17 的
+#: Qwen4-Max），这几个 key 就是当前一代；按名字误判成旧模型会把它从列表里
+#: 整个删掉（``qmodel_latest`` 此前正是被当成「Qwen3.7-Max」藏起来的）。
 #: 注意：``dfmodel``（上游显示名 ``DeepSeek-Flash``，即用户口中的 4.1-Flash）
 #: 曾因「名字看着旧但最常用」而不隐藏；2026-10-03 起它被上游停用，由
 #: :func:`is_enabled` 摘除。
@@ -150,18 +159,18 @@ def is_enabled(entry: dict[str, Any]) -> bool:
 #: CodeBuddy 静态表同名——同一批模型两边都有，裸名调用由 ``forward_chat``
 #: 的路由决定归属；要强制走本通道请写 ``qoder/<id>``。
 MODEL_IDS: dict[str, str] = {
-    # ``qwen4-max`` **上游目录里没有**（``/v1/models`` 只给 9 个，不含它），但
-    # 直接点名调用**实测可用**（2026-11-12：返回正常文本，``billable: false``
-    # 说明走的是不计费的内测档）。
+    # 2026-11-17 上游目录正式收录 Qwen4：``qmodel_latest`` 原地改名为
+    # ``Qwen4-Max``（0.4×，1M 上下文）。此前 11-12 我们靠「目录里没有、
+    # 点名能调」把 ``qwen4-max`` 塞进 ``LOCAL_EXTRA_MODELS``；现在目录自己
+    # 就报，那条本地补充与这里的同名登记随之删掉，改走正常映射。老名字
+    # ``qwen4-max`` 仍然解析得到（value 就是上游 key），不用留别名。
     #
-    # 登记在这里是为了让「用户敲 qwen4-max」能命中本通道并出现在目录里；
-    # 它的上下文窗口 / 是否支持图片等元数据**上游没给**，所以下面 models()
-    # 里不带那些字段（宁缺勿造）。既然可能是内测版，上游随时可能撤，
-    # 真撤了调用会回 400，不影响其它模型。
-    "qwen4-max": "qwen4-max",
+    "qmodel_latest": "qwen4-max",
     "qmodel_38max": "qwen3.8-max",
     "qfmodel": "qwen3.8-flash",
-    "qmodel_latest": "qwen3.7-max",
+    # ``qmodel_latest_preview``（``Qwen4-Max-Preview``）照常映射，但用户点名
+    # 说它太烂不要了——由 ``HIDDEN_KEYS`` 从列表摘掉（隐藏 ≠ 停用）。
+    "qmodel_latest_preview": "qwen4-max-preview",
     "qmodel": "qwen3.7-plus",
     "q37fmodel": "qwen3.7-flash",
     "dmodel": "deepseek-v4-pro",
@@ -185,22 +194,14 @@ MODEL_IDS: dict[str, str] = {
 #: 上游真实返回的条目生效；这里是**凭空补一条**——上游 ``/v1/models`` 根本
 #: 不给它，但点名调用能通。
 #:
-#: 当前只有 ``qwen4-max``（2026-11-12 实测）：调用返回正常文本、
-#: ``billable: false``（不计费的内测档）。上游目录只报 9 个模型，不含它。
+#: 2026-11-17 起清空：唯一的成员 ``qwen4-max`` 已被上游目录正式收录
+#: （``qmodel_latest`` 改名为 ``Qwen4-Max``），补在这里反而会在目录里出现
+#: 第二条同名（缺上下文字段的）条目。空着是正常态，不是漏填。
 #:
 #: ⚠ 只填**确定的**能力字段。上游没声明 ``max_input`` / 是否支持图片，
 #: 这里就不写——`to_openai_model` 会把这些留空，客户端按「未知」处理，
 #: 不会因为编了个数字导致长上下文请求被误判。
-LOCAL_EXTRA_MODELS: tuple[dict[str, Any], ...] = (
-    {
-        "key": "qwen4-max",
-        "display_name": "Qwen4-Max",
-        "is_reasoning": True,
-        # 注意：本次实测它自述为「Qwen3.5」——上游命名与模型自我认知不一致，
-        # 可能是内测期的占位。等上游正式收录后再校正 display_name。
-        "local_extra": True,
-    },
-)
+LOCAL_EXTRA_MODELS: tuple[dict[str, Any], ...] = ()
 
 
 #: 改名前的旧对外 id -> 上游 key。上游原地换代时只改 display_name，老客户端的
