@@ -1,17 +1,12 @@
 // ---- KIRO 面板 ----
 //
-// 与 kimi/codex 同款布局（每账号一块：名字 / 状态 / ▲▼ / ✎ / ✕），但多出两个
-// **kiro 特有的**入口：
-//
-//   1. 「导入 auth 文件」——从本机 Kiro IDE 的 sso cache 导入。这是主路径：
-//      Kiro 的官方登录要过 AWS SSO/IAM Identity Center，设备码流程需要企业
-//      start URL（只有 Kiro 客户端自己知道），所以「IDE 里登录过 → 一键导入」
-//      远比「让用户去查 start URL」现实。
-//   2. 「浏览器授权」——设备码流程兜底。打开地址输码即可，无需本机装 IDE。
-//
-// 额度区不需要本文件参与：kiro 走**通用额度卡**（见 benefits.js 的
-// _PANEL_PROVIDERS 说明），条目 label 形如 `Kiro #1 · 主号 · Credit`。
-// 本面板只管账号（谁在、什么状态、怎么加/删/改）。
+// 复用通用多账号额度面板布局与组件（.pat-head / .pat-quota-grid / .pat-pkg /
+// .ag-move / quotaAccountTotal / quotaProviderFold / acctRenameButton /
+// acctMoveButtons / acctDeleteButton / confirmAccountDelete）：
+//   - 两栏网格（.pat-quota-grid），多账号并排各占半宽，与 kimi/codex/copilot 一致
+//   - 卡头带跨账号合计、负载均衡开关、刷新、折叠、以及 kiro 特有入口：
+//     1. 「导入 auth 文件」——从本机 ~/.aws/sso/cache/ 导入
+//     2. 「浏览器授权」——设备码流程兜底
 
 let KIRO_ACCTS = null;
 let KIRO_MOVING = false;
@@ -21,47 +16,28 @@ function _kiro_acct_by_id(id) {
   return (KIRO_ACCTS || []).find(a => a.id === id) || null;
 }
 
+function _kiro_acct_for(idx) {
+  if (!KIRO_ACCTS) return null;
+  if (idx == null) return KIRO_ACCTS.length === 1 ? KIRO_ACCTS[0] : null;
+  return KIRO_ACCTS.find(a => a.index === idx) || null;
+}
+
+function _kiro_acct_by_title(title) {
+  if (!KIRO_ACCTS || !title) return null;
+  const clean = String(title).replace(/^Kiro(?:\s+#\d+)?\s+·\s+/, '').trim();
+  return KIRO_ACCTS.find(a => a.label === clean || a.id === clean) || null;
+}
+
 function _kiro_sub_html(a) {
   if (!a) return '';
   const bits = [];
   if (a.provider) bits.push(a.provider);
   if (a.region) bits.push(a.region);
   if (a.needs_refresh) bits.push('token 待刷新');
-  else if (a.expires_at) {
-    const left = Math.round(a.expires_at - Date.now() / 1000);
-    if (left > 0) bits.push(`token ${left > 3600 ? (left / 3600).toFixed(1) + 'h' : Math.max(1, Math.round(left / 60)) + 'min'} 有效`);
-    else bits.push('token 已过期');
-  }
   if (!a.has_refresh_token) bits.push('缺 refreshToken');
   return bits.length
-    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px">${esc(bits.join(' · '))}</div>`
+    ? `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-kiro-sub>${esc(bits.join(' · '))}</div>`
     : '';
-}
-
-/** 单个账号的额度明细：复用通用卡的 ``quotaItemHtml``（进度条 + 剩余/已用 + 重置）。
-
- * 额度条目的 label 形如 ``Kiro #1 · 主号 · Credit``（多账号）或
- * ``Kiro · 主号 · Credit``（单账号），本函数按**账号名**把条目分回各自的卡。
- * 认不出归属的一律不显示——错挂到别的账号比少显示一条更糟。
- */
-function _kiro_quota_html(kiro, acct) {
-  const q = kiro.quota || {};
-  if (!q.supported) return '';
-  const items = (q.items || []).filter(it => it && it.label
-    && !it.query_failed && it.percent != null || (it.used != null && it.total));
-  const mine = items.filter(it => {
-    const parts = String(it.label).split(' · ');
-    // 形如 [Kiro, #N, 名字, 明细...] 或 [Kiro, 名字, 明细...]
-    const name = parts.find((x, i) => i > 0 && !/^#\d+$/.test(x) && x !== 'Kiro') || '';
-    return name === (acct.label || acct.id) || parts.includes(acct.label || acct.id);
-  });
-  if (!mine.length) return '';
-  return `<div class="kiro-quota">` + mine.map(it => {
-    // 去掉通道/账号前缀，只留包名（进度条自己会显示数字）
-    const idx = String(it.label).lastIndexOf(' · ');
-    const short = Object.assign({}, it, {label: idx >= 0 ? String(it.label).slice(idx + 3) : it.label});
-    return quotaItemHtml(short);
-  }).join('') + '</div>';
 }
 
 function renderKiroPanel() {
@@ -70,47 +46,114 @@ function renderKiroPanel() {
   const kiro = (BENEFITS.providers || []).find(p => p.id === 'kiro' && !p.disabled);
   if (!kiro) { panel.innerHTML = ''; return; }   // 未启用（没加 --kiro）：整块不渲染
 
+  const items = (kiro.quota && kiro.quota.supported ? kiro.quota.items : []) || [];
+  // 后端 label 形如「Kiro #1 · addbackteam1@addbacktech.com · Credit」（多账号）
+  // 或「Kiro · addbackteam1@addbacktech.com · Credit」（单账号）。
+  // 这里按「第 1 段 + #N」拆出账号组名，并把末尾明细名留给 quotaItemsHtml。
+  const groups = new Map();
+  const notices = [];
+  for (const it of items) {
+    if (it.query_failed || (it.percent == null && it.used == null)) { notices.push(it); continue; }
+    const parts = String(it.label || '').split(' · ');
+    let grp = 'Kiro';
+    let sub = it.label;
+    if (parts.length >= 3 && /^Kiro(?:\s+#\d+)?$/.test(parts[0])) {
+      grp = `${parts[0]} · ${parts[1]}`;
+      sub = parts.slice(2).join(' · ');
+    } else if (parts.length === 2) {
+      grp = parts[0];
+      sub = parts[1];
+    }
+    if (!groups.has(grp)) groups.set(grp, []);
+    groups.get(grp).push(Object.assign({}, it, {label: sub}));
+  }
   const accts = KIRO_ACCTS || [];
-  const rows = accts.map(a => {
-    const name = a.label || a.id;
-    const moveUp = accts.length > 1
-      ? `<button class="ghost" onclick="kiroMoveAccount(${a.index},-1,'${esc(a.id)}')" title="上移">▲</button>` +
-        `<button class="ghost" onclick="kiroMoveAccount(${a.index},1,'${esc(a.id)}')" title="下移">▼</button>`
-      : '';
-    return `<div class="pat-pkg" style="margin-bottom:8px">
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-        <span class="pat-pkg-name" style="font-weight:600">${esc(name)}</span>
-        ${moveUp}
-        ${acctRenameButton('kiro', a)}
-        <span style="flex:1"></span>
-        <button class="ghost" onclick="kiroConfirmDelete('${esc(a.id)}')" title="删除该账号">✕</button>
-      </div>
-      ${_kiro_sub_html(a)}
-      ${_kiro_quota_html(kiro, a)}
-      <div class="muted" style="font-size:11px" title="账号 id（排障用）">${esc(a.id)}</div>
+  // 查不到额度的账号（如新导入还没刷新 benefits、或单账号暂未拉到）也要出卡片，
+  // 这样改名/删号/顺位按钮总有地方挂。
+  if (!(accts.length === 1 && groups.size === 1)) {
+    for (const a of accts) {
+      const hasMine = [...groups.keys()].some(g => {
+        const m = g.match(/^Kiro #(\d+)(?: · |$)/);
+        if (m) return Number(m[1]) === a.index;
+        return g === `Kiro · ${a.label || a.id}`;
+      });
+      if (!hasMine) {
+        const key = accts.length > 1
+          ? `Kiro #${a.index} · ${a.label || a.id}`
+          : `Kiro · ${a.label || a.id}`;
+        groups.set(key, []);
+      }
+    }
+  }
+  const idxOf = grp => {
+    const m = grp.match(/^Kiro #(\d+)(?: · |$)/);
+    return m ? Number(m[1]) : null;
+  };
+  const ordered = [...groups.keys()].sort((a, b) => {
+    const ia = idxOf(a), ib = idxOf(b);
+    return ia == null || ib == null ? (ia == null) - (ib == null) : ia - ib;
+  });
+  const n = Math.max(...ordered.map(g => idxOf(g) || 0), accts.length, 1);
+  const quotaHtml = ordered.map(grp => {
+    const its = groups.get(grp) || [];
+    const idx = idxOf(grp);
+    const m = idx != null;
+    const acct = _kiro_acct_by_title(grp) || _kiro_acct_for(idx);
+    const moveBtns = (m && n > 1) ? acctMoveButtons('kiro', idx, n, acct ? acct.id : '') : '';
+    const delBtn = acctDeleteButton('kiro', acct, 'token 失效/不再使用时');
+    const renameBtn = acctRenameButton('kiro', acct);
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    const shown = acct ? (acct.label || acct.id)
+      : grp.replace(/^Kiro(?:\s+#\d+)?\s+·\s+/, '');
+    return `
+    <div class="pat-pkg">
+      <span class="pat-pkg-name"${m ? ` data-kiro-idx="${idx}"` : ''}>${esc(shown)}</span>
+      ${_kiro_sub_html(acct)}
+      ${its.length ? quotaItemsHtml(its, 'kiro:' + grp)
+        : '<div class="muted" style="font-size:11px;padding:4px 0">暂无额度数据</div>'}
+      ${rowBtns}
     </div>`;
   }).join('');
+  const noticeHtml = notices.map(quotaItemHtml).join('');
+  const multi = accts.length > 1 || n > 1;
+  const levelTag = (kiro.quota && kiro.quota.level) ? String(kiro.quota.level) : 'AWS CodeWhisperer';
+  const fold = quotaProviderFold(ordered.length ? items : 'empty', 'kiro');
 
-  const items = (kiro.quota && kiro.quota.supported) ? (kiro.quota.items || []) : null;
-  const fold = quotaProviderFold(items && items.length ? items : (accts.length ? items : 'empty'), 'kiro');
-  panel.innerHTML = `<div class="chart-card" data-kiro-panel>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-      <span style="font-weight:600">Kiro（AWS CodeWhisperer）</span>
-      <span class="muted" style="font-size:12px">${accts.length} 个账号</span>${fold.badge}
-      <span style="flex:1"></span>
-      ${fold.toggle}${providerLoadBalanceToggle('kiro', accts.length > 1)}${providerRefreshButton('kiro')}
-    </div>
-    ${fold.bodyStart}${rows || '<div class="empty" style="padding:10px 0">还没有账号</div>'}
-    <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
-      <button onclick="kiroOpenImport()">导入 auth 文件</button>
+  panel.innerHTML = `<div class="chart-card" style="margin-top:14px" data-kiro-panel>
+    <div class="pat-head">
+      <span class="name">Kiro</span>
+      <span class="tag">${esc(multi ? '多账号 · 自动切换' : levelTag)}</span>${fold.badge}
+      <span class="grow"></span>
+      ${quotaAccountTotal(groups, !!(kiro.quota && kiro.quota.sum_items))}
+      <span class="muted" style="font-size:11px">${multi ? '402/429/403 自动切换（按导入顺位）' : `${accts.length} 个账号`}</span>
+      ${fold.toggle}${providerLoadBalanceToggle('kiro', multi)}${providerRefreshButton('kiro')}
+      <button class="ghost" onclick="kiroOpenImport()">导入 auth 文件</button>
       <button class="ghost" onclick="kiroStartLogin()">浏览器授权</button>
     </div>
+    ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${ordered.length ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      : '<div class="empty" style="padding:10px 0">还没有账号</div>'}
     <div id="kiro-login-box" style="margin-top:10px"></div>${fold.bodyEnd}
   </div>`;
-  if (!accts.length) loadKiroAccounts();
+  loadKiroAccounts();
 }
 
 // ---- 账号加载/顺位/删除 ----------------------------------------------------
+
+function fillKiroAccounts(accts) {
+  if (!ACCT_NO_RERENDER && typeof renderKiroPanel === 'function') { renderKiroPanel(); return; }
+  for (const a of accts) {
+    const el = (accts.length === 1)
+      ? document.querySelector('#kiro-panel .pat-pkg-name')
+      : document.querySelector(`#kiro-panel [data-kiro-idx="${a.index}"]`);
+    if (!el) continue;
+    el.textContent = a.label || a.id;
+    if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-kiro-sub')) {
+      el.nextElementSibling.remove();
+    }
+    const sub = _kiro_sub_html(a);
+    if (sub) el.insertAdjacentHTML('afterend', sub);
+  }
+}
 
 function loadKiroAccounts() {
   return acctFetch('kiro', () => (async function() {
@@ -120,13 +163,10 @@ function loadKiroAccounts() {
       const list = r.accounts || [];
       if (JSON.stringify(list) === JSON.stringify(KIRO_ACCTS)) return;  // 没变不动 DOM
       KIRO_ACCTS = list;
-      renderKiroPanel();
+      fillKiroAccounts(list);
       syncQuotaFold();
     } catch (e) {
-      const panel = document.getElementById('kiro-panel');
-      if (panel && !KIRO_ACCTS) {
-        panel.innerHTML = `<div class="chart-card"><div class="empty">账号加载失败：${esc(e.message)}</div></div>`;
-      }
+      // 静默：账号接口抖动不清面板，下轮 30s 自动重试
     }
   })());
 }
@@ -150,8 +190,8 @@ async function kiroMoveAccount(idx, delta, id) {
     });
     if (r && r.ok) {
       KIRO_ACCTS = (r.accounts || []).map((a, i) => ({...a, index: i + 1}));
-      renderKiroPanel();
       toast('顺位已更新');
+      refreshAll();
     }
   } catch (e) {
     toast('调整失败: ' + e.message, true);
@@ -163,22 +203,30 @@ async function kiroMoveAccount(idx, delta, id) {
 function kiroConfirmDelete(id) {
   const a = _kiro_acct_by_id(id);
   const name = (a && a.label) || id;
-  confirmAccountDelete({
+  return confirmAccountDelete({
     title: '删除 Kiro 账号',
     name,
     extra: '该账号的本地凭据一并移除，转发不再使用它。' +
       '如果只是 token 过期，重新在 Kiro IDE 登录后「导入 auth 文件」即可恢复，不必删号。',
-  }).then(ok => { if (ok) kiroDeleteAccount(id); });
+  });
 }
 
 async function kiroDeleteAccount(id) {
+  if (KIRO_MOVING) return;
+  if (!(await kiroConfirmDelete(id))) return;
+  const a = _kiro_acct_by_id(id);
+  const name = (a && a.label) || id;
+  KIRO_MOVING = true;
   try {
     await api(`/ui/api/kiro/accounts/${encodeURIComponent(id)}`, {method: 'DELETE'});
-    KIRO_ACCTS = (KIRO_ACCTS || []).filter(a => a.id !== id);
-    renderKiroPanel();
-    toast('已删除');
+    KIRO_ACCTS = (KIRO_ACCTS || []).filter(x => x.id !== id);
+    toast(`${name} 已删除`);
+    refreshAll();
   } catch (e) {
     toast('删除失败: ' + e.message, true);
+  } finally {
+    KIRO_MOVING = false;
+    ACCT_CONFIRM_OPEN = false;
   }
 }
 
