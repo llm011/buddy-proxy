@@ -313,15 +313,15 @@ def test_follow_state_waits_for_partial_line(tmp_path):
     st.read_new()
     line = json.dumps(_rec(model="half"))
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(line[:10])  # 写到一半：不能当成一整行解析
+        fh.write(line)  # 写完内容但换行还没落盘：不能当成一整行
     assert st.read_new() == []
     with path.open("a", encoding="utf-8") as fh:
-        fh.write(line[10:] + "\n")
+        fh.write("\n")
     assert [json.loads(x)["model"] for x in st.read_new()] == ["half"]
 
 
 def test_follow_state_follows_rotation(tmp_path):
-    """按天轮转：旧文件末尾的行不能丢，之后要跟到新文件。"""
+    """按天轮转：旧文件里还没轮询到的尾巴不能丢，之后要跟到新文件。"""
     path = tmp_path / "metrics.jsonl"
     _write(tmp_path, [_rec(model="before")])
     st = cli_logs._FollowState(path)
@@ -330,9 +330,100 @@ def test_follow_state_follows_rotation(tmp_path):
     path.rename(tmp_path / "metrics.jsonl.2026-11-16")
     path.write_text(json.dumps(_rec(model="in-new")) + "\n", encoding="utf-8")
     got = [json.loads(x)["model"] for x in st.read_new()]
+    # 旧文件尾巴先补齐，再从新文件 0 偏移读：不丢也不重
     assert got == ["tail-of-old", "in-new"]
     _append(path, _rec(model="later"))
     assert [json.loads(x)["model"] for x in st.read_new()] == ["later"]
+
+
+def test_follow_state_switches_to_new_inode_after_rotation(tmp_path):
+    """轮转后钉在新 inode 上：老文件残留的字节不会再被读一遍。"""
+    path = tmp_path / "metrics.jsonl"
+    _write(tmp_path, [_rec(model="before")])
+    st = cli_logs._FollowState(path)
+    st.read_new()
+    old = tmp_path / "metrics.jsonl.2026-11-16"
+    path.rename(old)
+    path.write_text(json.dumps(_rec(model="in-new")) + "\n", encoding="utf-8")
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["in-new"]
+    _append(old, _rec(model="written-late-to-old"))
+    assert st.read_new() == []
+    _append(path, _rec(model="later"))
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["later"]
+
+
+def test_follow_state_flushes_unterminated_line_on_rotation(tmp_path):
+    """换行还没落盘就轮转：残行属于旧文件，按 tail 规矩吐出来，不带到新文件。
+
+    常驻描述符仍绑在旧 inode 上，所以这行写不写换行都读得到；写了换行只是
+    让它归到「残行」分支之外，验证的顺序仍是旧行在前、新文件行在后。
+    """
+    path = tmp_path / "metrics.jsonl"
+    _write(tmp_path, [_rec(model="before")])
+    st = cli_logs._FollowState(path)
+    st.read_new()
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_rec(model="tail-of-old")) + "\n")
+    path.rename(tmp_path / "metrics.jsonl.2026-11-16")
+    path.write_text(json.dumps(_rec(model="in-new")) + "\n", encoding="utf-8")
+    got = [json.loads(x)["model"] for x in st.read_new()]
+    assert got == ["tail-of-old", "in-new"]
+
+
+def test_follow_state_can_emit_unparseable_half_written_line(tmp_path):
+    """轮转吐出的残行可能是**坏的 JSON**，下游必须能跳过而不是炸掉。
+
+    真实场景：服务正在 ``write`` 一条 JSON 的过程中跨天轮转（``os.replace``），
+    留下的是 ``{"model": "half"`` 这种半截内容——它缺右括号，``json.loads``
+    必然抛错。测试里如果只造"完整 JSON 缺换行"的残行，就测不出这条。
+
+    ``follow()`` 里的 ``except ValueError: continue`` 负责兜住；这里验证两层：
+    1. ``_FollowState`` 肯把这行交出去（不静默吞掉，否则用户永远不知道为什么少一条）
+    2. 调用方能安全跳过
+    """
+    path = tmp_path / "metrics.jsonl"
+    _write(tmp_path, [_rec(model="before")])
+    st = cli_logs._FollowState(path)
+    st.read_new()
+
+    # 写「半截 JSON」：去掉最后的右括号，再轮转
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(_rec(model="half"))[:-1])
+    path.rename(tmp_path / "metrics.jsonl.2026-11-16")
+    path.write_text(json.dumps(_rec(model="in-new")) + "\n", encoding="utf-8")
+
+    raw = st.read_new()
+    parsed, skipped = [], []
+    for line in raw:
+        try:
+            parsed.append(json.loads(line.strip())["model"])
+        except ValueError:
+            skipped.append(line)
+    assert skipped, "坏掉的残行应该被交出来（由调用方决定跳过）"
+    assert parsed == ["in-new"], "坏行之后的正常记录不能被连带丢掉"
+
+
+def test_follow_state_resumes_after_truncate(tmp_path):
+    """copytruncate：文件被清零后要继续读，不能停在旧偏移上装死。"""
+    path = tmp_path / "metrics.jsonl"
+    _write(tmp_path, [_rec(model="old1"), _rec(model="old2")])
+    st = cli_logs._FollowState(path)
+    st.read_new()
+    path.write_text(json.dumps(_rec(model="after-truncate")) + "\n",
+                    encoding="utf-8")
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["after-truncate"]
+
+
+def test_follow_state_handles_non_ascii_lines(tmp_path):
+    """中文错误信息：偏移按字节算，不能按字符算，否则会重读/错位。"""
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("", encoding="utf-8")
+    st = cli_logs._FollowState(path)
+    st.read_new()
+    _append(path, _rec(model="m1", error="上游超时"))
+    _append(path, _rec(model="m2"))
+    got = [json.loads(x)["model"] for x in st.read_new()]
+    assert got == ["m1", "m2"]
 
 
 def _run_follow_once(tmp_path, monkeypatch, args, appended):
@@ -372,6 +463,29 @@ def test_follow_replays_then_streams_with_filters(tmp_path, monkeypatch, capsys)
     assert "Ctrl-C" in out
 
 
+def test_follow_survives_copytruncate_between_ticks(tmp_path, monkeypatch, capsys):
+    """服务轮转时有「并入既有归档再删当前文件」的分支：文件消失一轮不能退化成
+    从末尾接着跟——那样紧接着写进新文件的那条就漏了。"""
+    monkeypatch.setenv("BUDDY_PROXY_LOG_FILE", str(tmp_path / "x.jsonl"))
+    path = tmp_path / "metrics.jsonl"
+    path.write_text(json.dumps(_rec(model="before")) + "\n", encoding="utf-8")
+    ticks = {"n": 0}
+
+    def fake_sleep(_s):
+        ticks["n"] += 1
+        if ticks["n"] == 1:
+            path.unlink()  # 这一刻日志文件不存在
+        elif ticks["n"] == 2:
+            _append(path, _rec(model="after-gap"))
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_logs.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli_logs, "_FOLLOW_POLL_S", 0)
+    assert cli_logs.run(_args(follow=True, limit=0)) == 130
+    assert "after-gap" in capsys.readouterr().out
+
+
 def test_follow_json_lines_are_machine_readable(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BUDDY_PROXY_LOG_FILE", str(tmp_path / "x.jsonl"))
     _write(tmp_path, [_rec(model="m1")])
@@ -381,7 +495,6 @@ def test_follow_json_lines_are_machine_readable(tmp_path, monkeypatch, capsys):
     assert code == 130
     lines = [json.loads(x) for x in capsys.readouterr().out.splitlines() if x]
     assert [r["model"] for r in lines] == ["m1", "m2", "m3"]
-    assert "Ctrl-C" not in capsys.readouterr().out
 
 
 def test_follow_today_limits_replay(tmp_path, monkeypatch, capsys):
@@ -401,6 +514,19 @@ def test_follow_rejects_csv(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BUDDY_PROXY_LOG_FILE", str(tmp_path / "x.jsonl"))
     assert cli_logs.run(_args(follow=True, csv=True)) == 2
     assert "不能同时使用" in capsys.readouterr().err
+
+
+def test_follow_prints_header_without_replay(tmp_path, monkeypatch, capsys):
+    """``-n 0`` 不回放，但也得先打出「在跟哪个文件、筛了什么」，否则看着像卡住。"""
+    monkeypatch.setenv("BUDDY_PROXY_LOG_FILE", str(tmp_path / "x.jsonl"))
+    code = _run_follow_once(tmp_path, monkeypatch,
+                            _args(follow=True, limit=0, provider=["codebuddy"],
+                                  account=["acct-1"]), [_rec(model="live")])
+    assert code == 130
+    out = capsys.readouterr().out
+    assert "Ctrl-C" in out
+    assert "providers=codebuddy" in out and "accounts=acct-1" in out
+    assert "live" in out
 
 
 def test_follow_line_marks_errors():

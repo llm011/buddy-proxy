@@ -27,7 +27,8 @@ import sys
 import time
 from typing import Any, Optional
 
-from buddy_proxy.core.metrics import MetricsCollector
+from buddy_proxy.core.metrics import MetricsCollector, is_error
+from buddy_proxy.core.metrics_protocol import log_matches
 from buddy_proxy.core.metrics_protocol import log_matches
 
 from .render import (
@@ -168,19 +169,6 @@ def _overview(scan: dict[str, Any], palette: Palette) -> list[str]:
         parts.append(f"积分 {c['total']:,.2f}（实扣 {c['actual']:,.2f} + "
                      f"估算 {c['estimated']:,.2f}）")
     return [f"  {p}" for p in parts]
-
-
-def _is_error(rec: dict[str, Any]) -> bool:
-    """与 ``core.metrics._is_error`` 同口径：状态码 ≥400 或 error 字段有值。
-
-    不复用那个私有函数（它只负责统计），但口径必须一致——follow 里标红的行
-    和统计视图里的「错误 N」得是同一批，否则用户会问「为什么这行红了但错误数是 0」。
-    """
-    try:
-        code = int(rec.get("status") if rec.get("status") is not None else 200)
-    except (TypeError, ValueError):
-        code = 200
-    return code >= 400 or bool(rec.get("error"))
 
 
 #: 账号列宽。账号 id 是 UUID（36 格）、邮箱或 ``acct-…``，原样排表能把整张表
@@ -366,7 +354,7 @@ def _follow_line(r: dict[str, Any], palette: Palette) -> str:
     """一条请求记录 → 单行。列与统计视图的「最近 N 条」一致，额外带宽（到秒）。"""
     code = int(r.get("status") or 0)
     code_text = str(code) if code else "-"
-    if _is_error(r):
+    if is_error(r):
         code_text = palette.bad(code_text)
     elif code >= 400:
         code_text = palette.warn(code_text)
@@ -406,67 +394,32 @@ def _replay_args(args: Any, limit: int) -> Any:
 
 
 class _FollowState:
-    """``metrics.jsonl`` 的增量读取器（含按天轮转处理）。"""
+    """``metrics.jsonl`` 的增量读取器（含按天轮转、copytruncate）。
+
+    只读上次偏移之后的新字节，不重读整个文件——``metrics.jsonl`` 一天能到几十
+    MB，每次从 0 读既慢又会吃掉半行。文件身份记 (dev, inode)：路径换成了新
+    inode 就是轮转，从头读新文件。
+
+    偏移按**字节**算，所以必须用 ``rb`` 打开：文本模式的 ``tell()`` 返回的其实是
+    opaque cookie，再叠加 ``len(str)`` 判断残行长度，碰到中文（日志里的上游
+    error 基本是中文）就会错位，拼出 ``{"{"model":…`` 这种怪行。
+    """
 
     def __init__(self, path: pathlib.Path) -> None:
         self.path = path
-        self._fh: Any = None
-        self._ino: Optional[int] = None
+        self._id: Optional[tuple[int, int]] = None
+        self._offset = 0
         self._buf = ""
+        # 常驻 fd：指向**当前正在跟的那个 inode**。轮转时它仍指向旧 inode，
+        # 是唯一还能读到旧文件剩余字节的东西——按天轮转走 os.replace，旧路径
+        # 随即消失，光靠路径重开只能打开新文件。
+        self._fh: Any = None
 
-    def _open(self) -> None:
+    def _stat(self) -> Optional[os.stat_result]:
         try:
-            fh = self.path.open("r", encoding="utf-8", errors="replace")
-            st = os.fstat(fh.fileno())
+            return os.stat(self.path)
         except OSError:
-            return
-        self._fh = fh
-        self._ino = st.st_ino
-        fh.seek(0, os.SEEK_END)
-
-    def read_new(self) -> list[str]:
-        """返回自上次以来新出现的完整行（不含换行符）。"""
-        if self._fh is None:
-            if not self.path.exists():
-                return []
-            self._open()
-            if self._fh is None:
-                return []
-        rotated = False
-        try:
-            ino = os.stat(self.path).st_ino
-            rotated = ino != self._ino
-        except OSError:
-            rotated = True
-        if rotated:
-            # 先把旧文件读到尾（改名后新创建的路径已指向新 inode），再切过去
-            tail = self._drain()
-            # 旧的残行属于已轮转的文件：新文件沿用同一缓冲区会把两段拼成怪行
-            self._buf = ""
-            self._close()
-            self._open()
-            # _open() 会 seek 到新文件末尾——那会跳过轮转瞬间已写进新文件的行，
-            # 所以这里收回来读一遍（最多一次轮转瞬间的量）
-            if self._fh is None:
-                return tail
-            self._fh.seek(0)
-            return tail + self._drain()
-        return self._drain()
-
-    def _drain(self) -> list[str]:
-        fh = self._fh
-        if fh is None:
-            return []
-        try:
-            chunk = fh.read()
-        except OSError:
-            return []
-        if not chunk:
-            return []
-        self._buf += chunk
-        parts = self._buf.split("\n")
-        self._buf = parts.pop()  # 最后一段不完整（或为空），留到下轮
-        return parts
+            return None
 
     def _close(self) -> None:
         if self._fh is not None:
@@ -475,7 +428,93 @@ class _FollowState:
             except OSError:
                 pass
         self._fh = None
-        self._ino = None
+
+    def _open_at(self, offset: int) -> Any:
+        try:
+            # 以 ``os.open`` 打开再包成文件对象：``os.stat`` 按路径在看，
+            # 而这里要的正是「上次那个 inode 的文件」——轮转后旧文件已改名，
+            # 只有保留下来的描述符还能读到它（Linux 上改名后打开旧路径会
+            # 直接命中新文件，残行就丢了）。
+            fd = os.open(self.path, os.O_RDONLY)
+        except OSError:
+            return None
+        fh = os.fdopen(fd, "rb")
+        try:
+            fh.seek(offset)
+        except OSError:
+            fh.close()
+            return None
+        return fh
+
+    def _read_from(self, fh: Any, tail_mode: bool = False) -> list[str]:
+        """读到文件尾，只把以换行结尾的整行交出去；残行留在缓冲。
+
+        ``tail_mode``：旧文件已经不再是当前路径（轮转/删除），末尾那截没换行的
+        残行就是它的全部内容了，吐出来，别留给一个再也不会被追加的文件。
+        """
+        chunk = fh.read()
+        if not chunk:
+            return []
+        self._buf += chunk.decode("utf-8", errors="replace")
+        parts = self._buf.split("\n")
+        self._buf = parts.pop()  # 最后一段没有换行：还没写完，等下一轮
+        if tail_mode and self._buf:
+            parts.append(self._buf)
+            self._buf = ""
+        return parts
+
+    def _drain_rotated(self) -> list[str]:
+        """轮转前把**旧 inode** 读到尾。
+
+        新路径此刻已指向新文件，按路径重开只能打开新文件，所以必须用常驻 fd
+        （它仍绑定旧 inode）。末尾没换行的残行按 ``tail`` 的规矩吐出来——那是
+        旧文件的最后一条，服务恰好崩在 write 中间才会这样，丢掉就永远看不到了。
+        """
+        if self._fh is None:
+            return []
+        try:
+            self._fh.seek(self._offset)
+            return self._read_from(self._fh, tail_mode=True)
+        except OSError:
+            return []
+
+    def read_new(self) -> list[str]:
+        """返回自上次以来新出现的完整行（不含换行符）。"""
+        st = self._stat()
+        if st is None:
+            return []
+        sig = (st.st_dev, st.st_ino)
+        if self._id is None:
+            # 首次：历史行由回放（collect）负责，这里只记位置。末尾若正卡着
+            # 一条写了一半的行，它属于已跳过的历史，不回放。
+            self._id, self._offset = sig, st.st_size
+            self._close()
+            self._fh = self._open_at(self._offset)
+            return []
+        out: list[str] = []
+        if sig != self._id:
+            # 轮转：旧 inode 改名后已不在原路径上，只能靠「路径还是不是同一个
+            # inode」判断。先把旧文件在偏移之后的部分读完（含没换行的残行，
+            # 按 tail 的规矩吐出来，不能带到新文件的头上拼成怪行），再从 0 读
+            # 新文件——轮转瞬间已写进新文件的行也就不会漏。
+            out.extend(self._drain_rotated())
+            self._buf = ""
+            self._close()
+            self._id, self._offset = sig, 0
+            self._fh = self._open_at(0)
+        elif st.st_size < self._offset:
+            # copytruncate：文件被清零，停在旧偏移上会永远读不到新内容
+            self._offset = 0
+            self._buf = ""
+            self._close()
+            self._fh = self._open_at(0)
+        if self._fh is None:
+            self._fh = self._open_at(self._offset)
+        if self._fh is None:
+            return out
+        lines = self._read_from(self._fh)
+        self._offset = self._fh.tell()
+        return out + lines
 
 
 def _follow_header(palette: Palette, filters: dict[str, Any]) -> str:
@@ -498,9 +537,10 @@ def follow(args: Any, palette: Palette) -> int:
     几十 MB，重读一遍既慢又会让非内存映射的读取器吃到半行。这里只读上次偏移
     之后的新增字节，遇到不完整的最后一行就留在缓冲区等下一个 tick。
 
-    轮转：服务按天把当前文件改名成 ``metrics.jsonl.YYYY-MM-DD`` 再新建。检测到
-    路径的 (inode, 大小) 变小或 inode 变化时，先把旧文件剩余部分读完再切到新文件——
-    否则 0 点前后那几秒的请求会丢（它们写在旧文件末尾）。
+    轮转：服务按天把当前文件改成 ``metrics.jsonl.YYYY-MM-DD`` 再新建。路径的
+    (dev, inode) 变了就是轮转——先靠常驻描述符把旧文件剩下的字节读完，再从 0 读
+    新文件，0 点前后那几秒的请求不会丢。copytruncate（大小突然小于偏移）同理，
+    从头读。
 
     半行/坏行：写到一半的行不解析（留着等补全），解析失败的整行跳过——服务崩在
     ``write()`` 中间时最后一行是残的，不该让 follow 直接退出。
@@ -516,20 +556,18 @@ def follow(args: Any, palette: Palette) -> int:
         print("--csv 与 -f 不能同时使用；要导出全量明细请去掉 -f", file=sys.stderr)
         return 2
 
-    # 先回放：统计视图同一批行（当前文件 + 归档），取最近 limit 条，正序输出
-    if limit:
-        scan = collect(_replay_args(args, limit))
-        rows = list(reversed(scan.get("rows") or []))
-        if as_json:
-            for r in rows:
-                print(json.dumps(r, ensure_ascii=False, default=str), flush=True)
-        else:
-            print(_follow_header(palette, filters), flush=True)
-            for r in rows:
-                print(_follow_line(r, palette), flush=True)
-
+    # 表头不等回放：``-n 0`` 或回放为空时也得先告诉用户「在跟什么、筛了什么」
     if not as_json:
+        print(_follow_header(palette, filters), flush=True)
         print(palette.dim(f"跟踪 {path}（Ctrl-C 退出）"), flush=True)
+
+    # 回放：统计视图同一批行（当前文件 + 归档），取最近 limit 条，正序输出
+    if limit:
+        for r in reversed(collect(_replay_args(args, limit)).get("rows") or []):
+            if as_json:
+                print(json.dumps(r, ensure_ascii=False, default=str), flush=True)
+            else:
+                print(_follow_line(r, palette), flush=True)
 
     state = _FollowState(path)
     try:

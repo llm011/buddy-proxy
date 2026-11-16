@@ -85,17 +85,24 @@ def _sum_credits(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _is_error(rec: dict[str, Any]) -> bool:
+def is_error(rec: dict[str, Any]) -> bool:
     """一条记录算不算失败。
 
     日志里 ``status`` 缺失时视为成功（老记录没这字段），``error`` 字段有值
     就算失败——网关会把上游异常折成 200+error，只看状态码会漏掉这类。
+
+    公开名供 ``cli.logs`` 的 ``-f`` 复用：统计里的「错误 N」和实时流里标红的行
+    必须是同一批，口径抄一份迟早漂移。
     """
     try:
         code = int(rec.get("status") if rec.get("status") is not None else 200)
     except (TypeError, ValueError):
         code = 200
     return code >= 400 or bool(rec.get("error"))
+
+
+#: 本模块内沿用的短名（历史调用点很多，不必全部改名）。
+_is_error = is_error
 
 
 class MetricsCollector:
