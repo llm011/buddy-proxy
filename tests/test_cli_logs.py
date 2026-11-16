@@ -174,7 +174,7 @@ def _args(**kw):
     ns = argparse.Namespace(days=None, start=None, end=None, today=False,
                             account=None, provider=None, model=None, client=None,
                             limit=0, state_dir=None, csv=False, json=False,
-                            no_color=True)
+                            no_color=True, follow=False)
     for k, v in kw.items():
         setattr(ns, k, v)
     return ns
@@ -280,3 +280,139 @@ def test_run_json_and_csv_are_machine_readable(tmp_path, monkeypatch, capsys, fl
         assert json.loads(out)["total"] == 1
     else:
         assert out.startswith("ts,time,provider")
+
+
+# ---------------------------------------------------------------------------
+# -f/--follow：增量读 + 回放 + 筛选
+# ---------------------------------------------------------------------------
+
+
+def _append(path, *rows):
+    with path.open("a", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+
+def test_follow_state_starts_at_end_and_reads_increments(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    _write(tmp_path, [_rec(model="old")])
+    st = cli_logs._FollowState(path)
+    # 第一次 read_new 只管从末尾开始：历史行不回放（回放走 collect）
+    assert st.read_new() == []
+    _append(path, _rec(model="new1"))
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["new1"]
+    _append(path, _rec(model="new2"), _rec(model="new3"))
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["new2", "new3"]
+    assert st.read_new() == []
+
+
+def test_follow_state_waits_for_partial_line(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    path.write_text("", encoding="utf-8")
+    st = cli_logs._FollowState(path)
+    st.read_new()
+    line = json.dumps(_rec(model="half"))
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line[:10])  # 写到一半：不能当成一整行解析
+    assert st.read_new() == []
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(line[10:] + "\n")
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["half"]
+
+
+def test_follow_state_follows_rotation(tmp_path):
+    """按天轮转：旧文件末尾的行不能丢，之后要跟到新文件。"""
+    path = tmp_path / "metrics.jsonl"
+    _write(tmp_path, [_rec(model="before")])
+    st = cli_logs._FollowState(path)
+    st.read_new()
+    _append(path, _rec(model="tail-of-old"))
+    path.rename(tmp_path / "metrics.jsonl.2026-11-16")
+    path.write_text(json.dumps(_rec(model="in-new")) + "\n", encoding="utf-8")
+    got = [json.loads(x)["model"] for x in st.read_new()]
+    assert got == ["tail-of-old", "in-new"]
+    _append(path, _rec(model="later"))
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["later"]
+
+
+def _run_follow_once(tmp_path, monkeypatch, args, appended):
+    """跑一轮 follow：回放 + 增量各行，下一轮抛 KeyboardInterrupt 退出。"""
+    path = tmp_path / "metrics.jsonl"
+    if not path.exists():
+        path.write_text("", encoding="utf-8")
+    ticks = {"n": 0}
+
+    def fake_sleep(_s):
+        ticks["n"] += 1
+        if ticks["n"] == 1:
+            _append(path, *appended)
+        else:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli_logs.time, "sleep", fake_sleep)
+    monkeypatch.setattr(cli_logs, "_FOLLOW_POLL_S", 0)
+    return cli_logs.run(args)
+
+
+def test_follow_replays_then_streams_with_filters(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BUDDY_PROXY_LOG_FILE", str(tmp_path / "x.jsonl"))
+    _write(tmp_path, [_rec(model="m1"), _rec(model="m2"), _rec(model="m1")])
+    code = _run_follow_once(
+        tmp_path, monkeypatch,
+        _args(follow=True, limit=2, provider=["codebuddy"], model=["m1"]),
+        [_rec(model="m2"), _rec(model="m1", account="acct-9"),
+         _rec(model="m1", provider="qoder")])
+    assert code == 130
+    out = capsys.readouterr().out
+    # 回放 2 条 m1（正序）+ 新流里的 m1/codebuddy 1 条；m2、qoder 被筛掉
+    assert out.count("  m1 ") == 3
+    assert "m2" not in out
+    assert "qoder" not in out
+    assert "acct-9" in out
+    assert "Ctrl-C" in out
+
+
+def test_follow_json_lines_are_machine_readable(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BUDDY_PROXY_LOG_FILE", str(tmp_path / "x.jsonl"))
+    _write(tmp_path, [_rec(model="m1")])
+    code = _run_follow_once(tmp_path, monkeypatch,
+                            _args(follow=True, limit=1, json=True),
+                            [_rec(model="m2"), _rec(model="m3", provider="qoder")])
+    assert code == 130
+    lines = [json.loads(x) for x in capsys.readouterr().out.splitlines() if x]
+    assert [r["model"] for r in lines] == ["m1", "m2", "m3"]
+    assert "Ctrl-C" not in capsys.readouterr().out
+
+
+def test_follow_today_limits_replay(tmp_path, monkeypatch, capsys):
+    """``--today`` 回放时不该把昨天的明细也吐出来（新行本身都是今天的）。"""
+    monkeypatch.setenv("BUDDY_PROXY_LOG_FILE", str(tmp_path / "x.jsonl"))
+    _write(tmp_path, [_rec(model="yesterday", ts=time.time() - 86400),
+                      _rec(model="today")])
+    code = _run_follow_once(tmp_path, monkeypatch,
+                            _args(follow=True, limit=20, today=True), [])
+    assert code == 130
+    out = capsys.readouterr().out
+    assert "today" in out
+    assert "yesterday" not in out
+
+
+def test_follow_rejects_csv(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BUDDY_PROXY_LOG_FILE", str(tmp_path / "x.jsonl"))
+    assert cli_logs.run(_args(follow=True, csv=True)) == 2
+    assert "不能同时使用" in capsys.readouterr().err
+
+
+def test_follow_line_marks_errors():
+    line = cli_logs._follow_line(_rec(status=502, error="upstream 502"),
+                                 Palette(False))
+    assert "502" in line
+    assert line.endswith("upstream 502")
+
+
+def test_follow_line_without_tokens_uses_dash():
+    """历史行可能没有 token 字段：补 ``—`` 而不是 ``0``，别编数据。"""
+    rec = _rec()
+    del rec["prompt_tokens"], rec["completion_tokens"]
+    line = cli_logs._follow_line(rec, Palette(False))
+    assert "—" in line
