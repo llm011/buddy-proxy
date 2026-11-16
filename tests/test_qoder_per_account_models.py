@@ -364,7 +364,8 @@ def test_fallback_models_restored_with_measured_prices():
                 "kmodel", "gm51model", "mmodel"):
         assert key in by_key, f"兜底表缺三方模型 {key}"
     assert by_key["qfmodel"]["price_factor"] == 0.0
-    assert by_key["qmodel_latest"]["price_factor"] == 0.5
+    # 2026-11-17 上游把 qmodel_latest 改名为 Qwen4-Max，倍率 0.5→0.4
+    assert by_key["qmodel_latest"]["price_factor"] == 0.4
     assert by_key["q37fmodel"]["price_factor"] == 0.1
     assert by_key["kmodel_latest"]["price_factor"] == 1.0
     assert by_key["mmodel"]["price_factor"] == 0.1

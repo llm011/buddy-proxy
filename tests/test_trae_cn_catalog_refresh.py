@@ -205,7 +205,7 @@ def test_refresh_keeps_rate_activities_out_of_static_table(monkeypatch, trae_env
     monkeypatch.setattr(TraeProvider, "_probe_model", lambda self, m: True)
     p = TraeProvider()
     models = asyncio.run(p.refresh_models(force=True))
-    assert next(m for m in models if m["id"] == "glm-5.3")["credits"] == "x0.58"
+    assert next(m for m in models if m["id"] == "glm-5.3")["credits"] == "x0.78"
     assert trae_config.DISCOVERED_CREDITS == {}
 
 
@@ -283,7 +283,7 @@ def test_credit_multiplier_prefers_discovered_then_static(monkeypatch):
                         {"brand-new": "x0.33", "glm-5.3": "x9.99"})
     assert trae_config.credit_multiplier("cn", "brand-new") == "x0.33"
     # 静态底表优先：人工核过的值不被运行时抄回值顶掉
-    assert trae_config.credit_multiplier("cn", "glm-5.3") == "x0.58"
+    assert trae_config.credit_multiplier("cn", "glm-5.3") == "x0.78"
     # 别名按映射到内部名取同一倍率（-Official 是闲时折扣价，见 MODEL_CREDITS）
     assert trae_config.credit_multiplier("cn", "deepseek-v4-pro-official") == "x0.36"
     # 海外没有倍率概念
@@ -300,3 +300,22 @@ def test_static_catalog_lists_new_models():
                       ("deepseek-v4-pro-official", "x0.36")]:
         assert mid in trae_config.MODEL_IDS, mid
         assert trae_config.credit_multiplier("cn", mid) == mult, mid
+
+
+def test_static_catalog_2026_11_17_update(trae_env):
+    """2026-11-17 面板 + 目录核对：qwen4-max 收录及跟价条目，并触发 qwen 代际收敛。"""
+    from buddy_proxy.trae.provider import TraeProvider
+
+    for mid, mult in [("qwen4-max", "x0.69"),
+                      ("glm-5.3", "x0.78"),
+                      ("doubao-seed-2.1-turbo", "x0.10"),
+                      ("doubao-seed-code", "x0.03")]:
+        assert mid in trae_config.MODEL_IDS, mid
+        assert trae_config.credit_multiplier("cn", mid) == mult, mid
+
+    listed = {m["id"]: m for m in TraeProvider().models()}
+    assert "qwen4-max" in listed
+    assert listed["qwen4-max"]["credits"] == "x0.69"
+    # 代际收敛：qwen4-max 在场时 qwen3.8-max / qwen3.8-flash 退隐（点名仍可调）
+    assert "qwen3.8-max" not in listed
+    assert "qwen3.8-flash" not in listed

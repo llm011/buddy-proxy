@@ -257,6 +257,11 @@ MODEL_IDS: list[str] = [
     # 会员档位不足）——名字与倍率照面板收，能不能调由上游按账号诚实裁决。
     "kimi-k3.1-pro", "minimax-m3.1-flash",
     "glm-5.2", "deepseek-v4-flash-official", "deepseek-v4-pro-official",
+    # 2026-11-17 面板与目录（get_detail_param）同步收录：目录 id=name=qwen4-max
+    # （rate=0.69），面板带「会员档位不足」灰锁，本机 CN 账号 native chat_v3
+    # 实测回 1005（extra.plan=1，同 kimi-k3.1-pro）——名字与倍率照面板/目录收，
+    # 能不能调由上游按账号诚实裁决。
+    "qwen4-max",
 ]
 
 # 模型积分倍率：整理自知识库《模型及成本整理-workbuddy-trae-含选用建议》
@@ -307,17 +312,21 @@ MODEL_CREDITS: dict[str, str] = {
     # seed-code 0.03/0.06、glm-5.3 0.39/0.78。静态表只放得下一个值，原先维持
     # 人工核过的补贴档 0.39；2026-11-05 面板截图跟价到 **0.58**（见下），
     # 未按账号分叉——真要分叉得改成 per-account 表，不值得为展示倍率动结构。
-    "doubao-seed-2.1-turbo": "x0.20",
-    "doubao-seed-code": "x0.06",
+    # 2026-11-17 面板跟价：turbo 0.20→0.10、seed-code 0.06→0.03（同带
+    # 「会员 2.5 折」徽章，两个账号档位一致，不再像上次那样分叉）。
+    "doubao-seed-2.1-turbo": "x0.10",
+    "doubao-seed-code": "x0.03",
     "step-5-preview": "x0.48",
     "glm-5.3-flash": "x0.08",
     "glm-5.3-flashx": "x0.31",
-    "glm-5.3": "x0.58",
+    "glm-5.3": "x0.78",
     "deepseek-v4.1-flash": "x0.06",
     "kimi-k3": "x1.83",
     # deepseek-v4-pro（非 -Official）已不在目录里（config_switch=False 或
     # is_invisible），保留旧值只为历史行/客户端点名时取倍率。
     "deepseek-v4-pro": "x0.72",
+    # 2026-11-17 面板：MiniMax-M3 显示 0.26（与旧值一致，补一句免得下次再疑）；
+    # minimax-m3.1-flash 0.09 同面板一致。
     "minimax-m3": "x0.26",
     "qwen3.8-max": "x1.50",
     # 2026-10-12 用户从客户端「模型倍率」面板截图跟价/收录
@@ -345,6 +354,12 @@ MODEL_CREDITS: dict[str, str] = {
     # V4-Flash-Official 已不在本次目录里（config_switch/is_invisible 过滤掉了），
     # 无从核对，沿用旧值 x0.20 不动。
     "deepseek-v4-pro-official": "x0.36",
+    # 2026-11-17 用户「模型倍率」面板截图 + CN 目录（get_detail_param）交叉核对：
+    # Seed-2.1-Turbo 0.10（带「会员 2.5 折」徽章）、Seed-Code 0.03（同徽章）、
+    # GLM-5.3 0.78、MiniMax-M3 0.26；DeepSeek-V4.1-Flash 0.06 与本表一致未动。
+    # qwen4-max 在面板上是灰锁看不到数字，目录接口 consumption_rate 实测为 0.69
+    # （同 qwen3.8-flash 一样是会员档位不足灰锁，能不能调由上游按账号裁决）。
+    "qwen4-max": "x0.69",
     # glm-5.3 面板 0.39（带「会员5折」徽章，原 0.40 小差）；deepseek-v4-flash
     # 0.10（「闲时折扣」）不进表——内部目录只有 deepseek-v4.1-flash
 }

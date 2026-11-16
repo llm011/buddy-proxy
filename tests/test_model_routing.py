@@ -514,7 +514,7 @@ def test_real_qoder_and_zcode_overlap_is_resolved_by_registration_order():
 def test_real_qoder_still_exactly_claims_its_own_ids():
     """修完不能过度收紧：qoder 自己仍可用的 id 仍要在精确轮被认领。"""
     q = _real_qoder()
-    for name in ("qwen3.8-flash", "qwen3.8-max", "qwen3.7-max"):
+    for name in ("qwen3.8-flash", "qwen3.8-max", "qwen4-max"):
         assert q.accepts_model(name, aliases=False) is True, f"{name} 应被 qoder 精确认领"
 
 
