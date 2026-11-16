@@ -162,8 +162,7 @@ function renderCodebuddyPanel() {
         ${providerLoadBalanceToggle('codebuddy', multi)}
         ${fold.toggle}${providerRefreshButton('codebuddy')}
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login codebuddy</span>）</div>'}${fold.bodyEnd}
     </div>`;
   loadCodebuddyAccounts();
@@ -258,8 +257,7 @@ function renderCodebuddyIntlPanel() {
         ${quotaAccountTotal(groups, {sumItems: true})}
         ${fold.toggle}${providerLoadBalanceToggle('codebuddyintl', groups.size > 1)}${providerRefreshButton('codebuddyintl')}
       </div>
-      ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-      ${fold.bodyStart}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（<span class="mono">buddy login codebuddy --region global</span> 后重启 Buddy）</div>'}${fold.bodyEnd}
     </div>`;
   loadCodebuddyIntlAccounts();

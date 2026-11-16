@@ -51,7 +51,7 @@ function renderTraepatPanel() {
         ${fold.toggle}${providerRefreshButton('traepat')}
         <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
       </div>
-      ${fold.bodyStart}<div class="pat-quota-grid">${quotaHtml}</div>${fold.bodyEnd}
+      ${fold.bodyStart}<div class="pat-quota-grid">${quotaHtml}</div>
       <div id="traepat-account-error"></div>
       <div class="pat-load-section">
         <div class="pat-col-head">
@@ -59,7 +59,7 @@ function renderTraepatPanel() {
           <button class="primary" onclick="loadTraepatStatus(this, true)">更新</button>
         </div>
         <div id="traepat-status"><div class="empty" style="padding:8px 0">加载中…</div></div>
-      </div>
+      </div>${fold.bodyEnd}
     </div>`;
   loadTraepatAccounts();
   loadTraepatStatus(null, false);

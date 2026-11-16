@@ -130,10 +130,9 @@ function renderKiroPanel() {
       <button class="ghost" onclick="kiroOpenImport()">导入 auth 文件</button>
       <button class="ghost" onclick="kiroStartLogin()">浏览器授权</button>
     </div>
-    ${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}
-    ${fold.bodyStart}${ordered.length ? `<div class="pat-quota-grid">${quotaHtml}</div>`
-      : '<div class="empty" style="padding:10px 0">还没有账号</div>'}${fold.bodyEnd}
-    <div id="kiro-login-box" style="margin-top:10px"></div>
+    ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${ordered.length ? `<div class="pat-quota-grid">${quotaHtml}</div>`
+      : '<div class="empty" style="padding:10px 0">还没有账号</div>'}
+    <div id="kiro-login-box" style="margin-top:10px"></div>${fold.bodyEnd}
   </div>`;
   loadKiroAccounts();
 }
