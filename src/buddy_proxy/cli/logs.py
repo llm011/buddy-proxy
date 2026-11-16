@@ -29,7 +29,6 @@ from typing import Any, Optional
 
 from buddy_proxy.core.metrics import MetricsCollector, is_error
 from buddy_proxy.core.metrics_protocol import log_matches
-from buddy_proxy.core.metrics_protocol import log_matches
 
 from .render import (
     Palette, display_width, humanize_number, humanize_ms, humanize_ts, pad, table,
@@ -414,6 +413,10 @@ class _FollowState:
         # 是唯一还能读到旧文件剩余字节的东西——按天轮转走 os.replace，旧路径
         # 随即消失，光靠路径重开只能打开新文件。
         self._fh: Any = None
+        # 构造那一刻文件是否存在。决定「首次看到文件」时该不该把已有内容当历史
+        # 跳过：构造时就在 → 是历史（回放已负责）；构造时不在 → 那个文件是之后
+        # 新建的，内容全属于本轮。详见 read_new() 里的分支说明。
+        self._existed_at_init = path.exists()
 
     def _stat(self) -> Optional[os.stat_result]:
         try:
@@ -485,12 +488,28 @@ class _FollowState:
             return []
         sig = (st.st_dev, st.st_ino)
         if self._id is None:
-            # 首次：历史行由回放（collect）负责，这里只记位置。末尾若正卡着
-            # 一条写了一半的行，它属于已跳过的历史，不回放。
-            self._id, self._offset = sig, st.st_size
-            self._close()
-            self._fh = self._open_at(self._offset)
-            return []
+            # 首次看到这个文件。
+            #
+            # 两种情形必须分开，否则要么丢日志、要么重放历史：
+            #
+            #  · **构造时文件就在**（`follow()` 的常规路径）：历史行由回放
+            #    （collect）负责，这里只记位置、不重放。末尾若正卡着一条写了一半
+            #    的行，它属于已跳过的历史。
+            #  · **构造时文件不在**：赶上了轮转中间态（旧文件已 rename、新文件
+            #    还没建）。此刻出现的第一个文件是**新建**的，里面全是本轮之后
+            #    写的内容，一条都不能当历史跳过——否则 0 点前后那几秒的请求会
+            #    永久丢失，而且毫无提示，用户只会觉得「日志少了一截」。
+            fresh = not self._existed_at_init
+            self._existed_at_init = True
+            if fresh:
+                self._id, self._offset = sig, 0
+                self._close()
+                self._fh = self._open_at(0)
+            else:
+                self._id, self._offset = sig, st.st_size
+                self._close()
+                self._fh = self._open_at(self._offset)
+                return []
         out: list[str] = []
         if sig != self._id:
             # 轮转：旧 inode 改名后已不在原路径上，只能靠「路径还是不是同一个

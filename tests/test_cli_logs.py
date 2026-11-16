@@ -352,6 +352,53 @@ def test_follow_state_switches_to_new_inode_after_rotation(tmp_path):
     assert [json.loads(x)["model"] for x in st.read_new()] == ["later"]
 
 
+def test_follow_state_construction_without_file_reads_from_start(tmp_path):
+    """构造时文件**根本不存在**：随后出现的第一个文件必须从 0 读。
+
+    这条覆盖的是跟在轮转中间态撞上的情形：``_FollowState`` 构造的时候旧文件
+    已 rename、新文件还没建。此时出现的第一个文件是新建的，内容全属于本轮。
+
+    如果按「首次 = 把已有内容当历史、seek 到末尾」处理，这行会被静默跳过——
+    表现就是 0 点前后丢请求，而且毫无提示。
+
+    注意与 ``starts_fresh_when_file_missing_at_construction`` 的区别：那条是
+    「先见过文件、后来消失（已持有旧 inode）」，这条是「一上来就没有文件」。
+    """
+    path = tmp_path / "metrics.jsonl"
+    assert not path.exists()
+    st = cli_logs._FollowState(path)
+    assert st.read_new() == []
+
+    # 新文件（新建）出现：里面的行全是本轮写的，不能当历史跳过
+    path.write_text(json.dumps(_rec(model="first-after-create")) + "\n",
+                    encoding="utf-8")
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["first-after-create"]
+
+    # 之后正常追加
+    _append(path, _rec(model="later"))
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["later"]
+
+
+def test_follow_state_starts_fresh_when_file_missing_at_construction(tmp_path):
+    """构造时文件不存在（轮转中间态）：不能退化成「从末尾开始」。
+
+    ``_FollowState`` 首次 ``read_new()`` 若扑空，``_id`` 一直是 None；紧接着
+    写进新文件的那条记录就是轮转瞬间的内容。如果此时按「首次 = seek 到末尾」
+    处理，这条会被当成「历史」跳过——用户看到的现象是 0 点前后丢请求。
+    """
+    path = tmp_path / "metrics.jsonl"
+    _write(tmp_path, [_rec(model="before")])
+    st = cli_logs._FollowState(path)
+    st.read_new()
+    # 轮转中间态：旧文件已改名，新文件还没创建
+    path.rename(tmp_path / "metrics.jsonl.2026-11-16")
+    assert not path.exists()
+    assert st.read_new() == [], "文件不在时应返回空，不该报错"
+    # 新文件出现，里面的行必须能读到
+    path.write_text(json.dumps(_rec(model="in-new")) + "\n", encoding="utf-8")
+    assert [json.loads(x)["model"] for x in st.read_new()] == ["in-new"]
+
+
 def test_follow_state_flushes_unterminated_line_on_rotation(tmp_path):
     """换行还没落盘就轮转：残行属于旧文件，按 tail 规矩吐出来，不带到新文件。
 
