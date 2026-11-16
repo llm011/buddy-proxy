@@ -301,15 +301,18 @@ def _detail(scan: dict[str, Any], palette: Palette) -> list[str]:
             r.get("model") or "",
             code_text,
             humanize_ms(r.get("duration_ms")),
+            _ttft_text(r),
             humanize_number(r.get("prompt_tokens")),
             humanize_number(r.get("completion_tokens")),
+            _credit_text(r),
             (r.get("error") or "")[:40],
         ])
     out.extend("  " + ln for ln in table(
-        ["时间", "通道", "账号", "模型", "状态", "耗时", "入", "出", "错误"],
+        ["时间", "通道", "账号", "模型", "状态", "耗时", "首字", "入", "出", "积分",
+         "错误"],
         table_rows, palette,
         ["left", "left", "left", "left", "right", "right", "right", "right",
-         "left"]))
+         "right", "right", "left"]))
     return out
 
 
@@ -349,6 +352,36 @@ def render_csv(scan: dict[str, Any]) -> str:
     return buf.getvalue()
 
 
+#: 「首字」「积分」列宽：``999,999`` / ``1,234.56★`` 都放得下，右边数字齐出一条线。
+_TTFT_WIDTH = 6
+_CREDIT_WIDTH = 10
+
+#: 「首字」列的三种状态：有数、非流式本来就无首字、流式却缺数（异常）。
+_TTFT_NA = "-"
+
+
+def _ttft_text(r: dict[str, Any]) -> str:
+    """首字列：非流式请求没有首字，记的是 null——补 ``-`` 而不是 ``—``。
+
+    ``—`` 留给「本该有、却没拿到」的流式请求：这两种在终端里长得一样的话，
+    偶发丢 TTFT 的行会被当成正常情况从眼皮底下滑过去。
+    """
+    ms = r.get("ttft_ms")
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+        return humanize_ms(ms)
+    return _TTFT_NA if not r.get("stream") else humanize_ms(None)
+
+
+def _credit_text(r: dict[str, Any]) -> str:
+    """积分列：无数据 ``—``；估算值带 ``★``——和实扣混在一列里，不标出来就会
+    被当成上游的真实账单。
+    """
+    text = humanize_number(r.get("credit"))
+    if text != "—" and r.get("credit_estimated"):
+        text += "★"
+    return text
+
+
 def _follow_line(r: dict[str, Any], palette: Palette) -> str:
     """一条请求记录 → 单行。列与统计视图的「最近 N 条」一致，额外带宽（到秒）。"""
     code = int(r.get("status") or 0)
@@ -371,6 +404,8 @@ def _follow_line(r: dict[str, Any], palette: Palette) -> str:
         pad(humanize_ms(r.get("duration_ms")), 7, "right"),
         pad(humanize_number(r.get("prompt_tokens")), 6, "right"),
         pad(humanize_number(r.get("completion_tokens")), 6, "right"),
+        pad(_ttft_text(r), _TTFT_WIDTH, "right"),
+        pad(_credit_text(r), _CREDIT_WIDTH, "right"),
     ]
     line = "  ".join(fields).rstrip()
     if r.get("error"):
@@ -545,7 +580,9 @@ def _follow_header(palette: Palette, filters: dict[str, Any]) -> str:
         palette.dim("时间    "), pad(palette.dim("通道"), 12),
         pad(palette.dim("账号"), _ACCOUNT_WIDTH), pad(palette.dim("模型"), 26),
         pad(palette.dim("状态"), 3, "right"), pad(palette.dim("耗时"), 7, "right"),
+        pad(palette.dim("首字"), _TTFT_WIDTH, "right"),
         pad(palette.dim("入"), 6, "right"), pad(palette.dim("出"), 6, "right"),
+        pad(palette.dim("积分"), _CREDIT_WIDTH, "right"),
     ]).rstrip() + palette.dim(scope)
 
 

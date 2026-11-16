@@ -576,6 +576,39 @@ def test_follow_prints_header_without_replay(tmp_path, monkeypatch, capsys):
     assert "live" in out
 
 
+def test_follow_line_shows_ttft_and_credit():
+    """实时流和统计明细都得能看到首字、积分：这两列以前只有总览里有。"""
+    line = cli_logs._follow_line(
+        _rec(ttft_ms=7356, credit=0.16, **{"pro​mpt_tokens": 193049}), Palette(False))
+    cells = line.split()
+    assert "7.4s" in cells and "0.16" in cells
+
+
+def test_ttft_column_tells_missing_apart_from_not_applicable():
+    """非流式没首字是常态（``-``）；流式有数却没记才是异常（``—``）。"""
+    assert cli_logs._ttft_text(_rec(stream=False, ttft_ms=None)) == "-"
+    assert cli_logs._ttft_text(_rec(stream=True, ttft_ms=None)) == "—"
+    assert cli_logs._ttft_text(_rec(stream=True, ttft_ms=812)) == "812ms"
+
+
+def test_follow_line_marks_estimated_credit():
+    """估算值标 ``★``，别和上游实扣混成同一个数；没有数据补 ``—``。"""
+    est = cli_logs._follow_line(_rec(credit=1.5, credit_estimated=True), Palette(False))
+    assert "1.50★" in est.split()
+    none = cli_logs._follow_line(_rec(credit=None), Palette(False))
+    assert "—" in none.split()
+
+
+def test_detail_table_has_ttft_and_credit_columns():
+    scan = _scan_with([])
+    scan["rows"] = [_rec(ttft_ms=812, credit=0.12)]
+    text = "\n".join(cli_logs._detail(scan, Palette(False)))
+    head = next(ln for ln in text.splitlines() if "时间" in ln)
+    assert "首字" in head and "积分" in head
+    row = next(ln for ln in text.splitlines() if "812ms" in ln)
+    assert "0.12" in row
+
+
 def test_follow_line_marks_errors():
     line = cli_logs._follow_line(_rec(status=502, error="upstream 502"),
                                  Palette(False))
