@@ -367,7 +367,7 @@ def _status_text(r: dict[str, Any]) -> str:
     return str(code) if code else "-"
 
 
-def _error_style(r: dict[str, Any], palette: Palette) -> list[str]:
+def _error_style(r: dict[str, Any]) -> list[str]:
     """状态码/错误文本该用的颜色；空列表 = 原样。"""
     code = int(r.get("status") or 0)
     if is_error(r) or code >= 500:
@@ -393,7 +393,7 @@ _ACCOUNT_WIDTH = 24
 _FOLLOW_COLUMNS: tuple[tuple[str, int, str, Any], ...] = (
     ("时间", 8, "left", lambda r: _clock(r)),
     ("通道", 11, "left", lambda r: r.get("provider") or "-"),
-    ("账号", _ACCOUNT_WIDTH, "left", lambda r: r.get("account") or "-"),
+    ("账号", _ACCOUNT_WIDTH, "left", lambda r: _short_account(r.get("account") or "-")),
     ("模型", 26, "left", lambda r: r.get("model") or "-"),
     ("状态", 3, "right", lambda r: _status_text(r)),
     ("首字", _TTFT_WIDTH, "right", lambda r: _ttft_text(r)),
@@ -430,7 +430,7 @@ def _follow_line(r: dict[str, Any], palette: Palette) -> str:
     单元格先把**带颜色的**文本按显示宽度补齐（ANSI 不计宽），所以红/黄状态下
     那一列不会把右边的列整体推歪；错误文本跟在最后，不占列。
     """
-    styles = _error_style(r, palette)
+    styles = _error_style(r)
     cells = []
     for _head, width, align, getter in _FOLLOW_COLUMNS:
         text = str(getter(r) or "-")

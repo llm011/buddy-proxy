@@ -646,6 +646,9 @@ def test_follow_header_and_rows_are_aligned_columns():
         # 状态码带色：颜色不能把右边各列推歪
         _rec(status=502, error="upstream 502", ttft_ms=None, stream=True),
         _rec(status=429, stream=False),
+        # 36 位 UUID 账号会被 _short_account 截到 24 格，不能把右侧各列推歪
+        _rec(account="3f7a1c2e-1111-2222-3333-444455556666", ttft_ms=512,
+             duration_ms=1400, credit=0.25),
     ]
     colored = Palette(True)
     for r in rows:
