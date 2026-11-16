@@ -68,6 +68,15 @@ _TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
 # ``/gateway/apis/v1/models`` 要的是百炼式 API Key（relay 在进程内注入，拿不到）。
 # opencode 的 ``/config/providers`` 只有 static 两条，拿它刷新会把表缩到 2 条。
 # 上游至今没有可用的模型目录接口，新模型只能实测。
+# 2026-11-17 复测（DuMate 1.0.92.512，对全部已配 model_order 国产模型及主流名逐个探测）：
+# - **新增可用 ``qwen4-max``**：实测 ``x-dumate-gw-realmodel: qwen4-max``，支持
+#   ``reasoning_content`` 与 ``tool_calls``；100k input 实测约 2.61 积分（与
+#   ``deepseek-v4-pro`` 的 ~2.60 积分/100k 同档，远低于 ``qwen3.8-max`` ~63.3
+#   与 ``kimi-k3`` ~124.2 积分/100k）。
+# - 其余候选（glm-5.3* / kimi-k3.1-pro / mimo-v2.6* / minimax-m3.1* /
+#   step-5-preview / qwen3.8-flash / doubao-seed-* / ernie-*）仍全 404。
+# - ``deepseek-v4.1-flash`` 直连名仍 404，仅内部别名 ``model-text`` / ``glm-5`` /
+#   ``dm-auto-model/text.L0`` 等实际路由到 ``deepseek-v4.1-flash-low-latency-1017``。
 _MODELS: dict[str, dict[str, Any]] = {
     # 同档模型只保留最新款（用户 2026-10-05：有新模型旧模型就不配上）。
     # 展示名（description）在管理页「名称」列整列显示，长句会折行；别名等
@@ -75,6 +84,12 @@ _MODELS: dict[str, dict[str, Any]] = {
     "kimi-k3": {
         "name": "Kimi K3",
         "desc": "Moonshot Kimi K3（DuMate 直连）",
+        "reasoning": True,
+        "tool_call": True,
+    },
+    "qwen4-max": {
+        "name": "Qwen4-Max",
+        "desc": "通义千问 4 Max（DuMate 直连）",
         "reasoning": True,
         "tool_call": True,
     },
