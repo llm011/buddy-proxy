@@ -977,8 +977,9 @@ class KiroProvider(BaseProvider):
                     body_text = (await resp.aread()).decode("utf-8", "replace")
                     last_exc = RuntimeError(f"HTTP {resp.status_code}: {body_text[:200]}")
                     await resp.aclose()
-                    # 429/5xx 换号；其它（400 参数错）换号也没用，直接抛
-                    if resp.status_code in (429, 500, 502, 503, 504):
+                    # 402（月额度用尽 MONTHLY_REQUEST_COUNT）/ 429 / 5xx 换号；
+                    # 其它（400 参数错）换号也没用，直接抛
+                    if resp.status_code in (402, 429, 500, 502, 503, 504):
                         continue
                     raise HTTPException(status_code=resp.status_code, detail={"error": {
                         "message": f"kiro 上游错误: {body_text[:300]}",

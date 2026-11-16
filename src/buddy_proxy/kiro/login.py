@@ -93,20 +93,88 @@ def detected_auth_files() -> list[dict[str, Any]]:
     return out
 
 
-def import_auth_file(path: str | None = None, *, label: str = "") -> creds.KiroAccount:
-    """导入一份 auth 文件（见 credentials.import_auth_file）。
-
-    导入后**主动探一次额度**确认凭据可用：光看文件存在不够——过期或被吊销的
-    token 也能导入成功，用户要到发请求时才发现。这里提前失败并给出可操作的
-    原因（「refreshToken 已失效，请重新登录」）。
-    """
-    account = creds.import_auth_file(path, label=label)
+def _fetch_usage_limits(token: str, region: str) -> dict[str, Any]:
+    """用已有 accessToken 调一次 ``getUsageLimits``（带 ``isEmailRequired=true``）。"""
+    # isEmailRequired=true 才会带回 userInfo.email（false 时该字段恒 null）。
+    # 账号显示名与多账号去重都要用 userInfo（email + userId）。
+    url = (f"https://codewhisperer.{region}.amazonaws.com/getUsageLimits"
+           "?origin=AI_EDITOR&isEmailRequired=true")
+    req = urllib.request.Request(url, headers=_headers(token))
     try:
-        probe_account(account.id)
-    except Exception as exc:  # noqa: BLE001 - 探活失败要让用户立刻知道
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")[:200]
+        except Exception:  # noqa: BLE001
+            pass
+        if exc.code == 403:
+            raise LoginError(
+                f"上游拒绝（403）：{body or '订阅不支持或凭据无效'}") from exc
+        raise LoginError(f"探活失败 HTTP {exc.code}: {body}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise LoginError(f"探活失败: {type(exc).__name__}") from exc
+    if not isinstance(data, dict):
+        raise LoginError("探活失败: 上游响应不是 JSON 对象")
+    return data
+
+
+def import_auth_file(path: str | None = None, *, label: str = "") -> creds.KiroAccount:
+    """导入一份 auth 文件（见 credentials.prepare_auth_file）。
+
+    ⚠ **必须先在内存里刷新 + 探活拿到 ``userInfo.userId``，再落盘**：
+    同一 AWS IAM Identity Center 企业目录下的多个账号共用相同的
+    ``profileArn`` 和 ``clientIdHash``，如果先按旧逻辑直接落盘，第二个账号
+    会在探活前就把第一个账号的凭据文件覆盖掉（真实踩坑）。
+    """
+    try:
+        merged = creds.prepare_auth_file(path, label=label)
+        cred = creds._normalize_cred(merged, account_id="pending")  # noqa: SLF001
+        if creds.needs_refresh(cred):
+            cred = creds.refresh_tokens(cred)
+        data = _fetch_usage_limits(
+            str(cred.get("access_token") or ""),
+            str(cred.get("region") or creds.DEFAULT_REGION),
+        )
+    except LoginError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - 统一转成可操作提示，且绝不污染磁盘
         raise LoginError(
-            f"auth 文件已导入，但凭据不可用：{str(exc)[:200]}。"
+            f"凭据不可用，未导入：{str(exc)[:200]}。"
             "请在 Kiro IDE 里重新登录后再导入") from exc
+
+    info = data.get("userInfo") or {}
+    user_id = str(info.get("userId") or "").strip()
+    email = str(info.get("email") or "").strip()
+    if user_id:
+        cred["user_id"] = user_id
+    if email:
+        cred["email"] = email
+
+    # 先找是否已有同 user_id（或同邮箱的旧格式账号），命中则原地更新，否则分配新 id
+    account_id = creds.find_existing_account_id(user_id=user_id, email=email)
+    if not account_id:
+        account_id = creds._account_id(  # noqa: SLF001
+            user_id=user_id,
+            email=email,
+            profile_arn=str(cred.get("profile_arn") or ""),
+            client_id_hash=str(cred.get("client_id_hash") or ""),
+            refresh_token=str(cred.get("refresh_token") or ""),
+            access_token=str(cred.get("access_token") or ""),
+        )
+    cred["account_id"] = account_id
+    if email and not label:
+        existing_cred = creds.load_account_cred(account_id)
+        if not existing_cred:
+            cred["label"] = email
+    account = creds.save_account_cred(cred)
+    if email and not label:
+        try:
+            creds.set_label(account.id, email)
+            account = next((a for a in creds.list_accounts() if a.id == account.id), account)
+        except Exception:  # noqa: BLE001
+            pass
     return account
 
 
@@ -133,28 +201,20 @@ def probe_account(account_id: str) -> dict[str, Any]:
     """
     token, cred = creds.ensure_account_token(account_id)
     region = str(cred.get("region") or creds.DEFAULT_REGION)
-    # isEmailRequired=true 才会带回 userInfo.email（false 时该字段恒 null）。
-    # 账号显示名要用它——用户要求「额度里看到是哪个号」。
-    url = (f"https://codewhisperer.{region}.amazonaws.com/getUsageLimits"
-           "?origin=AI_EDITOR&isEmailRequired=true")
-    req = urllib.request.Request(url, headers=_headers(token))
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", "replace")[:200]
-        except Exception:  # noqa: BLE001
-            pass
-        if exc.code == 403:
-            raise LoginError(
-                f"上游拒绝（403）：{body or '订阅不支持或凭据无效'}") from exc
-        raise LoginError(f"探活失败 HTTP {exc.code}: {body}") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise LoginError(f"探活失败: {type(exc).__name__}") from exc
+    data = _fetch_usage_limits(token, region)
     info = data.get("userInfo") or {}
     email = str(info.get("email") or "").strip()
+    user_id = str(info.get("userId") or "").strip()
+    if (user_id and not cred.get("user_id")) or (email and not cred.get("email")):
+        try:
+            updated = dict(cred)
+            if user_id:
+                updated["user_id"] = user_id
+            if email:
+                updated["email"] = email
+            creds.save_account_cred(updated)
+        except Exception:  # noqa: BLE001 - 回填身份信息失败不影响探活结果
+            pass
     if email:
         # 探活顺手把邮箱写进索引当显示名：导入时用户不一定填 label，
         # 不写的话列表里只剩一串 ``c-xxxxxxxx``，看不出是谁。
@@ -316,10 +376,27 @@ def poll_device_login() -> dict[str, Any]:
         "refreshToken": str(data.get("refreshToken") or ""),
         "expiresAt": time.time() + float(data.get("expiresIn") or 3600),
         "clientIdHash": client_hash,
+        "clientId": _pending["client_id"],
+        "clientSecret": _pending["client_secret"],
         "authMethod": "IdC",
         "provider": "Enterprise",
         "region": _pending["region"],
     }
+    try:
+        usage = _fetch_usage_limits(access, _pending["region"])
+        info = usage.get("userInfo") or {}
+        uid = str(info.get("userId") or "").strip()
+        mail = str(info.get("email") or "").strip()
+        if uid:
+            cred_dict["userId"] = uid
+        if mail:
+            cred_dict["email"] = mail
+            cred_dict["label"] = mail
+        existing_id = creds.find_existing_account_id(user_id=uid, email=mail)
+        if existing_id:
+            cred_dict["account_id"] = existing_id
+    except Exception:  # noqa: BLE001 - 设备授权成功后若探活暂失败，仍保留凭据
+        pass
     account = creds.save_account_cred(cred_dict)
     _pending.clear()
     return {"status": "ok", "account": {
