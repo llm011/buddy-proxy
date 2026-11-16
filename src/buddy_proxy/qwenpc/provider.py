@@ -330,12 +330,21 @@ class QwenpcProvider(BaseProvider):
     def models(self) -> Sequence[dict[str, Any]]:
         return provider_models()
 
+    #: 不在 ``/v1/models`` 展示、但实测上游仍接且老配置/``chat-modes`` 可能用到的名。
+    _HIDDEN_MODELS = frozenset({
+        "qwen3.8-max-preview",      # chat-modes 原始 key（对外展示 qwen3.8-max）
+        "deepseek-v4-flash",        # 旧版（已被 deepseek-v4.1-flash 取代）
+        "kimi-k3.1-pro-highspeed",  # 已从面板/目录移出，但上游仍可用
+    })
+
     def accepts_model(self, model: str, aliases: bool = True) -> bool:
         want = (model or "").strip()
         if not want:
             return False
         bare = want.removeprefix(f"{self.id}/").lower()
-        return any(str(m["id"]) == bare for m in self.models())
+        if any(str(m["id"]) == bare for m in self.models()):
+            return True
+        return bool(aliases and bare in self._HIDDEN_MODELS)
 
     # -- 认证 ---------------------------------------------------------------
 

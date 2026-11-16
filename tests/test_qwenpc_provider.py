@@ -357,7 +357,13 @@ def test_new_models_accepts_and_context_window():
                 "minimax-m3.1-flash", "step-5-preview"):
         assert p.accepts_model(mid), mid
         assert p.accepts_model(f"qwenpc/{mid}"), mid
+    for legacy in ("qwen3.8-max-preview", "deepseek-v4-flash",
+                   "kimi-k3.1-pro-highspeed"):
+        assert p.accepts_model(legacy)
+        assert not p.accepts_model(legacy, aliases=False)
     by_id = {m["id"]: m for m in p.models()}
+    assert "deepseek-v4-flash" not in by_id
+    assert "kimi-k3.1-pro-highspeed" not in by_id
     assert all(m.get("context_window") == 1_000_000 for m in by_id.values())
     assert by_id["kimi-k3.1-pro"]["credits"] == max(
         m["credits"] for m in by_id.values()
