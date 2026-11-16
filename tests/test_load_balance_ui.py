@@ -29,7 +29,7 @@ _PANELS = {
     "codex": ("benefits_codex.js", r"const multi = n > 1"),
     "trae": ("benefits_trae.js", r"const multi = n > 1"),
     "traeintl": ("benefits_trae.js", r"groups\.size"),
-    "kiro": ("benefits_kiro.js", r"accts\.length"),
+    "kiro": ("benefits_kiro.js", r"const multi = accts\.length > 1"),
     "dumate": ("benefits_dumate.js", r"_dumate_multi"),
 }
 
