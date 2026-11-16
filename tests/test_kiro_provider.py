@@ -862,3 +862,209 @@ def test_retryable_exc_covers_transient_errors():
     assert _h.ConnectError in _RETRYABLE_EXC
     # 4xx 是确定性的，重试只是浪费往返
     assert _h.HTTPStatusError not in _RETRYABLE_EXC
+
+
+# ---------------------------------------------------------------------------
+# 多账号隔离：同企业 org 共用 profileArn / clientIdHash 时不得互相覆盖
+# ---------------------------------------------------------------------------
+#
+# 真实事故（2026-11-17）：AWS IAM Identity Center（Enterprise / IdC）下同一
+# 组织的所有账号共用相同的 ``profileArn`` 与 ``clientIdHash``（startUrl 的 SHA1）。
+# 仅凭它们派生 account_id，导入第 2 个号时会直接覆盖掉第 1 个号；且不同机器
+# 注册的 clientId/clientSecret 不同但文件名同为 ``{clientIdHash}.json``。
+
+
+def test_import_two_enterprise_users_sharing_profile_and_client_hash(
+    monkeypatch, tmp_path
+):
+    from buddy_proxy.kiro import login as kiro_login
+
+    state_dir = tmp_path / "kiro_state"
+    sso_dir = tmp_path / "sso_cache"
+    sso_dir.mkdir()
+    monkeypatch.setenv("BUDDY_KIRO_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(creds, "SSO_CACHE_DIR", sso_dir)
+
+    client_hash = "d5c7abe37885acd842f7524c41056f6efba43fbe"
+    (sso_dir / f"{client_hash}.json").write_text(
+        json.dumps({"clientId": "cid-1", "clientSecret": "sec-1"}),
+        encoding="utf-8",
+    )
+
+    auth_file = sso_dir / "kiro-auth-token.json"
+    shared_arn = "arn:aws:codewhisperer:us-east-1:197701154738:profile/KGVMAMAMGGDK"
+
+    def write_token(tok: str, rt: str):
+        auth_file.write_text(json.dumps({
+            "accessToken": tok,
+            "refreshToken": rt,
+            "expiresAt": "2099-01-01T00:00:00Z",
+            "clientIdHash": client_hash,
+            "profileArn": shared_arn,
+            "region": "us-east-1",
+            "provider": "Enterprise",
+        }), encoding="utf-8")
+
+    users_by_token = {
+        "tok-user-1": {"userId": "d-906676b27b.1111", "email": "team1@example.com"},
+        "tok-user-2": {"userId": "d-906676b27b.2222", "email": "team8@example.com"},
+    }
+    monkeypatch.setattr(
+        kiro_login,
+        "_fetch_usage_limits",
+        lambda token, _region: {"userInfo": users_by_token[token]},
+    )
+
+    write_token("tok-user-1", "rt-1")
+    acct1 = kiro_login.import_auth_file(str(auth_file))
+
+    write_token("tok-user-2", "rt-2")
+    acct2 = kiro_login.import_auth_file(str(auth_file))
+
+    assert acct1.id != acct2.id
+    accounts = creds.list_accounts()
+    assert len(accounts) == 2
+    assert {a.label for a in accounts} == {"team1@example.com", "team8@example.com"}
+
+    # 同一人再次导入应原地更新，不新增第 3 条
+    write_token("tok-user-1", "rt-1-new")
+    acct1_again = kiro_login.import_auth_file(str(auth_file))
+    assert acct1_again.id == acct1.id
+    assert len(creds.list_accounts()) == 2
+    assert creds.load_account_cred(acct1.id)["refresh_token"] == "rt-1-new"
+
+
+def test_two_accounts_same_client_hash_keep_independent_clients(
+    monkeypatch, tmp_path
+):
+    """不同机器导出的号可能同 clientIdHash、不同 clientId/clientSecret。"""
+    import urllib.request as urlreq
+    from buddy_proxy.kiro import login as kiro_login
+
+    state_dir = tmp_path / "kiro_state"
+    monkeypatch.setenv("BUDDY_KIRO_STATE_DIR", str(state_dir))
+    monkeypatch.setattr(creds, "SSO_CACHE_DIR", tmp_path / "empty_sso")
+
+    client_hash = "d5c7abe37885acd842f7524c41056f6efba43fbe"
+    dir_a = tmp_path / "host_a"
+    dir_b = tmp_path / "host_b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+
+    for directory, cid, sec, tok, rt in [
+        (dir_a, "cid-host-a", "sec-host-a", "tok-a", "rt-a"),
+        (dir_b, "cid-host-b", "sec-host-b", "tok-b", "rt-b"),
+    ]:
+        (directory / f"{client_hash}.json").write_text(
+            json.dumps({"clientId": cid, "clientSecret": sec}), encoding="utf-8"
+        )
+        (directory / "kiro-auth-token.json").write_text(json.dumps({
+            "accessToken": tok,
+            "refreshToken": rt,
+            "expiresAt": "2099-01-01T00:00:00Z",
+            "clientIdHash": client_hash,
+            "region": "us-east-1",
+        }), encoding="utf-8")
+
+    monkeypatch.setattr(
+        kiro_login,
+        "_fetch_usage_limits",
+        lambda token, _region: {
+            "userInfo": {
+                "userId": f"uid-{token}",
+                "email": f"{token}@example.com",
+            }
+        },
+    )
+
+    acct_a = kiro_login.import_auth_file(str(dir_a / "kiro-auth-token.json"))
+    acct_b = kiro_login.import_auth_file(str(dir_b / "kiro-auth-token.json"))
+
+    seen_clients: list[tuple[str, str, str]] = []
+
+    class _FakeResp:
+        def __init__(self, body: bytes):
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_urlopen(req, timeout=30):
+        del timeout
+        payload = json.loads(req.data.decode("utf-8"))
+        seen_clients.append((
+            payload["refreshToken"], payload["clientId"], payload["clientSecret"]
+        ))
+        return _FakeResp(json.dumps({
+            "accessToken": f"new-{payload['refreshToken']}",
+            "expiresIn": 3600,
+        }).encode("utf-8"))
+
+    monkeypatch.setattr(urlreq, "urlopen", fake_urlopen)
+
+    creds.ensure_account_token(acct_a.id, force_refresh=True)
+    creds.ensure_account_token(acct_b.id, force_refresh=True)
+
+    assert seen_clients == [
+        ("rt-a", "cid-host-a", "sec-host-a"),
+        ("rt-b", "cid-host-b", "sec-host-b"),
+    ]
+
+
+def test_forward_fails_over_on_402_monthly_quota(monkeypatch, tmp_path):
+    """首号月额度用尽（HTTP 402 MONTHLY_REQUEST_COUNT）必须自动切到下一个号。"""
+    import asyncio
+    import httpx
+    from buddy_proxy.kiro.provider import KiroProvider
+
+    monkeypatch.setenv("BUDDY_KIRO_STATE_DIR", str(tmp_path / "kiro_state"))
+    creds.save_account_cred({
+        "account_id": "u-exhausted",
+        "label": "exhausted@example.com",
+        "access_token": "tok-1",
+        "refresh_token": "rt-1",
+        "expires_at": 4_000_000_000.0,
+        "region": "us-east-1",
+        "priority": 0,
+    })
+    creds.save_account_cred({
+        "account_id": "u-healthy",
+        "label": "healthy@example.com",
+        "access_token": "tok-2",
+        "refresh_token": "rt-2",
+        "expires_at": 4_000_000_000.0,
+        "region": "us-east-1",
+        "priority": 1,
+    })
+
+    provider = KiroProvider()
+    tried_tokens: list[str] = []
+
+    async def fake_post(token: str, region: str, payload: dict):
+        del region, payload
+        tried_tokens.append(token)
+        if token == "tok-1":
+            return httpx.Response(
+                402,
+                content=b'{"reason":"MONTHLY_REQUEST_COUNT"}',
+            )
+        return httpx.Response(
+            200,
+            content=make_frame("assistantResponseEvent", {"content": "ok-from-2"}),
+        )
+
+    monkeypatch.setattr(provider, "_post_chat", fake_post)
+    resp = asyncio.run(provider.forward(
+        {"model": "claude-haiku-4.5", "messages": [{"role": "user", "content": "hi"}]},
+        protocol="openai",
+    ))
+    assert resp.status_code == 200
+    assert tried_tokens == ["tok-1", "tok-2"]
+    body = json.loads(resp.body)
+    assert body["choices"][0]["message"]["content"] == "ok-from-2"

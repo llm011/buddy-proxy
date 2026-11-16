@@ -131,13 +131,29 @@ def _parse_expiry(value: Any) -> float:
         return 0.0
 
 
-def _account_id(*, profile_arn: str, client_id_hash: str, access_token: str) -> str:
-    """稳定账号坐标：profileArn → clientIdHash → accessToken 哈希。
+def _account_id(*, user_id: str = "", email: str = "", profile_arn: str = "",
+                client_id_hash: str = "", refresh_token: str = "",
+                access_token: str = "") -> str:
+    """稳定账号坐标：userId → email → profileArn → clientIdHash → token 哈希。
 
-    用 profileArn 的**尾部段**（``.../profile/KGVMAMAMGGDK``）：同一账号重新
-    登录后 clientIdHash 会变（每次注册新 client），但 profile id 不变，所以
-    用它当坐标才能让「重新登录」覆盖同一个账号，而不是堆积重复条目。
+    ⚠ **为什么不能把 profileArn / clientIdHash 放最前面**：在 AWS IAM
+    Identity Center（Enterprise / IdC）下，同一企业目录里的所有用户共用同一个
+    ``profileArn``（如 ``.../profile/KGVMAMAMGGDK``）和同一个 ``clientIdHash``
+    （它是 ``startUrl`` 的 SHA1）。如果优先用它们当坐标，导入第二个企业账号时
+    会算出完全相同的 id，直接把前一个账号覆盖掉。
+
+    ``userId``（``getUsageLimits.userInfo.userId``）和 ``email`` 才是真正的
+    **单用户级**唯一标识。无网络或离线单测未传 userId/email 时，才退回
+    profileArn / clientIdHash（保持离线调用与历史单测兼容）。
     """
+    uid = (user_id or "").strip()
+    if uid:
+        digest = hashlib.sha256(uid.encode()).hexdigest()[:20]
+        return f"u-{digest}"
+    mail = (email or "").strip().lower()
+    if mail:
+        digest = hashlib.sha256(mail.encode()).hexdigest()[:20]
+        return f"e-{digest}"
     if profile_arn:
         tail = profile_arn.rstrip("/").rsplit("/", 1)[-1]
         cleaned = re.sub(r"[^a-z0-9]", "", tail.lower())
@@ -147,7 +163,8 @@ def _account_id(*, profile_arn: str, client_id_hash: str, access_token: str) -> 
         cleaned = re.sub(r"[^a-z0-9]", "", client_id_hash.lower())
         if cleaned:
             return f"c-{cleaned[:20]}"
-    digest = hashlib.sha256((access_token or "").encode()).hexdigest()[:20]
+    secret = refresh_token or access_token or ""
+    digest = hashlib.sha256(secret.encode()).hexdigest()[:20]
     return f"t-{digest}"
 
 
@@ -156,45 +173,58 @@ def _account_id(*, profile_arn: str, client_id_hash: str, access_token: str) -> 
 # ---------------------------------------------------------------------------
 
 
-def client_secret_path(client_id_hash: str) -> pathlib.Path:
+def client_secret_path(client_id_hash: str,
+                       *, base_dir: pathlib.Path | None = None) -> pathlib.Path:
     """AWS SSO 缓存里的 client 注册文件（含 clientId/clientSecret）。"""
-    return SSO_CACHE_DIR / f"{client_id_hash}.json"
+    return (base_dir or SSO_CACHE_DIR) / f"{client_id_hash}.json"
 
 
-def _load_client(client_id_hash: str) -> tuple[str, str]:
+def _load_client(client_id_hash: str,
+                 *, search_dirs: tuple[pathlib.Path, ...] = ()) -> tuple[str, str]:
     """读 ``clientId`` / ``clientSecret``；读不到抛 :class:`RuntimeError`。
 
     这两个值由 Kiro 首次 ``login`` 时注册并缓存，刷新 token 必须用它们。
-    文件缺失说明本机没登录过 Kiro，或者缓存被清了——提示要重新登录。
+    导入其它机器拷来的文件时优先查文件所在目录，避免被本机同名
+    ``{startUrl_sha1}.json`` 误配。
     """
-    path = client_secret_path(client_id_hash)
-    data = read_json_dict(path)
-    cid = str(data.get("clientId") or "").strip()
-    secret = str(data.get("clientSecret") or "").strip()
-    if not cid or not secret:
-        raise RuntimeError(
-            f"缺少 Kiro client 凭据（{path}）。请先在 Kiro IDE / kiro-cli 里登录一次，"
-            "或用「导入 auth 文件」带入完整凭据")
-    return cid, secret
+    seen: set[pathlib.Path] = set()
+    candidates: list[pathlib.Path] = []
+    for directory in (*search_dirs, SSO_CACHE_DIR):
+        path = client_secret_path(client_id_hash, base_dir=directory)
+        if path not in seen:
+            seen.add(path)
+            candidates.append(path)
+    for path in candidates:
+        data = read_json_dict(path)
+        cid = str(data.get("clientId") or "").strip()
+        secret = str(data.get("clientSecret") or "").strip()
+        if cid and secret:
+            return cid, secret
+    primary = client_secret_path(client_id_hash)
+    raise RuntimeError(
+        f"缺少 Kiro client 凭据（{primary}）。请先在 Kiro IDE / kiro-cli 里登录一次，"
+        "或用「导入 auth 文件」带入完整凭据")
 
 
 def refresh_tokens(cred: dict[str, Any]) -> dict[str, Any]:
     """用 refreshToken 换新 accessToken，返回更新后的 cred。
 
     body 必须是 **JSON**（form 会 400 ``invalid_request``，见模块头）。
-    失败抛 :class:`RuntimeError`，文案区分两种根因：
-
-    - ``invalid_grant``：refreshToken 本身失效（过期/被吊销）→ 要重新登录；
-    - 其它：clientId/Secret 与 refreshToken 不配对，或网络问题。
+    优先使用凭据自身内嵌的 ``client_id`` / ``client_secret``（不同机器或多次
+    IDE 登录会生成不同 client，却共用同一 ``clientIdHash``），缺失时才回退
+    读 ``SSO_CACHE_DIR/{client_id_hash}.json``。
     """
     region = str(cred.get("region") or DEFAULT_REGION)
     refresh_token = str(cred.get("refresh_token") or "").strip()
     if not refresh_token:
         raise RuntimeError("Kiro 凭据缺少 refreshToken，请重新登录")
-    client_hash = str(cred.get("client_id_hash") or "").strip()
-    if not client_hash:
-        raise RuntimeError("Kiro 凭据缺少 clientIdHash，请重新登录")
-    cid, secret = _load_client(client_hash)
+    cid = str(cred.get("client_id") or "").strip()
+    secret = str(cred.get("client_secret") or "").strip()
+    if not cid or not secret:
+        client_hash = str(cred.get("client_id_hash") or "").strip()
+        if not client_hash:
+            raise RuntimeError("Kiro 凭据缺少 clientIdHash，请重新登录")
+        cid, secret = _load_client(client_hash)
 
     payload = json.dumps({
         "clientId": cid,
@@ -274,6 +304,10 @@ def _normalize_cred(raw: dict[str, Any], *, account_id: str) -> dict[str, Any]:
     access = pick("accessToken", "access_token")
     refresh = pick("refreshToken", "refresh_token")
     client_hash = pick("clientIdHash", "client_id_hash")
+    client_id = pick("clientId", "client_id")
+    client_secret = pick("clientSecret", "client_secret")
+    user_id = pick("userId", "user_id")
+    email = pick("email")
     region = pick("region") or DEFAULT_REGION
     provider = pick("provider", "authMethod") or "Enterprise"
     profile_arn = pick("profileArn", "profile_arn")
@@ -285,7 +319,7 @@ def _normalize_cred(raw: dict[str, Any], *, account_id: str) -> dict[str, Any]:
             expires_at = float(expires_at)
         except (TypeError, ValueError):
             expires_at = _parse_expiry(raw.get("expiresAt"))
-    return {
+    out: dict[str, Any] = {
         "account_id": account_id,
         # label 必须显式带过来：_normalize_cred 是白名单式重建，漏掉的字段
         # 会在落盘时消失（踩过一次：导入时传的「主号」变成了一串 id）
@@ -299,6 +333,16 @@ def _normalize_cred(raw: dict[str, Any], *, account_id: str) -> dict[str, Any]:
         "expires_at": float(expires_at or 0.0),
         "saved_at": raw.get("saved_at") or time.time(),
     }
+    if client_id and client_secret:
+        # 每账号自带 client_id/client_secret：同 startUrl 下的不同机器/登录
+        # 共用同一 clientIdHash 文件名，但各有各的 client，互不覆盖。
+        out["client_id"] = client_id
+        out["client_secret"] = client_secret
+    if user_id:
+        out["user_id"] = user_id
+    if email:
+        out["email"] = email
+    return out
 
 
 def _entry_from_cred(cred: dict[str, Any]) -> dict[str, Any]:
@@ -338,8 +382,11 @@ def save_account_cred(cred: dict[str, Any]) -> KiroAccount:
     以 :func:`_account_id` 派生坐标：同一账号重新登录会覆盖同一条，不新增。
     """
     account_id = str(cred.get("account_id") or "").strip() or _account_id(
+        user_id=str(cred.get("user_id") or ""),
+        email=str(cred.get("email") or ""),
         profile_arn=str(cred.get("profile_arn") or ""),
         client_id_hash=str(cred.get("client_id_hash") or ""),
+        refresh_token=str(cred.get("refresh_token") or ""),
         access_token=str(cred.get("access_token") or ""),
     )
     normalized = _normalize_cred(cred, account_id=account_id)
@@ -347,9 +394,11 @@ def save_account_cred(cred: dict[str, Any]) -> KiroAccount:
         entries = _STORE.entries_locked()
         existing = next((e for e in entries if str(e.get("id")) == account_id), None)
         if existing is not None:
-            # 保留原优先位与加入时间：重新登录不改顺位
+            # 保留原优先位、加入时间与用户改过的显示名：重新登录不改顺位也不冲别名
             normalized["priority"] = int(existing.get("priority") or 0)
             normalized["added_at"] = int(existing.get("added_at") or time.time())
+            if not normalized.get("label") and existing.get("label"):
+                normalized["label"] = str(existing["label"])
         else:
             normalized["priority"] = int(cred.get("priority") or len(entries))
             normalized["added_at"] = int(time.time())
@@ -456,39 +505,69 @@ def ensure_account_token(account_id: str, *, force_refresh: bool = False
 
 
 def _guess_client_hash(token_path: pathlib.Path, raw: dict[str, Any]) -> str:
-    """确定 clientIdHash：优先文件里自带的，否则找同目录最近修改的 client 文件。"""
+    """确定 clientIdHash：优先文件里自带的，否则找同目录（再到 sso cache）最新 client 文件。"""
     declared = str(raw.get("clientIdHash") or raw.get("client_id_hash") or "").strip()
     if declared:
         return declared
-    # 没有声明时：在 sso cache 里找「含 clientId/clientSecret」且最新的文件
+    # 没有声明时：先看 token 所在目录，再看 sso cache 里「含 clientId/clientSecret」且最新的文件
     best: tuple[float, str] = (0.0, "")
-    for path in SSO_CACHE_DIR.glob(IDE_CLIENT_GLOB):
-        if path == token_path:
-            continue
-        data = read_json_dict(path)
-        if not (data.get("clientId") and data.get("clientSecret")):
-            continue
+    search_dirs: list[pathlib.Path] = [token_path.parent]
+    if SSO_CACHE_DIR not in search_dirs:
+        search_dirs.append(SSO_CACHE_DIR)
+    for directory in search_dirs:
         try:
-            mtime = path.stat().st_mtime
+            paths = list(directory.glob(IDE_CLIENT_GLOB))
         except OSError:
             continue
-        if mtime > best[0]:
-            best = (mtime, path.stem)
+        for path in paths:
+            if path == token_path:
+                continue
+            data = read_json_dict(path)
+            if not (data.get("clientId") and data.get("clientSecret")):
+                continue
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if mtime > best[0]:
+                best = (mtime, path.stem)
+        if best[1]:
+            return best[1]
     return best[1]
 
 
-def import_auth_file(path: str | pathlib.Path | None = None, *,
-                     label: str = "") -> KiroAccount:
-    """把一份本地 Kiro auth 文件导入本通道。
+def find_existing_account_id(*, user_id: str = "", email: str = "") -> str | None:
+    """按唯一用户标识（userId，其次无 userId 历史账号的 email/label）找已存在的账号 id。
 
-    ``path`` 缺省用 Kiro IDE 的标准位置。文件可以是：
-
-    - IDE 的 ``kiro-auth-token.json``（camelCase，可能没有 profileArn）；
-    - 其它代理导出的 auth json（snake_case 也认）。
-
-    缺 ``clientIdHash`` 时自动从 ``~/.aws/sso/cache/`` 里挑最近注册的 client
-    文件——IDE 换号时会写新 client，取最新的通常就是当前账号的。
+    用于多账号去重与平滑迁移：同一人重新登录/导入时覆盖原顺位，不同人哪怕共用
+    ``profileArn`` 和 ``clientIdHash`` 也不互盖。
     """
+    uid = (user_id or "").strip()
+    mail = (email or "").strip().lower()
+    if not uid and not mail:
+        return None
+    accounts = list_accounts()
+    if uid:
+        for acct in accounts:
+            cred = load_account_cred(acct.id) or {}
+            if str(cred.get("user_id") or "").strip() == uid:
+                return acct.id
+    if mail:
+        for acct in accounts:
+            cred = load_account_cred(acct.id) or {}
+            cred_uid = str(cred.get("user_id") or "").strip()
+            # 已经绑定了别的 userId 时绝不按邮箱/名字合并，避免撞名
+            if uid and cred_uid and cred_uid != uid:
+                continue
+            cred_mail = str(cred.get("email") or "").strip().lower()
+            if cred_mail == mail or acct.label.strip().lower() == mail:
+                return acct.id
+    return None
+
+
+def prepare_auth_file(path: str | pathlib.Path | None = None, *,
+                      label: str = "") -> dict[str, Any]:
+    """读取并配对本地/外机 auth 文件，返回可直接探活与落盘的 dict（不写磁盘）。"""
     target = pathlib.Path(path) if path else IDE_TOKEN_PATH
     raw = read_json_dict(target)
     if not raw:
@@ -498,23 +577,48 @@ def import_auth_file(path: str | pathlib.Path | None = None, *,
     if not access and not refresh:
         raise RuntimeError(f"auth 文件里没有 accessToken/refreshToken: {target}")
 
+    merged = dict(raw)
+    cid = str(raw.get("clientId") or raw.get("client_id") or "").strip()
+    secret = str(raw.get("clientSecret") or raw.get("client_secret") or "").strip()
     client_hash = _guess_client_hash(target, raw)
-    if not client_hash:
+    if (not cid or not secret) and not client_hash:
         raise RuntimeError(
             f"找不到与 {target.name} 配对的 client 凭据（~/.aws/sso/cache/*.json）。"
             "请先在 Kiro IDE 里登录一次")
-    merged = dict(raw)
-    merged["clientIdHash"] = client_hash
+    if client_hash:
+        merged["clientIdHash"] = client_hash
+    if not cid or not secret:
+        cid, secret = _load_client(client_hash, search_dirs=(target.parent,))
+    merged["client_id"] = cid
+    merged["client_secret"] = secret
     if label:
         merged["label"] = label
-    account_id = _account_id(
+    return merged
+
+
+def import_auth_file(path: str | pathlib.Path | None = None, *,
+                     label: str = "") -> KiroAccount:
+    """把一份本地 Kiro auth 文件导入本通道（不触网版，优先用 :func:`login.import_auth_file`）。"""
+    merged = prepare_auth_file(path, label=label)
+    refresh = str(merged.get("refreshToken") or merged.get("refresh_token") or "").strip()
+    access = str(merged.get("accessToken") or merged.get("access_token") or "").strip()
+    user_id = str(merged.get("userId") or merged.get("user_id") or "").strip()
+    email = str(merged.get("email") or "").strip()
+    account_id = find_existing_account_id(user_id=user_id, email=email) or _account_id(
+        user_id=user_id,
+        email=email,
         profile_arn=str(merged.get("profileArn") or merged.get("profile_arn") or ""),
-        client_id_hash=client_hash,
+        client_id_hash=str(merged.get("clientIdHash") or ""),
+        refresh_token=refresh,
         access_token=access,
     )
+    # 离线导入拿不到 userId/email 时，若派生的 p-/c- 坐标已经被另一个 refreshToken 占了，
+    # 退到按 refreshToken 哈希派生，防止默默覆盖掉已有账号。
+    if not user_id and not email:
+        existing = load_account_cred(account_id)
+        if existing and refresh and str(existing.get("refresh_token") or "").strip() not in ("", refresh):
+            account_id = _account_id(refresh_token=refresh, access_token=access)
     merged["account_id"] = account_id
-    if label:
-        merged["label"] = label
     return save_account_cred(merged)
 
 
@@ -535,9 +639,12 @@ def set_label(account_id: str, label: str) -> None:
         if hit is None:
             return
         current = str(hit.get("label") or "")
-        # 用户手动改过的名字优先保留：只覆盖「看起来是自动生成的」那种
+        arn = str(hit.get("profile_arn") or "")
+        arn_tail = arn.rsplit("/", 1)[-1] if arn else ""
+        # 用户手动改过的名字优先保留：只覆盖「看起来是自动生成的」那种（含 profileArn 尾部占位）
         auto_like = (not current) or current == str(hit.get("id") or "") \
-            or re.fullmatch(r"[cp]-[a-z0-9]{8,}", current) is not None
+            or (arn_tail and current == arn_tail) \
+            or re.fullmatch(r"[ecpu]-[a-z0-9]{8,}", current) is not None
         if not auto_like:
             return
         hit["label"] = clean
