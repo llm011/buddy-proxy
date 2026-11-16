@@ -41,6 +41,7 @@ def test_models_catalog_latest_only():
     p = DumateProvider()
     ids = [m["id"] for m in p.models()]
     assert "kimi-k3" in ids
+    assert "qwen4-max" in ids
     assert "qwen3.8-max" in ids
     assert "deepseek-v4-pro" in ids
     # 2026-11-11 复测：deepseek-v4.1-flash 已被上游下线（网关回
