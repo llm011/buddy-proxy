@@ -584,6 +584,13 @@ def test_follow_line_shows_ttft_and_credit():
     assert "7.4s" in cells and "0.16" in cells
 
 
+def test_ttft_column_tells_missing_apart_from_not_applicable():
+    """非流式没首字是常态（``-``）；流式有数却没记才是异常（``—``）。"""
+    assert cli_logs._ttft_text(_rec(stream=False, ttft_ms=None)) == "-"
+    assert cli_logs._ttft_text(_rec(stream=True, ttft_ms=None)) == "—"
+    assert cli_logs._ttft_text(_rec(stream=True, ttft_ms=812)) == "812ms"
+
+
 def test_follow_line_marks_estimated_credit():
     """估算值标 ``★``，别和上游实扣混成同一个数；没有数据补 ``—``。"""
     est = cli_logs._follow_line(_rec(credit=1.5, credit_estimated=True), Palette(False))

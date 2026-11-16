@@ -301,7 +301,7 @@ def _detail(scan: dict[str, Any], palette: Palette) -> list[str]:
             r.get("model") or "",
             code_text,
             humanize_ms(r.get("duration_ms")),
-            humanize_ms(r.get("ttft_ms")),
+            _ttft_text(r),
             humanize_number(r.get("prompt_tokens")),
             humanize_number(r.get("completion_tokens")),
             _credit_text(r),
@@ -356,6 +356,21 @@ def render_csv(scan: dict[str, Any]) -> str:
 _TTFT_WIDTH = 6
 _CREDIT_WIDTH = 10
 
+#: 「首字」列的三种状态：有数、非流式本来就无首字、流式却缺数（异常）。
+_TTFT_NA = "-"
+
+
+def _ttft_text(r: dict[str, Any]) -> str:
+    """首字列：非流式请求没有首字，记的是 null——补 ``-`` 而不是 ``—``。
+
+    ``—`` 留给「本该有、却没拿到」的流式请求：这两种在终端里长得一样的话，
+    偶发丢 TTFT 的行会被当成正常情况从眼皮底下滑过去。
+    """
+    ms = r.get("ttft_ms")
+    if isinstance(ms, (int, float)) and not isinstance(ms, bool):
+        return humanize_ms(ms)
+    return _TTFT_NA if not r.get("stream") else humanize_ms(None)
+
 
 def _credit_text(r: dict[str, Any]) -> str:
     """积分列：无数据 ``—``；估算值带 ``★``——和实扣混在一列里，不标出来就会
@@ -389,7 +404,7 @@ def _follow_line(r: dict[str, Any], palette: Palette) -> str:
         pad(humanize_ms(r.get("duration_ms")), 7, "right"),
         pad(humanize_number(r.get("prompt_tokens")), 6, "right"),
         pad(humanize_number(r.get("completion_tokens")), 6, "right"),
-        pad(humanize_ms(r.get("ttft_ms")), _TTFT_WIDTH, "right"),
+        pad(_ttft_text(r), _TTFT_WIDTH, "right"),
         pad(_credit_text(r), _CREDIT_WIDTH, "right"),
     ]
     line = "  ".join(fields).rstrip()
