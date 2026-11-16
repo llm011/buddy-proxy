@@ -758,3 +758,41 @@ def test_log_refresh_lives_inside_log_page_not_topbar():
     app = (STATIC / "app.js").read_text(encoding="utf-8")
     assert "右上角" not in app
     assert "请求日志" in app and "↻ 刷新" in app
+
+
+def test_provider_toggle_open_recalculates_inner_quota_fold():
+    """默认收起的面板初次展开时，需重跑 syncQuotaFold() 校准内部 .qbody 高度与按钮。"""
+    out = _run("""
+const {box, btn} = mkBox('trae:acct1', 0, 0, 12);
+const bodyEl = {
+  hidden: true,
+  // 模拟浏览器：父元素 hidden=true 时 scrollHeight=0，展开后变成真实高度 460
+  set hiddenVal(v) {},
+};
+let isHidden = true;
+Object.defineProperty(bodyEl, 'hidden', {
+  get() { return isHidden; },
+  set(v) { isHidden = v; box.scrollHeight = v ? 0 : 460; },
+});
+globalThis.__providerBodies = {'provider-quota-trae': bodyEl};
+// 初次渲染时面板默认收起，syncQuotaFold 量到 0 → 按钮隐藏
+syncQuotaFold();
+const hiddenBefore = btn.hidden;
+const toggleBtn = {
+  dataset: {providerFold: 'trae'},
+  getAttribute: n => n === 'aria-expanded' ? 'false' : 'provider-quota-trae',
+  setAttribute() {}, title: '', textContent: '',
+};
+quotaProviderToggle(toggleBtn);
+console.log(JSON.stringify({
+  hiddenBefore,
+  clippedAfter: box.classList.contains('clipped'),
+  btnShownAfter: btn.hidden === false,
+  btnTextAfter: btn.textContent,
+}));
+""")
+    r = _last(out)
+    assert r["hiddenBefore"] is True
+    assert r["clippedAfter"] is True
+    assert r["btnShownAfter"] is True
+    assert r["btnTextAfter"] == "展开全部 12 项 ▾"
