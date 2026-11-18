@@ -64,6 +64,26 @@ def test_models_all_support_reasoning_and_tools():
         assert m["tool_call"] is True, m["id"]
 
 
+def test_models_limits_are_measured_per_model_not_app_default():
+    """上限必须逐模型取实测值，不能退回 App 自带 opencode.json 的 192k/128k。
+
+    那组数是 App 里默认 glm-5 条目的标注，与本通道模型无关；曾导致管理页把
+    qwen4-max 标成 192k，而实测 ~60 万 token 的请求照样成功。
+    """
+    by_id = {m["id"]: m for m in DumateProvider().models()}
+    # 实测报错里给出的确切输入上限
+    assert by_id["qwen4-max"]["max_input"] == 983_616
+    assert by_id["qwen3.8-max"]["max_input"] == 983_616
+    assert by_id["deepseek-v4-pro"]["max_input"] == 1_000_000
+    assert by_id["kimi-k3"]["max_input"] == 1_048_576
+    # 输出上限：有明确 400 数字的两个按实测写
+    assert by_id["qwen3.8-max"]["max_output"] == 131_072
+    assert by_id["deepseek-v4-pro"]["max_output"] == 393_216
+    for mid, m in by_id.items():
+        assert m["max_input"] > 192_000, f"{mid} 仍是旧的 192k 标注"
+        assert m["max_output"] > 0, mid
+
+
 # --- 端点发现失败时的行为 ----------------------------------------------------
 
 

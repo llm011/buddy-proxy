@@ -93,11 +93,24 @@ def test_backoff_is_capped():
     assert delay <= B.CLAIM_RETRY_BACKOFF_MAX_S + 60 or delay >= 0
 
 
-def test_give_up_after_streak_schedules_next_day():
+def test_give_up_after_streak_schedules_next_day(monkeypatch):
     """连续失败到阈值后退到「明天」，而不是继续半小时一次。
 
     这是本次事故的核心修复：同一个接口连续同步失败不会在几分钟内自愈。
+
+    ⚠ 必须把「现在」固定下来：「到明天 00:05」的秒数取决于跑测试的钟点，
+    晚于 20:05 时它只剩不到 4 小时，反而小于退避上限
+    ``CLAIM_RETRY_BACKOFF_MAX_S``，断言就会失败（CI 在 UTC 20:09 跑时红过，
+    与改动内容无关）。固定在白天后，「明天」恒为 15 小时以上。
     """
+    from datetime import datetime as real_datetime
+
+    class _Daytime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 11, 19, 9, 0, 0)
+
+    monkeypatch.setattr(B, "datetime", _Daytime)
     mgr = _manager()
     for i in range(B.CLAIM_GIVE_UP_STREAK):
         before = time.time()
