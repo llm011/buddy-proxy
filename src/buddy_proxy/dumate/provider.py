@@ -73,6 +73,20 @@ _TIMEOUT = httpx.Timeout(connect=10.0, read=600.0, write=60.0, pool=10.0)
 #   ``reasoning_content`` 与 ``tool_calls``；100k input 实测约 2.61 积分（与
 #   ``deepseek-v4-pro`` 的 ~2.60 积分/100k 同档，远低于 ``qwen3.8-max`` ~63.3
 #   与 ``kimi-k3`` ~124.2 积分/100k）。
+# - **上下文与输出上限（2026-11-19 实测，不是 App 自带 opencode.json 的 192k/128k）**：
+#   ``192000/128000`` 只是 App 里默认 glm-5 条目的标注，与本通道模型无关。
+#   实测输入：qwen4-max 成功发过 ~60 万 token（计 15.6 积分）；deepseek-v4-pro 同样
+#   63 万 token 成功。超限由上游直接 400、不计费，报错里带出确切上限：
+#     qwen4-max / qwen3.8-max  ``Range of input length should be [1, 983616]``
+#     deepseek-v4-pro          ``input token limit is 1000000``
+#     kimi-k3                  ``exceeded model token limit: 1048576``（原文未说明是否含输出）
+#   输出（max_tokens）实测：qwen4-max ≥1,000,000 不拒；deepseek-v4-pro 上限 393,216
+#   （``range is [1, 393216]``）；qwen3.8-max 上限 131,072（``[1, 131072]``）；
+#   kimi-k3 ≥1,000,000 不拒。这两个只测到 100 万都没被拒、**不是真实上限**，
+#   表里 max_output 用 262144 作展示值（偏保守，不代表网关只允许这么多）。
+#   **没有额外的「放开上下文」参数**：上限由网关按模型
+#   固定，请求里不存在能抬高它的字段，超出只能分段或换模型。
+#   ⚠ 上限是网关当时的行为，不是承诺值；真遇到 400 以报错里的数字为准。
 # - 其余候选（glm-5.3* / kimi-k3.1-pro / mimo-v2.6* / minimax-m3.1* /
 #   step-5-preview / qwen3.8-flash / doubao-seed-* / ernie-*）仍全 404。
 # - ``deepseek-v4.1-flash`` 直连名仍 404，仅内部别名 ``model-text`` / ``glm-5`` /
@@ -86,24 +100,32 @@ _MODELS: dict[str, dict[str, Any]] = {
         "desc": "Moonshot Kimi K3（DuMate 直连）",
         "reasoning": True,
         "tool_call": True,
+        "max_input": 1048576,
+        "max_output": 262144,
     },
     "qwen4-max": {
         "name": "Qwen4-Max",
         "desc": "通义千问 4 Max（DuMate 直连）",
         "reasoning": True,
         "tool_call": True,
+        "max_input": 983616,
+        "max_output": 262144,
     },
     "qwen3.8-max": {
         "name": "Qwen3.8-Max",
         "desc": "通义千问 3.8 Max（DuMate 直连）",
         "reasoning": True,
         "tool_call": True,
+        "max_input": 983616,
+        "max_output": 131072,
     },
     "deepseek-v4-pro": {
         "name": "DeepSeek V4 Pro",
         "desc": "DeepSeek V4 Pro 重推理档（DuMate 直连）",
         "reasoning": True,
         "tool_call": True,
+        "max_input": 1000000,
+        "max_output": 393216,
     },
 }
 
@@ -134,9 +156,10 @@ class DumateProvider(BaseProvider):
                 "description": spec["desc"],
                 "reasoning": spec["reasoning"],
                 "tool_call": spec.get("tool_call", False),
-                # 上游 opencode.json 标注的上下文/输出上限（192k / 128k）
-                "max_input": 192000,
-                "max_output": 128000,
+                # 逐模型实测上限（见 _MODELS 上方注释）；不再用 App 自带
+                # opencode.json 的 192k/128k——那是 glm-5 条目的默认标注。
+                "max_input": spec["max_input"],
+                "max_output": spec["max_output"],
             }
             for mid, spec in _MODELS.items()
         ]
