@@ -1296,6 +1296,12 @@ def _classify_frame(payload: str) -> str:
         try:
             frame = json.loads(payload)
             code = int((frame or {}).get("code") or 0)
+            if not code and isinstance((frame or {}).get("body"), str):
+                # 线上 qoderintl 的 112 也会藏在 COSY body 内层：_unwrap 已认出
+                # 错误，但这里只看外层 code 就会漏判成 semantic，客户端收到 502
+                # 而不是冷却换号（2026-11-21 slay 零额度账号实测）。
+                chunk = json.loads(frame["body"])
+                code = int((chunk or {}).get("code") or 0)
         except (ValueError, TypeError):
             pass
         if code in (112, 429, 401):

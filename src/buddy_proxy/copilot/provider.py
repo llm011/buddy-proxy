@@ -56,6 +56,7 @@ from .upstream import (
     normalize_billing_usage,
     parse_user_usage,
     plan_label,
+    quota_reset_ts,
     upstream_headers,
 )
 
@@ -598,7 +599,7 @@ class CopilotProvider(BaseProvider):
                 "label": f"{prefix}Copilot 套餐额度",
                 "used": None, "total": None,
                 "remaining": "该账号的配额不设上限（无剩余量可展示）",
-                "percent": None, "reset_ts": None, "expire_ts": None,
+                "percent": None, "reset_ts": quota_reset_ts(data), "expire_ts": None,
             }]
         for item in items:
             item["label"] = f"{prefix}{item['label']}"

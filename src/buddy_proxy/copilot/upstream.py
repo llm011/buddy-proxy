@@ -286,7 +286,7 @@ def parse_user_usage(data: dict[str, Any]) -> list[dict[str, Any]]:
     snapshots = data.get("quota_snapshots")
     if not isinstance(snapshots, dict):
         return []
-    reset_ts = _reset_ts(snapshots)
+    fallback_reset_ts = quota_reset_ts(data)
     labels = {
         "premium_interactions": "Premium 交互",
         "chat": "Chat",
@@ -316,6 +316,7 @@ def parse_user_usage(data: dict[str, Any]) -> list[dict[str, Any]]:
         # 0 已用算——上游只回包容量、还没回用量时，按 0 算会画出满格绿条，
         # 把「未知」说成「一点没用」，比不显示更误导（同 trae/pat/quota.py）。
         percent = round(used / total * 100, 1) if total and used is not None else None
+        reset_ts = _parse_reset_ts(snap.get("quota_reset_at")) or fallback_reset_ts
         items.append({
             "label": label,
             "used": used,
@@ -329,21 +330,60 @@ def parse_user_usage(data: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
-def _reset_ts(snapshots: dict[str, Any]) -> float | None:
-    """周期重置时刻：任一快照的 ``quota_reset_at``（epoch 秒或 ISO 串）。"""
-    for snap in snapshots.values():
-        if not isinstance(snap, dict):
-            continue
-        value = snap.get("quota_reset_at")
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
-        if isinstance(value, str) and value.strip():
-            text = value.strip().replace("Z", "+00:00")
+def _parse_reset_ts(value: Any) -> float | None:
+    """单个重置时间字段 → epoch 秒（0 / 负数占位值返回 None）。"""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value <= 0:
+            return None
+        return float(value) / 1000.0 if value > 1e11 else float(value)
+    if isinstance(value, str) and value.strip():
+        text = value.strip()
+        # 纯日期串（如 "2026-12-01"）按 UTC 零点算，与 quota_reset_date_utc 口径一致。
+        if "T" not in text and " " not in text and len(text) == 10:
             try:
-                return datetime.datetime.fromisoformat(text).timestamp()
+                day = datetime.date.fromisoformat(text)
+                return datetime.datetime.combine(
+                    day, datetime.time.min, tzinfo=datetime.timezone.utc
+                ).timestamp()
             except ValueError:
-                continue
+                return None
+        try:
+            dt = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.timestamp()
     return None
+
+
+def quota_reset_ts(data: dict[str, Any]) -> float | None:
+    """周期重置时刻：快照内非零 ``quota_reset_at`` 优先，否则取顶层重置日期。
+
+    实测 GitHub ``/copilot_internal/user`` 在 ``quota_snapshots.*`` 里把
+    ``quota_reset_at`` 填成占位 ``0``，真正的下周期重置时刻放在顶层
+    ``quota_reset_date_utc``（``2026-12-01T00:00:00.000Z``）和
+    ``quota_reset_date``（``2026-12-01``）。旧逻辑把 ``0`` 当有效 epoch
+    直接返回，导致前端 ``it.reset_ts ? ...`` 判假，整栏不显示重置时间。
+    """
+    snapshots = data.get("quota_snapshots")
+    if isinstance(snapshots, dict):
+        for snap in snapshots.values():
+            if not isinstance(snap, dict):
+                continue
+            parsed = _parse_reset_ts(snap.get("quota_reset_at"))
+            if parsed is not None:
+                return parsed
+    for key in ("quota_reset_date_utc", "quota_reset_at", "quota_reset_date"):
+        parsed = _parse_reset_ts(data.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _reset_ts(snapshots: dict[str, Any]) -> float | None:
+    """兼容旧单测/调用点：仅从 snapshots 抽非零 ``quota_reset_at``。"""
+    return quota_reset_ts({"quota_snapshots": snapshots})
 
 
 def _number(value: Any) -> float | None:

@@ -885,3 +885,168 @@ def test_blacklist_cooldown_report_and_status_shape():
     assert acct["cooling"] == [{"kind": "blacklist", "minutes_left": pytest.approx(360, rel=0.01)}]
     report = failover.cooldown_report()
     assert "u@x.com 疑似拉黑剩" in report and report.endswith("h"), "6h 档按小时展示"
+
+
+# ---------------------------------------------------------------------------
+# 5xx 换号 + 重置倒计时解析 + 账号频控排队保护
+# ---------------------------------------------------------------------------
+
+def test_http_5xx_switches_account_and_cools(two_accounts, monkeypatch):
+    """HTTP 502/503（两个 endpoint 都 5xx）必须冷却当前账号并切到下一个，不直接炸给客户端。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (503, {"error": {"code": 503, "message": "overloaded"}}, {})
+    up.plan["tok-v@y.com"] = (200, _gemini_ok("recovered"), {})
+    _patch_token(monkeypatch)
+
+    resp = _run(provider, stream=False)
+    assert resp.status_code == 200
+    assert json.loads(resp.body)["choices"][0]["message"]["content"] == "recovered"
+    # u@x.com 打满两个 endpoint（daily + prod），随后切到 v@y.com 成功
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com", "tok-v@y.com"]
+    left, kind = failover.cooldown_left("u@x.com")
+    assert left > 0 and kind == "account"
+
+
+def test_in_band_5xx_switches_account_and_cools(two_accounts, monkeypatch):
+    """HTTP 200 流首事件为 500/503 error：闸门未出字节，必须冷却并换号。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    sse_500 = _sse([json.dumps({"error": {"code": 500, "message": "internal error"}})])
+    up.plan["tok-u@x.com"] = (200, sse_500, {})
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    sr = _run(provider, stream=True)
+    assert sr.status_code == 200
+    assert "pong" in _stream_text(sr)
+    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+    left, kind = failover.cooldown_left("u@x.com")
+    assert left > 0 and kind == "account"
+
+
+def test_429_resets_in_message_sets_cooldown_duration(two_accounts, monkeypatch):
+    """无 Retry-After 头时，从 'Resets in 4h29m15s.' 解析冷却时长而非死守 5min。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (
+        429,
+        {"error": {"code": 429, "message": "Individual quota reached. Resets in 4h29m15s."}},
+        {},
+    )
+    up.plan["tok-v@y.com"] = (200, _gemini_ok(), {})
+    _patch_token(monkeypatch)
+
+    resp = _run(provider, stream=False)
+    assert resp.status_code == 200
+    left, kind = failover.model_cooldown_left("u@x.com", _default_upstream_model())
+    expected = 4 * 3600 + 29 * 60 + 15
+    assert kind == "quota" and expected - 5 <= left <= expected + 1
+
+
+def test_rate_limiter_queues_when_burst_exceeded(two_accounts, monkeypatch):
+    """单账号超出突发频率时排队等待后放行，而不是直接 429 或打爆上游。"""
+    from buddy_proxy.antigravity import credentials as creds
+    from buddy_proxy.antigravity.provider import AntigravityProvider, MODELS
+    from buddy_proxy.antigravity.rate_limit import AccountRateLimiter, RateLimitConfig
+
+    # 仅保留单个账号，验证超频后确实发生异步排队并最终成功
+    creds.delete_account("v@y.com")
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, _gemini_ok("queued-ok"), {})
+    _patch_token(monkeypatch)
+
+    fake_now = [100.0]
+
+    async def fake_sleep(dt: float) -> None:
+        fake_now[0] += dt
+
+    monkeypatch.setattr("buddy_proxy.antigravity.rate_limit.asyncio.sleep", fake_sleep)
+    provider._rate_limiter = AccountRateLimiter(
+        RateLimitConfig(max_concurrent=2, rpm=10, burst_10s=1, min_interval_s=0.0, queue_timeout_s=30.0),
+        clock=lambda: fake_now[0],
+    )
+
+    body = {**_BODY, "model": f"antigravity/{MODELS[0]['id']}", "stream": False}
+    r1 = asyncio.run(provider.forward(body, "openai"))
+    assert r1.status_code == 200
+    assert fake_now[0] == 100.0
+
+    # 第 2 次在同一秒内到来，命中 burst_10s=1，应当推进时钟等待 10s 后成功
+    r2 = asyncio.run(provider.forward(body, "openai"))
+    assert r2.status_code == 200
+    assert fake_now[0] >= 110.0
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com"]
+
+
+def test_rate_limiter_prefers_ready_account_without_waiting(two_accounts, monkeypatch):
+    """账号 #1 正在受频控保护排队时，多账号请求优先走无需等待的账号 #2。"""
+    from buddy_proxy.antigravity.provider import MODELS
+    from buddy_proxy.antigravity.rate_limit import AccountRateLimiter, RateLimitConfig
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, _gemini_ok("from-u"), {})
+    up.plan["tok-v@y.com"] = (200, _gemini_ok("from-v"), {})
+    _patch_token(monkeypatch)
+
+    fake_now = [200.0]
+
+    async def fake_sleep(dt: float) -> None:
+        fake_now[0] += dt
+
+    monkeypatch.setattr("buddy_proxy.antigravity.rate_limit.asyncio.sleep", fake_sleep)
+    provider._rate_limiter = AccountRateLimiter(
+        RateLimitConfig(max_concurrent=2, rpm=10, burst_10s=1, min_interval_s=0.0, queue_timeout_s=30.0),
+        clock=lambda: fake_now[0],
+    )
+
+    body = {**_BODY, "model": f"antigravity/{MODELS[0]['id']}", "stream": False}
+    r1 = asyncio.run(provider.forward(body, "openai"))
+    r2 = asyncio.run(provider.forward(body, "openai"))
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+    assert fake_now[0] == 200.0, "账号 #2 空闲时应立即切换，不应傻等账号 #1"
+
+
+def test_rate_limiter_stream_releases_concurrency_on_close(two_accounts, monkeypatch):
+    """流式响应占用的并发槽位必须到流关闭时才释放，防止并发流堆积打爆上游。"""
+    from buddy_proxy.antigravity import credentials as creds
+    from buddy_proxy.antigravity.provider import MODELS
+    from buddy_proxy.antigravity.rate_limit import AccountRateLimiter, RateLimitConfig
+
+    creds.delete_account("v@y.com")
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    provider._rate_limiter = AccountRateLimiter(
+        RateLimitConfig(max_concurrent=1, rpm=10, burst_10s=5, min_interval_s=0.0, queue_timeout_s=0.05),
+    )
+
+    async def _go():
+        body = {**_BODY, "model": f"antigravity/{MODELS[0]['id']}", "stream": True}
+        sr1 = await provider.forward(body, "openai")
+        # 第一条流尚未消费/关闭，并发上限 1 下第二条在短超时内应排队失败（429 排队超时）
+        from fastapi import HTTPException
+
+        with pytest.raises(HTTPException) as ei:
+            await provider.forward(body, "openai")
+        assert ei.value.status_code == 429
+
+        # 消费并关闭第一条流后，并发槽位释放，下一条请求立即成功
+        chunks = []
+        async for piece in sr1.body_iterator:
+            chunks.append(piece if isinstance(piece, bytes) else piece.encode())
+        assert b"pong" in b"".join(chunks)
+
+        sr2 = await provider.forward(body, "openai")
+        assert sr2.status_code == 200
+        async for _ in sr2.body_iterator:
+            pass
+
+    asyncio.run(_go())
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com"]
+

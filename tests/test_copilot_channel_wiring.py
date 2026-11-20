@@ -195,6 +195,34 @@ def test_parse_user_usage_builds_quota_rows():
     # ``percent`` 是**已用**（进度条 / 颜色按它分档），上游只给 remaining。
     # 按剩余算就会「剩得越多越红」，正好反了。
     assert rows[0]["percent"] == 60.0
+    # 顶层 quota_reset_date_utc 必须落在 reset_ts 上（不能被 snapshot 里的 0 占位遮掉）
+    assert rows[0]["reset_ts"] == pytest.approx(1796083200.0)
+
+
+def test_parse_user_usage_ignores_zero_quota_reset_at_placeholder():
+    """真实响应里 quota_snapshots.*.quota_reset_at 常给 0，不能盖掉顶层重置日期。"""
+    rows = upstream.parse_user_usage({
+        "quota_reset_date": "2026-12-01",
+        "quota_reset_date_utc": "2026-12-01T00:00:00.000Z",
+        "quota_snapshots": {
+            "chat": {"unlimited": True, "quota_reset_at": 0},
+            "premium_interactions": {
+                "entitlement": 1500, "remaining": -49, "quota_reset_at": 0,
+            },
+        },
+    })
+    assert rows[0]["reset_ts"] == pytest.approx(1796083200.0)
+
+
+def test_parse_user_usage_falls_back_to_quota_reset_date():
+    """仅有顶层 quota_reset_date（YYYY-MM-DD）时按 UTC 零点解析。"""
+    rows = upstream.parse_user_usage({
+        "quota_reset_date": "2026-12-01",
+        "quota_snapshots": {
+            "premium_interactions": {"entitlement": 300, "remaining": 200},
+        },
+    })
+    assert rows[0]["reset_ts"] == pytest.approx(1796083200.0)
 
 
 def test_parse_user_usage_percent_is_used_not_remaining():

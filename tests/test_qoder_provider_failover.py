@@ -128,6 +128,12 @@ def _cosy_error(code: str, message: str) -> bytes:
     return f"data: {json.dumps(envelope)}\n\n".encode()
 
 
+def _cosy_nested_error(code: str, message: str) -> bytes:
+    """qoderintl 实测形态：112 不在信封顶层，而在 body 的内层 JSON。"""
+    envelope = {"headers": {}, "body": json.dumps({"code": code, "message": message})}
+    return f"data: {json.dumps(envelope)}\n\n".encode()
+
+
 def _text_stream(text: str) -> httpx.Response:
     """成功流：一个带 content 的 chunk + finish/usage + [DONE]。"""
     chunks = [
@@ -240,6 +246,29 @@ def test_failover_on_inband_112_error(monkeypatch):
     assert calls == ["uid-acct-a", "uid-acct-b"], "112 带内错误触发换号"
     assert meta.get("account") == "acct-b"
     # 账号 a 被冷却
+    left, kind = failover.cooldown_left("acct-a")
+    assert left > 0 and kind == "quota"
+
+
+def test_failover_on_nested_body_112_error(monkeypatch):
+    """body 内层 112 也必须换号，不能把零额度账号的权益门当普通内容透传。"""
+    monkeypatch.setenv("QODER_REGION", "global")
+    _write_account("acct-a", region="global")
+    _write_account("acct-b", region="global")
+    routes = {
+        "uid-acct-a": lambda req: httpx.Response(
+            200, headers={"content-type": "text/event-stream"},
+            stream=_ChunkedBody([_cosy_nested_error(
+                "112", '{"pricingUrl":"https://qoder.com/pricing?client=qoder"}')])),
+        "uid-acct-b": lambda req: _text_stream("from-global-b"),
+    }
+    body_bytes, calls, _, meta = _run_stream(
+        monkeypatch, routes,
+        {"model": "qwen3.8-flash", "messages": [{"role": "user", "content": "hi"}],
+         "stream": True})
+    assert b"from-global-b" in body_bytes
+    assert calls == ["uid-acct-a", "uid-acct-b"]
+    assert meta.get("account") == "acct-b"
     left, kind = failover.cooldown_left("acct-a")
     assert left > 0 and kind == "quota"
 
