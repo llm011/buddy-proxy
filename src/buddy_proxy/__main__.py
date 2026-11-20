@@ -773,12 +773,22 @@ def main():
         print(f"[Disabled Providers] {len(disabled_providers)} 个通道已停用: "
               f"{', '.join(sorted(disabled_providers))}")
 
+    # 会话轮转：settings.json 的 provider id 列表，命中通道按显式会话标识轮转账号
+    # （与负载均衡互斥，同时出现时会话轮转优先）。缺省空集 = 全部照旧。
+    session_rotation = {
+        k.strip() for k in (saved_settings.get("session_rotation") or [])
+        if isinstance(k, str) and k.strip()
+    }
+    if session_rotation:
+        print(f"[Session Rotation] {len(session_rotation)} 个通道按会话轮转账号: "
+              f"{', '.join(sorted(session_rotation))}")
+
     # 负载均衡：settings.json 的 provider id 列表，命中通道改为按剩余额度加权
     # 轮转（额度页开关写入，用户 2026-11-10 需求）。缺省空集 = 全部照旧。
     load_balance = {
         k.strip() for k in (saved_settings.get("load_balance") or [])
         if isinstance(k, str) and k.strip()
-    }
+    } - session_rotation
     if load_balance:
         print(f"[Load Balance] {len(load_balance)} 个通道按剩余额度轮转: "
               f"{', '.join(sorted(load_balance))}")
@@ -842,6 +852,7 @@ def main():
         hidden_models=hidden_models,
         disabled_providers=disabled_providers,
         load_balance=load_balance,
+        session_rotation=session_rotation,
         model_schedules=model_schedules,
         model_order=model_order,
         metrics=metrics,

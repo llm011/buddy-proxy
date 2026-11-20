@@ -21,6 +21,9 @@ let ACCT_CONFIRM_OPEN = false;
 //: 已开启「负载均衡」的通道 id 列表（GET /ui/api/settings 的 load_balance）。
 //: 放模块级而不是 DOM：整页 30s 重建一次，DOM 上的状态会被冲掉。
 let LOAD_BALANCE_ON = [];
+//: 已开启「会话轮转」的通道 id 列表（GET /ui/api/settings 的 session_rotation，
+//: 与 LOAD_BALANCE_ON 互斥）。
+let SESSION_ROTATION_ON = [];
 //: 已开启均衡的通道里，哪些模型因「缓存按账号隔离」被自动跳过。
 //: {provider: [model, ...]}，来源 GET /ui/api/settings 的 load_balance_excluded。
 //: 与 LOAD_BALANCE_ON 分开存：一个是「开没开」，一个是「开了之后哪些模型不跟着转」。
@@ -232,24 +235,32 @@ function providerRefreshButton(pid) {
  * 账号数取本通道额度卡的分组数（与面板渲染同源），不从全局推断。 */
 function providerLoadBalanceToggle(pid, multi) {
   if (!multi) return '';
-  const on = (LOAD_BALANCE_ON || []).includes(pid);
-  // 被自动跳过的模型（缓存按账号隔离，轮转会白丢缓存）。只有开着开关时才提示：
-  // 没开的时候不轮转，说「跳过了谁」没有意义。
+  const lbOn = (LOAD_BALANCE_ON || []).includes(pid);
+  const srOn = (SESSION_ROTATION_ON || []).includes(pid);
+  // 被自动跳过的模型（缓存按账号隔离，轮转会白丢缓存）。只有开着「负载均衡」时
+  // 才提示：会话轮转下同一会话不中途换号，缓存隔离模型也照常参与。
   const skipped = (LOAD_BALANCE_EXCLUDED || {})[pid] || [];
-  const skippedNote = (on && skipped.length)
+  const skippedNote = (lbOn && skipped.length)
     ? `<span class="lb-skip" onclick="showLoadBalanceSkipped('${pid}')" style="cursor:pointer" ` +
       `title="这些模型的缓存按账号隔离，换号会让本次前缀全部未命中，` +
       `所以即使开关打开也不参与轮转：\n${esc(skipped.join('、'))}">` +
       `已跳过 ${skipped.length} 个 ▾</span>`
     : '';
-  const hint = on
+  const lbHint = lbOn
     ? '已开启：按剩余积分加权轮转（额度多的账号用得更多）'
       + (skipped.length ? `；${skipped.length} 个缓存按账号隔离的模型保持原顺位` : '')
     : '开启后按剩余积分加权轮转。缓存按账号隔离的模型会自动跳过，避免白丢缓存';
-  return `<label class="lb-toggle" title="${esc(hint)}">` +
-    `<input type="checkbox" ${on ? 'checked' : ''} ` +
+  const srHint = srOn
+    ? '已开启：检测到显式会话标识（x-session-id 等）时按会话在账号间轮转，同一会话粘在同一账号（含缓存隔离模型）；未带会话标识的请求保持原顺位'
+    : '开启后对带显式会话标识（x-session-id 等）的请求按会话轮转账号，同一会话固定走同一账号以保缓存；未带会话标识保持原顺位（与负载均衡互斥）';
+  return `<label class="lb-toggle" title="${esc(lbHint)}">` +
+    `<input type="checkbox" ${lbOn ? 'checked' : ''} ` +
     `onchange="setProviderLoadBalance('${pid}', this.checked, this)">` +
-    `<span>负载均衡</span></label>` + skippedNote;
+    `<span>负载均衡</span></label>` + skippedNote +
+    `<label class="lb-toggle" title="${esc(srHint)}">` +
+    `<input type="checkbox" ${srOn ? 'checked' : ''} ` +
+    `onchange="setProviderSessionRotation('${pid}', this.checked, this)">` +
+    `<span>会话轮转</span></label>`;
 }
 
 /** 展开「已跳过 N 个」的模型清单（点一下弹 toast，不占版面）。 */
@@ -268,6 +279,9 @@ async function setProviderLoadBalance(pid, on, el) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({load_balance: {[pid]: !!on}})});
     LOAD_BALANCE_ON = (r.settings && r.settings.load_balance) || [];
+    if (r.settings && Array.isArray(r.settings.session_rotation)) {
+      SESSION_ROTATION_ON = r.settings.session_rotation;
+    }
     // 排除表也跟着变（开关一开，该通道的隔离模型清单才有意义）
     LOAD_BALANCE_EXCLUDED = r.load_balance_excluded || LOAD_BALANCE_EXCLUDED;
     toast(on
@@ -283,14 +297,40 @@ async function setProviderLoadBalance(pid, on, el) {
   }
 }
 
-/** 拉取负载均衡开关状态（一次，页面装载时调用；失败保持空表 = 全关）。 */
+/** 切换某通道的会话轮转开关（增量写入；开启时后端自动关闭同通道的负载均衡）。 */
+async function setProviderSessionRotation(pid, on, el) {
+  if (el) el.disabled = true;
+  try {
+    const r = await api('/ui/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_rotation: {[pid]: !!on}})});
+    SESSION_ROTATION_ON = (r.settings && r.settings.session_rotation) || [];
+    if (r.settings && Array.isArray(r.settings.load_balance)) {
+      LOAD_BALANCE_ON = r.settings.load_balance;
+    }
+    LOAD_BALANCE_EXCLUDED = r.load_balance_excluded || {};
+    toast(on
+      ? `${pid} 已开启会话轮转：不同会话在账号间轮转，同会话固定同一账号`
+      : `${pid} 已关闭会话轮转：恢复按顺位固定主备`);
+    if (typeof refreshAll === 'function') refreshAll();
+  } catch (e) {
+    if (el) el.checked = !on;
+    toast('切换失败: ' + e.message, true);
+  } finally {
+    if (el) el.disabled = false;
+  }
+}
+
+/** 拉取负载均衡与会话轮转开关状态（一次，页面装载时调用；失败保持空表 = 全关）。 */
 async function loadLoadBalanceState() {
   try {
     const r = await api('/ui/api/settings');
     LOAD_BALANCE_ON = r.load_balance || [];
+    SESSION_ROTATION_ON = r.session_rotation || [];
     LOAD_BALANCE_EXCLUDED = r.load_balance_excluded || {};
   } catch (e) {
     LOAD_BALANCE_ON = [];
+    SESSION_ROTATION_ON = [];
     LOAD_BALANCE_EXCLUDED = {};
   }
 }

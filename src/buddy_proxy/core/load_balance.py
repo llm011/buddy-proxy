@@ -40,9 +40,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import random
+import re
+import threading
 import time
-from typing import Any, Callable, Iterable, Sequence
+from contextvars import ContextVar, Token
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 #: 权重下限：额度为 0 / 未知的账号仍保留一点被选中的机会。
 #: 取 1.0 是相对"积分"这个量纲的经验值——剩余 300 积分与"未知"的差距不该是
@@ -219,26 +224,43 @@ def enabled(state: Any, provider_id: str) -> bool:
     return provider_id in (on or ())
 
 
+def session_rotation_enabled(state: Any, provider_id: str) -> bool:
+    """该通道是否开启了「按会话在账号间轮转」。
+
+    与 :func:`enabled` 一样直接读运行态；state 缺失时返回 False。
+    """
+    try:
+        on = getattr(state, "session_rotation", None)
+    except Exception:  # noqa: BLE001 - 无运行态：当没开
+        return False
+    return provider_id in (on or ())
+
+
 def reorder(state: Any, provider_id: str, accounts: Sequence[Any],
-            model: str | None = None) -> list[Any]:
+            model: str | None = None, *, session_key: str | None = None) -> list[Any]:
     """按开关决定是否重排账号顺序；返回**新列表**（不修改入参）。
 
-    - 开关关着、或候选不足两个：原样返回列表副本——调用方拿到的东西与历史
-      行为逐字节一致，不必在两处写 ``if``。
-    - 模型属于「缓存按账号隔离」那一类（见 :func:`is_account_scoped`）：
-      同样原样返回。**这是本函数最重要的分支**：对这些模型轮转没好处，
-      纯亏缓存。
-    - 其余情况：按该通道读数表的权重做一次无放回加权抽样。
+    两条可选策略（开关互斥；同时出现时会话轮转优先）：
+    1. **会话轮转**（``state.session_rotation``）：仅当请求带有显式会话标识
+       （``session_key`` / ContextVar ``SESSION_KEY``）时生效——新会话按可用账号
+       顺位轮转分配，同一会话在有效期内粘在同一个账号上。因为同一会话不中途
+       换号，缓存按账号隔离的模型也照常参与轮转；未检测到会话标识时保持原顺位
+       不变。
+    2. **负载均衡**（``state.load_balance``）：按剩余额度加权随机抽样。命中
+       「缓存按账号隔离」名单的模型仍保持原顺位，避免每次请求白丢缓存。
 
     过滤（冷却 / region / 单模型限流 / per-account 模型支持）**必须**在调用
     本函数之前完成：这里只决定「先试谁」，不决定「谁能试」。
-
-    ``model`` 缺省（None）时按「未知」处理——**不做**隔离检查，照常均衡。
-    理由：老调用方（或未来新通道忘了传）应当保持"开关打开就生效"的行为，
-    而不是静默失效；宁可偶尔掉缓存，也不能让功能看起来失灵。
     """
     pool = list(accounts or ())
-    if len(pool) < 2 or not enabled(state, provider_id):
+    if len(pool) < 2:
+        return pool
+    if session_rotation_enabled(state, provider_id):
+        sid = current_session_key() if session_key is None else _normalize_session_id(session_key)
+        if not sid:
+            return pool
+        return _SESSION_ROUTER.order(provider_id, sid, pool)
+    if not enabled(state, provider_id):
         return pool
     if model and is_account_scoped(provider_id, model):
         return pool
@@ -402,3 +424,187 @@ def account_scoped_models(provider_id: str) -> list[str]:
 def clear_swap_samples() -> None:
     """清空观测样本（测试隔离用）。"""
     _SWAP_SAMPLES.clear()
+
+
+# ---------------------------------------------------------------------------
+# 会话轮转：显式会话标识提取 + 粘性顺位轮转
+# ---------------------------------------------------------------------------
+
+#: 当前请求的显式会话标识（由 web/routes.py 在请求入口设置，finally 还原）。
+#: 用 ContextVar 避免改动 8 个 provider.forward 的函数签名。
+SESSION_KEY: ContextVar[str] = ContextVar("buddy_session_key", default="")
+
+#: 显式会话标识请求头，按优先级从高到低匹配（大小写不敏感）。
+_SESSION_HEADERS = (
+    "x-session-id",
+    "session-id",
+    "x-conversation-id",
+    "conversation-id",
+)
+
+#: Claude Code 等 Anthropic 客户端常把会话 id 编在 metadata.user_id 里：
+#: ``user_<hash>_account_<uuid>_session_<uuid>``。
+_METADATA_SESSION_RE = re.compile(r"(?:^|_)session_([A-Za-z0-9._:-]+)$")
+
+#: 会话 → 账号粘性映射的空闲过期时间（秒）与容量上限。
+SESSION_TTL_S = 6 * 3600.0
+MAX_SESSIONS = 4096
+
+
+def _normalize_session_id(raw: Any) -> str:
+    if not isinstance(raw, str):
+        return ""
+    val = raw.strip()
+    if not val:
+        return ""
+    if len(val) > 256:
+        return "sha256:" + hashlib.sha256(val.encode("utf-8", errors="replace")).hexdigest()[:32]
+    return val
+
+
+def _extract_metadata_session(metadata: Any) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    uid = metadata.get("user_id")
+    if not isinstance(uid, str):
+        return ""
+    text = uid.strip()
+    if not text:
+        return ""
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                sid = _normalize_session_id(parsed.get("session_id") or parsed.get("sessionId"))
+                if sid:
+                    return sid
+        except (ValueError, TypeError):
+            pass
+    m = _METADATA_SESSION_RE.search(text)
+    if m:
+        return _normalize_session_id(m.group(1))
+    return ""
+
+
+def extract_session_key(
+    headers: Mapping[str, str] | None,
+    body: Any = None,
+) -> str:
+    """从请求头与请求体里提取显式会话标识；未检测到返回空串。
+
+    只认第一级显式标识（请求头 ``x-session-id`` / ``session-id`` 等、请求体
+    ``prompt_cache_key`` / ``session_id`` / ``conversation_id`` / ``metadata.user_id``
+    中的 session 段）。不做对话内容指纹猜测，确保未带会话标识的客户端行为与历史
+    完全一致。
+    """
+    if headers:
+        lowered = {str(k).lower(): v for k, v in headers.items() if isinstance(v, str)}
+        for name in _SESSION_HEADERS:
+            sid = _normalize_session_id(lowered.get(name))
+            if sid:
+                return sid
+    if isinstance(body, dict):
+        for field in ("prompt_cache_key", "session_id", "conversation_id"):
+            sid = _normalize_session_id(body.get(field))
+            if sid:
+                return sid
+        sid = _extract_metadata_session(body.get("metadata"))
+        if sid:
+            return sid
+    return ""
+
+
+def current_session_key() -> str:
+    return SESSION_KEY.get()
+
+
+def set_session_key(key: str) -> Token[str]:
+    return SESSION_KEY.set(_normalize_session_id(key))
+
+
+def reset_session_key(token: Token[str]) -> None:
+    SESSION_KEY.reset(token)
+
+
+class SessionRouter:
+    """按通道维护「会话 → 账号」粘性绑定与轮转游标（线程安全）。
+
+    - 新会话按可用账号列表做严格轮转（第 1 个会话先试账号 1，第 2 个会话先试账号 2…）；
+    - 同一会话在 TTL 内再次请求时固定把原绑定账号排在首位（保持前缀缓存命中，
+      同时保留其余账号在后面作 failover 兜底）；
+    - 原绑定账号因冷却/停用不在当前候选池时，顺位轮转到下一个可用账号并更新绑定。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # (provider_id, session_key) -> (account_id, last_used_ts)
+        self._bindings: dict[tuple[str, str], tuple[str, float]] = {}
+        # provider_id -> next round-robin index
+        self._cursors: dict[str, int] = {}
+
+    def _prune_locked(self, now: float) -> None:
+        expired = [
+            k for k, (_acct, ts) in self._bindings.items()
+            if (now - ts) > SESSION_TTL_S
+        ]
+        for k in expired:
+            del self._bindings[k]
+        if len(self._bindings) >= MAX_SESSIONS:
+            # 超过容量上限时淘汰最久未活跃的会话，避免内存无界增长
+            excess = len(self._bindings) - MAX_SESSIONS + 1
+            oldest = sorted(self._bindings.items(), key=lambda kv: kv[1][1])[:excess]
+            for k, _ in oldest:
+                self._bindings.pop(k, None)
+
+    def order(
+        self,
+        provider_id: str,
+        session_key: str,
+        accounts: Sequence[Any],
+        *,
+        now: float | None = None,
+    ) -> list[Any]:
+        pool = list(accounts or ())
+        if len(pool) < 2 or not session_key:
+            return pool
+        ts = now if now is not None else time.time()
+        pid = str(provider_id or "")
+        bkey = (pid, session_key)
+
+        with self._lock:
+            entry = self._bindings.get(bkey)
+            if entry is not None:
+                bound_id, last_ts = entry
+                if (ts - last_ts) <= SESSION_TTL_S:
+                    for idx, acct in enumerate(pool):
+                        if str(getattr(acct, "id", "") or "") == bound_id:
+                            self._bindings[bkey] = (bound_id, ts)
+                            return pool[idx:] + pool[:idx]
+                else:
+                    self._bindings.pop(bkey, None)
+
+            self._prune_locked(ts)
+            cur = self._cursors.get(pid, 0)
+            idx = cur % len(pool)
+            self._cursors[pid] = cur + 1
+            chosen_id = str(getattr(pool[idx], "id", "") or "")
+            if chosen_id:
+                self._bindings[bkey] = (chosen_id, ts)
+            return pool[idx:] + pool[:idx]
+
+    def clear(self) -> None:
+        with self._lock:
+            self._bindings.clear()
+            self._cursors.clear()
+
+
+_SESSION_ROUTER = SessionRouter()
+
+
+def session_router() -> SessionRouter:
+    return _SESSION_ROUTER
+
+
+def clear_sessions() -> None:
+    """清空所有会话绑定与轮转游标（测试隔离用）。"""
+    _SESSION_ROUTER.clear()
