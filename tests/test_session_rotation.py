@@ -245,3 +245,49 @@ def test_routes_propagate_and_reset_session_key():
         assert r4.status_code == 200
 
     assert seen == ["ethan-sess-1", "cc-sess-2", "resp-sess-3", ""]
+
+
+def test_routes_log_session_id_in_client_request_summary():
+    """client_request_summary 必须带 session_id：排查轮转是否生效不用抓包。
+
+    退化护栏：若有人把提取挪回 log 之后（或删掉 session_id 参数），
+    「日志里看不到会话标识」的老问题会复发，本测试当场红。
+    """
+    async def fake_forward_chat(body, protocol, original=None):
+        return JSONResponse(status_code=200, content={"ok": True})
+
+    fake_state = _make_route_client()
+    client = TestClient(st.app)
+
+    with (
+        mock.patch.object(routes_mod, "get_state", return_value=fake_state),
+        mock.patch.object(routes_mod, "log_client_request") as log_mock,
+        mock.patch.object(routes_mod, "diagnostic"),
+        mock.patch.object(routes_mod, "forward_chat", side_effect=fake_forward_chat),
+    ):
+        client.post(
+            "/v1/chat/completions",
+            headers={"x-session-id": "log-sess-1"},
+            json={"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]},
+        )
+        client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-sonnet-4-6",
+                "max_tokens": 64,
+                "metadata": {"user_id": "user_h_account_a_session_log-sess-2"},
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        client.post(
+            "/v1/responses",
+            json={"model": "gpt-5", "input": "hi", "prompt_cache_key": "log-sess-3"},
+        )
+        client.post(
+            "/v1/chat/completions",
+            json={"model": "glm-5.3", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+    assert log_mock.call_count == 4
+    logged = [c.kwargs.get("session_id") for c in log_mock.call_args_list]
+    assert logged == ["log-sess-1", "log-sess-2", "log-sess-3", None]
