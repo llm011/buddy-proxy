@@ -84,6 +84,7 @@ class ProxyState:
         hidden_models: Optional[set[str]] = None,
         disabled_providers: Optional[set[str]] = None,
         load_balance: Optional[set[str]] = None,
+        session_rotation: Optional[set[str]] = None,
         model_schedules: Optional[dict[str, list]] = None,
         model_order: Optional[dict[str, list[str]]] = None,
         metrics: Optional[Any] = None,
@@ -120,6 +121,10 @@ class ProxyState:
         # 账号间按剩余积分加权随机排序（见 core/load_balance.py）；未命中的通道行为
         # 不变。settings.py 持久化，/ui 额度页的开关可改。
         self.load_balance: set[str] = set(load_balance or ())
+        # 开启「按显式会话标识在账号间轮转」的通道 id 集合（与 load_balance 互斥）。
+        # 命中通道在请求带 x-session-id 等标识时将不同会话轮流分配给不同账号，
+        # 同会话固定粘在同一账号上（见 core/load_balance.py）。
+        self.session_rotation: set[str] = set(session_rotation or ())
         # 限时可用模型：键 "provider/model" → 允许时间窗列表 [["HH:MM","HH:MM"], ...]。
         # 命中的模型仅在窗口内放行、窗口外 403（与 disabled_models 并存，disabled
         # 优先级更高）。settings.py 持久化，/ui 可改。空 dict = 所有模型不受时段限制。

@@ -62,6 +62,7 @@ def test_toggle_helper_defaults_to_off():
     """开关状态默认空 = 全关：不读 settings 时不许显示成已开启。"""
     src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
     assert "let LOAD_BALANCE_ON = [];" in src
+    assert "let SESSION_ROTATION_ON = [];" in src
 
 
 def test_toggle_is_incremental_write():
@@ -69,6 +70,14 @@ def test_toggle_is_incremental_write():
     src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
     assert "load_balance: {[pid]: !!on}" in src, (
         "切换开关必须只提交目标通道，整表覆盖会把其它通道的开关悄悄关掉")
+    assert "session_rotation: {[pid]: !!on}" in src, (
+        "会话轮转开关也必须只提交目标通道")
+
+
+def test_ui_has_session_rotation_toggle():
+    src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
+    assert "会话轮转" in src
+    assert "setProviderSessionRotation" in src
 
 
 def test_ui_shows_skipped_models():

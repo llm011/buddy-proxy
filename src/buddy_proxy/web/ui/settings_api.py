@@ -29,6 +29,7 @@ async def ui_settings_get(request: Request):
         "auto_checkin": cfg["auto_checkin"],
         "checkin_time": cfg["checkin_time"],
         "load_balance": sorted(getattr(state, "load_balance", set()) or ()),
+        "session_rotation": sorted(getattr(state, "session_rotation", set()) or ()),
         # 负载均衡的「缓存隔离」提示：每个通道里哪些模型换号会掉缓存。
         # 前端拿去在开关旁边显示一行小字，让用户知道「开了均衡，但这个模型
         # 不会跟着轮转」。数据来自 core.load_balance（静态实测表 + 线上观测）。
@@ -80,21 +81,46 @@ async def ui_settings_post(request: Request):
                 detail={"error": {"message": f"打卡时间格式应为 HH:MM，收到 {raw_time!r}"}},
             )
         update["checkin_time"] = raw_time
-    # 负载均衡开关（provider 维度的**增量**写入）：body 里给
-    # ``load_balance: {"codebuddy": true}`` 就只改这一个通道，不动其它通道的
-    # 开关——整表覆盖的语义会让「切换一个通道」把别的通道悄悄关掉（多面板
-    # 并发点击时尤其危险）。要一次设置多个通道就传多个键。
-    lb_patch = _load_balance_patch(body.get("load_balance"), getattr(state, "providers", {}) or {})
-    if lb_patch:
-        current = set(getattr(state, "load_balance", set()) or ())
+    # 负载均衡 & 会话轮转开关（provider 维度的**增量**写入，两者互斥）：
+    # body 里给 ``load_balance: {"codebuddy": true}`` 或
+    # ``session_rotation: {"codebuddy": true}`` 就只改对应通道，并自动关掉同一
+    # 通道上互斥的另一项。整表覆盖会让多面板并发点击把别的通道悄悄关掉。
+    providers = getattr(state, "providers", {}) or {}
+    lb_patch = _provider_bool_patch(body.get("load_balance"), providers, field="load_balance")
+    sr_patch = _provider_bool_patch(body.get("session_rotation"), providers, field="session_rotation")
+    both_on = sorted(pid for pid, on in lb_patch.items() if on and sr_patch.get(pid) is True)
+    if both_on:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": f"通道 {', '.join(both_on)} 不能同时开启负载均衡与会话轮转"}},
+        )
+    if lb_patch or sr_patch:
+        cur_lb = set(getattr(state, "load_balance", set()) or ())
+        cur_sr = set(getattr(state, "session_rotation", set()) or ())
+        lb_changed = bool(lb_patch)
+        sr_changed = bool(sr_patch)
         for pid, on in lb_patch.items():
             if on:
-                current.add(pid)
+                cur_lb.add(pid)
+                if pid in cur_sr:
+                    cur_sr.discard(pid)
+                    sr_changed = True
             else:
-                current.discard(pid)
+                cur_lb.discard(pid)
+        for pid, on in sr_patch.items():
+            if on:
+                cur_sr.add(pid)
+                if pid in cur_lb:
+                    cur_lb.discard(pid)
+                    lb_changed = True
+            else:
+                cur_sr.discard(pid)
         # 排序写盘：settings.json 是给人看的，集合的随机序会让每次保存都产生
         # 无意义的 diff（也会让「设置文件变了」的健康检查误报）。
-        update["load_balance"] = sorted(current)
+        if lb_changed:
+            update["load_balance"] = sorted(cur_lb)
+        if sr_changed:
+            update["session_rotation"] = sorted(cur_sr)
 
     if not update:
         raise HTTPException(status_code=400, detail={"error": {"message": "没有可更新的设置字段"}})
@@ -106,8 +132,17 @@ async def ui_settings_post(request: Request):
         state.default_provider = update["default_provider"]
     if "load_balance" in update:
         state.load_balance = set(update["load_balance"])
-    return {"ok": True, "settings": {
-        k: saved.get(k) for k in ("default_model", "default_provider", "load_balance")}}
+    if "session_rotation" in update:
+        state.session_rotation = set(update["session_rotation"])
+    return {
+        "ok": True,
+        "settings": {
+            k: saved.get(k) for k in (
+                "default_model", "default_provider", "load_balance", "session_rotation"
+            )
+        },
+        "load_balance_excluded": _load_balance_excluded(state),
+    }
 
 
 def _load_balance_excluded(state: Any) -> dict[str, list[str]]:
@@ -130,8 +165,13 @@ def _load_balance_excluded(state: Any) -> dict[str, list[str]]:
         return {}
 
 
-def _load_balance_patch(raw: Any, providers: dict[str, Any]) -> dict[str, bool]:
-    """校验并归一 ``load_balance`` 增量：``{provider_id: bool}``。
+def _provider_bool_patch(
+    raw: Any,
+    providers: dict[str, Any],
+    *,
+    field: str = "load_balance",
+) -> dict[str, bool]:
+    """校验并归一通道开关增量：``{provider_id: bool}``。
 
     只接受已注册的通道 id（``codebuddy`` 恒认，它不在 ``providers`` 字典里而是
     默认通道）。非法条目**整条拒绝**而不是静默跳过：静默跳过会让用户以为打开了，
@@ -143,7 +183,7 @@ def _load_balance_patch(raw: Any, providers: dict[str, Any]) -> dict[str, bool]:
     if not isinstance(raw, dict):
         raise HTTPException(
             status_code=400,
-            detail={"error": {"message": "load_balance 应为 {provider: bool} 对象"}},
+            detail={"error": {"message": f"{field} 应为 {{provider: bool}} 对象"}},
         )
     out: dict[str, bool] = {}
     for key, value in raw.items():
@@ -158,7 +198,11 @@ def _load_balance_patch(raw: Any, providers: dict[str, Any]) -> dict[str, bool]:
         if not isinstance(value, bool):
             raise HTTPException(
                 status_code=400,
-                detail={"error": {"message": f"load_balance.{pid} 应为 true/false"}},
+                detail={"error": {"message": f"{field}.{pid} 应为 true/false"}},
             )
         out[pid] = value
     return out
+
+
+def _load_balance_patch(raw: Any, providers: dict[str, Any]) -> dict[str, bool]:
+    return _provider_bool_patch(raw, providers, field="load_balance")

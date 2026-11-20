@@ -126,6 +126,7 @@ def _make_state(providers, tmp_path):
         model_order={},
         # 负载均衡开关：与 ProxyState 同型（set of provider id）
         load_balance=set(),
+        session_rotation=set(),
         metrics=MetricsCollector(tmp_path / "metrics.jsonl"),
         write_log=mock.MagicMock(),
         ensure_auth=mock.MagicMock(),
@@ -2463,3 +2464,50 @@ def test_load_balance_rejects_non_bool(env):
 def test_load_balance_rejects_non_object(env):
     r = env.client.post("/ui/api/settings", json={"load_balance": ["codebuddy"]})
     assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 设置：会话轮转开关（provider 维度，与负载均衡互斥）
+# ---------------------------------------------------------------------------
+def test_session_rotation_toggle_is_incremental_and_mutually_exclusive(env):
+    # 先开 codebuddy 和 fakeprov 的负载均衡
+    env.client.post("/ui/api/settings", json={"load_balance": {"codebuddy": True, "fakeprov": True}})
+    assert env.state.load_balance == {"codebuddy", "fakeprov"}
+
+    # 开启 codebuddy 会话轮转 → 自动关闭 codebuddy 负载均衡，fakeprov 负载均衡保留
+    r = env.client.post("/ui/api/settings", json={"session_rotation": {"codebuddy": True}})
+    assert r.status_code == 200
+    assert r.json()["settings"]["session_rotation"] == ["codebuddy"]
+    assert r.json()["settings"]["load_balance"] == ["fakeprov"]
+    assert env.state.session_rotation == {"codebuddy"}
+    assert env.state.load_balance == {"fakeprov"}
+    saved = settings_mod.load_settings()
+    assert saved["session_rotation"] == ["codebuddy"]
+    assert saved["load_balance"] == ["fakeprov"]
+
+    # GET /ui/api/settings 如实上报
+    g = env.client.get("/ui/api/settings")
+    assert g.status_code == 200
+    assert g.json()["session_rotation"] == ["codebuddy"]
+    assert g.json()["load_balance"] == ["fakeprov"]
+
+    # 反过来开启 codebuddy 负载均衡 → 自动关闭 codebuddy 会话轮转
+    r2 = env.client.post("/ui/api/settings", json={"load_balance": {"codebuddy": True}})
+    assert r2.status_code == 200
+    assert env.state.load_balance == {"codebuddy", "fakeprov"}
+    assert env.state.session_rotation == set()
+
+
+def test_session_rotation_validation(env):
+    # 同一通道同时传 true 拒绝
+    r = env.client.post(
+        "/ui/api/settings",
+        json={"load_balance": {"codebuddy": True}, "session_rotation": {"codebuddy": True}},
+    )
+    assert r.status_code == 400
+    assert env.state.load_balance == set()
+    assert env.state.session_rotation == set()
+
+    assert env.client.post("/ui/api/settings", json={"session_rotation": {"nope": True}}).status_code == 400
+    assert env.client.post("/ui/api/settings", json={"session_rotation": {"codebuddy": "yes"}}).status_code == 400
+    assert env.client.post("/ui/api/settings", json={"session_rotation": ["codebuddy"]}).status_code == 400

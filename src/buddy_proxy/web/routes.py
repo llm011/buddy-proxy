@@ -21,6 +21,7 @@ from buddy_proxy.core.state import (
     diagnostic,
     get_state,
 )
+from buddy_proxy.core import load_balance as lb_mod
 from buddy_proxy.core import settings as settings_mod
 from buddy_proxy.web.model_list import load_models_from_local_config, model_to_codex_format
 from buddy_proxy.web.model_aggregate import aggregate_models
@@ -358,7 +359,11 @@ async def chat_completions(request: Request):
     if os.environ.get("WB_DEBUG_DUMP"):
         state.write_log("debug_request_summary", **body_summary(body))
 
-    return await forward_chat(body, "openai")
+    session_token = lb_mod.set_session_key(lb_mod.extract_session_key(request.headers, body))
+    try:
+        return await forward_chat(body, "openai")
+    finally:
+        lb_mod.reset_session_key(session_token)
 
 
 @app.post("/v1/responses")
@@ -412,7 +417,11 @@ async def create_response(request: Request):
                       filtered=filtered_names)
 
     diagnostic("request", protocol="responses", **body_summary(chat_body))
-    return await forward_chat(chat_body, "responses", original=body)
+    session_token = lb_mod.set_session_key(lb_mod.extract_session_key(request.headers, body))
+    try:
+        return await forward_chat(chat_body, "responses", original=body)
+    finally:
+        lb_mod.reset_session_key(session_token)
 
 
 @app.post("/v1/messages")
@@ -426,4 +435,8 @@ async def create_message(request: Request):
     chat_body = anthropic_to_chat(body)
     diagnostic("request", protocol="anthropic", **body_summary(chat_body))
 
-    return await forward_chat(chat_body, "anthropic", original=body)
+    session_token = lb_mod.set_session_key(lb_mod.extract_session_key(request.headers, body))
+    try:
+        return await forward_chat(chat_body, "anthropic", original=body)
+    finally:
+        lb_mod.reset_session_key(session_token)
