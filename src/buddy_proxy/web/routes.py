@@ -352,14 +352,19 @@ async def chat_completions(request: Request):
     state = get_state()
     body = await parse_request_body(request)
 
-    log_client_request("POST", "/v1/chat/completions", body, **client_meta(request))
+    # 会话标识先提取再落日志：client_request_summary 带上 session_id，
+    # 排查「会话轮转有没有生效 / 客户端到底带没带 x-session-id」时不用抓包。
+    # 会话 id 是本地对话 UUID，不是凭据；超长值 extract_session_key 已哈希化。
+    session_key = lb_mod.extract_session_key(request.headers, body)
+    log_client_request("POST", "/v1/chat/completions", body,
+                       session_id=session_key or None, **client_meta(request))
     diagnostic("request", protocol="openai", **body_summary(body))
 
     # 调试开关只增加安全摘要，绝不落请求原文、token、UID 或工具参数。
     if os.environ.get("WB_DEBUG_DUMP"):
         state.write_log("debug_request_summary", **body_summary(body))
 
-    session_token = lb_mod.set_session_key(lb_mod.extract_session_key(request.headers, body))
+    session_token = lb_mod.set_session_key(session_key)
     try:
         return await forward_chat(body, "openai")
     finally:
@@ -371,7 +376,9 @@ async def create_response(request: Request):
     state = get_state()
     body = await parse_request_body(request)
 
-    log_client_request("POST", "/v1/responses", body, **client_meta(request))
+    session_key = lb_mod.extract_session_key(request.headers, body)
+    log_client_request("POST", "/v1/responses", body,
+                       session_id=session_key or None, **client_meta(request))
 
     # 转换 Responses → Chat
     chat_body = responses_request_to_chat(body)
@@ -417,7 +424,7 @@ async def create_response(request: Request):
                       filtered=filtered_names)
 
     diagnostic("request", protocol="responses", **body_summary(chat_body))
-    session_token = lb_mod.set_session_key(lb_mod.extract_session_key(request.headers, body))
+    session_token = lb_mod.set_session_key(session_key)
     try:
         return await forward_chat(chat_body, "responses", original=body)
     finally:
@@ -429,13 +436,15 @@ async def create_message(request: Request):
     state = get_state()
     body = await parse_request_body(request)
 
-    log_client_request("POST", "/v1/messages", body, **client_meta(request))
+    session_key = lb_mod.extract_session_key(request.headers, body)
+    log_client_request("POST", "/v1/messages", body,
+                       session_id=session_key or None, **client_meta(request))
 
     # 转换 Anthropic → Chat
     chat_body = anthropic_to_chat(body)
     diagnostic("request", protocol="anthropic", **body_summary(chat_body))
 
-    session_token = lb_mod.set_session_key(lb_mod.extract_session_key(request.headers, body))
+    session_token = lb_mod.set_session_key(session_key)
     try:
         return await forward_chat(chat_body, "anthropic", original=body)
     finally:
