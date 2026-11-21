@@ -123,6 +123,23 @@ def test_quota_signal():
     assert not failover.is_quota_signal(401)
 
 
+def test_provider_forwards_402_to_exhausted_marker(monkeypatch):
+    """转发路径接线：402 走 mark_exhausted（标记下线），不是 5 分钟 quota 冷却。
+
+    退化护栏：若有人把 402 分支改回 mark_cooldown(quota=True)，耗尽标记不再
+    写入、账号又开始每 5 分钟白撞——本测试当场红。
+    """
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "src/buddy_proxy/copilot/provider.py").read_text(encoding="utf-8")
+    assert "is_exhausted_signal(resp.status_code, code, message)" in src
+    assert "failover.mark_exhausted(" in src
+    # 额度查询回来时解除标记
+    assert "clear_exhausted_if_recovered" in src
+    assert "usage_has_quota(data)" in src
+
+
 def test_auth_detail_prefers_login():
     detail = _auth_detail(401, "Bad credentials",
                           AccountRef(id="acct-1a2b", name="jsongo",
