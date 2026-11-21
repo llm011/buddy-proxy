@@ -136,7 +136,65 @@ def test_generation_config_and_effort():
     gc = req["request"]["generationConfig"]
     assert gc["temperature"] == 0.5
     assert gc["maxOutputTokens"] == 99
-    assert gc["thinkingConfig"] == {"thinkingBudget": 1024}
+    # low → 2048（对齐 DSH pi-ai DEFAULT_THINKING_BUDGETS）；但 max_tokens=99
+    # 太小，按 MIN_ANSWER_TOKENS=1024 钳到 0，保证正文不被 thinking 吃光。
+    assert gc["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+# ---------------------------------------------------------------------------
+# generationConfig.thinkingConfig：DSH 档位映射 + 输出预算钳制
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+@pytest.mark.parametrize("effort,expected", [
+    ("minimal", 1024),
+    ("low", 2048),
+    ("medium", 8192),
+    ("high", 16384),
+    ("xhigh", 16384),   # DSH 档位别名 → high
+    ("max", 16384),     # DSH TUI effort: max → high
+])
+def test_effort_maps_to_thinking_budget(effort, expected):
+    """所有 DSH 档位都必须显式发 thinkingConfig，不能把默认值交给上游。
+
+    退化护栏：旧逻辑只认 low/medium/high，max/xhigh/minimal 完全不发
+    thinkingConfig → 强推理模型吃光输出预算 → 空内容 502。
+    """
+    body = _basic_body(max_tokens=65536, reasoning_effort=effort)
+    gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
+    assert gc["thinkingConfig"] == {"thinkingBudget": expected}
+
+
+@pytest.mark.parametrize("effort", ["none", "off", "disable"])
+def test_effort_off_disables_thinking(effort):
+    body = _basic_body(max_tokens=4096, reasoning_effort=effort)
+    gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
+    assert gc["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+def test_small_max_tokens_clamps_thinking_budget():
+    """max_tokens 不够 budget+1024 时钳制，至少给正文留 MIN_ANSWER_TOKENS。
+
+    实测线上根因：max_tokens<=64 时强推理 100% 空内容（finish=MAX_TOKENS）。
+    """
+    # max=16384(high)，max_tokens=4096 → 钳到 4096-1024
+    body = _basic_body(max_tokens=4096, reasoning_effort="max")
+    gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
+    assert gc["thinkingConfig"] == {"thinkingBudget": 4096 - 1024}
+    # max_tokens=64 → 钳到 0
+    body = _basic_body(max_tokens=64, reasoning_effort="max")
+    gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
+    assert gc["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+def test_no_effort_still_sends_budget():
+    """effort 缺省也要有 budget 上限，不能把默认值交给上游。"""
+    body = _basic_body(max_tokens=65536)
+    body.pop("reasoning_effort", None)
+    gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
+    assert gc["thinkingConfig"]["thinkingBudget"] > 0
 
 
 # ---------------------------------------------------------------------------
