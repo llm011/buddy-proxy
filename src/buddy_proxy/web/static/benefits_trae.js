@@ -241,7 +241,29 @@ function renderTraeIntlPanel() {
   }
   const quotaHtml = [...groups.entries()].map(([grp, its]) => {
     const headSum = quotaHeadSum({items: its});
+    // 海外账号卡片也要「下线」按钮：traeintl 与 CN 共用 work 账号池、只按
+    // region="global" 过滤（见 trae/intl_provider.py 模块 docstring），
+    // 而 TraeIntlProvider 继承父类 forward → lb_mod.reorder(..., self.id, ...)，
+    // self.id 就是 'traeintl'。所以 disabled_accounts 的键是 'traeintl:<id>'，
+    // 禁用真实生效，只差 UI 没给入口（用户 2026-11-22 实报）。
+    //
+    // 分组名形如「Trae 海外版 #N」，用 N 对齐 TRAE_ACCTS 的 index 拿账号；
+    // 拿不到（快照未到）时 acctDisableButton 自身返回空串，不渲染假控件。
+    const m = grp.match(/#(\d+)/);
+    let acct = _trae_acct_for(m ? Number(m[1]) : null);
+    if (!acct) {
+      // 分组名没带 #N 时按 region 兜底：海外面板只认 global 号，
+      // 不能退化成「随便挑一个」（那会把 CN 号的下线按钮画到海外卡上，
+      // 点下去停用的是另一个区的账号）。恰有一个海外号时才给按钮。
+      const intl = (TRAE_ACCTS || []).filter(a => a.region === 'global');
+      acct = intl.length === 1 ? intl[0] : null;
+    }
+    const rowBtns = acct
+      ? `<span class="ag-move">${acctRenameButton('traeintl', acct)}` +
+        `${acctDisableButton('traeintl', acct)}</span>`
+      : '';
     return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>` +
+      `${rowBtns}` +
       `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
       `${quotaItemsHtml(its, 'traeintl:' + grp)}</div>`;
   }).join('');
