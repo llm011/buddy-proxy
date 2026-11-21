@@ -21,6 +21,7 @@ Google 风控把账号挡在 antigravity 外（能登录、凭据有效，但上
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -50,6 +51,34 @@ _RETRY_AFTER_MAX_S = 7 * 86400.0
 
 #: 上游 403 文案的拉黑指纹（不区分大小写匹配）。
 _BLACKLIST_MSG = "verify your account"
+
+#: 上游 429 文本里的重置倒计时（如 "Resets in 4h29m15s." / "reset after 12m30s"）。
+_RESET_DELAY_RE = re.compile(
+    r"(?:resets?|reset)\s+(?:in|after)\s+"
+    r"((?:\d+\s*d)?\s*(?:\d+\s*h)?\s*(?:\d+\s*m)?\s*(?:\d+\s*s)?)",
+    re.IGNORECASE,
+)
+_UNIT_PART_RE = re.compile(r"(\d+)\s*([dhms])", re.IGNORECASE)
+_UNIT_SECONDS = {"d": 86400.0, "h": 3600.0, "m": 60.0, "s": 1.0}
+
+
+def parse_reset_delay_after(message: str) -> str | None:
+    """从上游 429 错误文案里提取重置秒数（供没有 Retry-After 头时作冷却时长）。
+
+    线上 2026-11-19 ``claude-sonnet-5-5-high`` 实测返回
+    ``Individual quota reached... Resets in 4h29m15s.`` 且不带 Retry-After 头；
+    只按默认 5min 冷却会导致每 5 分钟白撞一次已耗尽账号。
+    """
+    m = _RESET_DELAY_RE.search(message or "")
+    if not m:
+        return None
+    total = 0.0
+    for num_s, unit in _UNIT_PART_RE.findall(m.group(1)):
+        total += int(num_s) * _UNIT_SECONDS[unit.lower()]
+    if total <= 0:
+        return None
+    capped = min(max(total, _RETRY_AFTER_MIN_S), _RETRY_AFTER_MAX_S)
+    return str(int(round(capped)))
 
 #: 「账号 + 模型」复合冷却键的分隔符（同 codebuddy 的先例；账号 id 不含 \x00）。
 _MODEL_KEY_SEP = "\x00"

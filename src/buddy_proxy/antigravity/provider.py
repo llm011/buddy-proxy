@@ -37,6 +37,7 @@ from ..core.metrics import ACCOUNT_META
 from ..gemini.convert import gemini_response_to_chat
 from . import failover
 from .convert import apply_effort_suffix, chat_to_antigravity_request
+from .rate_limit import AccountLease, AccountRateLimiter
 from .credentials import (
     AuthError,
     ensure_account_token,
@@ -249,6 +250,8 @@ class AntigravityProvider(BaseProvider):
         self._model_by_id: dict[str, dict[str, Any]] = {
             str(m["id"]): m for m in self._models
         }
+        #: 按账号并发 + 双滑窗频控保护（超限自动排队，见 rate_limit.py）。
+        self._rate_limiter = AccountRateLimiter()
         # 积分估算只需要一个「上次读数」：存在 core.credit_estimate._QUOTA_MARKS
         # （按 账号|池键），每次收尾现算池键，不缓存——少一份会和面板口径漂移的副本。
 
@@ -450,6 +453,8 @@ class AntigravityProvider(BaseProvider):
         # 冷却/权限等过滤已在上一行完成。关着时顺序与历史完全一致。
         accounts = lb_mod.reorder(_lb_state(), 'antigravity', accounts,
                                   model=upstream_model)
+        # 频控错峰：把此刻无需排队的账号提前，都忙则按预计等待最短排序。
+        accounts = self._rate_limiter.pick_account_order(accounts)
         if not accounts:
             # 模型级冷却不出现在 cooldown_report 里（后者只查纯账号 id），
             # 不补一句就会得到「冷却中：」后面一片空白的报错。
@@ -498,6 +503,16 @@ class AntigravityProvider(BaseProvider):
             if meta is not None:
                 meta["account"] = acct.id
 
+            # 账号并发/滑窗频控保护：超过安全频率时排队等待，而不是直接打爆上游吃 429。
+            # 等待上限至少要受限于多账号尝试期剩余预算，避免前面排队把整个请求的超时预算耗尽。
+            acquire_timeout: float | None = None
+            if tried > 1:
+                acquire_timeout = max(0.0, _ATTEMPT_DEADLINE_S - (time.monotonic() - started))
+            lease = await self._rate_limiter.acquire(acct.id, timeout_s=acquire_timeout)
+            if lease is None:
+                last_status, last_detail = 429, f"账号 {acct.id} 频控排队超时"
+                continue
+
             upstream_body = chat_to_antigravity_request(
                 body, project_id=project_id, model=upstream_model
             )
@@ -507,6 +522,7 @@ class AntigravityProvider(BaseProvider):
                     auth_headers(access_token, upstream_model, stream), stream,
                 )
             except _UpstreamUnavailable as exc:
+                lease.release()
                 # 两个 endpoint 都没给出 HTTP 响应（超时/网络错）：过去直接 504
                 # 打断整个 failover 循环（客户端干等满 read 超时）——现在换号重试。
                 # 短冷却防「挂死账号每轮都被首选」；机器级断网时全账号一起进
@@ -514,6 +530,9 @@ class AntigravityProvider(BaseProvider):
                 last_status, last_detail = 504, exc.message
                 failover.mark_cooldown(acct.id, reason=exc.message)
                 continue
+            except BaseException:
+                lease.release()
+                raise
 
             # 401：token 被上游拒（比如文件被手工改过）——强刷一次重试同账号；
             # 仍拒说明凭据层面失效，冷却换号
@@ -523,18 +542,27 @@ class AntigravityProvider(BaseProvider):
                     access_token, _ = await asyncio.to_thread(
                         ensure_account_token, acct.id, force_refresh=True)
                 except AuthError as exc:
+                    lease.release()
                     failover.mark_cooldown(acct.id, reason=f"强刷失败: {exc}")
                     continue
+                except BaseException:
+                    lease.release()
+                    raise
                 try:
                     resp = await self._send_with_fallback(
                         client, method, upstream_body,
                         auth_headers(access_token, upstream_model, stream), stream,
                     )
                 except _UpstreamUnavailable as exc:
+                    lease.release()
                     last_status, last_detail = 504, exc.message
                     failover.mark_cooldown(acct.id, reason=exc.message)
                     continue
+                except BaseException:
+                    lease.release()
+                    raise
                 if resp.status_code == 401:
+                    lease.release()
                     last_status, last_detail = 401, await _error_detail(resp, stream)
                     await _drain_and_close(resp, stream)
                     failover.mark_cooldown(acct.id, reason="401 强刷后仍被拒")
@@ -548,20 +576,22 @@ class AntigravityProvider(BaseProvider):
             #   因此 429 一律按 (账号, 模型) 复合键冷却：坏模型只挡自己，真额度
             #   耗尽时同一模型的其它账号也照常换号，语义不受影响。
             if resp.status_code in (403, 429):
+                lease.release()
                 last_status = resp.status_code
                 last_detail = await _error_detail(resp, stream)
                 reason = (f"HTTP {resp.status_code}"
                           f"{(': ' + last_detail) if last_detail else ''}")
+                retry_after = resp.headers.get("Retry-After")
                 if resp.status_code == 429:
                     failover.mark_model_cooldown(
                         acct.id, upstream_model,
-                        retry_after=resp.headers.get("Retry-After"),
+                        retry_after=retry_after or failover.parse_reset_delay_after(last_detail),
                         reason=reason,
                     )
                 else:
                     failover.mark_cooldown(
                         acct.id,
-                        retry_after=resp.headers.get("Retry-After"),
+                        retry_after=retry_after,
                         blacklist=failover.is_blacklist_signal(
                             resp.status_code, last_detail),
                         reason=reason,
@@ -569,8 +599,21 @@ class AntigravityProvider(BaseProvider):
                 await _drain_and_close(resp, stream)
                 continue
 
+            if resp.status_code >= 500:
+                # 5xx 两个 endpoint fallback 都失败后继续换下一个账号，避免单账号抖动直接炸整条请求。
+                lease.release()
+                last_status = resp.status_code
+                last_detail = await _error_detail(resp, stream)
+                failover.mark_cooldown(
+                    acct.id,
+                    reason=f"HTTP {resp.status_code}{(': ' + last_detail) if last_detail else ''}",
+                )
+                await _drain_and_close(resp, stream)
+                continue
+
             if resp.status_code >= 400:
                 # 其余业务 4xx（模型名不合法等）：换号没意义，原样透传
+                lease.release()
                 if stream:
                     await resp.aread()
                 try:
@@ -580,13 +623,24 @@ class AntigravityProvider(BaseProvider):
 
             # 200：过首事件闸门——首个上游事件若是 429/403 error，还没向客户端
             # 吐过任何字节，可以安全冷却换号；见到语义事件后绝不重放（防重复计费）
-            gate = await self._gate_first_event(resp, stream)
+            try:
+                gate = await self._gate_first_event(resp, stream)
+            except BaseException:
+                lease.release()
+                await _drain_and_close(resp, stream)
+                raise
             if gate.account_error:
+                lease.release()
                 last_status, last_detail = gate.code, gate.message
                 reason = f"带内 error {gate.code}: {gate.message}"
                 if gate.code == 429:
                     failover.mark_model_cooldown(
-                        acct.id, upstream_model, reason=reason)
+                        acct.id, upstream_model,
+                        retry_after=failover.parse_reset_delay_after(gate.message),
+                        reason=reason,
+                    )
+                elif gate.code >= 500:
+                    failover.mark_cooldown(acct.id, reason=reason)
                 else:
                     failover.mark_cooldown(
                         acct.id,
@@ -597,6 +651,7 @@ class AntigravityProvider(BaseProvider):
                 await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
             if gate.eof:
+                lease.release()
                 # 语义事件之前断流/空流：没向客户端吐过字节，换下一个账号。
                 # 读超时（首事件前卡死）额外短冷却——挂死账号别每轮都被首选；
                 # 干净 EOF 不冷却（可能只是网络抖动，与 trae/model_order 同思路）。
@@ -630,7 +685,7 @@ class AntigravityProvider(BaseProvider):
                         acct.id, upstream_model, frame, p, c)
 
                 replay = _ReplayStream(gate.resp, gate.buffered, gate.lines,
-                                       on_close=_estimate)
+                                       on_close=_estimate, lease=lease)
                 if protocol == "anthropic":
                     return StreamingResponse(
                         _to_anthropic_stream(replay, upstream_model),
@@ -643,32 +698,35 @@ class AntigravityProvider(BaseProvider):
                     headers={"Cache-Control": "no-cache", "Connection": "close"},
                 )
 
-            payload = gate.payload
-            if payload is None:
+            try:
+                payload = gate.payload
+                if payload is None:
+                    await gate.resp.aclose()
+                    raise HTTPException(
+                        status_code=502,
+                        detail={"error": {"message": "antigravity upstream returned non-JSON",
+                                          "type": "bad_gateway"}},
+                    )
                 await gate.resp.aclose()
-                raise HTTPException(
-                    status_code=502,
-                    detail={"error": {"message": "antigravity upstream returned non-JSON",
-                                      "type": "bad_gateway"}},
+                chat = gemini_response_to_chat(payload, model=upstream_model)
+                # 单次消耗估算（水位落差）：写进本请求的帧 ag_credit，observability
+                # 落库时读帧（与流式同一条路径，只是触发点不同）。
+                # usage 在 envelope 的 response 里（顶层只有 response/traceId/metadata），
+                # 读顶层会恒为 0——token 数只用来分摊区间落差，读 0 会让分摊失准。
+                resp_obj = payload.get("response") if isinstance(payload, dict) else None
+                usage = (resp_obj.get("usageMetadata")
+                         if isinstance(resp_obj, dict) else None) or {}
+                await self._settle_frame(
+                    acct.id, upstream_model, frame,
+                    usage.get("promptTokenCount"), usage.get("candidatesTokenCount"),
                 )
-            await gate.resp.aclose()
-            chat = gemini_response_to_chat(payload, model=upstream_model)
-            # 单次消耗估算（水位落差）：写进本请求的帧 ag_credit，observability
-            # 落库时读帧（与流式同一条路径，只是触发点不同）。
-            # usage 在 envelope 的 response 里（顶层只有 response/traceId/metadata），
-            # 读顶层会恒为 0——token 数只用来分摊区间落差，读 0 会让分摊失准。
-            resp_obj = payload.get("response") if isinstance(payload, dict) else None
-            usage = (resp_obj.get("usageMetadata")
-                     if isinstance(resp_obj, dict) else None) or {}
-            await self._settle_frame(
-                acct.id, upstream_model, frame,
-                usage.get("promptTokenCount"), usage.get("candidatesTokenCount"),
-            )
-            if protocol == "anthropic":
-                from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
+                if protocol == "anthropic":
+                    from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
 
-                chat = chat_completion_to_anthropic_message(chat, original)
-            return JSONResponse(content=chat)
+                    chat = chat_completion_to_anthropic_message(chat, original)
+                return JSONResponse(content=chat)
+            finally:
+                lease.release()
 
         # 全部账号失败：报错里逐账号说明当前状态（谁在额度冷却还剩几分钟、
         # 谁疑似被拉黑）——不然用户看到「两个账号明明能用」却报 403，没法自查。
@@ -724,7 +782,7 @@ class AntigravityProvider(BaseProvider):
             err = payload.get("error") if isinstance(payload, dict) else None
             if isinstance(err, dict):
                 code = int(err.get("code") or 0)
-                if code in (429, 403):
+                if code in (429, 403) or code >= 500:
                     return _Gate(resp=resp, account_error=True, code=code,
                                  message=str(err.get("message") or ""))
             if not isinstance(payload, dict) or _has_real_payload(payload):
@@ -764,7 +822,7 @@ class AntigravityProvider(BaseProvider):
                 err = inner.get("error")
                 if isinstance(err, dict):
                     code = int(err.get("code") or 0)
-                    if code in (429, 403):
+                    if code in (429, 403) or code >= 500:
                         return _Gate(resp=resp, account_error=True, code=code,
                                      message=str(err.get("message") or ""), lines=lines)
                     # 其它带内错误（400 等）：换号没意义，缓冲行随透传交给转换器
@@ -1350,11 +1408,13 @@ class _ReplayStream:
     def __init__(self, resp: httpx.Response, buffered: list[str],
                  lines: AsyncIterator[str] | None = None,
                  on_close: Callable[[int | None, int | None],
-                                    Awaitable[float | None]] | None = None) -> None:
+                                    Awaitable[float | None]] | None = None,
+                 lease: AccountLease | None = None) -> None:
         self._resp = resp
         self._buffered = list(buffered)
         self._lines = lines
         self._on_close = on_close
+        self._lease = lease
         self._prompt: int | None = None
         self._completion: int | None = None
         self._probed = False
@@ -1393,14 +1453,18 @@ class _ReplayStream:
                 yield line
 
     async def aclose(self) -> None:
-        if self._on_close is not None and not self._probed:
-            self._probed = True
-            try:
-                await self._on_close(self._prompt, self._completion)
-            except Exception as exc:  # noqa: BLE001 - 旁路，绝不影响收尾
-                log.debug("antigravity 流式积分估算失败（忽略）: %s: %s",
-                          type(exc).__name__, exc)
-        await self._resp.aclose()
+        try:
+            if self._on_close is not None and not self._probed:
+                self._probed = True
+                try:
+                    await self._on_close(self._prompt, self._completion)
+                except Exception as exc:  # noqa: BLE001 - 旁路，绝不影响收尾
+                    log.debug("antigravity 流式积分估算失败（忽略）: %s: %s",
+                              type(exc).__name__, exc)
+            await self._resp.aclose()
+        finally:
+            if self._lease is not None:
+                self._lease.release()
 
 
 async def _drain_and_close(resp: httpx.Response, stream: bool,
