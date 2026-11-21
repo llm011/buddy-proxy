@@ -43,6 +43,7 @@ from buddy_proxy.core import cooldown as cooldown_mod
 from buddy_proxy.core.errors import is_local_dns_failure
 
 from .observability import _instrument
+from .empty_reply import synthesize_reply
 from .provider import (
     _default_codebuddy,
     _exc_is_channel_block,
@@ -526,6 +527,13 @@ async def _forward_with_order(
         diagnostic("model_order_failover", model=key, target=target, status=status)
 
     if last_exc is not None:
+        # 上游空内容（200 但没真负载）：合成一条带提示语的正常回复，而不是 502。
+        # 客户端对 502 是 turn error 直接中断、**不重试**；对空回复会重试，对
+        # 正常回复则不打断会话——用户能看到「没拿到回复、可以减小上下文再试」，
+        # 下一轮直接继续（见 empty_reply 模块 docstring）。
+        if _exc_is_empty_content(last_exc):
+            return synthesize_reply(key, protocol, reason="empty_content",
+                                    original=original, body=body)
         raise last_exc
     blocked_targets = skipped_by_reason.get("channel_blocked", [])
     gated_targets = skipped_by_reason.get("gated", [])
@@ -556,6 +564,13 @@ async def _forward_with_order(
                          "请在管理页 /ui 重新启用或调整可用时段")
         if cooled_targets:
             parts.append(f"处于冷却（{'、'.join(cooled_targets)}），冷却结束后可重试")
+        if not gated_targets:
+            # 纯冷却（没人被停用）：等一会儿自己会好，合成一条可读回复比 502
+            # 好——客户端（dsh 等）对 502 是 turn error 直接中断，对正常回复
+            # 则不会打断会话（见 empty_reply 模块 docstring）。
+            # 有 gated 目标时必须如实报错：那是要用户去 /ui 动手的事。
+            return synthesize_reply(key, protocol, reason="cooldown",
+                                    original=original, body=body)
         raise HTTPException(
             status_code=502,
             detail={
