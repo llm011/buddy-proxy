@@ -102,7 +102,7 @@ function renderKiroPanel() {
     const moveBtns = (m && n > 1) ? acctMoveButtons('kiro', idx, n, acct ? acct.id : '') : '';
     const delBtn = acctDeleteButton('kiro', acct, 'token 失效/不再使用时');
     const renameBtn = acctRenameButton('kiro', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('kiro', acct)}${delBtn}</span>`;
     const shown = acct ? (acct.label || acct.id)
       : grp.replace(/^Kiro(?:\s+#\d+)?\s+·\s+/, '');
     return `

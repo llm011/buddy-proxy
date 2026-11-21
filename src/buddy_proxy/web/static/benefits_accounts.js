@@ -24,6 +24,9 @@ let LOAD_BALANCE_ON = [];
 //: 已开启「会话轮转」的通道 id 列表（GET /ui/api/settings 的 session_rotation，
 //: 与 LOAD_BALANCE_ON 互斥）。
 let SESSION_ROTATION_ON = [];
+//: 被手动「临时下线」的账号键列表（GET /ui/api/settings 的 disabled_accounts，
+//: 形如 "antigravity:u@x.com"）。账号卡片据此渲染「禁用/启用」按钮态。
+let DISABLED_ACCOUNTS = [];
 //: 已开启均衡的通道里，哪些模型因「缓存按账号隔离」被自动跳过。
 //: {provider: [model, ...]}，来源 GET /ui/api/settings 的 load_balance_excluded。
 //: 与 LOAD_BALANCE_ON 分开存：一个是「开没开」，一个是「开了之后哪些模型不跟着转」。
@@ -219,6 +222,19 @@ function acctDeleteButton(pid, acct, hint) {
       `onclick="acctDelete('${pid}','${acct.id}')">✕</button>` : '';
 }
 
+/** ⏸/▶ 临时下线按钮（要账号 id）：禁用后该账号不参与转发选号，但保留凭据与顺位，
+ *  可随时启用恢复。与「删除」不同——删除清凭据，禁用只是暂停使用。快照没到时不渲染。 */
+function acctDisableButton(pid, acct) {
+  if (!acct || !acct.id) return '';
+  const key = `${pid}:${acct.id}`;
+  const off = (DISABLED_ACCOUNTS || []).includes(key);
+  return off
+    ? `<button class="ghost acct-enable" title="该账号已临时下线，点击恢复使用" ` +
+      `onclick="setAccountDisabled('${pid}','${acct.id}',false,this)">▶</button>`
+    : `<button class="ghost acct-disable" title="临时下线该账号（暂停参与转发，可随时恢复）" ` +
+      `onclick="setAccountDisabled('${pid}','${acct.id}',true,this)">⏸</button>`;
+}
+
 /** 渠道标题统一使用的整体额度刷新按钮。 */
 function providerRefreshButton(pid) {
   return `<button class="ghost" title="刷新本通道全部账号额度（绕过缓存重查）" ` +
@@ -327,19 +343,39 @@ async function loadLoadBalanceState() {
     const r = await api('/ui/api/settings');
     LOAD_BALANCE_ON = r.load_balance || [];
     SESSION_ROTATION_ON = r.session_rotation || [];
+    DISABLED_ACCOUNTS = r.disabled_accounts || [];
     LOAD_BALANCE_EXCLUDED = r.load_balance_excluded || {};
   } catch (e) {
     LOAD_BALANCE_ON = [];
     SESSION_ROTATION_ON = [];
+    DISABLED_ACCOUNTS = [];
     LOAD_BALANCE_EXCLUDED = {};
   }
 }
 
-/** ▲▼ + ✕ 合成右上角账号按钮组。渠道级 ↻ 统一放面板标题；这里仍放块尾、
+/** 切换某账号的「临时下线」状态（增量写入，只动这一个账号键）。 */
+async function setAccountDisabled(pid, id, on, el) {
+  if (el) el.disabled = true;
+  const key = `${pid}:${id}`;
+  try {
+    const r = await api('/ui/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({disabled_accounts: {[key]: !!on}})});
+    DISABLED_ACCOUNTS = (r.settings && r.settings.disabled_accounts) || [];
+    toast(on ? `已临时下线 ${id}（不再参与转发，可随时恢复）` : `已恢复使用 ${id}`);
+    if (typeof refreshAll === 'function') refreshAll();
+  } catch (e) {
+    toast('切换失败: ' + (e && e.message ? e.message : e), true);
+  } finally {
+    if (el) el.disabled = false;
+  }
+}
+
+/** ▲▼ + ⏸ + ✕ 合成右上角账号按钮组。渠道级 ↻ 统一放面板标题；这里仍放块尾、
  *  绝对定位——load 的就地回填靠「名字元素的下一个兄弟是副标题」定位，
- *  中间插任何元素会乱。 */
-function acctRowButtons(pid, moveBtns, delBtn) {
-  return `<span class="ag-move">${moveBtns}${delBtn}</span>`;
+ *  中间插任何元素会乱。acct 给定时附带「临时下线」按钮（禁用/启用）。 */
+function acctRowButtons(pid, moveBtns, delBtn, acct) {
+  return `<span class="ag-move">${moveBtns}${acctDisableButton(pid, acct)}${delBtn}</span>`;
 }
 
 /** 按「<Prefix> #N」切分组。额度 label 形如「<Prefix> #N · <条目>」，单账号无前缀。

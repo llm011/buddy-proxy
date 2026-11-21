@@ -236,11 +236,46 @@ def session_rotation_enabled(state: Any, provider_id: str) -> bool:
     return provider_id in (on or ())
 
 
+def is_account_disabled(state: Any, provider_id: str, account_id: str) -> bool:
+    """该账号是否被用户在管理页手动「临时下线」。
+
+    键口径 ``provider_id:account_id``（与 settings.disabled_accounts 一致）。
+    state 缺失/无禁用表时返回 False——离线/测试直连行为与历史一致。
+    """
+    try:
+        disabled = getattr(state, "disabled_accounts", None)
+    except Exception:  # noqa: BLE001 - 无运行态：当没禁用
+        return False
+    if not disabled:
+        return False
+    return f"{provider_id}:{account_id}" in disabled
+
+
+def _filter_disabled(state: Any, provider_id: str, pool: list[Any]) -> list[Any]:
+    """剔除被手动禁用的账号。无禁用表时原样返回（不制造无谓拷贝）。
+
+    这是**用户政策开关**（同 load_balance/session_rotation），不是健康过滤：
+    无论均衡/轮转开关开没开，被禁用的账号一律不参与转发。放在 reorder 入口
+    统一处理，所有调用 reorder 的通道（含 kiro 直取 creds.list_accounts 的路径）
+    自动生效，不必逐通道改 failover。
+    """
+    try:
+        disabled = getattr(state, "disabled_accounts", None)
+    except Exception:  # noqa: BLE001 - 无运行态：不过滤
+        return pool
+    if not disabled:
+        return pool
+    return [a for a in pool
+            if f"{provider_id}:{getattr(a, 'id', '') or ''}" not in disabled]
+
+
 def reorder(state: Any, provider_id: str, accounts: Sequence[Any],
             model: str | None = None, *, session_key: str | None = None) -> list[Any]:
     """按开关决定是否重排账号顺序；返回**新列表**（不修改入参）。
 
-    两条可选策略（开关互斥；同时出现时会话轮转优先）：
+    入口先剔除被用户手动禁用的账号（``state.disabled_accounts``，政策开关，
+    与均衡/轮转无关，始终生效）。剩余账号再按两条可选策略排序（开关互斥；
+    同时出现时会话轮转优先）：
     1. **会话轮转**（``state.session_rotation``）：仅当请求带有显式会话标识
        （``session_key`` / ContextVar ``SESSION_KEY``）时生效——新会话按可用账号
        顺位轮转分配，同一会话在有效期内粘在同一个账号上。因为同一会话不中途
@@ -249,10 +284,11 @@ def reorder(state: Any, provider_id: str, accounts: Sequence[Any],
     2. **负载均衡**（``state.load_balance``）：按剩余额度加权随机抽样。命中
        「缓存按账号隔离」名单的模型仍保持原顺位，避免每次请求白丢缓存。
 
-    过滤（冷却 / region / 单模型限流 / per-account 模型支持）**必须**在调用
-    本函数之前完成：这里只决定「先试谁」，不决定「谁能试」。
+    健康/能力过滤（冷却 / region / 单模型限流 / per-account 模型支持）**必须**在
+    调用本函数之前完成：那些决定「谁能试」且影响权重计算。手动禁用是用户政策
+    开关（同均衡/轮转），故在本函数入口统一剔除，不属于上述健康过滤。
     """
-    pool = list(accounts or ())
+    pool = _filter_disabled(state, provider_id, list(accounts or ()))
     if len(pool) < 2:
         return pool
     if session_rotation_enabled(state, provider_id):

@@ -137,7 +137,7 @@ function renderTraePanel() {
       ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
         `onclick="traeDeleteAccount('${acct.id}')">✕</button>` : '';
     const renameBtn = acctRenameButton('trae', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('trae', acct)}${delBtn}</span>`;
     // 合计行：总额度那条（head_only，unshift 到组首）单独供数——各权益包是
     // 它的明细不能相加，quotaHeadSum 走非 sum_items 分支取第一条有数的。
     const headSum = quotaHeadSum({items: its});

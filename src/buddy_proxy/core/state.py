@@ -85,6 +85,7 @@ class ProxyState:
         disabled_providers: Optional[set[str]] = None,
         load_balance: Optional[set[str]] = None,
         session_rotation: Optional[set[str]] = None,
+        disabled_accounts: Optional[set[str]] = None,
         model_schedules: Optional[dict[str, list]] = None,
         model_order: Optional[dict[str, list[str]]] = None,
         metrics: Optional[Any] = None,
@@ -125,6 +126,11 @@ class ProxyState:
         # 命中通道在请求带 x-session-id 等标识时将不同会话轮流分配给不同账号，
         # 同会话固定粘在同一账号上（见 core/load_balance.py）。
         self.session_rotation: set[str] = set(session_rotation or ())
+        # 被用户手动「临时下线」的账号键集合，形如 "antigravity:ethanspiring@gmail.com"
+        # （provider_id:account_id）。命中账号在转发选号时被剔除（core/load_balance.py
+        # 的 reorder 入口统一过滤），与冷却无关、始终生效；管理页账号卡片可切换。
+        # settings.py 持久化，重启保留。空集 = 无账号被禁用。
+        self.disabled_accounts: set[str] = set(disabled_accounts or ())
         # 限时可用模型：键 "provider/model" → 允许时间窗列表 [["HH:MM","HH:MM"], ...]。
         # 命中的模型仅在窗口内放行、窗口外 403（与 disabled_models 并存，disabled
         # 优先级更高）。settings.py 持久化，/ui 可改。空 dict = 所有模型不受时段限制。

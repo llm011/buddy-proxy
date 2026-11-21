@@ -141,7 +141,7 @@ function renderQoderPanel() {
       ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
         `onclick="qoderDeleteAccount('${acct.id}')">✕</button>` : '';
     const renameBtn = acctRenameButton('qoder', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('qoder', acct)}${delBtn}</span>`;
     // 合计行：qoder 的订阅额度/加油包/专属积分是并存的份额，加起来才是账号
     // 总量（后端 sum_items 声明可合计）。quotaHeadSum 原本服务「列表头部」，
     // 借用它产出同款「剩 X / Y」chip，放进账号卡标题行下。
@@ -261,7 +261,7 @@ function renderQoderIntlPanel() {
       `${_qoder_sub_html(acct, false)}` +
       `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
       `${quotaItemsHtml(its, 'qoderintl:' + grp)}` +
-      `${acct ? `<span class="ag-move">${acctRenameButton('qoderintl', acct)}</span>` : ''}</div>`;
+      `${acct ? `<span class="ag-move">${acctRenameButton('qoderintl', acct)}${acctDisableButton('qoderintl', acct)}</span>` : ''}</div>`;
   }).join('');
   const noticeHtml = notices.map(quotaItemHtml).join('');
   // 同上：没有账号卡（未登录 / 查询为空）就收起明细，以免整块空白占屏。

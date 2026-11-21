@@ -235,7 +235,7 @@ function renderCopilotPanel() {
     const moveBtns = (m && n > 1) ? acctMoveButtons('copilot', idx, n, acct ? acct.id : '') : '';
     const delBtn = acctDeleteButton('copilot', acct, 'token 撤销/不再使用时');
     const renameBtn = acctRenameButton('copilot', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('copilot', acct)}${delBtn}</span>`;
     const shown = acct ? (acct.alias || acct.name || acct.id) : grp.replace(/^Copilot #\d+ · /, '');
     return `
     <div class="pat-pkg">
