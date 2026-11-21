@@ -135,9 +135,9 @@ def test_generation_config_and_effort():
     req = chat_to_gemini_request(body, project_id="p", model="m", stream=False)
     gc = req["request"]["generationConfig"]
     assert gc["temperature"] == 0.5
-    assert gc["maxOutputTokens"] == 99
-    # low → 2048（对齐 DSH pi-ai DEFAULT_THINKING_BUDGETS）；但 max_tokens=99
-    # 太小，按 MIN_ANSWER_TOKENS=1024 钳到 0，保证正文不被 thinking 吃光。
+    # 强推理请求的小 max_tokens 被抬到下限（见 _MIN_REASONING_OUTPUT_TOKENS）。
+    assert gc["maxOutputTokens"] == 1024
+    # low → 2048；按 effective_max(1024) 与 MIN_ANSWER_TOKENS=1024 钳到 0。
     assert gc["thinkingConfig"] == {"thinkingBudget": 0}
 
 
@@ -195,6 +195,46 @@ def test_no_effort_still_sends_budget():
     body.pop("reasoning_effort", None)
     gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
     assert gc["thinkingConfig"]["thinkingBudget"] > 0
+
+
+# ---------------------------------------------------------------------------
+# maxOutputTokens 下限：根治「小预算 → MAX_TOKENS 空流」
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("effort", ["max", "xhigh", "high", "low", "minimal", None])
+def test_reasoning_request_raises_small_max_output(effort):
+    """强推理请求 max_tokens=64 必须抬到下限 1024（实测 64 时 25~50% 空内容）。
+
+    退化护栏：这是比 thinkingBudget 更硬的根因——只发 thinkingConfig 而不抬
+    maxOutputTokens，短 prompt + 64 预算照样空。effort 缺省也算强推理路径。
+    """
+    body = _basic_body(max_tokens=64)
+    if effort:
+        body["reasoning_effort"] = effort
+    else:
+        body.pop("reasoning_effort", None)
+    gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
+    assert gc["maxOutputTokens"] == 1024
+    # 抬到 1024 后 budget 按 MIN_ANSWER_TOKENS 钳到 0，正文空间独占
+    assert gc["thinkingConfig"]["thinkingBudget"] == 0
+
+
+@pytest.mark.parametrize("effort", ["none", "off", "disable"])
+def test_thinking_off_keeps_client_max_output(effort):
+    """明确关思考时不抬 maxOutputTokens，尊重客户端契约。"""
+    body = _basic_body(max_tokens=64, reasoning_effort=effort)
+    gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
+    assert gc["maxOutputTokens"] == 64
+    assert gc["thinkingConfig"] == {"thinkingBudget": 0}
+
+
+def test_large_max_output_unchanged():
+    """max_tokens 本来就大时不改动。"""
+    body = _basic_body(max_tokens=4096, reasoning_effort="max")
+    gc = chat_to_gemini_request(body, project_id="p", model="m", stream=False)["request"]["generationConfig"]
+    assert gc["maxOutputTokens"] == 4096
+    assert gc["thinkingConfig"] == {"thinkingBudget": 4096 - 1024}
 
 
 # ---------------------------------------------------------------------------
