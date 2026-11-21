@@ -208,8 +208,14 @@ function renderAntigravityPanel() {
     // ✎ 改名：同样要 id（同 ✕ 快照没到先不渲）。放按钮组最前=标题行行尾，
     // 别插在名字和副标题之间——就地回填靠「名字元素的下一个兄弟是副标题」定位。
     const renameBtn = acctRenameButton('antigravity', acct);
-    // 账号级按钮只保留改名/排序/删除；渠道级 ↻ 统一放面板标题。
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    // 账号级按钮：改名 / 排序 / **下线** / 删除。渠道级 ↻ 统一放面板标题。
+    //
+    // 下线按钮这里之前漏了（只有 fill 路径的 acctRowButtons 带了它）——
+    // 首屏由本函数整卡渲染，所以用户看到的就是「额度子卡片里没有下线按钮」。
+    // antigravity 走 lb_mod.reorder(..., 'antigravity', ...)，键为
+    // 'antigravity:<id>'，禁用真实生效。
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}` +
+      `${acctDisableButton('antigravity', acct)}${delBtn}</span>`;
     return `
     <div class="pat-pkg">
       <span class="pat-pkg-name"${m ? ` data-ag-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.email) : grp)}</span>

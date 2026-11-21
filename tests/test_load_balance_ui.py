@@ -108,18 +108,64 @@ def test_account_disable_helper_and_state():
 
 
 def test_account_disable_button_wired_in_panels():
-    # 走 acctRowButtons 第 4 参（acct）的面板（antigravity 就地回填路径）
-    ag = (_STATIC / "benefits_antigravity.js").read_text(encoding="utf-8")
-    assert "acctRowButtons('antigravity'," in ag and ", delBtn, a)" in ag
-    # 内联拼按钮组的面板（均为多账号 failover 通道，禁用经 reorder 真实生效）
-    for fname, pid in [("benefits_copilot.js", "copilot"), ("benefits_codex.js", "codex"),
-                       ("benefits_kiro.js", "kiro"), ("benefits_qoder.js", "qoder"),
-                       ("benefits_trae.js", "trae"), ("benefits_codebuddy.js", "codebuddy")]:
+    """**每个**多账号面板都要接下线按钮。
+
+    这条测试以前是手写清单（copilot/codex/kiro/qoder/trae/codebuddy），
+    于是 antigravity 的首屏整卡渲染路径、kimi、traeintl 三个都漏了——用户
+    2026-11-22 实报「多账号的额度子卡片里为什么没有下线按钮，你很多没加全」。
+    清单式断言只能保证「写进清单的没退化」，保证不了「新增的没漏」。
+
+    现在改成从 ``_PANELS``（面板注册表）派生：凡是登记为多账号面板的通道，
+    都必须在**它自己的文件**里出现 ``acctDisableButton('<pid>'``。新增通道
+    往 ``_PANELS`` 加一行，这条测试自动覆盖，漏接当场红。
+    """
+    missing: list[str] = []
+    for pid, (fname, _count_expr) in sorted(_PANELS.items()):
+        if pid == "dumate":
+            # 单账号本地 App、不走 reorder，禁用对它无效 → 不挂假控件
+            src = (_STATIC / fname).read_text(encoding="utf-8")
+            assert "acctDisableButton('dumate'" not in src, (
+                "dumate 是单账号通道，禁用不生效，不该挂假控件")
+            continue
         src = (_STATIC / fname).read_text(encoding="utf-8")
-        assert f"acctDisableButton('{pid}', acct)" in src, f"{fname} 没接禁用按钮"
-    # dumate 是单账号本地 App、不走 reorder，禁用对其无效 → 不挂假控件
-    dm = (_STATIC / "benefits_dumate.js").read_text(encoding="utf-8")
-    assert "acctDisableButton('dumate'" not in dm
+        if f"acctDisableButton('{pid}'" not in src:
+            missing.append(f"{pid} ({fname})")
+    assert not missing, (
+        "以下多账号面板没接「下线」按钮：" + "、".join(missing) +
+        "。禁用对这些通道经 reorder 真实生效，必须有入口")
+
+
+def test_account_disable_button_covers_first_paint_path():
+    """antigravity 的**首屏整卡渲染**也要带下线按钮（不只是回填路径）。
+
+    ``fillAntigravityAccounts`` 走 ``acctRowButtons``（带第 4 参 acct），
+    但首屏是 ``renderAntigravityPanel`` 内联拼 ``rowBtns``——只修回填路径时
+    用户看到的仍是「没有下线按钮」。
+    """
+    src = (_STATIC / "benefits_antigravity.js").read_text(encoding="utf-8")
+    # 两处都要有：acctRowButtons 的第 4 参 + 内联 rowBtns
+    assert "acctRowButtons('antigravity'," in src and ", delBtn, a)" in src
+    inline = re.search(
+        r"const rowBtns = `<span class=\"ag-move\">.*?`;", src, re.S)
+    assert inline, "找不到 antigravity 首屏的内联 rowBtns"
+    assert "acctDisableButton('antigravity'" in inline.group(0), (
+        f"首屏 rowBtns 缺下线按钮：{inline.group(0)!r}")
+
+
+def test_traeintl_card_has_disable_button():
+    """traeintl（海外版）卡片要有下线按钮，且 pid 用 'traeintl'。
+
+    海外版与 CN 共用 work 账号池、按 region=global 过滤，``TraeIntlProvider``
+    继承父类 forward → ``lb_mod.reorder(..., self.id, ...)``（self.id 即
+    'traeintl'），所以键是 'traeintl:<id>'，禁用真实生效。
+    """
+    src = (_STATIC / "benefits_trae.js").read_text(encoding="utf-8")
+    assert "acctDisableButton('traeintl'" in src, (
+        "海外版卡片缺下线按钮")
+    # 不能拿 CN 号充数：分组名无 #N 时按 region=global 兜底，且只在唯一海外号时给
+    assert "a.region === 'global'" in src, (
+        "海外面板兜底取账号必须按 region=global 过滤，否则会把 CN 号的下线按钮"
+        "画到海外卡上，点下去停用的是另一个区的账号")
 
 
 def test_account_disable_button_is_always_visible():

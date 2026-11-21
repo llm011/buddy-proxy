@@ -170,7 +170,11 @@ function renderKimiPanel() {
       ? `<button class="ghost danger" title="删除该账号（refresh_token 作废/不再使用时）" ` +
         `onclick="kimiDeleteAccount('${acct.id}')">✕</button>` : '';
     const renameBtn = acctRenameButton('kimi', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    // 下线按钮：kimi 走 lb_mod.reorder(_lb_state(), 'kimi', …)（见 provider.py），
+    // 所以 disabled_accounts 的键就是 'kimi:<id>'，禁用真实生效。
+    // 之前这里漏了它——用户 2026-11-22 实报「多账号的额度子卡片里没有下线按钮」。
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}` +
+      `${acctDisableButton('kimi', acct)}${delBtn}</span>`;
     return `
     <div class="pat-pkg">
       <span class="pat-pkg-name"${m ? ` data-kimi-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.id) : grp)}</span>
