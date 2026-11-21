@@ -292,27 +292,69 @@ def clean_json_schema_for_gemini(schema: dict[str, Any]) -> dict[str, Any]:
     return cleaned if isinstance(cleaned, dict) and cleaned else {"type": "object", "properties": {}}
 
 
+#: reasoning_effort → thinkingBudget 预算表，对齐 DSH pi-ai 的
+#: ``DEFAULT_THINKING_BUDGETS``（simple-options.js:60）。档位名按 pi-ai 的
+#: ``clampReasoning`` 归一：xhigh/max 归 high、minimal 归 low。
+#: 上游 v1internal 里 reasoning 与 answer **共享 maxOutputTokens**——不设
+#: thinkingBudget 时强推理模型会把整个输出预算吃光，正文 0 token、流里只有
+#: thinking 甚至直接空流（实测 max_tokens<=64 时 100% 空内容，>=256 时正常）。
+#: 因此每个档位都必须显式发 budget，不能把默认值交给上游。
+_THINKING_BUDGETS: dict[str, int] = {
+    "minimal": 1024,
+    "low": 2048,
+    "medium": 8192,
+    "high": 16384,
+}
+#: 归一别名：DSH TUI 的 effort 档位名 → 上面预算表里的键。
+#: 对齐 pi-ai ``clampReasoning``：只把 xhigh/max 归 high；minimal 是独立档位
+#: （budget=1024），不能并进 low，否则小 max_tokens 下更容易吃光正文。
+_EFFORT_ALIASES: dict[str, str] = {
+    "xhigh": "high",
+    "max": "high",
+}
+#: 至少要给正文留的 token 数（同 pi-ai ``MIN_ANSWER_TOKENS``）。
+#: 当 max_tokens 很小、thinkingBudget 会吃光预算时按它钳制。
+_MIN_ANSWER_TOKENS = 1024
+
+
 def _generation_config(body: dict[str, Any]) -> dict[str, Any]:
     cfg: dict[str, Any] = {}
     if body.get("temperature") is not None:
         cfg["temperature"] = body["temperature"]
     if body.get("top_p") is not None:
         cfg["topP"] = body["top_p"]
-    if body.get("max_tokens") is not None:
-        cfg["maxOutputTokens"] = body["max_tokens"]
+    max_tokens = body.get("max_tokens")
+    if max_tokens is not None:
+        cfg["maxOutputTokens"] = max_tokens
     stops = body.get("stop")
     if isinstance(stops, str):
         cfg["stopSequences"] = [stops]
     elif isinstance(stops, list) and stops:
         cfg["stopSequences"] = [str(s) for s in stops]
-    # reasoning_effort → thinkingConfig（Gemini 2.5+；低配额下 low 最实用）
-    effort = str(body.get("reasoning_effort") or "").lower()
-    if effort in ("low", "medium", "high"):
-        cfg["thinkingConfig"] = {
-            "thinkingBudget": {"low": 1024, "medium": 8192, "high": 24576}[effort]
-        }
-    elif effort == "none" or effort == "disable":
+
+    # reasoning_effort → thinkingConfig.thinkingBudget（Gemini 2.5+ 强推理模型）。
+    # DSH pi-ai 会发 max/xhigh/minimal/off/none 等档位名；旧逻辑只认
+    # low/medium/high/none，其余档位**完全不发 thinkingConfig**，等于把 thinking
+    # 交给上游默认（无上限），正是「空内容 502」的根因之一。
+    effort = str(body.get("reasoning_effort") or "").strip().lower()
+    if effort in ("none", "off", "disable"):
         cfg["thinkingConfig"] = {"thinkingBudget": 0}
+    elif effort:
+        level = _EFFORT_ALIASES.get(effort, effort)
+        budget = _THINKING_BUDGETS.get(level)
+        if budget is None:
+            # 未知档位名也不能退化成「不发 thinkingConfig」（= 无上限）：
+            # 退回 low 档，至少保证上游 thinking 有界、正文不会被吃光。
+            budget = _THINKING_BUDGETS["low"]
+        # 与 pi-ai 同款钳制：reasoning 和 answer 共享 max_tokens，留足正文。
+        # max_tokens 缺省时不钳（上游按模型上限自己管）；给了才钳。
+        if isinstance(max_tokens, int) and 0 < max_tokens < budget + _MIN_ANSWER_TOKENS:
+            budget = max(0, max_tokens - _MIN_ANSWER_TOKENS)
+        cfg["thinkingConfig"] = {"thinkingBudget": budget}
+    else:
+        # effort 缺省（老调用方/客户端没带）：同样给一个有界默认值，避免把
+        # thinking 完全交给上游默认。取 low 档最保守，不强推高推理。
+        cfg["thinkingConfig"] = {"thinkingBudget": _THINKING_BUDGETS["low"]}
     return cfg
 
 
