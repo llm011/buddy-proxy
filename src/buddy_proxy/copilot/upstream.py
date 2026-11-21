@@ -394,6 +394,29 @@ def _number(value: Any) -> float | None:
     return None
 
 
+def usage_has_quota(data: dict[str, Any]) -> bool:
+    """额度数据是否表明「账号还有可用额度」。
+
+    用于解除 402 记下的耗尽标记：快照里任一项有正剩余、或标记为 unlimited，
+    就算恢复。拿不到快照 / 全是 0 / 字段缺失都返回 False——宁可继续挂着耗尽
+    标记，也不要因为一次解析不稳就把耗尽的号放回来白撞。
+    """
+    snapshots = data.get("quota_snapshots")
+    if not isinstance(snapshots, dict):
+        return False
+    for snap in snapshots.values():
+        if not isinstance(snap, dict):
+            continue
+        if snap.get("unlimited"):
+            return True
+        remaining = _number(snap.get("remaining"))
+        if remaining is None:
+            remaining = _number(snap.get("quota_remaining"))
+        if remaining is not None and remaining > 0:
+            return True
+    return False
+
+
 def plan_label(data: dict[str, Any]) -> str:
     """套餐名（``copilot_plan`` / ``access_type_sku``）；取不到返回空串。"""
     for key in ("copilot_plan", "access_type_sku"):

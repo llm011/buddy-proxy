@@ -58,6 +58,7 @@ from .upstream import (
     plan_label,
     quota_reset_ts,
     upstream_headers,
+    usage_has_quota,
 )
 
 log = logging.getLogger(__name__)
@@ -346,6 +347,13 @@ class CopilotProvider(BaseProvider):
                         acct.id, upstream_model,
                         reason=f"HTTP {resp.status_code} {code or message}")
                     continue
+                if failover.is_exhausted_signal(resp.status_code, code, message):
+                    # 402「月度配额耗尽」：直接标记账号耗尽、从可用集合剔除，
+                    # 不做任何定时重试（猜恢复时间只会反复白撞）。下次额度查询
+                    # 确认有剩余额度时由 _quota_one 清标记。
+                    failover.mark_exhausted(
+                        acct.id, reason=f"HTTP {resp.status_code} {code or message}")
+                    continue
                 if failover.is_quota_signal(resp.status_code, code):
                     failover.mark_cooldown(
                         acct.id, retry_after=resp.headers.get("retry-after"),
@@ -592,6 +600,13 @@ class CopilotProvider(BaseProvider):
         except Exception as exc:  # noqa: BLE001
             log.warning("copilot 额度查询失败（%s）: %s", acct.id, exc)
             return [], None, False
+
+        # 额度查询是「账号还有没有额度」的权威数据源：确认有剩余额度时，解除
+        # 402 记下的耗尽标记（发现 402 → 剔除 → 等额度查询恢复 → 重新启用）。
+        # 查询失败/接口拒了（上面两个 except 已 return）不碰标记，避免一次抖动
+        # 就把耗尽的号放回来白撞。
+        failover.clear_exhausted_if_recovered(acct.id, has_quota=usage_has_quota(data))
+
         items = parse_user_usage(data)
         level = plan_label(data) or None
         if not items:

@@ -8,6 +8,12 @@
   即恢复，自动删号会让用户下次登录时莫名多一个「新」顺位。
 - **额度**冷却（``quota`` 档，300s）：429。只记账号级——Copilot 的 429 是
   账号维度的配额/频率限制，本账号所有模型一起停，换模型救不了。
+- **月度配额耗尽**标记（``_exhausted`` 集合）：402 ``quota_exceeded`` /
+  「You have exceeded your monthly quota」。这是**长周期**状态，5 分钟甚至
+  6 小时都不会恢复——旧逻辑按 300s quota 档冷却，实测 11-17~11-21 反复
+  白撞 19 次，antigravity 抖动时这条兜底永远「刚好还在冷却」。
+  改成发现 402 就把账号标记为耗尽、直接从 ``available_accounts`` 剔除，
+  **不做任何定时重试**；只有下次额度查询确认有剩余额度时才清除标记。
 - **模型级**冷却（复合键 ``账号\\x00模型``，``quota`` 档）：400
   ``model_not_supported`` / 400 ``no_available_model_endpoints``——这是
   **SKU 不含该模型**的确定性拒绝（不是请求写错），账号本身完全健康。只冷却
@@ -20,6 +26,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any
 
 from ..core.account_failover import CooldownTracker, diagnose_available
@@ -28,6 +35,12 @@ from .credentials import AccountRef, list_accounts, load_account_cred
 log = logging.getLogger(__name__)
 
 _tracker = CooldownTracker()
+
+#: 被上游 402「月度配额耗尽」判过死刑的账号集合。**不做定时重试**——耗尽是
+#: 整个计费周期的状态，猜「多久恢复」只会反复白撞。只有额度查询（quota()）
+#: 确认该账号又有剩余额度时才从这里移除。进程重启清零，代价只是重探一次。
+_exhausted: set[str] = set()
+_exhausted_lock = threading.Lock()
 
 #: 活引用 tracker 内部 dict（同 ``_tracker._cooldowns``）：测试直接清空用。
 _cooldowns = _tracker._cooldowns
@@ -74,6 +87,56 @@ def is_quota_signal(code: int, error_code: str = "") -> bool:
     return code == 429 or error_code in _QUOTA_CODES
 
 
+def is_exhausted_signal(code: int, error_code: str = "", message: str = "") -> bool:
+    """这是不是「月度/长周期配额耗尽」（402），区别于 5 分钟级的 429 限流。
+
+    实测 jsongo 账号 11-17~11-21 反复收到 ``402 quota_exceeded`` /
+    「You have exceeded your monthly quota」，这是整个计费周期都不可用的
+    长状态，按 300s quota 档冷却只会每 5 分钟白撞一次。
+    """
+    if code == 402:
+        return True
+    text = (message or "").lower()
+    return (error_code == "quota_exceeded"
+            or "monthly quota" in text
+            or "exceeded your" in text and "quota" in text)
+
+
+def mark_exhausted(account_id: str, *, reason: str = "") -> None:
+    """把账号标记为「月度配额耗尽」，从可用集合里剔除，不再定时重试。
+
+    恢复不靠计时：只有 ``clear_exhausted_if_recovered()`` 在额度查询确认
+    「有剩余额度」时才清标记（见 provider._quota_one）。
+    """
+    with _exhausted_lock:
+        _exhausted.add(account_id)
+    if reason:
+        log.warning("账号 %s 月度配额耗尽（%s），已标记下线，等额度查询确认恢复后再启用",
+                    account_id, reason)
+
+
+def is_exhausted(account_id: str) -> bool:
+    with _exhausted_lock:
+        return account_id in _exhausted
+
+
+def clear_exhausted_if_recovered(account_id: str, *, has_quota: bool) -> bool:
+    """额度查询回来后调用：``has_quota=True`` 时清掉耗尽标记，返回是否清了。
+
+    ``has_quota`` 由调用方按额度数据判定（有上限项 remaining>0，或账号是
+    无限额度 / 无上限项）。查询失败/拿不到额度时传 False——保持标记，不
+    因为一次查询抖动就把耗尽的号放回来白撞。
+    """
+    if not has_quota:
+        return False
+    with _exhausted_lock:
+        removed = account_id in _exhausted
+        _exhausted.discard(account_id)
+    if removed:
+        log.info("账号 %s 额度已恢复，解除耗尽标记", account_id)
+    return removed
+
+
 def mark_cooldown(account_id: str, *, retry_after: str | None = None,
                   quota: bool = False, reason: str = "") -> float:
     """把账号冷却一段时间（``retry_after`` 优先），返回实际冷却秒数。"""
@@ -95,16 +158,20 @@ def model_cooldown_left(account_id: str, model: str) -> tuple[float, str]:
 
 
 def clear_cooldown(account_id: str) -> None:
-    """清掉该账号的冷却标记（删除账号后调用），连带清模型级复合键。"""
+    """清掉该账号的冷却标记（删除账号后调用），连带清模型级复合键与耗尽标记。"""
     _tracker.clear(account_id)
     prefix = f"{account_id}{_MODEL_KEY_SEP}"
     with _tracker._lock:  # noqa: SLF001 - 同模块内的状态清理
         for key in [k for k in _tracker._cooldowns if k.startswith(prefix)]:
             _tracker._cooldowns.pop(key, None)
+    with _exhausted_lock:
+        _exhausted.discard(account_id)
 
 
 def clear_all() -> None:
     _tracker.clear_all()
+    with _exhausted_lock:
+        _exhausted.clear()
 
 
 def cooldown_left(account_id: str) -> tuple[float, str]:
@@ -112,10 +179,13 @@ def cooldown_left(account_id: str) -> tuple[float, str]:
 
 
 def available_accounts(model: str | None = None) -> list[AccountRef]:
-    """当前可用账号（按 failover 顺位），剔除账号级与该模型级的冷却。"""
+    """当前可用账号（按 failover 顺位），剔除冷却中与额度耗尽的账号。"""
     accts = list_accounts()
+    with _exhausted_lock:
+        exhausted = set(_exhausted)
     out = [a for a in accts
-           if cooldown_left(a.id)[0] <= 0
+           if a.id not in exhausted
+           and cooldown_left(a.id)[0] <= 0
            and (model is None or model_cooldown_left(a.id, model)[0] <= 0)]
     diagnose_available("copilot", _tracker, accts, out, log=log)
     return out
