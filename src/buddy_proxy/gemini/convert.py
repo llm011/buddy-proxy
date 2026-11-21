@@ -294,11 +294,12 @@ def clean_json_schema_for_gemini(schema: dict[str, Any]) -> dict[str, Any]:
 
 #: reasoning_effort → thinkingBudget 预算表，对齐 DSH pi-ai 的
 #: ``DEFAULT_THINKING_BUDGETS``（simple-options.js:60）。档位名按 pi-ai 的
-#: ``clampReasoning`` 归一：xhigh/max 归 high、minimal 归 low。
-#: 上游 v1internal 里 reasoning 与 answer **共享 maxOutputTokens**——不设
-#: thinkingBudget 时强推理模型会把整个输出预算吃光，正文 0 token、流里只有
-#: thinking 甚至直接空流（实测 max_tokens<=64 时 100% 空内容，>=256 时正常）。
-#: 因此每个档位都必须显式发 budget，不能把默认值交给上游。
+#: ``clampReasoning`` 归一：xhigh/max 归 high、minimal 是独立档位。
+#: 上游 v1internal 里 reasoning 与 answer **共享 maxOutputTokens**：
+#: - 不设 thinkingBudget 时强推理模型 thinking 可能吃光输出预算；
+#: - 但实测更硬的根因是 **maxOutputTokens 本身太小**——短 prompt + 64 token
+#:   时约 25~50% 概率上游只回 ``MAX_TOKENS`` 空流（连 thinkingBudget=0 也救不
+#:   了），>=256 时 0% 空。因此强推理路径要把 maxOutputTokens 抬到下限。
 _THINKING_BUDGETS: dict[str, int] = {
     "minimal": 1024,
     "low": 2048,
@@ -315,6 +316,11 @@ _EFFORT_ALIASES: dict[str, str] = {
 #: 至少要给正文留的 token 数（同 pi-ai ``MIN_ANSWER_TOKENS``）。
 #: 当 max_tokens 很小、thinkingBudget 会吃光预算时按它钳制。
 _MIN_ANSWER_TOKENS = 1024
+#: 强推理请求的 maxOutputTokens 下限。实测：64 → 2/8 空内容，256/1024 → 0/8。
+#: 客户端常给 64 这种很小的预算（如标题/分类任务），但 gemini-4-hydrogen-high
+#: 这类强推理模型连 thinkingBudget=0 都无法保证在 64 内吐出正文。只在带
+#: 强推理 effort（非 off/none）时抬高，纯文本/关思考请求仍尊重客户端原值。
+_MIN_REASONING_OUTPUT_TOKENS = 1024
 
 
 def _generation_config(body: dict[str, Any]) -> dict[str, Any]:
@@ -324,8 +330,19 @@ def _generation_config(body: dict[str, Any]) -> dict[str, Any]:
     if body.get("top_p") is not None:
         cfg["topP"] = body["top_p"]
     max_tokens = body.get("max_tokens")
-    if max_tokens is not None:
-        cfg["maxOutputTokens"] = max_tokens
+    effort = str(body.get("reasoning_effort") or "").strip().lower()
+    # 只有「明确关闭思考」(none/off/disable) 才不抬下限；effort 缺省也走
+    # 低档 thinking（见下方 else 分支），同样要抬，否则 64 预算照样空。
+    reasoning_on = effort not in ("none", "off", "disable")
+    # 强推理请求给 maxOutputTokens 设下限：小预算会被上游 thinking 吃光或
+    # 直接吐 MAX_TOKENS 空流（实测 64 时 2/8 空、256 时 0/8）。纯文本请求或
+    # 关思考时保持客户端原值，不改契约。
+    effective_max = max_tokens
+    if (reasoning_on and isinstance(max_tokens, int)
+            and 0 < max_tokens < _MIN_REASONING_OUTPUT_TOKENS):
+        effective_max = _MIN_REASONING_OUTPUT_TOKENS
+    if effective_max is not None:
+        cfg["maxOutputTokens"] = effective_max
     stops = body.get("stop")
     if isinstance(stops, str):
         cfg["stopSequences"] = [stops]
@@ -347,14 +364,21 @@ def _generation_config(body: dict[str, Any]) -> dict[str, Any]:
             # 退回 low 档，至少保证上游 thinking 有界、正文不会被吃光。
             budget = _THINKING_BUDGETS["low"]
         # 与 pi-ai 同款钳制：reasoning 和 answer 共享 max_tokens，留足正文。
+        # 用 effective_max（已抬下限）而非原始 max_tokens，否则下限白抬。
         # max_tokens 缺省时不钳（上游按模型上限自己管）；给了才钳。
-        if isinstance(max_tokens, int) and 0 < max_tokens < budget + _MIN_ANSWER_TOKENS:
-            budget = max(0, max_tokens - _MIN_ANSWER_TOKENS)
+        if (isinstance(effective_max, int)
+                and 0 < effective_max < budget + _MIN_ANSWER_TOKENS):
+            budget = max(0, effective_max - _MIN_ANSWER_TOKENS)
         cfg["thinkingConfig"] = {"thinkingBudget": budget}
     else:
         # effort 缺省（老调用方/客户端没带）：同样给一个有界默认值，避免把
-        # thinking 完全交给上游默认。取 low 档最保守，不强推高推理。
-        cfg["thinkingConfig"] = {"thinkingBudget": _THINKING_BUDGETS["low"]}
+        # thinking 完全交给上游默认。取 low 档最保守，不强推高推理；仍按
+        # effective_max 留足正文（同上面的钳制口径）。
+        budget = _THINKING_BUDGETS["low"]
+        if (isinstance(effective_max, int)
+                and 0 < effective_max < budget + _MIN_ANSWER_TOKENS):
+            budget = max(0, effective_max - _MIN_ANSWER_TOKENS)
+        cfg["thinkingConfig"] = {"thinkingBudget": budget}
     return cfg
 
 
