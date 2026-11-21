@@ -62,6 +62,7 @@ globalThis.STATS = null;
 globalThis.RECENT_PAGE = 1;
 globalThis.RANGE_MODELS = [];
 globalThis.RANGE_CLIENTS = [];
+globalThis.RANGE_ACCOUNTS = [];
 globalThis.renderRecent = () => {{}};
 globalThis.esc = s => String(s);
 globalThis.pcolor = () => '#000';

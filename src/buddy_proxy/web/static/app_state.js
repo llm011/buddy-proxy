@@ -89,6 +89,7 @@ const LOG_FILTERS = {
   provider: new Set((INITIAL_URL_PARAMS.get('provider') || '').split(',').filter(Boolean)),
   model: new Set((INITIAL_URL_PARAMS.get('model') || '').split(',').filter(Boolean)),
   client: new Set((INITIAL_URL_PARAMS.get('client') || '').split(',').filter(Boolean)),
+  account: new Set((INITIAL_URL_PARAMS.get('account') || '').split(',').filter(Boolean)),
 };
 
 // 日期范围与请求日志筛选写进 query，刷新/复制链接后仍能恢复当前视图。
@@ -101,7 +102,7 @@ function syncUrlFromState() {
     url.searchParams.set('start', RANGE.start);
     url.searchParams.set('end', RANGE.end);
   }
-  for (const key of ['provider', 'model', 'client']) {
+  for (const key of ['provider', 'model', 'client', 'account']) {
     url.searchParams.delete(key);
     if (LOG_FILTERS[key].size)
       url.searchParams.set(key, [...LOG_FILTERS[key]].sort().join(','));
@@ -122,9 +123,10 @@ function renderLogFilters() {
   const provs = [...new Set(RANGE_MODELS.map(m => m.provider).filter(Boolean))];
   const models = [...new Set(RANGE_MODELS.map(m => m.model).filter(Boolean))];
   const clients = RANGE_CLIENTS;
+  const accounts = LOG_FILTERS.provider.size ? RANGE_ACCOUNTS : [];
   const btn = (kind, val, inner) =>
     `<button class="rb-btn${LOG_FILTERS[kind].has(val) ? ' active' : ''}" data-kind="${kind}" data-val="${esc(val)}">${inner}</button>`;
-  // 三组各占一行（.lf-row）：组名徽章 + 该组按钮；空组整行不渲染
+  // 各组占一行（.lf-row）：组名徽章 + 该组按钮；空组整行不渲染
   const row = (label, buttons) =>
     buttons.length ? `<div class="lf-row"><span class="lf-label">${label}</span>${buttons.join('')}</div>` : '';
   // 内容放进 .lf-main，外面包一层 .lf-clip（限高）与展开按钮。折叠与否由
@@ -135,6 +137,7 @@ function renderLogFilters() {
       `<div class="lf-main">` +
         row('通道', provs.map(p => btn('provider', p,
           `<i class="lf-dot" style="background:${pcolor(p)}"></i>${esc(p)}`))) +
+        row('账号', accounts.map(a => btn('account', a.id, esc(a.name || a.id)))) +
         row('模型', models.map(m => btn('model', m, esc(m)))) +
         row('客户端', clients.map(c => btn('client', c, esc(c)))) +
       `</div>` +
@@ -167,9 +170,14 @@ function toggleLogFilterFold() {
 }
 document.getElementById('log-filters').addEventListener('click', ev => {
   const b = ev.target.closest('.rb-btn'); if (!b) return;
-  const set = LOG_FILTERS[b.dataset.kind];
+  const kind = b.dataset.kind;
+  const set = LOG_FILTERS[kind];
   const v = b.dataset.val;
   if (set.has(v)) set.delete(v); else set.add(v);
+  if (kind === 'provider' && !LOG_FILTERS.provider.size) {
+    LOG_FILTERS.account.clear();
+    RANGE_ACCOUNTS = [];
+  }
   syncUrlFromState();
   RECENT_PAGE = 1;
   renderLogFilters();
@@ -181,6 +189,8 @@ document.getElementById('log-filters').addEventListener('click', ev => {
 let RANGE_MODELS = [];
 // 客户端筛选候选（按出现次数降序），由 /ui/api/logs 响应带回（见 renderRecent）。
 let RANGE_CLIENTS = [];
+// 账号筛选候选（[{id, name}, ...]），选中通道时由 /ui/api/logs 响应带回。
+let RANGE_ACCOUNTS = [];
 // 只统计**真实有请求**的桶：count=0 的桶是「该渠道当天的账号级积分」，不是某个
 // 模型的请求——前端为补上 dumate 的积分图，后端会往 model_daily 里塞
 // {provider:'dumate', model:'', count:0} 的合成桶（见 queries._inject_dumate_credits）。
