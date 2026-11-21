@@ -1050,3 +1050,29 @@ def test_rate_limiter_stream_releases_concurrency_on_close(two_accounts, monkeyp
     asyncio.run(_go())
     assert up.calls == ["tok-u@x.com", "tok-u@x.com"]
 
+
+def test_default_rate_limiter_does_not_throttle_normal_agent_burst(monkeypatch):
+    """默认阈值必须放行正常高频 agent 工具循环（如 10s 内 6 次、并发 4 路），不得误伤。"""
+    from buddy_proxy.antigravity.rate_limit import AccountRateLimiter
+
+    fake_now = [500.0]
+
+    async def fail_if_slept(_dt: float) -> None:
+        raise AssertionError("正常突发不应触发排队 sleep")
+
+    monkeypatch.setattr("buddy_proxy.antigravity.rate_limit.asyncio.sleep", fail_if_slept)
+    limiter = AccountRateLimiter(clock=lambda: fake_now[0])
+
+    async def _go():
+        leases = []
+        # 同一秒连续 5 路并发（覆盖 p99 并发与 10s 突发）应全部零等待拿到租约
+        for _ in range(5):
+            lease = await limiter.acquire("u@x.com")
+            assert lease is not None
+            leases.append(lease)
+        for lease in leases:
+            lease.release()
+
+    asyncio.run(_go())
+
+
