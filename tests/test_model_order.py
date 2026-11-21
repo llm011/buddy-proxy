@@ -154,6 +154,15 @@ class _Provider(BaseProvider):
                 }
                 yield f"data: {json.dumps(error_chunk)}\n\n".encode()
             return StreamingResponse(gen_blocked(), media_type="text/event-stream")
+        if self.behavior == "raise502_empty_content":
+            # 上游 200 但没产出真负载（antigravity/gemini 的「空内容」形态）。
+            # 换档层必须靠 detail.error.type 认出来：这是**上游没给内容**，
+            # 不是通道/账号故障，只能软退避，不能打 5 分钟冷却。
+            raise HTTPException(
+                status_code=502,
+                detail={"error": {
+                    "message": "antigravity gemini-4-hydrogen stream returned no content",
+                    "type": "upstream_empty_content"}})
         if self.behavior == "json429":
             return JSONResponse(status_code=429,
                                 content={"error": {"message": "rate limited"}})
@@ -524,6 +533,44 @@ def test_dns_error_not_marked_even_when_all_candidates_fail(tmp_path, monkeypatc
     b.calls.clear()
     _post(client)
     assert len(a.calls) == 1 and len(b.calls) == 1
+
+
+def test_empty_content_502_does_not_mark_five_minute_cooldown(tmp_path, monkeypatch):
+    """上游「空内容」（200 但没真负载）**不**打 5 分钟通道冷却。
+
+    2026-11-21 21:45 事故回归：同会话 687k token，21:45:10 成功、21:45:18 空流
+    （finishReason=n/a）、21:45:46 重发仍空。旧逻辑把它当普通 502 →
+    ``mark_failed`` 给 ``antigravity/gemini-4-hydrogen`` 打 5 分钟冷却 → 换
+    copilot 吃 402 → 两个候选一起冷却 → 用户看到「候选上游全部不可用」。
+
+    账号 8 秒前刚成功过，显然不是通道故障，所以这里锁住：失败后目标**立刻**
+    仍可重试（前两次空内容不冷却）。
+    """
+    client, _, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"],
+                                  a_behavior="raise502_empty_content")
+    r = _post(client)
+    assert r.status_code == 200, r.text
+    assert r.json()["choices"][0]["message"]["content"] == "from-pb"
+    assert len(a.calls) == 1 and len(b.calls) == 1
+    # 关键断言：空内容不留 5 分钟冷却
+    assert cooldown_mod.is_marked("pa", "m1") is False
+    assert cooldown_mod.remaining("pa", "m1") == 0
+
+    # 紧接着重试：pa 必须被真正再调一次（不是被冷却 skip 掉）
+    a.calls.clear()
+    b.calls.clear()
+    _post(client)
+    assert len(a.calls) == 1, "空内容后目标应立即可重试"
+
+
+def test_empty_content_still_backs_off_after_repeats(tmp_path, monkeypatch):
+    """连续空内容仍会退避（但只有秒级），不会变成「永不冷却」的硬撞。"""
+    client, _, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"],
+                                  a_behavior="raise502_empty_content")
+    for _ in range(3):
+        _post(client)
+    left = cooldown_mod.remaining("pa", "m1")
+    assert 0 < left <= 1, f"第 3 次空内容应只退避 1 秒级，实际 {left}"
 
 
 def test_dns_httpx_form_also_not_marked(tmp_path, monkeypatch):

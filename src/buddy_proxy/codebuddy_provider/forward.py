@@ -74,6 +74,26 @@ _RETRYABLE_STATUS = frozenset({405, 429, 500, 502, 503, 504})
 #: 的 ``HTTPException`` 分支；这里兜的是漏网的上游连接层异常。
 _RETRYABLE_EXC = (httpx.HTTPError, OSError)
 
+#: 「上游 200 但没产出真负载」的错误 ``type``。这类失败**不是通道/账号故障**，
+#: 不能按普通 5xx 打 5 分钟冷却（2026-11-21 21:45 事故：同会话 687k token，
+#: 8 秒前刚成功、8 秒后空流，一冷却整条候选下线 5 分钟，用户看到「候选上游全部
+#: 不可用」）。命中这里的目标改走 :func:`core.cooldown.mark_empty_content`
+#: 的软退避（前两次不冷却，之后指数退避封顶 60s）。
+#:
+#: 各通道若要表达这个语义，在 ``HTTPException.detail.error.type`` 里用这些值。
+_EMPTY_CONTENT_TYPES = frozenset({"upstream_empty_content"})
+
+
+def _exc_is_empty_content(exc: HTTPException) -> bool:
+    """该 HTTPException 是否「上游空内容」（不是通道故障，只该软退避）。"""
+    detail = exc.detail
+    if not isinstance(detail, dict):
+        return False
+    err = detail.get("error")
+    if not isinstance(err, dict):
+        return False
+    return str(err.get("type") or "") in _EMPTY_CONTENT_TYPES
+
 
 @functools.lru_cache(maxsize=1)
 def _codebuddy_static_ids() -> frozenset[str]:
@@ -470,10 +490,15 @@ async def _forward_with_order(
             # 各 provider 会把 httpx 异常转成 HTTPException(502)，所以必须沿
             # __cause__ 链判断（见 core.errors.is_local_dns_failure）。
             dns_failure = is_local_dns_failure(exc)
-            if not dns_failure:
+            empty_content = _exc_is_empty_content(exc)
+            if empty_content:
+                # 上游 200 但没产出真负载：账号/通道本身健康，只走软退避。
+                cooldown_mod.mark_empty_content(provider_id, model)
+            elif not dns_failure:
                 cooldown_mod.mark_failed(provider_id, model, status=exc.status_code)
             diagnostic("model_order_failover", model=key, target=target,
-                       status=exc.status_code, cooldown_skipped=dns_failure)
+                       status=exc.status_code, cooldown_skipped=dns_failure,
+                       empty_content=empty_content)
             continue
         except _RETRYABLE_EXC as exc:  # httpx 传输层 / OSError：上游不可达
             # 注意：asyncio.CancelledError 是 BaseException 子类，不被这里捕获——
@@ -492,6 +517,9 @@ async def _forward_with_order(
             continue
         status = _retryable_failure(resp)
         if status is None:
+            # 真负载成功：清掉该目标的失败/空内容计数，让「上午抖两次、下午再抖
+            # 一次」不被算成连续三次而误进退避档（见 cooldown.note_success）。
+            cooldown_mod.note_success(provider_id, model)
             return resp  # 成功，或已提交语义的流（不换档）
         last_note = f"HTTP {status}"
         cooldown_mod.mark_failed(provider_id, model, status=status)

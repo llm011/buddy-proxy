@@ -125,6 +125,10 @@ def two_accounts():
 
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(upstream),
                                          timeout=prov._TIMEOUT)
+    # 空流重发走独立连接池（见 provider._fresh_client）：夹具必须一并注入，
+    # 否则重发会打到真实网络。
+    provider._retry_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(upstream), timeout=prov._TIMEOUT)
     return provider, upstream
 
 
@@ -230,6 +234,8 @@ def test_bad_model_429_does_not_poison_other_models(two_accounts, monkeypatch):
                                        "default_effort": "medium", "group": "gemini"}
     provider._client = httpx.AsyncClient(transport=httpx.MockTransport(route),
                                          timeout=prov._TIMEOUT)
+    provider._retry_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(route), timeout=prov._TIMEOUT)
     _patch_token(monkeypatch)
 
     # 1) 坏模型：两个账号都 429，按模型冷却。
@@ -677,6 +683,57 @@ def test_stream_gate_empty_all_accounts_raises(two_accounts, monkeypatch):
     assert "returned no content" in json.dumps(ei.value.detail, ensure_ascii=False)
     # 每账号各 2 次（首判 + 重发）
     assert up.calls == ["tok-u@x.com", "tok-u@x.com", "tok-v@y.com", "tok-v@y.com"]
+    # 空内容必须是独立错误类型：换档层靠它区分「上游没产出」与「通道真故障」，
+    # 前者只走软退避、不打 5 分钟冷却（见 core.cooldown.mark_empty_content）。
+    assert ei.value.detail["error"]["type"] == "upstream_empty_content"
+
+
+def test_prompt_block_reason_is_deterministic_and_not_retried(two_accounts, monkeypatch):
+    """promptFeedback.blockReason（内容拦截）：不重发、不换号、不冷却账号。
+
+    上游明确表示「这次请求不产出内容」，重发只会再被拒一次、白烧上游配额；
+    把它当空流重试正是「重发 1/1 之后还是空」的成因之一。
+    """
+    from fastapi import HTTPException
+
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    blocked = _sse([json.dumps({"promptFeedback": {"blockReason": "SAFETY"}})])
+    up.plan["tok-u@x.com"] = (200, blocked, {})
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(provider, stream=True)
+    assert ei.value.status_code == 400
+    assert "SAFETY" in json.dumps(ei.value.detail, ensure_ascii=False)
+    # 只打了一次：没有重发，也没换到 v 账号
+    assert up.calls == ["tok-u@x.com"]
+    assert failover.cooldown_left("u@x.com") == (0.0, "")
+
+
+def test_empty_retry_uses_fresh_client(two_accounts, monkeypatch):
+    """空流重发必须走独立连接池（排除复用坏 keep-alive 连接这个成因）。"""
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, b"", {})
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    used: list[httpx.AsyncClient] = []
+    orig_send = provider._send_with_fallback
+
+    async def spy(client, *a, **kw):
+        used.append(client)
+        return await orig_send(client, *a, **kw)
+
+    monkeypatch.setattr(provider, "_send_with_fallback", spy)
+    sr = _run(provider, stream=True)
+    assert "pong" in _stream_text(sr)
+    # 第 1 次用共享 client，重发用 _retry_client
+    assert used[0] is provider._client
+    assert used[1] is provider._retry_client
+    assert used[0] is not used[1]
 
 
 def test_stream_gate_thinking_then_text_commits(two_accounts, monkeypatch):

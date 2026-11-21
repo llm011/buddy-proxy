@@ -53,6 +53,23 @@ _BURST_COOLDOWN_S = 30
 #: 耗尽时，每分钟一次快速 429 再换档的代价也很小。
 _RATE_LIMIT_COOLDOWN_S = 60
 
+#: 「空内容」的软退避阶梯（秒）。空内容**不是账号故障**，是上游对这次请求没
+#: 产出语义事件（``finishReason=n/a`` 断流 / ``MAX_TOKENS`` 预算吃光）。账号
+#: 本身完全健康——2026-11-21 21:45 实测：同一会话 687k token，21:45:10 成功、
+#: 21:45:18 空流，中间只隔 8 秒，两次请求体几乎一样大。
+#:
+#: 旧行为把它当普通 502 打 5 分钟冷却，等于「一次偶发空流 = 整条候选下线 5
+#: 分钟」，这才是用户看到「候选上游全部不可用」的直接原因。改成阶梯：
+#:
+#: * 第 1、2 次：**不冷却**（立刻可重试，同一会话下一次请求大概率正常）；
+#: * 第 3 次起：1s → 2s → 4s → 8s → 16s → 32s → 60s 封顶（按窗口内次数翻倍）。
+#:
+#: 为什么还要退避而不是完全不冷却：连续空流说明这个 (通道, 模型) 此刻对这类
+#: 请求真的不行，无间隔硬撞只会把上游频控和本机连接池一起拖垮；指数退避既让
+#: 偶发抖动零代价，又让持续故障快速让位给下一个候选。封顶 60s 保证恢复后
+#: 最迟一分钟就重新试探（远短于原来 5 分钟）。
+_EMPTY_BACKOFF_STEPS = (0, 0, 1, 2, 4, 8, 16, 32, 60)
+
 #: ``(provider_id, model_id)`` → 解禁时刻（epoch 秒）。
 _marks: dict[tuple[str, str], float] = {}
 #: ``(provider_id, model_id)`` → 窗口内失败时间戳列表。
@@ -189,6 +206,68 @@ def mark_failed(provider_id: str, model_id: str, *, status: int | None = None) -
             status if status is not None else "unknown", len(hits),
         )
     return _marks[key]
+
+
+def mark_empty_content(provider_id: str, model_id: str) -> float:
+    """「上游 200 但没产出语义事件」的**软退避**标记，返回解禁时刻（epoch 秒）。
+
+    与 :func:`mark_failed` 的区别是**不把它当通道故障**：空内容说明上游这次没
+    给出真负载，账号/通道本身是好的（2026-11-21 21:45 实测：同会话 687k token，
+    8 秒前刚成功、8 秒后空流）。因此：
+
+    * 前两次**不冷却**（``_EMPTY_BACKOFF_STEPS[:2] == (0, 0)``），返回当前时刻，
+      下一次请求立刻可以再试同一个目标——偶发抖动对用户零代价；
+    * 第 3 次起按窗口内次数取阶梯 ``1→2→4→8→16→32→60`` 秒封顶，让「持续空流」
+      快速让位给下一个候选，又不至于像旧逻辑那样锁死 5 分钟；
+    * 不写 ``_marks`` 的 0 秒档（等于没标），也不参与机器级突发窗口——空内容
+      不是网络层故障，把它算进「多通道同时失败」会误判成机器级并缩短别的目标。
+
+    计数与普通失败**共用** ``_hits`` 窗口（``_ESCALATE_WINDOW_S``），但只在成功
+    时由 :func:`note_success` 清零：连续空流才升级，中间成功一次就回到「不冷却」。
+    """
+    key = (provider_id, model_id)
+    now = time.time()
+    with _lock:
+        hits = _prune_hits(key, now)
+        hits.append(now)
+        _hits[key] = hits
+        idx = min(len(hits) - 1, len(_EMPTY_BACKOFF_STEPS) - 1)
+        span = _EMPTY_BACKOFF_STEPS[idx]
+        if span <= 0:
+            # 前两枪不冷却：清掉可能残留的旧标记（比如上一轮升级出来的长冷却），
+            # 否则「不冷却」会被旧标记推翻，用户照样看到 cooldown skip。
+            _marks.pop(key, None)
+            until = now
+        else:
+            until = max(_marks.get(key, 0.0), now + span)
+            _marks[key] = until
+        count = len(hits)
+    if span <= 0:
+        log.warning(
+            "目标 %s/%s 上游空内容（第%d次，未冷却，立即可重试）",
+            provider_id, model_id, count,
+        )
+    else:
+        log.warning(
+            "目标 %s/%s 上游连续空内容（窗口内第%d次），软退避 %d 秒",
+            provider_id, model_id, count, span,
+        )
+    return until
+
+
+def note_success(provider_id: str, model_id: str) -> None:
+    """一次**真负载**成功后调用：清空该目标的失败计数与冷却标记。
+
+    成功就是「这个目标现在能用」的最强证据，因此连冷却标记一起清掉：
+    * 计数不清的话，「上午失败两次、下午再失败一次」会被算成连续三次而进入
+      退避档，把早已恢复的目标又冷却几秒；
+    * 标记不清的话，第 3 次空内容留下的 1~60 秒退避会继续挡着——而这个目标
+      刚刚明明成功了。既然成功已经证明它健康，没有理由再等。
+    """
+    key = (provider_id, model_id)
+    with _lock:
+        _hits.pop(key, None)
+        _marks.pop(key, None)
 
 
 def is_marked(provider_id: str, model_id: str) -> bool:
