@@ -654,6 +654,16 @@ class TraeProvider(BaseProvider):
             status["next_ts_source"] = SOURCE_INFERRED
         return status
 
+    def _fallback_daily_credit(self, token: str, account_id: str) -> float | None:
+        """claim 响应不带金额（如上游省略字段或 replay）时，从 status 接口兜底读取今日签到积分。"""
+        try:
+            st = fetch_checkin_status(token=token, account_id=account_id,
+                                      region=self._region.key)
+        except Exception:  # noqa: BLE001 — 兜底查询失败不影响签到主结果
+            return None
+        val = (st.get("credits") or 0) + (st.get("extra_credits") or 0)
+        return float(val) if isinstance(val, (int, float)) and val > 0 else None
+
     def checkin_claim(self) -> dict[str, Any] | None:
         """领取今日签到积分。多账号**每个都领**（用户决策），逐个尝试、
         各自容错：单个账号失败（网络/token/已领过）不阻塞其它账号。汇总
@@ -692,6 +702,8 @@ class TraeProvider(BaseProvider):
             if data.get("code") not in (0, None):
                 raise RuntimeError(data.get("message") or json.dumps(data, ensure_ascii=False)[:200])
             granted = data.get("credits_granted", data.get("extra_credits"))
+            if granted is None:
+                granted = self._fallback_daily_credit(token, acct.id)
             return {
                 "checked_in": True,
                 "extra_credits": granted,
@@ -744,6 +756,8 @@ class TraeProvider(BaseProvider):
                     g = data.get("credits_granted", data.get("extra_credits"))
                     if isinstance(g, (int, float)):
                         granted = float(g)
+                    else:
+                        granted = self._fallback_daily_credit(token, acct.id)
                     msg = str(data.get("message") or "")[:80]
                     break
                 msg = str(data.get("message"))[:60]
