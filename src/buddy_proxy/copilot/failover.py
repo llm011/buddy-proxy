@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any
 
 from ..core.account_failover import CooldownTracker, diagnose_available
@@ -40,6 +41,15 @@ _tracker = CooldownTracker()
 #: 整个计费周期的状态，猜「多久恢复」只会反复白撞。只有额度查询（quota()）
 #: 确认该账号又有剩余额度时才从这里移除。进程重启清零，代价只是重探一次。
 _exhausted: set[str] = set()
+#: ``account_id`` → 标记时刻（epoch 秒）。用于「最短观察期」：402 刚打上标记时，
+#: 额度接口的快照可能还是**上一轮**的（甚至就是那个已经耗尽的池），立刻读回
+#: ``remaining>0`` 会把标记撤销，于是兜底通道变成「刚标记就恢复 → 下一次又
+#: 402」，白撞 + 每次多烧 3 秒和一轮 30 秒机器级冷却。
+#:
+#: 2026-11-21 实测证据：日志里 3 次「月度配额耗尽」、3 次「额度已恢复」，
+#: 间隔分别 **16 秒 / 80 秒 / 16 秒**——月度配额不可能 16 秒恢复，这就是假恢复。
+_MIN_EXHAUSTED_OBSERVE_S = 1800.0
+_exhausted_at: dict[str, float] = {}
 _exhausted_lock = threading.Lock()
 
 #: 活引用 tracker 内部 dict（同 ``_tracker._cooldowns``）：测试直接清空用。
@@ -110,6 +120,7 @@ def mark_exhausted(account_id: str, *, reason: str = "") -> None:
     """
     with _exhausted_lock:
         _exhausted.add(account_id)
+        _exhausted_at[account_id] = time.time()
     if reason:
         log.warning("账号 %s 月度配额耗尽（%s），已标记下线，等额度查询确认恢复后再启用",
                     account_id, reason)
@@ -126,12 +137,27 @@ def clear_exhausted_if_recovered(account_id: str, *, has_quota: bool) -> bool:
     ``has_quota`` 由调用方按额度数据判定（有上限项 remaining>0，或账号是
     无限额度 / 无上限项）。查询失败/拿不到额度时传 False——保持标记，不
     因为一次查询抖动就把耗尽的号放回来白撞。
+
+    **最短观察期**：标记后 ``_MIN_EXHAUSTED_OBSERVE_S`` 内的「恢复」一律忽略。
+    2026-11-21 实测 3 次 402 后分别在 16s / 80s / 16s 就被判「已恢复」，而月度
+    配额不可能分钟级恢复——那是额度接口快照滞后造成的假恢复。假恢复的代价是
+    兜底通道每次都要白撞一轮 402（+3 秒 + 机器级 30 秒冷却），比多等半小时
+    再探一次贵得多。真正的周期重置远大于这个窗口，不会被它挡掉。
     """
     if not has_quota:
         return False
+    now = time.time()
     with _exhausted_lock:
+        marked_at = _exhausted_at.get(account_id)
+        if marked_at is not None and now - marked_at < _MIN_EXHAUSTED_OBSERVE_S:
+            left = int(_MIN_EXHAUSTED_OBSERVE_S - (now - marked_at))
+            log.info("账号 %s 额度查询显示有额度，但距 402 仅 %d 秒"
+                     "（观察期还剩 %d 秒），暂不解除耗尽标记",
+                     account_id, int(now - marked_at), left)
+            return False
         removed = account_id in _exhausted
         _exhausted.discard(account_id)
+        _exhausted_at.pop(account_id, None)
     if removed:
         log.info("账号 %s 额度已恢复，解除耗尽标记", account_id)
     return removed
@@ -166,12 +192,14 @@ def clear_cooldown(account_id: str) -> None:
             _tracker._cooldowns.pop(key, None)
     with _exhausted_lock:
         _exhausted.discard(account_id)
+        _exhausted_at.pop(account_id, None)
 
 
 def clear_all() -> None:
     _tracker.clear_all()
     with _exhausted_lock:
         _exhausted.clear()
+        _exhausted_at.clear()
 
 
 def cooldown_left(account_id: str) -> tuple[float, str]:

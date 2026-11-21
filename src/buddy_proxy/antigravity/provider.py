@@ -34,6 +34,7 @@ from ..providers.base import BaseProvider
 from ..core.account_store import quota_epoch_from
 from ..core import load_balance as lb_mod
 from ..core.metrics import ACCOUNT_META
+
 from ..gemini.convert import gemini_response_to_chat
 from . import failover
 from .convert import apply_effort_suffix, chat_to_antigravity_request
@@ -251,6 +252,10 @@ class AntigravityProvider(BaseProvider):
         self._client: httpx.AsyncClient | None = None
         #: 积分探测专用的长连接 client（见 _fetch_watermark）。
         self._probe_client: httpx.AsyncClient | None = None
+        #: 空流重发专用 client（见 _fresh_client）。与 _client 分开是刻意的：
+        #: 空流最可疑的成因是复用了已被对端关掉的 keep-alive 连接，重发必须
+        #: 换一条全新连接才能排除它。测试可注入 MockTransport 覆盖。
+        self._retry_client: httpx.AsyncClient | None = None
         # 模块级 MODELS 只是冷启动种子。运行时目录归实例持有，刷新一个 provider
         # 不能污染其它实例（测试、多 app 同进程也不会串目录）。
         self._models: list[dict[str, Any]] = [dict(m) for m in MODELS]
@@ -672,11 +677,43 @@ class AntigravityProvider(BaseProvider):
                 if gate.timed_out:
                     last_status, last_detail = 504, "首事件前读超时"
                     failover.mark_cooldown(acct.id, reason="首事件前读超时")
+                elif gate.evidence.get("block_reason"):
+                    # 内容拦截：上游明确说这次请求**不产出**（promptFeedback.
+                    # blockReason）。确定性拒绝，重发/换号都无用，也不该冷却
+                    # 账号——直接把原因交给客户端，比再白跑两轮 90s 好得多。
+                    # 必须立刻收场（return 而非 continue）：换号只会拿到同样的
+                    # 拦截，还白烧掉另一个账号的配额。
+                    await _drain_and_close(gate.resp, stream, gate.lines)
+                    log.warning(
+                        "antigravity_content_blocked: model=%s account=%s reason=%s",
+                        upstream_model, acct.id, gate.evidence["block_reason"],
+                    )
+                    raise HTTPException(
+                        status_code=400,
+                        detail={"error": {
+                            "message": (f"antigravity {upstream_model} 请求被上游内容策略"
+                                        f"拦截（blockReason={gate.evidence['block_reason']}），"
+                                        "这不是账号或通道故障，换号重试也不会成功。"),
+                            "type": "content_filter",
+                        }},
+                    )
                 elif gate.empty:
                     last_status = 502
                     last_detail = (f"空内容（finishReason={gate.message or 'n/a'}，"
                                    f"已重发 {_EMPTY_RETRY_MAX} 次）")
                 await _drain_and_close(gate.resp, stream, gate.lines)
+                if gate.evidence:
+                    # 空流的**结构性证据**：没有它，finishReason=n/a 这一个标签
+                    # 下混着「对端关连接 / 非 SSE 错误体 / 无 data 行的空流 /
+                    # 纯 thinking 收尾」四种成因，只能靠猜（2026-11-21 事故）。
+                    # 用 log.warning 而非 diagnostic：后者要求全局 state 已初始化，
+                    # 纯 provider 单测里会直接抛 503，把「记录证据」变成新的失败点。
+                    log.warning(
+                        "antigravity_empty_stream: model=%s account=%s "
+                        "finish_reason=%s timed_out=%s evidence=%s",
+                        upstream_model, acct.id, gate.message or "n/a",
+                        gate.timed_out, gate.evidence,
+                    )
                 continue
 
             # 积分估算的归属帧：observability._instrument 在请求开始时放进
@@ -752,11 +789,17 @@ class AntigravityProvider(BaseProvider):
         if last_status == 502 and last_detail.startswith("空内容"):
             # 所有账号都只给了空内容：不说「全部不可用」，直接点明上游空成功，
             # 客户端（dsh 等）据此重试比拿到「成功但没有内容」好得多。
+            #
+            # ``type`` 刻意用独立的 ``upstream_empty_content``（不是 ``bad_gateway``）：
+            # 换档层靠它区分「上游没产出真负载」与「通道/账号真故障」。前者不该打
+            # 5 分钟冷却（账号是好的，8 秒前刚成功过），只走短退避
+            # （见 core.cooldown.mark_empty_content）。改这里时同步
+            # codebuddy_provider.forward._EMPTY_CONTENT_TYPES。
             raise HTTPException(
                 status_code=502,
                 detail={"error": {
                     "message": f"antigravity {upstream_model} stream returned no content（{last_detail}）",
-                    "type": "bad_gateway",
+                    "type": "upstream_empty_content",
                 }},
             )
         raise HTTPException(
@@ -804,19 +847,23 @@ class AntigravityProvider(BaseProvider):
         # finishReason=n/a 就是连 candidates 都没见到就断流，empty 为 False，
         # 只判 empty 会漏掉它们。唯独 timed_out（首事件前读超时，90s 挂死）
         # 不重发：那多半是账号真卡住，换号比再等 90s 快。
+        #
+        # 内容拦截（promptFeedback.blockReason）也不重发：上游是**明确拒绝**，
+        # 再来一次只会同样被拒，白烧一次上游配额。
         while (gate.eof and not gate.timed_out and not gate.account_error
+               and not gate.evidence.get("block_reason")
                and retried < _EMPTY_RETRY_MAX):
             retried += 1
             await _drain_and_close(gate.resp, stream, gate.lines)
             log.warning(
-                "antigravity %s 账号 %s 首事件空内容（finishReason=%s），"
+                "antigravity %s 账号 %s 首事件空内容（finishReason=%s，证据=%s），"
                 "同账号重发 %d/%d",
                 upstream_model, acct.id, gate.message or "n/a",
-                retried, _EMPTY_RETRY_MAX,
+                gate.evidence or "{}", retried, _EMPTY_RETRY_MAX,
             )
             try:
                 resp = await self._send_with_fallback(
-                    client, method, upstream_body,
+                    await self._fresh_client(), method, upstream_body,
                     _auth_headers(access_token, upstream_model, stream), stream,
                 )
             except _UpstreamUnavailable as exc:
@@ -831,6 +878,27 @@ class AntigravityProvider(BaseProvider):
                                    code=resp.status_code, message=detail)
             gate = await self._gate_first_event(resp, stream)
         return resp, gate
+
+    async def _fresh_client(self) -> httpx.AsyncClient:
+        """空流重发专用：**不共用连接池**的一次性 client。
+
+        为什么不能用 ``self._client``：空流最可疑的成因是复用了一条已被对端
+        关掉、但连接池还以为活着的 keep-alive 连接（``RemoteProtocolError:
+        Server disconnected`` 一类）。这种坏连接会立刻 EOF，表现正是「0 字节、
+        0 token、连 candidates 都没见到」——2026-11-21 21:46 那次重发仍空就是
+        这个形状。用全新连接重发，能把「坏连接」这个成因直接排除掉；若换成
+        新连接就好了，问题当场消失；若仍空，说明是上游真的没产出，证据也会
+        落在日志里（见 _gate_first_event 的 evidence）。
+
+        ``max_keepalive_connections=0``：这条连接用完即弃，不把可疑连接留在
+        池里影响后续请求。实例级缓存是为了让测试能注入 MockTransport。
+        """
+        if self._retry_client is None or self._retry_client.is_closed:
+            self._retry_client = httpx.AsyncClient(
+                timeout=_TIMEOUT,
+                limits=httpx.Limits(max_keepalive_connections=0),
+            )
+        return self._retry_client
 
     async def _gate_first_event(self, resp: httpx.Response, stream: bool) -> "_Gate":
         """压住第一个上游事件再决定透传还是换号。
@@ -868,6 +936,13 @@ class AntigravityProvider(BaseProvider):
 
         buffered: list[str] = []
         saw_candidates = False  # 见过 candidates 但没有真负载（纯 thinking/空 parts）
+        # 结构性证据：只在空流时写进 _Gate.evidence 供日志定性。**不记正文**，
+        # 只记形状（多少 data 行、有没有 usageMetadata/promptFeedback/blockReason、
+        # 是否根本不是 SSE）。
+        ev: dict[str, Any] = {
+            "data_lines": 0, "usage_seen": False,
+            "block_reason": "", "non_sse": False, "exc": "",
+        }
         # httpx 响应流一次性消费：迭代器只创建这一次，所有 return 都把它
         # 带上（透传时 _ReplayStream 续跑、换号时 _drain_and_close 排空）。
         lines = resp.aiter_lines()
@@ -880,10 +955,15 @@ class AntigravityProvider(BaseProvider):
                     return _Gate(resp=resp, committed=True, buffered=buffered, lines=lines)
                 stripped = line.strip()
                 if not stripped.startswith("data:"):
+                    # 200 但 body 是 JSON 错误体（不是 SSE）：上游偶发这么回，
+                    # 以前当「找不到 data 行」走完循环 → 误判成干净 EOF。
+                    if stripped.startswith("{") or stripped.startswith("["):
+                        ev["non_sse"] = True
                     continue
                 data = stripped[5:].strip()
                 if not data or data == "[DONE]":
                     continue
+                ev["data_lines"] += 1
                 try:
                     payload = json.loads(data)
                 except json.JSONDecodeError:
@@ -893,6 +973,14 @@ class AntigravityProvider(BaseProvider):
                 inner = payload.get("response") if isinstance(payload.get("response"), dict) else payload
                 if not isinstance(inner, dict):
                     continue
+                if isinstance(inner.get("usageMetadata"), dict):
+                    ev["usage_seen"] = True
+                # 内容拦截：上游给 promptFeedback.blockReason（或候选上的
+                # finishReason=SAFETY/RECITATION）时**根本没打算产出**。这是
+                # 确定性拒绝，重发和换号都无用，必须原样告诉客户端。
+                pf = inner.get("promptFeedback")
+                if isinstance(pf, dict) and pf.get("blockReason"):
+                    ev["block_reason"] = str(pf.get("blockReason"))
                 err = inner.get("error")
                 if isinstance(err, dict):
                     code = int(err.get("code") or 0)
@@ -910,17 +998,21 @@ class AntigravityProvider(BaseProvider):
                     # 已收尾的 chunk 仍只有 thinking/空 parts：只想了没答，
                     # 换号重试（客户端还没收到任何字节）
                     return _Gate(resp=resp, eof=True, empty=True,
-                                 message=finish_reason, lines=lines)
+                                 message=finish_reason, lines=lines, evidence=ev)
                 # 仅 usageMetadata / 纯 thinking：继续等下一条
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as exc:
             # 首事件前读超时（上游排队/挂死）：与 EOF 同为「没出字节可换号」，
             # 但带 timed_out 标记让调用方短冷却——挂死账号别每轮都被首选。
-            return _Gate(resp=resp, eof=True, timed_out=True, lines=lines)
-        except httpx.HTTPError:
-            return _Gate(resp=resp, eof=True, empty=saw_candidates, lines=lines)
+            ev["exc"] = f"{type(exc).__name__}: {exc}"[:160]
+            return _Gate(resp=resp, eof=True, timed_out=True, lines=lines, evidence=ev)
+        except httpx.HTTPError as exc:
+            # **关键证据**：传输层异常过去被整个吞掉，于是「连接被对端关闭」
+            # 与「上游优雅 EOF」在日志里长得一模一样，根因无从判断。
+            ev["exc"] = f"{type(exc).__name__}: {exc}"[:160]
+            return _Gate(resp=resp, eof=True, empty=saw_candidates, lines=lines, evidence=ev)
         # 真负载前 EOF：假成功，换号；没有 finishReason 就断流的纯 thinking
         # 同样算空内容（saw_candidates），全部账号都这样时报 502
-        return _Gate(resp=resp, eof=True, empty=saw_candidates, lines=lines)
+        return _Gate(resp=resp, eof=True, empty=saw_candidates, lines=lines, evidence=ev)
 
     # ---- 内部 ----
 
@@ -1468,6 +1560,11 @@ class _Gate:
     # 上游只给了 thinking/空内容（message=finishReason）。流式时是 eof 的细分；
     # 非流式没有 EOF 概念，复用同一字段表示「响应存在但无真负载」。
     empty: bool = False
+    #: 空流/断流的**结构性证据**，只记形状不记正文（见 ``_empty_evidence``）。
+    #: 没有它时 ``finishReason=n/a`` 这一个标签下混着至少四种完全不同的成因，
+    #: 定位根因只能靠猜——2026-11-21 那次「重发一次仍空」就是因为看不出
+    #: 到底是复用坏连接、非 SSE 错误体、还是 promptFeedback 拦截。
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 class _ReplayStream:

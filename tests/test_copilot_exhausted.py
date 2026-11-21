@@ -50,16 +50,44 @@ def test_mark_exhausted_removes_account_from_available(monkeypatch):
     assert failover.cooldown_left("jsongo") == (0.0, "")
 
 
-def test_clear_exhausted_only_after_quota_confirmed():
+def test_clear_exhausted_only_after_quota_confirmed(monkeypatch):
     failover.mark_exhausted("jsongo", reason="402")
     # 查询失败/没额度 → 保持标记
     assert failover.clear_exhausted_if_recovered("jsongo", has_quota=False) is False
     assert failover.is_exhausted("jsongo") is True
-    # 确认有额度 → 清除
+    # 观察期过后确认有额度 → 清除
+    _advance_past_observe_window(monkeypatch)
     assert failover.clear_exhausted_if_recovered("jsongo", has_quota=True) is True
     assert failover.is_exhausted("jsongo") is False
     # 再清一次幂等
     assert failover.clear_exhausted_if_recovered("jsongo", has_quota=True) is False
+
+
+def _advance_past_observe_window(monkeypatch):
+    """把「402 标记时刻」往前拨，模拟最短观察期已过。"""
+    import time
+
+    for aid in list(failover._exhausted_at):
+        failover._exhausted_at[aid] = (
+            time.time() - failover._MIN_EXHAUSTED_OBSERVE_S - 1)
+
+
+def test_fake_recovery_within_observe_window_is_ignored(monkeypatch):
+    """402 后立刻「额度查询显示有额度」是**假恢复**，必须忽略。
+
+    2026-11-21 实测：日志里 3 次「月度配额耗尽」、3 次「额度已恢复」，间隔分别
+    16 秒 / 80 秒 / 16 秒。月度配额不可能 16 秒恢复——那是额度接口快照滞后。
+    假恢复的代价是兜底通道每次白撞一轮 402（+3 秒 + 30 秒机器级冷却），
+    比多等半小时再探一次贵得多。
+    """
+    failover.mark_exhausted("jsongo", reason="402")
+    # 标记刚打上，额度查询就说「有额度」→ 不能信
+    assert failover.clear_exhausted_if_recovered("jsongo", has_quota=True) is False
+    assert failover.is_exhausted("jsongo") is True
+    # 观察期过后才认
+    _advance_past_observe_window(monkeypatch)
+    assert failover.clear_exhausted_if_recovered("jsongo", has_quota=True) is True
+    assert failover.is_exhausted("jsongo") is False
 
 
 def test_usage_has_quota():
