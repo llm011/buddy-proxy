@@ -254,6 +254,8 @@ async function renderRecent() {
     qs += `&model=${encodeURIComponent([...LOG_FILTERS.model].join(','))}`;
   if (LOG_FILTERS.client.size)
     qs += `&client=${encodeURIComponent([...LOG_FILTERS.client].join(','))}`;
+  if (LOG_FILTERS.account.size)
+    qs += `&account=${encodeURIComponent([...LOG_FILTERS.account].join(','))}`;
 
   // 同一查询已渲染过 → 直接跳过。首屏/切页签/轮询会多次 render(),
   // 该接口要全量扫归档，重复请求代价最高。
@@ -282,11 +284,12 @@ async function renderRecent() {
   const total = resp.total || 0;
   const pages = resp.pages || 1;
   RECENT_PAGE = resp.page || 1;  // 后端已收敛到合法区间
-  // 客户端筛选候选随日志数据刷新（按出现次数降序，不随已选筛选收缩）
+  // 客户端、账号筛选候选随日志数据刷新（按出现次数降序，不随已选筛选收缩）
   RANGE_CLIENTS = resp.clients || [];
+  RANGE_ACCOUNTS = LOG_FILTERS.provider.size ? (resp.accounts || []) : [];
   renderLogFilters();
   if (!rows.length) {
-    const filtered = LOG_FILTERS.provider.size || LOG_FILTERS.model.size || LOG_FILTERS.client.size;
+    const filtered = LOG_FILTERS.provider.size || LOG_FILTERS.model.size || LOG_FILTERS.client.size || LOG_FILTERS.account.size;
     el.innerHTML = `<tr><td colspan="9" class="empty">${
       filtered ? '当前筛选条件下没有请求记录' : (total ? '所选范围内没有请求记录' : '还没有请求记录')}</td></tr>`;
     pager.innerHTML = '';

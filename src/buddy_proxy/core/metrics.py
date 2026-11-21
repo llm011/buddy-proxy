@@ -558,6 +558,8 @@ class MetricsCollector:
         # 过滤**之前**收集，否则一选中某个筛选，其余候选按钮就消失了。
         # 旧记录 client 为空串，跳过（它们无法也不必参与筛选）。
         client_counts: dict[str, int] = {}
+        account_counts: dict[str, int] = {}
+        prov_set = set(providers) if providers else None
         for r in rows:
             d = _date_str(r.get("ts", 0))
             if (start and d < start) or (end and d > end):
@@ -565,8 +567,14 @@ class MetricsCollector:
             c = (r.get("client") or "").strip()
             if c:
                 client_counts[c] = client_counts.get(c, 0) + 1
+            if prov_set and (r.get("provider") or "") in prov_set:
+                a = (r.get("account") or "").strip()
+                if a:
+                    account_counts[a] = account_counts.get(a, 0) + 1
         client_list = [c for c, _ in
                        sorted(client_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
+        account_list = [a for a, _ in
+                        sorted(account_counts.items(), key=lambda kv: (-kv[1], kv[0]))]
 
         # 逐条按日期范围 + 通道/模型/客户端白名单过滤（内存 recent 分支也走这里）
         if start or end or providers or models or clients or accounts:
@@ -585,6 +593,7 @@ class MetricsCollector:
             "page_size": page_size,
             "pages": pages,
             "clients": client_list,
+            "accounts": account_list,
             "from_disk": self.log_path is not None,
             # 筛选后**全量**积分合计（不是当前页的）。放在这里而不是单独接口，
             # 是因为它必须与 rows 用**同一批过滤后的行**算——两处各算一次，

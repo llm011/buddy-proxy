@@ -115,24 +115,33 @@ async def ui_model_mix(request: Request, start: str = "", end: str = "",
 @app.get("/ui/api/logs")
 async def ui_logs(request: Request, start: str = "", end: str = "",
                   page: int = 1, page_size: int = 20,
-                  provider: str = "", model: str = "", client: str = ""):
+                  provider: str = "", model: str = "", client: str = "",
+                  account: str = ""):
     """请求日志分页查询：按日期范围直接读 metrics.jsonl + 30 天归档（服务端分页）。
 
-    provider/model/client：逗号分隔白名单（UI 快速筛选，组内 OR、组间 AND），空 = 不筛。
+    provider/model/client/account：逗号分隔白名单（UI 快速筛选，组内 OR、组间 AND），空 = 不筛。
     """
     _ensure_local(request)
     state = get_state()
     metrics = getattr(state, "metrics", None)
     if metrics is None:
         return {"rows": [], "total": 0, "page": 1, "page_size": page_size,
-                "pages": 1, "clients": [], "from_disk": False}
+                "pages": 1, "clients": [], "accounts": [], "from_disk": False}
     provs = [p.strip() for p in provider.split(",") if p.strip()] or None
     mds = [m.strip() for m in model.split(",") if m.strip()] or None
     cls = [c.strip() for c in client.split(",") if c.strip()] or None
+    accts = [a.strip() for a in account.split(",") if a.strip()] or None
     result = await asyncio.to_thread(
-        metrics.query_logs, start or None, end or None, page, page_size, provs, mds, cls)
+        metrics.query_logs, start or None, end or None, page, page_size,
+        provs, mds, cls, accts)
     await _attach_account_names(result.get("rows") or [])
     await _attach_dumate_credits(result.get("rows") or [])
+    raw_accts = result.get("accounts") or []
+    if raw_accts:
+        name_map = await asyncio.to_thread(_account_name_map)
+        result["accounts"] = [
+            {"id": aid, "name": name_map.get(aid, aid)} for aid in raw_accts
+        ]
     return result
 
 
