@@ -1,12 +1,13 @@
 """Antigravity 按账号并发与滑窗频控保护（超限自动排队）。
 
-根据 2026-11-14 ~ 2026-11-21 实测日志设计：
-- 上游并非单纯按「固定极低 QPS」拒单，但单账号在短时高并发（>=3 在途）或高 RPM
-  （>10~13 req/min）叠加长上下文时，极易触发 daily-cloudcode-pa 90s 卡死并回退
-  cloudcode-pa 吃 ``429 Resource has been exhausted`` 或「纯 thinking 空流 502」。
-- 因此在**发起上游请求前**对每个账号做两层保护：
-  1. **并发上限**（默认每账号最多 2 个在途请求，流式直到流关闭才释放）；
-  2. **双滑窗节流**（默认每账号 10s 最多 3 次突发、60s 最多 10 次）。
+根据 2026-11-14 ~ 2026-11-21 实测日志（1913 条 200 成功样本）标定：
+- 正常使用下，单账号在途并发 p95=2~3、p99=3~6；10s 内 200 突发 p95=4、p99=5~6
+  （峰值 10）；60s 内 200 RPM p95=11~14、p99=14~18（峰值 20）。
+- 早先过严的默认阈值（并发=2 / 10s=3 / 60s=10）恰好卡在正常使用的 p95 以内，
+  会把普通 agent 工具调用链生生堵成排队；因此默认放宽到**高于正常 p99/峰值**，
+  日常对话与子代理零感知直通，只拦真正的并发洪峰/死循环刷屏：
+  1. **并发上限**（默认每账号最多 6 个在途请求，流式直到流关闭才释放）；
+  2. **双滑窗节流**（默认每账号 10s 最多 12 次突发、60s 最多 30 次）。
 - 多账号时优先挑「此刻无需排队」的账号（不改变顺位内既有主备/均衡顺序），
   全部账号都满载时按最短预计等待时间异步排队（可配置超时），不直接把并发峰值砸向
   上游换 429。
@@ -31,9 +32,9 @@ log = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
 
-DEFAULT_MAX_CONCURRENT_PER_ACCOUNT = 2
-DEFAULT_RPM_PER_ACCOUNT = 10
-DEFAULT_BURST_10S_PER_ACCOUNT = 3
+DEFAULT_MAX_CONCURRENT_PER_ACCOUNT = 6
+DEFAULT_RPM_PER_ACCOUNT = 30
+DEFAULT_BURST_10S_PER_ACCOUNT = 12
 DEFAULT_MIN_INTERVAL_S = 0.0
 DEFAULT_QUEUE_TIMEOUT_S = 90.0
 
