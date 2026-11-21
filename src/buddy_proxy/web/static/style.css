@@ -600,8 +600,11 @@
   .lb-skip { font-size: 10px; color: var(--muted); margin-left: 2px;
              white-space: nowrap; text-decoration: underline dotted; }
   .lb-skip:hover { color: var(--warn); }
-  /* 账号「临时下线」按钮：⏸ 禁用态悬停转琥珀提示「将暂停」，▶ 恢复态常绿。
-     沿用 .ghost 基础样式，只加颜色语义，不另画胶囊。 */
+  /* 账号「临时下线」按钮：⏸ 常态用 --warn 直接表达「这是暂停类操作」，
+     ▶ 恢复态常绿。沿用 .ghost 基础样式，只加颜色语义，不另画胶囊。
+     颜色不再等 hover：10px 灰字混在 ✕ 旁边时用户根本分不出哪个是下线、
+     哪个是删除——误点删除的代价是凭据被清掉。 */
+  .acct-disable { color: var(--warn); }
   .acct-disable:hover { color: var(--warn); border-color: var(--warn); }
   .acct-enable { color: var(--ok); }
   .acct-enable:hover { color: var(--ok); border-color: var(--ok); }
@@ -627,10 +630,13 @@
                   text-overflow: ellipsis; white-space: nowrap; }
   .pat-pkg-status { margin-left: auto; font-size: 11px; text-align: right; white-space: nowrap; }
   .pat-pkg-status.warn { color: var(--warn); }
-  /* antigravity 账号操作（顺位 ▲▼ + 删除 ✕）：块尾渲染、绝对定位到右上角
-     （不干扰就地回填的「名字→副标题」锚点）；平时低调、悬停才亮，不抢额度条的视觉 */
+  /* antigravity 账号操作（顺位 ▲▼ + 下线 ⏸ + 删除 ✕）：块尾渲染、绝对定位到右上角
+     （不干扰就地回填的「名字→副标题」锚点）。
+     刻意**常驻可见**（opacity:1）：2026-11-21 用户实报「界面上没有这个操作」——
+     旧版 opacity:.35 + 仅 hover 才亮，10px 灰字挤在 ✕ 旁边，等于把功能藏起来。
+     功能入口不该靠悬停发现；hover 只做**加重**（描边+变色）而不是从无到有。 */
   .ag-move { position: absolute; top: 8px; right: 10px; display: inline-flex; gap: 2px;
-             opacity: .35; transition: opacity .12s; }
+             opacity: 1; transition: opacity .12s; }
   .pat-pkg:hover .ag-move { opacity: 1; }
   /* 小尺寸按钮：padding/font 压到 10px 档后，全局 button 的 border-radius:8px
      会把窄按钮撑成椭圆药丸（↻ 单字最明显，实测截图里就是扁的）。这里收成
@@ -640,6 +646,11 @@
   /* ↻ 刷新在飞：转圈提示「正在重查」（重查一轮最长 8s，不能让用户干瞪按钮） */
   .ag-move button.spinning { display: inline-block; animation: qspin 1s linear infinite; }
   @keyframes qspin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  /* 下线/恢复按钮带文字（「下线」/「恢复」）：纯图标 ⏸ 在 10px 灰字里不可辨，
+     用户 2026-11-21 实报「界面上没有这个操作」。文字比图标更快被找到，
+     也让「下线」与相邻的「✕ 删除」在语义上一眼区分开。 */
+  .ag-move button.acct-disable, .ag-move button.acct-enable {
+                    font-size: 10px; padding: 1px 6px; }
   /* 删除 ✕ 常红（危险样式）——小尺寸按钮里颜色是唯一的危险提示；
      悬停再有 button.danger:hover 的描边加重 */
   .ag-move button.danger { color: #e5534b; }
