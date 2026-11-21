@@ -482,14 +482,53 @@ def test_mixed_gated_and_cooled_lists_both(tmp_path, monkeypatch):
     assert a.calls == [] and b.calls == []
 
 
-def test_all_targets_marked_or_gated_reports_unavailable(tmp_path, monkeypatch):
-    """全部候选被标记/停用 → 502 且文案说明原因（不是笼统 internal error）。"""
+def test_all_targets_cooled_returns_readable_notice(tmp_path, monkeypatch):
+    """全部候选都在冷却 → **合成一条可读回复**，而不是 502。
+
+    客户端（dsh 等）对 502 是 turn error 直接中断、不重试；对正常回复则不打断
+    会话。用户能看到「候选在冷却、稍等再试」，下一轮可以直接继续。
+    """
     client, state, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"])
     cooldown_mod.mark_failed("pa", "m1")
     cooldown_mod.mark_failed("pb", "m1")
     r = _post(client)
+    assert r.status_code == 200
+    content = r.json()["choices"][0]["message"]["content"]
+    assert "冷却" in content
+    assert content.startswith("（") and content.endswith("）"), \
+        f"提示语要用括号包起来，实际 {content!r}"
+    assert a.calls == [] and b.calls == []
+
+
+def test_all_targets_cooled_stream_notice_is_valid_sse(tmp_path, monkeypatch):
+    """流式路径同样合成：必须是合法 SSE（一条 content + 收尾 + [DONE]）。"""
+    client, state, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"])
+    cooldown_mod.mark_failed("pa", "m1")
+    cooldown_mod.mark_failed("pb", "m1")
+    r = _post(client, stream=True)
+    assert r.status_code == 200
+    body = r.text
+    assert body.rstrip().endswith("data: [DONE]")
+    deltas = [json.loads(line[5:]) for line in body.splitlines()
+              if line.startswith("data:") and "[DONE]" not in line]
+    assert deltas, "至少要有一条 chunk"
+    text = "".join(
+        (d.get("choices") or [{}])[0].get("delta", {}).get("content") or ""
+        for d in deltas)
+    assert "冷却" in text
+    assert deltas[-1]["choices"][0].get("finish_reason") == "stop"
+
+
+def test_gated_targets_still_report_502(tmp_path, monkeypatch):
+    """被停用/不在时段 → **仍然报 502**，不能被合成回复掩盖。
+
+    那是要用户去 /ui 动手的事，合成一句「稍等再试」只会让人干等。
+    """
+    client, state, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"])
+    state.disabled_models = {"pa/m1", "pb/m1"}
+    r = _post(client)
     assert r.status_code == 502
-    assert "候选上游全部不可用" in r.text
+    assert "被停用" in r.text and "/ui" in r.text
     assert a.calls == [] and b.calls == []
 
 
