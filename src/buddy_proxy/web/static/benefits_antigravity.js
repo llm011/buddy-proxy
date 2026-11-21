@@ -275,7 +275,7 @@ function _fillAntigravityAccounts(accts) {
     const delBtn = `<button class="ghost danger" title="删除该账号（被 Google 拉黑/不再使用时）" ` +
       `onclick="agDeleteAccount('${a.id}')">✕</button>`;
     el.insertAdjacentHTML('beforeend', acctRowButtons('antigravity',
-      acctRenameButton('antigravity', a) + moveBtns, delBtn));
+      acctRenameButton('antigravity', a) + moveBtns, delBtn, a));
   }
 }
 

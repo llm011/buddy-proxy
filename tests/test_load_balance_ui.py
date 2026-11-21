@@ -91,3 +91,32 @@ def test_ui_shows_skipped_models():
 def test_ui_reads_excluded_list_from_settings():
     src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
     assert "load_balance_excluded" in src, "排除表要由 /ui/api/settings 下发"
+
+
+# ---------------------------------------------------------------------------
+# 账号「临时下线」按钮
+# ---------------------------------------------------------------------------
+def test_account_disable_helper_and_state():
+    src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
+    assert "let DISABLED_ACCOUNTS = [];" in src, "禁用表默认空 = 全启用"
+    assert "function acctDisableButton(" in src
+    assert "function setAccountDisabled(" in src
+    # 增量写入：只提交这一个账号键
+    assert "disabled_accounts: {[key]: !!on}" in src
+    # 状态由 settings 下发
+    assert "DISABLED_ACCOUNTS = r.disabled_accounts" in src
+
+
+def test_account_disable_button_wired_in_panels():
+    # 走 acctRowButtons 第 4 参（acct）的面板（antigravity 就地回填路径）
+    ag = (_STATIC / "benefits_antigravity.js").read_text(encoding="utf-8")
+    assert "acctRowButtons('antigravity'," in ag and ", delBtn, a)" in ag
+    # 内联拼按钮组的面板（均为多账号 failover 通道，禁用经 reorder 真实生效）
+    for fname, pid in [("benefits_copilot.js", "copilot"), ("benefits_codex.js", "codex"),
+                       ("benefits_kiro.js", "kiro"), ("benefits_qoder.js", "qoder"),
+                       ("benefits_trae.js", "trae"), ("benefits_codebuddy.js", "codebuddy")]:
+        src = (_STATIC / fname).read_text(encoding="utf-8")
+        assert f"acctDisableButton('{pid}', acct)" in src, f"{fname} 没接禁用按钮"
+    # dumate 是单账号本地 App、不走 reorder，禁用对其无效 → 不挂假控件
+    dm = (_STATIC / "benefits_dumate.js").read_text(encoding="utf-8")
+    assert "acctDisableButton('dumate'" not in dm

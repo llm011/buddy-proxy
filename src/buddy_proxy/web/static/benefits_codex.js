@@ -253,7 +253,7 @@ function renderCodexPanel() {
     const moveBtns = (m && n > 1) ? acctMoveButtons('codex', idx, n, acct && acct.id) : '';
     const delBtn = acctDeleteButton('codex', acct, 'refresh_token 作废/不再使用时');
     const renameBtn = acctRenameButton('codex', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${delBtn}</span>`;
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('codex', acct)}${delBtn}</span>`;
     // 卡片标题用账号名（快照回填）；后缀只是分组键自带的前缀，不要露出来
     const shown = acct ? (acct.alias || acct.name || acct.id) : grp.replace(/^Codex #\d+ · /, '');
     return `

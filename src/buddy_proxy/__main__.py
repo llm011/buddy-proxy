@@ -793,6 +793,16 @@ def main():
         print(f"[Load Balance] {len(load_balance)} 个通道按剩余额度轮转: "
               f"{', '.join(sorted(load_balance))}")
 
+    # 手动禁用的账号：settings.json 的 "provider:account_id" 键列表，命中账号
+    # 转发选号时剔除（管理页账号卡片「临时下线」）。缺省空集 = 无禁用。
+    disabled_accounts = {
+        k.strip() for k in (saved_settings.get("disabled_accounts") or [])
+        if isinstance(k, str) and k.strip() and ":" in k
+    }
+    if disabled_accounts:
+        print(f"[Disabled Accounts] {len(disabled_accounts)} 个账号已临时下线: "
+              f"{', '.join(sorted(disabled_accounts))}")
+
     # 限时可用模型：settings.json 的 {"provider/model": {"windows": [["HH:MM","HH:MM"],...]}}，
     # 窗口外拒绝转发。键规范化 + 窗口校验，非法窗口丢弃、空窗口不入表。
     model_schedules: dict[str, list] = {}
@@ -853,6 +863,7 @@ def main():
         disabled_providers=disabled_providers,
         load_balance=load_balance,
         session_rotation=session_rotation,
+        disabled_accounts=disabled_accounts,
         model_schedules=model_schedules,
         model_order=model_order,
         metrics=metrics,

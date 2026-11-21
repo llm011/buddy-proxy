@@ -127,6 +127,7 @@ def _make_state(providers, tmp_path):
         # 负载均衡开关：与 ProxyState 同型（set of provider id）
         load_balance=set(),
         session_rotation=set(),
+        disabled_accounts=set(),
         metrics=MetricsCollector(tmp_path / "metrics.jsonl"),
         write_log=mock.MagicMock(),
         ensure_auth=mock.MagicMock(),
@@ -2511,3 +2512,59 @@ def test_session_rotation_validation(env):
     assert env.client.post("/ui/api/settings", json={"session_rotation": {"nope": True}}).status_code == 400
     assert env.client.post("/ui/api/settings", json={"session_rotation": {"codebuddy": "yes"}}).status_code == 400
     assert env.client.post("/ui/api/settings", json={"session_rotation": ["codebuddy"]}).status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# 设置：账号「临时下线」（账号维度，键 provider:account_id）
+# ---------------------------------------------------------------------------
+def test_disabled_accounts_incremental_and_persisted(env):
+    r = env.client.post("/ui/api/settings",
+                        json={"disabled_accounts": {"antigravity:u@x.com": True}})
+    # antigravity 未在 env.providers 里 → 拒绝（只认 codebuddy 与已启用通道）
+    assert r.status_code == 400
+
+    r = env.client.post("/ui/api/settings",
+                        json={"disabled_accounts": {"fakeprov:a1": True}})
+    assert r.status_code == 200
+    assert r.json()["settings"]["disabled_accounts"] == ["fakeprov:a1"]
+    assert env.state.disabled_accounts == {"fakeprov:a1"}
+    assert settings_mod.load_settings()["disabled_accounts"] == ["fakeprov:a1"]
+
+    # 增量：再加一个，不动已有的
+    r = env.client.post("/ui/api/settings",
+                        json={"disabled_accounts": {"codebuddy:a2": True}})
+    assert r.status_code == 200
+    assert env.state.disabled_accounts == {"fakeprov:a1", "codebuddy:a2"}
+    assert settings_mod.load_settings()["disabled_accounts"] == ["codebuddy:a2", "fakeprov:a1"]
+
+    # 恢复一个
+    r = env.client.post("/ui/api/settings",
+                        json={"disabled_accounts": {"fakeprov:a1": False}})
+    assert r.status_code == 200
+    assert env.state.disabled_accounts == {"codebuddy:a2"}
+
+
+def test_disabled_accounts_get_reports_state(env):
+    env.client.post("/ui/api/settings", json={"disabled_accounts": {"codebuddy:a1": True}})
+    r = env.client.get("/ui/api/settings")
+    assert r.status_code == 200
+    assert r.json()["disabled_accounts"] == ["codebuddy:a1"]
+
+
+def test_disabled_accounts_validation(env):
+    # 缺冒号
+    assert env.client.post("/ui/api/settings",
+                           json={"disabled_accounts": {"codebuddy": True}}).status_code == 400
+    # 缺 account_id
+    assert env.client.post("/ui/api/settings",
+                           json={"disabled_accounts": {"codebuddy:": True}}).status_code == 400
+    # 未知 provider
+    assert env.client.post("/ui/api/settings",
+                           json={"disabled_accounts": {"nope:a1": True}}).status_code == 400
+    # 非 bool
+    assert env.client.post("/ui/api/settings",
+                           json={"disabled_accounts": {"codebuddy:a1": "yes"}}).status_code == 400
+    # 非对象
+    assert env.client.post("/ui/api/settings",
+                           json={"disabled_accounts": ["codebuddy:a1"]}).status_code == 400
+    assert env.state.disabled_accounts == set()

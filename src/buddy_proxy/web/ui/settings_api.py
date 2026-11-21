@@ -30,6 +30,7 @@ async def ui_settings_get(request: Request):
         "checkin_time": cfg["checkin_time"],
         "load_balance": sorted(getattr(state, "load_balance", set()) or ()),
         "session_rotation": sorted(getattr(state, "session_rotation", set()) or ()),
+        "disabled_accounts": sorted(getattr(state, "disabled_accounts", set()) or ()),
         # 负载均衡的「缓存隔离」提示：每个通道里哪些模型换号会掉缓存。
         # 前端拿去在开关旁边显示一行小字，让用户知道「开了均衡，但这个模型
         # 不会跟着轮转」。数据来自 core.load_balance（静态实测表 + 线上观测）。
@@ -122,6 +123,19 @@ async def ui_settings_post(request: Request):
         if sr_changed:
             update["session_rotation"] = sorted(cur_sr)
 
+    # 账号「临时下线」开关（账号维度的**增量**写入）：body 里给
+    # ``disabled_accounts: {"antigravity:u@x.com": true}`` 只改这一个账号。
+    # 键口径 provider_id:account_id；provider 必须是已启用通道（codebuddy 恒认）。
+    da_patch = _disabled_accounts_patch(body.get("disabled_accounts"), providers)
+    if da_patch:
+        cur_da = set(getattr(state, "disabled_accounts", set()) or ())
+        for key, on in da_patch.items():
+            if on:
+                cur_da.add(key)
+            else:
+                cur_da.discard(key)
+        update["disabled_accounts"] = sorted(cur_da)
+
     if not update:
         raise HTTPException(status_code=400, detail={"error": {"message": "没有可更新的设置字段"}})
     saved = settings_mod.save_settings(update)
@@ -134,11 +148,14 @@ async def ui_settings_post(request: Request):
         state.load_balance = set(update["load_balance"])
     if "session_rotation" in update:
         state.session_rotation = set(update["session_rotation"])
+    if "disabled_accounts" in update:
+        state.disabled_accounts = set(update["disabled_accounts"])
     return {
         "ok": True,
         "settings": {
             k: saved.get(k) for k in (
-                "default_model", "default_provider", "load_balance", "session_rotation"
+                "default_model", "default_provider", "load_balance",
+                "session_rotation", "disabled_accounts",
             )
         },
         "load_balance_excluded": _load_balance_excluded(state),
@@ -206,3 +223,48 @@ def _provider_bool_patch(
 
 def _load_balance_patch(raw: Any, providers: dict[str, Any]) -> dict[str, bool]:
     return _provider_bool_patch(raw, providers, field="load_balance")
+
+
+def _disabled_accounts_patch(raw: Any, providers: dict[str, Any]) -> dict[str, bool]:
+    """校验并归一账号禁用增量：``{"provider:account_id": bool}``。
+
+    键必须含 ``:``，provider 段必须是已启用通道（codebuddy 恒认）；account_id
+    段非空。非法条目整条拒绝（同 _provider_bool_patch 的取向：UI 点击写错属 bug）。
+    保留原始键字符串（account_id 可能含 @ . - 等，不做改写）。
+    """
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={"error": {"message": "disabled_accounts 应为 {provider:account_id: bool} 对象"}},
+        )
+    out: dict[str, bool] = {}
+    for key, value in raw.items():
+        full = str(key or "").strip()
+        if not full:
+            continue
+        if ":" not in full:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"disabled_accounts 键 {full!r} 应为 provider:account_id"}},
+            )
+        pid, account_id = full.split(":", 1)
+        pid = pid.strip()
+        if not account_id.strip():
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"disabled_accounts 键 {full!r} 缺少 account_id"}},
+            )
+        if pid != "codebuddy" and pid not in providers:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"provider {pid} 未启用"}},
+            )
+        if not isinstance(value, bool):
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"disabled_accounts.{full} 应为 true/false"}},
+            )
+        out[full] = value
+    return out

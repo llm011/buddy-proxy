@@ -600,6 +600,11 @@
   .lb-skip { font-size: 10px; color: var(--muted); margin-left: 2px;
              white-space: nowrap; text-decoration: underline dotted; }
   .lb-skip:hover { color: var(--warn); }
+  /* 账号「临时下线」按钮：⏸ 禁用态悬停转琥珀提示「将暂停」，▶ 恢复态常绿。
+     沿用 .ghost 基础样式，只加颜色语义，不另画胶囊。 */
+  .acct-disable:hover { color: var(--warn); border-color: var(--warn); }
+  .acct-enable { color: var(--ok); }
+  .acct-enable:hover { color: var(--ok); border-color: var(--ok); }
   /* 轨道必须写 minmax(0, 1fr) 而不是 1fr：后者的隐含下限是内容的 min-content
      （= minmax(auto, 1fr)）。额度网关不可达时第一块是那条长说明条（「Trae PAT
      (服务账号直连) · PAT 额度网关不可达 剩 10/10 个账号本轮未取到新数据（网络
