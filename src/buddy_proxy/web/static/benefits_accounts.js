@@ -222,17 +222,21 @@ function acctDeleteButton(pid, acct, hint) {
       `onclick="acctDelete('${pid}','${acct.id}')">✕</button>` : '';
 }
 
-/** ⏸/▶ 临时下线按钮（要账号 id）：禁用后该账号不参与转发选号，但保留凭据与顺位，
- *  可随时启用恢复。与「删除」不同——删除清凭据，禁用只是暂停使用。快照没到时不渲染。 */
+/** 下线/恢复按钮（要账号 id）：禁用后该账号不参与转发选号，但保留凭据与顺位，
+ *  可随时启用恢复。与「删除」不同——删除清凭据，禁用只是暂停使用。快照没到时不渲染。
+ *
+ *  带文字而不只是 ⏸/▶：2026-11-21 用户实报「界面上没有这个操作」。当时是
+ *  opacity:.35 + 仅 hover 才亮 + 10px 纯图标，紧挨着「✕ 删除」，既看不见也
+ *  分不清哪个是删除（误点代价是凭据被清）。文字 + 常驻 + 琥珀/绿配色解决可发现性。 */
 function acctDisableButton(pid, acct) {
   if (!acct || !acct.id) return '';
   const key = `${pid}:${acct.id}`;
   const off = (DISABLED_ACCOUNTS || []).includes(key);
   return off
     ? `<button class="ghost acct-enable" title="该账号已临时下线，点击恢复使用" ` +
-      `onclick="setAccountDisabled('${pid}','${acct.id}',false,this)">▶</button>`
+      `onclick="setAccountDisabled('${pid}','${acct.id}',false,this)">▶ 恢复</button>`
     : `<button class="ghost acct-disable" title="临时下线该账号（暂停参与转发，可随时恢复）" ` +
-      `onclick="setAccountDisabled('${pid}','${acct.id}',true,this)">⏸</button>`;
+      `onclick="setAccountDisabled('${pid}','${acct.id}',true,this)">⏸ 下线</button>`;
 }
 
 /** 渠道标题统一使用的整体额度刷新按钮。 */

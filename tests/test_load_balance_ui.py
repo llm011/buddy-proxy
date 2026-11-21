@@ -120,3 +120,35 @@ def test_account_disable_button_wired_in_panels():
     # dumate 是单账号本地 App、不走 reorder，禁用对其无效 → 不挂假控件
     dm = (_STATIC / "benefits_dumate.js").read_text(encoding="utf-8")
     assert "acctDisableButton('dumate'" not in dm
+
+
+def test_account_disable_button_is_always_visible():
+    """下线按钮必须**常驻可见**，不能靠 hover 才亮。
+
+    2026-11-21 用户实报「界面上也没有这个操作」：旧样式是
+    ``.ag-move { opacity: .35 }`` + ``.pat-pkg:hover .ag-move { opacity: 1 }``，
+    再叠加 10px 纯图标灰字紧挨着「✕ 删除」——功能等于被藏起来。
+    功能入口不该靠悬停发现，这条测试防止样式被「优化」回隐藏态。
+    """
+    css = (_STATIC / "style.css").read_text(encoding="utf-8")
+    m = re.search(r"\.ag-move\s*\{[^}]*\}", css)
+    assert m, "找不到 .ag-move 样式"
+    block = m.group(0)
+    assert "opacity: 1" in block, (
+        f"账号按钮组必须常驻可见，实际样式 {block!r}")
+    assert "opacity: .35" not in block, (
+        "不要再把按钮调成半透明——用户会以为没有这个操作")
+
+
+def test_account_disable_button_has_text_label():
+    """按钮要带文字（「下线」/「恢复」），不能只有 ⏸/▶ 图标。
+
+    纯图标在 10px 灰字里不可辨，且与相邻的「✕ 删除」无法区分——误点删除
+    会清掉凭据（不可撤销），误点下线只是暂停（可恢复）。
+    """
+    src = (_STATIC / "benefits_accounts.js").read_text(encoding="utf-8")
+    m = re.search(r"function acctDisableButton\([^)]*\)\s*\{.*?\n\}", src, re.S)
+    assert m, "找不到 acctDisableButton"
+    body = m.group(0)
+    assert "下线</button>" in body, "下线态按钮要带「下线」文字"
+    assert "恢复</button>" in body, "恢复态按钮要带「恢复」文字"
