@@ -84,30 +84,26 @@ def test_expired_cooldown_reads_zero():
 # available_accounts：顺位 + 区域过滤
 # ---------------------------------------------------------------------------
 
-def test_available_accounts_rotates_over_cooled_subset():
-    """冷却账号被剔除，其余**轮流**返回（2026-11-12 起改成轮询）。
+def test_available_accounts_preserves_priority_and_filters_cooled():
+    """可用账号必须按用户设置的 priority 顺位返回（不按 UUID 排序、也不强行轮转）。
 
-    为什么不再是「返回完整排序列表」：一次性返回整列会让调用方永远先用第一个
-    （主备降级），单账号被用爆才换——这正是 qoder 频繁触发频率限制的原因。
-    现在每次只回一个、按权重与轮询索引选，多账号才真正分摊负载。
+    线上回归（2026-11-21）：旧版 ``available_accounts`` 按 UUID 排序且每轮
+    ``_rotation_index`` 强行轮转，导致 ``qoderintl`` 即使没开负载均衡、且把
+    0 额度账号排在最后（priority 最大），也会因为 UUID 更小或轮转直接先打到
+    0 额度账号上。现在未开负载均衡/会话轮转时严格保持主备顺位。
     """
     from buddy_proxy.qoder import failover
 
     failover._rotation_index.clear()
     failover._weights.clear()
-    save_account_cred(_cred("a"))
-    save_account_cred(_cred("b"))
-    save_account_cred(_cred("c"))
-    mark_cooldown("b", reason="测试")
-    # 每次返回的是**旋转后的完整列表**（首元素是本次轮询选中的账号），
-    # 这样 forward 的 failover 循环仍有后续候选可试。
-    firsts = []
+    # 故意让高 priority 的账号 UUID 字母序更大（模拟真实 4e22... > 01a1...）
+    save_account_cred(_cred("4e22-first", region="global"))
+    save_account_cred(_cred("01a1-second", region="global"))
+    save_account_cred(_cred("01a1-third-zero", region="global"))
+    mark_cooldown("01a1-second", reason="测试")
     for _ in range(6):
-        got = [a.id for a in available_accounts()]
-        assert "b" not in got, "冷却账号不该出现在候选里"
-        assert set(got) == {"a", "c"}, f"应包含全部可用账号，实际 {got}"
-        firsts.append(got[0])
-    assert set(firsts) == {"a", "c"}, f"轮询起点应在可用账号间轮转，实际 {firsts}"
+        got = [a.id for a in available_accounts("global")]
+        assert got == ["4e22-first", "01a1-third-zero"]
 
 
 def test_available_accounts_filters_by_region():

@@ -963,8 +963,6 @@ class QoderProvider(BaseProvider):
                     continue
 
                 if resp.status_code != 200:
-                    # 成功：提升权重，下次优先用
-                    failover.mark_success(acct.id)
                     break  # 非 200 交给下方原有分支处理
                 gate = await _gate_first_event(resp, stream)
                 if gate.queue_wait_s <= 0:
@@ -986,8 +984,6 @@ class QoderProvider(BaseProvider):
                 continue
 
             if resp.status_code != 200:
-                # 成功：提升权重，下次优先用
-                failover.mark_success(acct.id)
                 text = (await resp.aread()).decode("utf-8", "replace")[:300]
                 await resp.aclose()
                 if resp.status_code == 401:
@@ -1092,6 +1088,7 @@ class QoderProvider(BaseProvider):
                 continue
 
             if stream:
+                failover.mark_success(acct.id)
                 inner = _ReplayStream(gate.resp, gate.buffered, gate.lines, client)
                 if protocol == "anthropic":
                     from ..protocols.anthropic_adapter import AnthropicStreamConverter
@@ -1114,6 +1111,7 @@ class QoderProvider(BaseProvider):
                     detail={"error": {"message": "qoder upstream returned non-JSON",
                                       "type": "bad_gateway"}},
                 )
+            failover.mark_success(acct.id)
             if protocol == "anthropic":
                 from ..protocols.anthropic_adapter import chat_completion_to_anthropic_message
                 return JSONResponse(chat_completion_to_anthropic_message(payload, original))
