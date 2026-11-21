@@ -73,16 +73,30 @@ class _RaisingStream(httpx.AsyncByteStream):
 
 
 class _Upstream:
-    """按 Bearer token（=账号）路由 canned 响应，记录调用顺序。"""
+    """按 Bearer token（=账号）路由 canned 响应，记录调用顺序。
+
+    ``plan`` 给单个响应；``sequences`` 给按账号的响应列表（每次调用弹一个，
+    弹空后沿用最后一个）——测「同账号重发」时用后者让第 2 次返回不同结果。
+    """
 
     def __init__(self):
         self.calls: list[str] = []  # 命中的 token 顺序
         self.plan: dict[str, tuple] = {}  # token -> (status, payload, headers)
+        self.sequences: dict[str, list] = {}  # token -> [tuple, ...]
+        self._seq_idx: dict[str, int] = {}
+
+    def _pick(self, tok: str):
+        seq = self.sequences.get(tok)
+        if seq is not None:
+            i = self._seq_idx.get(tok, 0)
+            self._seq_idx[tok] = i + 1
+            return seq[min(i, len(seq) - 1)]
+        return self.plan[tok]
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         tok = request.headers.get("authorization", "").removeprefix("Bearer ")
         self.calls.append(tok)
-        status, payload, headers = self.plan[tok]
+        status, payload, headers = self._pick(tok)
         if isinstance(payload, Exception):
             raise payload  # 超时/网络错：client.send 或闸门迭代时抛出
         if isinstance(payload, httpx.AsyncByteStream):
@@ -578,11 +592,11 @@ def test_stream_gate_committed_after_candidates(two_accounts, monkeypatch):
 
 
 def test_stream_gate_eof_switches_without_cooldown(two_accounts, monkeypatch):
-    """语义事件前 EOF（假成功）：换号但不冷却（可能只是网络抖动）。"""
+    """语义事件前干净 EOF（假成功）：先同账号重发一次，仍空才换号，且不冷却。"""
     from buddy_proxy.antigravity import failover
 
     provider, up = two_accounts
-    up.plan["tok-u@x.com"] = (200, b"", {})
+    up.plan["tok-u@x.com"] = (200, b"", {})  # 两次都空 EOF
     up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
     _patch_token(monkeypatch)
 
@@ -590,7 +604,7 @@ def test_stream_gate_eof_switches_without_cooldown(two_accounts, monkeypatch):
     assert sr.status_code == 200
     assert "pong" in _stream_text(sr)
     assert failover.cooldown_left("u@x.com") == (0.0, "")
-    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com", "tok-v@y.com"]
 
 
 # 上游偶发「只想了没答」：output 0 token、finish=STOP、parts 里只有 thought。
@@ -609,12 +623,16 @@ _SSE_THOUGHT_THEN_EOF = _sse([
 
 
 @pytest.mark.parametrize("empty_body", [_SSE_THOUGHT_ONLY, _SSE_THOUGHT_THEN_EOF])
-def test_stream_gate_empty_switches_account(two_accounts, monkeypatch, empty_body):
-    """上游只给 thinking/空内容：未出字节，换号重试且不冷却账号。"""
+def test_stream_gate_empty_retries_same_account_first(two_accounts, monkeypatch, empty_body):
+    """上游只给 thinking/空内容：先同账号重发一次，救回来就不换号。
+
+    20:11/20:33 两次中断的根因就是偶发空流；直接换号会撞上兜底通道 402。
+    """
     from buddy_proxy.antigravity import failover
 
     provider, up = two_accounts
-    up.plan["tok-u@x.com"] = (200, empty_body, {})
+    # 主账号第 1 次空、第 2 次正常 → 重发救回，不动备用账号
+    up.sequences["tok-u@x.com"] = [(200, empty_body, {}), (200, _SSE_OK, {})]
     up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
     _patch_token(monkeypatch)
 
@@ -622,13 +640,30 @@ def test_stream_gate_empty_switches_account(two_accounts, monkeypatch, empty_bod
     assert sr.status_code == 200
     text = _stream_text(sr)
     assert "pong" in text
-    assert "plan..." not in text and "hmm" not in text  # 失败账号的 thought 不得透传
+    assert "plan..." not in text and "hmm" not in text  # 首次空流的 thought 不得透传
     assert failover.cooldown_left("u@x.com") == (0.0, "")
-    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com"]  # 同账号重发，未换号
+
+
+@pytest.mark.parametrize("empty_body", [_SSE_THOUGHT_ONLY, _SSE_THOUGHT_THEN_EOF])
+def test_stream_gate_empty_retry_exhausted_switches_account(two_accounts, monkeypatch, empty_body):
+    """同账号重发仍空：才换下一个账号，且不冷却主账号。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.plan["tok-u@x.com"] = (200, empty_body, {})  # 两次都空
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    sr = _run(provider, stream=True)
+    assert sr.status_code == 200
+    assert "pong" in _stream_text(sr)
+    assert failover.cooldown_left("u@x.com") == (0.0, "")
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com", "tok-v@y.com"]
 
 
 def test_stream_gate_empty_all_accounts_raises(two_accounts, monkeypatch):
-    """所有账号都只给 thinking：明确 502 no content，而不是「成功但没有内容」。"""
+    """所有账号重发后仍只给 thinking：明确 502 no content。"""
     from fastapi import HTTPException
 
     provider, up = two_accounts
@@ -640,7 +675,8 @@ def test_stream_gate_empty_all_accounts_raises(two_accounts, monkeypatch):
         _run(provider, stream=True)
     assert ei.value.status_code == 502
     assert "returned no content" in json.dumps(ei.value.detail, ensure_ascii=False)
-    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+    # 每账号各 2 次（首判 + 重发）
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com", "tok-v@y.com", "tok-v@y.com"]
 
 
 def test_stream_gate_thinking_then_text_commits(two_accounts, monkeypatch):
@@ -659,18 +695,85 @@ def test_stream_gate_thinking_then_text_commits(two_accounts, monkeypatch):
     assert up.calls == ["tok-u@x.com"]
 
 
-def test_nonstream_empty_switches_account(two_accounts, monkeypatch):
-    """非流式同理：candidates 只有 thinking → 换号，不把空内容当成功。"""
+def test_nonstream_empty_retries_same_account_first(two_accounts, monkeypatch):
+    """非流式同理：首次空内容先同账号重发一次，救回就不换号。"""
     provider, up = two_accounts
-    up.plan["tok-u@x.com"] = (200, {"candidates": [{
-        "content": {"parts": [{"text": "plan...", "thought": True}], "role": "model"},
-        "finishReason": "STOP"}]}, {})
+    up.sequences["tok-u@x.com"] = [
+        (200, {"candidates": [{
+            "content": {"parts": [{"text": "plan...", "thought": True}], "role": "model"},
+            "finishReason": "STOP"}]}, {}),
+        (200, _gemini_ok(), {}),
+    ]
     up.plan["tok-v@y.com"] = (200, _gemini_ok(), {})
     _patch_token(monkeypatch)
 
     resp = _run(provider)
     assert resp.status_code == 200 and b"pong" in resp.body
-    assert up.calls == ["tok-u@x.com", "tok-v@y.com"]
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com"]  # 同账号重发
+
+
+# 20:11/20:33 两次中断的真实形状：流里连 candidates 都没出现（只有 usage /
+# 心跳），随后干净 EOF —— _gate_first_event 判 eof=True, empty=False,
+# finishReason=n/a。这正是必须重发的那类（只判 empty 会漏）。
+_SSE_BARE_EOF = _sse([
+    json.dumps({"usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 0}}),
+])
+
+
+def test_stream_gate_bare_eof_retries_same_account(two_accounts, monkeypatch):
+    """finishReason=n/a 的干净断流：同账号重发一次救回，不换号不冷却。
+
+    退化护栏：这是 20:11、20:33 两次真实中断的形状；若重发条件只判
+    gate.empty，这类 empty=False 的断流会直接换号 → 撞兜底 402 → 双冷却。
+    """
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.sequences["tok-u@x.com"] = [(200, _SSE_BARE_EOF, {}), (200, _SSE_OK, {})]
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    sr = _run(provider, stream=True)
+    assert sr.status_code == 200
+    assert "pong" in _stream_text(sr)
+    assert failover.cooldown_left("u@x.com") == (0.0, "")
+    assert up.calls == ["tok-u@x.com", "tok-u@x.com"]  # 同账号重发
+
+
+def test_empty_retry_second_429_cooldowns_and_switches(two_accounts, monkeypatch):
+    """重发拿到 429：折算成带内错误，主流程按 (账号,模型) 冷却并换号，不崩。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.sequences["tok-u@x.com"] = [
+        (200, _SSE_THOUGHT_THEN_EOF, {}),  # 首次空
+        (429, {"error": {"code": 429, "message": "quota"}}, {}),  # 重发 429
+    ]
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    text = _stream_text(_run(provider, stream=True))
+    assert "pong" in text
+    model = _default_upstream_model()
+    assert failover.model_cooldown_left("u@x.com", model)[0] > 0  # 429 冷却了模型
+    assert up.calls[-1] == "tok-v@y.com"  # 换到备用号
+
+
+def test_empty_retry_second_transport_error_cooldowns(two_accounts, monkeypatch):
+    """重发遇网络错：折算成 504 冷却换号，不抛裸异常。"""
+    from buddy_proxy.antigravity import failover
+
+    provider, up = two_accounts
+    up.sequences["tok-u@x.com"] = [
+        (200, _SSE_THOUGHT_THEN_EOF, {}),
+        (0, httpx.ConnectError("boom"), {}),  # 重发网络错 → _UpstreamUnavailable
+    ]
+    up.plan["tok-v@y.com"] = (200, _SSE_OK, {})
+    _patch_token(monkeypatch)
+
+    text = _stream_text(_run(provider, stream=True))
+    assert "pong" in text
+    assert failover.cooldown_left("u@x.com")[0] > 0  # 504 冷却
 
 
 def test_stream_gate_buffer_cap_committed(two_accounts, monkeypatch):
