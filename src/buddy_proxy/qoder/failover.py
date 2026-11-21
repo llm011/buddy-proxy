@@ -61,14 +61,14 @@ _QUOTA_COOLDOWN_S = 300.0
 def mark_cooldown(account_id: str, *, retry_after: str | None = None,
                   quota: bool = False, reason: str = "") -> float:
     """把账号冷却一段时间。``retry_after``（Retry-After 头）优先于默认时长。
-    
-    同时降低该账号权重（失败惩罚），让轮询更倾向其他账号。
+
+    同时降低该账号权重（允许降到 0 以下，后续由指数衰减自然恢复），避免
+    反复失败/无额度的账号冷却到期后立刻重新排回顺位前列。
     """
-    # 降低权重（失败惩罚）
-    for region in ["global", "cn", "global"]:  # 所有 region
+    for region in _KNOWN_REGIONS:
         key = (region, account_id)
-        _weights[key] = max(0.0, _weights.get(key, 0.0) - 1.0)
-    
+        _weights[key] = _weights.get(key, 0.0) - 1.0
+
     return _tracker.mark(account_id, retry_after=retry_after,
                          kind="quota" if quota else "account",
                          reason=reason, log=log)
@@ -103,63 +103,43 @@ def cooldown_left(account_id: str) -> tuple[float, str]:
 
 
 def available_accounts(region: str | None = None) -> list[AccountRef]:
-    """当前可用的账号（按轮询 + 权重排序）。
+    """当前可用的账号（按健康权重 + 用户配置的 ``priority`` 顺位）。
 
     策略：
-    1. 先过滤掉冷却中的账号与 region 不匹配的
-    2. 按权重降序排列（成功的账号优先）
-    3. 同权重的按登录顺序轮询（避免单账号过度使用）
-    
-    这样既避免单账号限流，又优先用成功率高的账号。
+    1. 过滤掉冷却中的账号与 region 不匹配的；
+    2. 每次取账号前把权重向 0 乘性衰减（×0.9），避免历史失败永久惩罚；
+    3. 同一健康水位下严格按 ``a.priority`` 升序（用户在管理页调整的顺位），
+       再用 ``a.id`` 兜底稳序。
+
+    不在本层强制轮询（旧版 ``_rotation_index`` 曾按 UUID 排序并强行轮转，
+    导致未开负载均衡的 ``qoderintl`` 每隔几轮就把排在最后的 0 额度账号转到第一位）；
+    需要按剩余额度均衡或按会话轮转时，统一走上层 ``core.load_balance.reorder``。
     """
     accts = list_accounts()
     out = [a for a in accts if cooldown_left(a.id)[0] <= 0]
     if region:
         out = [a for a in out if a.region == region]
-    
+
     if not out:
         diagnose_available('qoder', _tracker, accts, [], region=region, log=log)
         return []
-    
-    # **权重衰减**：每次取账号前把所有候选的权重乘 0.9。
-    #
-    # 为什么必须衰减：纯「成功 +1 / 失败 -1」会让被限流过的账号**永久**低人
-    # 一等——它冷却恢复后权重还是负的，即使早就没问题了也轮不到它。用户指出
-    # 的正是这点（「某个号被用多了限流，之后就一直被降权」）。
-    #
-    # 乘性衰减模拟「遗忘」：一次失败的 -1 影响会随请求次数指数衰减
-    # （10 次后剩 0.35，30 次后剩 0.04），账号自然回到公平竞争。
+
+    # **权重衰减**：每次取账号前把所有候选的权重乘 0.9，
+    # 一次 -1 惩罚在 10 次请求后剩 0.35、30 次后剩 0.04，自然回到公平竞争。
     for a in out:
         key = (region or "global", a.id)
         if key in _weights:
             _weights[key] *= _WEIGHT_DECAY_RATE
 
-    # 按权重降序 + 轮询索引排序
+    # 健康权重降序 + 用户配置的 priority 升序（同权时绝不能按 UUID 字母序把
+    # 靠后的 0 额度号排到高顺位账号前面）；测试桩 SimpleNamespace 缺 priority
+    # 时按原始顺位 0 兜底，保持兼容。
     def sort_key(a):
         w = _weights.get((region or "global", a.id), 0.0)
-        # 权重降序，同权重的按账号 ID 排序（确保稳定性）
-        return (-w, a.id)
+        return (-round(w, 6), getattr(a, "priority", 0), a.id)
 
     out.sort(key=sort_key)
-    
-    # 轮询：**把排序后的列表按轮转起点旋转**，而不是只摘一个。
-    #
-    # 为什么要返回完整列表（不只是首选那个）：``forward`` 的 failover 循环靠
-    # 遍历这个列表来「A 失败换 B」。只回一个的话，首选账号一失败就直接报
-    # 「所有账号均不可用」——比原来的主备降级还脆弱（踩过：8 个 failover
-    # 测试全红，生产上单个账号抖一下就整轮挂）。
-    #
-    # 旋转而不是重排：保持权重与相对次序不变，只换起点。这样连续请求会从
-    # 不同账号开始（分摊负载），而每个请求内部仍能按权重顺序依次兜底。
-    #
-    # ⚠ ``rot_idx`` 必须对**当前**列表长度取模：索引按 region 累积，而账号会
-    # 被冷却过滤掉、列表随时变短。直接用会 ``list index out of range``
-    # （踩过：6 条连续 500、耗时 0ms，根本没发请求就崩了）。
-    if out:
-        rot_idx = _rotation_index.get(region or "global", 0) % len(out)
-        out = out[rot_idx:] + out[:rot_idx]
-        _rotation_index[region or "global"] = (rot_idx + 1) % len(out)
-    
+
     diagnose_available('qoder', _tracker, accts, out, region=region, log=log)
     return out
 

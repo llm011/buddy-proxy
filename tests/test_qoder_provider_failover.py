@@ -289,6 +289,61 @@ def test_failover_on_http_429(monkeypatch):
     assert calls == ["uid-acct-a", "uid-acct-b"]
     left, kind = failover.cooldown_left("acct-a")
     assert left > 0 and kind == "quota"
+    # 回归：失败账号不能被误调用 mark_success，只有实际成功出字的 acct-b 才加权
+    assert failover._weights[("cn", "acct-a")] < 0
+    assert failover._weights[("cn", "acct-b")] > 0
+
+
+def test_forward_respects_priority_over_uuid_and_does_not_rotate(monkeypatch):
+    """未开负载均衡时，即使 #3 账号 UUID 更小，也必须先用 #1、不会轮转到 #3。"""
+    monkeypatch.setenv("QODER_REGION", "global")
+    # priority 0 的 UUID 字母序故意大于 priority 1/2
+    _write_account("4e22-acct-1", region="global")
+    _write_account("01a1-acct-2", region="global")
+    _write_account("01a0-acct-3-zero", region="global")
+    up = _Upstream()
+    up.routes.update({
+        "uid-4e22-acct-1": lambda req: _text_stream("ok-1"),
+        "uid-01a1-acct-2": lambda req: _text_stream("ok-2"),
+        "uid-01a0-acct-3-zero": lambda req: httpx.Response(
+            200, headers={"content-type": "text/event-stream"},
+            stream=_ChunkedBody([_cosy_nested_error(
+                "112", '{"pricingUrl":"https://qoder.com/pricing"}')])),
+    })
+    _patch_token(monkeypatch)
+    real_client = httpx.AsyncClient
+
+    def client_factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(up)
+        kwargs.pop("timeout", None)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("buddy_proxy.qoder.provider.httpx.AsyncClient", client_factory)
+    prov = QoderProvider()
+
+    for _ in range(4):
+        meta: dict[str, Any] = {}
+        holder = ACCOUNT_META.set(meta)
+        try:
+            async def _go():
+                resp = await prov.forward(
+                    {"model": "qwen3.8-flash",
+                     "messages": [{"role": "user", "content": "hi"}],
+                     "stream": True},
+                    "openai",
+                )
+                chunks = []
+                async for piece in resp.body_iterator:
+                    chunks.append(piece if isinstance(piece, bytes) else piece.encode())
+                return b"".join(chunks)
+
+            body_bytes = asyncio.run(_go())
+        finally:
+            ACCOUNT_META.reset(holder)
+        assert b"ok-1" in body_bytes
+        assert meta.get("account") == "4e22-acct-1"
+
+    assert up.calls == ["uid-4e22-acct-1"] * 4
 
 
 def test_401_force_refresh_then_failover(monkeypatch):
