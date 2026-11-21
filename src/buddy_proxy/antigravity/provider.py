@@ -62,6 +62,7 @@ from .model_catalog import (
     _split_effort_suffix,
     _strip_effort_suffix,
 )
+from .fingerprint import auth_headers as _auth_headers  # 供 _gate_with_empty_retry 模块级使用
 
 log = logging.getLogger(__name__)
 
@@ -91,6 +92,12 @@ _CREDIT_PROBE_TIMEOUT_S = 8.0
 _ATTEMPT_DEADLINE_S = 180.0
 #: 流式首事件闸门的缓冲行上限（防异常上游无界攒内存，见 _gate_first_event）。
 _GATE_BUFFER_MAX_LINES = 256
+#: 上游偶发「空内容 200 流」（finishReason=MAX_TOKENS 或 n/a）：此时一个字节
+#: 都没吐给客户端，同账号重发一次是安全且最有效的兜底。实测 11-21 20:11 /
+#: 20:33 两次中断都是 68 万 token 热会话里偶发 n/a 空流，紧接着换 copilot
+#: 吃 402 → 双通道冷却 5 分钟，整段对话被打断。重发只针对「干净空流」，
+#: 读超时(timed_out)不重发（换号更快），避免把挂死账号再拖一遍 90s。
+_EMPTY_RETRY_MAX = 1
 
 def _load_models() -> list[dict[str, Any]]:
     """兼容旧导入路径；实际目录逻辑已拆到 ``model_catalog``。"""
@@ -623,8 +630,16 @@ class AntigravityProvider(BaseProvider):
 
             # 200：过首事件闸门——首个上游事件若是 429/403 error，还没向客户端
             # 吐过任何字节，可以安全冷却换号；见到语义事件后绝不重放（防重复计费）
+            #
+            # 「干净空内容」（EOF / 只有 thinking、finishReason=n/a 或 MAX_TOKENS）
+            # 时同账号再发一次：上游偶发空流（20:11、20:33 两次中断）不是账号
+            # 问题，换号反而撞上兜底通道 402 → 双通道冷却 5 分钟。重发前客户端
+            # 0 字节，绝对安全、无重复计费。
             try:
-                gate = await self._gate_first_event(resp, stream)
+                resp, gate = await self._gate_with_empty_retry(
+                    client, method, upstream_body, access_token,
+                    upstream_model, stream, resp, acct,
+                )
             except BaseException:
                 lease.release()
                 await _drain_and_close(resp, stream)
@@ -652,17 +667,15 @@ class AntigravityProvider(BaseProvider):
                 continue
             if gate.eof:
                 lease.release()
-                # 语义事件之前断流/空流：没向客户端吐过字节，换下一个账号。
-                # 读超时（首事件前卡死）额外短冷却——挂死账号别每轮都被首选；
-                # 干净 EOF 不冷却（可能只是网络抖动，与 trae/model_order 同思路）。
+                # 语义事件之前断流/空流（已重发过仍空）：没向客户端吐过字节，
+                # 换下一个账号。读超时额外短冷却；干净空内容不冷却。
                 if gate.timed_out:
                     last_status, last_detail = 504, "首事件前读超时"
                     failover.mark_cooldown(acct.id, reason="首事件前读超时")
                 elif gate.empty:
-                    # 上游只想了没答（0 token 空内容）：不是账号问题，不冷却，
-                    # 单纯换号重试；全部账号都空时对外报 502，让客户端明确重试
                     last_status = 502
-                    last_detail = f"空内容（finishReason={gate.message or 'n/a'}）"
+                    last_detail = (f"空内容（finishReason={gate.message or 'n/a'}，"
+                                   f"已重发 {_EMPTY_RETRY_MAX} 次）")
                 await _drain_and_close(gate.resp, stream, gate.lines)
                 continue
 
@@ -757,6 +770,67 @@ class AntigravityProvider(BaseProvider):
                          else "bad_gateway"),
             }},
         )
+
+    async def _gate_with_empty_retry(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        upstream_body: dict[str, Any],
+        access_token: str,
+        upstream_model: str,
+        stream: bool,
+        resp: httpx.Response,
+        acct: Any,
+    ) -> "tuple[httpx.Response, _Gate]":
+        """过首事件闸门；干净空内容（未吐字节）时同账号重发一次。
+
+        上游偶发「200 但流里没有语义事件」——finishReason=n/a（断流）或
+        MAX_TOKENS（预算吃光），实测同一个 68 万 token 热会话里前面几条都
+        成功、某一条突然空。这种时候换号反而会撞上兜底通道的 402 并让两个
+        候选一起冷却 5 分钟，整段对话被打断（20:11、20:33 两次中断）。
+
+        只重发「语义事件之前的干净断流」：``gate.timed_out``（首事件前读超时，
+        挂死账号）、``gate.account_error``（429/403 带内错误）、已 committed
+        （见过真负载）一律不重发，交给主流程原逻辑。重发前客户端 0 字节，
+        上游那次 0 token 产出，绝对安全、无重复计费。
+
+        重发本身若拿到非 200 / 网络错，折算成一个 ``account_error`` 形态的
+        gate（带状态码）交回主流程，由既有分支冷却换号——不引入新分支。
+        """
+        gate = await self._gate_first_event(resp, stream)
+        retried = 0
+        # 任何「语义事件之前的干净断流」都重发：既包括 empty=True（只有 thinking
+        # / 空 parts），也包括 empty=False 的纯 EOF——20:11/20:33 那两次
+        # finishReason=n/a 就是连 candidates 都没见到就断流，empty 为 False，
+        # 只判 empty 会漏掉它们。唯独 timed_out（首事件前读超时，90s 挂死）
+        # 不重发：那多半是账号真卡住，换号比再等 90s 快。
+        while (gate.eof and not gate.timed_out and not gate.account_error
+               and retried < _EMPTY_RETRY_MAX):
+            retried += 1
+            await _drain_and_close(gate.resp, stream, gate.lines)
+            log.warning(
+                "antigravity %s 账号 %s 首事件空内容（finishReason=%s），"
+                "同账号重发 %d/%d",
+                upstream_model, acct.id, gate.message or "n/a",
+                retried, _EMPTY_RETRY_MAX,
+            )
+            try:
+                resp = await self._send_with_fallback(
+                    client, method, upstream_body,
+                    _auth_headers(access_token, upstream_model, stream), stream,
+                )
+            except _UpstreamUnavailable as exc:
+                # 折算成 504 带内错误 → 主流程 mark_cooldown + 换号
+                return resp, _Gate(resp=resp, account_error=True, code=504,
+                                   message=exc.message)
+            if resp.status_code != 200:
+                # 非 200：折算成带内错误交主流程分类（429/403/5xx/4xx）
+                detail = await _error_detail(resp, stream)
+                await resp.aclose()
+                return resp, _Gate(resp=resp, account_error=True,
+                                   code=resp.status_code, message=detail)
+            gate = await self._gate_first_event(resp, stream)
+        return resp, gate
 
     async def _gate_first_event(self, resp: httpx.Response, stream: bool) -> "_Gate":
         """压住第一个上游事件再决定透传还是换号。
