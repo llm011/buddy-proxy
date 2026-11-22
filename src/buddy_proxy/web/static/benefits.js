@@ -702,7 +702,7 @@ function renderBenefits(opts) {
   // ⚠ 新增通道时**只有确实做了专属面板**才能加进这个表；否则它在两个地方都
   // 不出现——踩过一次：kiro 既没有专属面板、又没被排除表之外的逻辑覆盖，
   // 结果额度卡整块消失（后端数据明明有）。现在 kiro 走通用额度卡，不排除。
-  const _PANEL_PROVIDERS = new Set(['traepat', 'antigravity', 'kimi', 'codex',
+  const _PANEL_PROVIDERS = new Set(['traepat', 'antigravity', 'kimi', 'raccoon', 'codex',
     'qoder', 'qoderintl', 'trae', 'traeintl', 'codebuddy', 'codebuddyintl',
     'dumate', 'kiro']);
   const qps = (BENEFITS.providers || []).filter(
@@ -745,6 +745,7 @@ function renderBenefits(opts) {
   renderTraeIntlPanel();
   renderTraepatPanel();
   renderKimiPanel();
+  renderRaccoonPanel();
   renderCodexPanel();
   renderCopilotPanel();
   renderQoderPanel();

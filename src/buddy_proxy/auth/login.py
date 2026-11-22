@@ -53,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "copilot")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "copilot", "raccoon")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -884,6 +884,61 @@ def _login_kimi(open_browser: bool = True, **_kwargs) -> int:
     return 0
 
 
+def _login_raccoon(open_browser: bool = True, **_kwargs) -> int:
+    """商汤小浣熊登录：手机号+密码，或粘会话 JWT。
+
+    为什么不像其它通道那样「开浏览器授权」：小浣熊没有 OAuth 设备码流程，
+    网页端只有手机号+密码。所以这里给两条路：
+
+    1. **手机号 + 密码**（推荐）：直接调上游登录接口换会话，并把密码加密
+       落盘——之后 token 过期会**自动重新登录**，不必一个月人工换一次。
+    2. **粘 xhx_token**：从浏览器 DevTools 复制会话 cookie。没有密码时的
+       兜底，30 天后需重取。
+
+    多账号：重复执行即可，同一账号（同 uid）会就地更新而不会长出重复行。
+    """
+    import getpass
+
+    from buddy_proxy.raccoon import login as raccoon_login
+    from buddy_proxy.raccoon.credentials import AuthError, list_accounts
+
+    existing = list_accounts()
+    if existing:
+        print(f"[Raccoon] 已有 {len(existing)} 个账号：")
+        for i, a in enumerate(existing):
+            print(f"     #{i + 1} {a.alias or a.name or a.id}")
+
+    print("[Raccoon] 选择登录方式：")
+    print("     1) 手机号 + 密码（推荐：可自动续期，不用一个月换一次 token）")
+    print("     2) 粘贴 xhx_token（从浏览器 DevTools → Cookies 复制）")
+    choice = input("     请输入 1 或 2（回车=1）: ").strip() or "1"
+
+    try:
+        if choice == "2":
+            print("[Raccoon] 请粘贴 xhx_token（也接受整段 cookie 或 {\"access_token\": ...}）：")
+            raw = input("     > ").strip()
+            ref = raccoon_login.import_session(raw)
+        else:
+            phone = input("[Raccoon] 手机号: ").strip()
+            password = getpass.getpass("[Raccoon] 密码（输入不显示）: ")
+            result = raccoon_login.login_with_password(phone, password)
+            token = result["access_token"]
+            info = raccoon_login.fetch_user_info(token)
+            nick = str(info.get("nickname") or info.get("screen_name") or "").strip()
+            ref = raccoon_login.import_session(
+                token, phone=phone, password=password, nickname=nick or phone)
+    except AuthError as exc:
+        print(f"\n[X] Raccoon 登录失败: {exc}")
+        return 1
+    except KeyboardInterrupt:
+        print("\n[Raccoon] 已取消。")
+        return 1
+
+    print(f"[OK] Raccoon 账号已保存：{ref.name or ref.id}")
+    print(f"     账号 id: {ref.id}（顺位 #{ref.priority + 1}）")
+    return 0
+
+
 def _login_codex(open_browser: bool = True, **_kwargs) -> int:
     """Codex（ChatGPT 订阅）登录：OAuth 回环 + PKCE。
 
@@ -1097,6 +1152,7 @@ _DISPATCH = {
     "gemini": _login_gemini,
     "antigravity": _login_antigravity,
     "kimi": _login_kimi,
+    "raccoon": _login_raccoon,
     "codex": _login_codex,
     "deepseek": _login_deepseek,
     "yuntoken": _login_yuntoken,
@@ -1131,7 +1187,7 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy, =codebuddyintl 海外) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi / codex / copilot，默认 codebuddy")
+                        help="codebuddy(=workbuddy, =codebuddyintl 海外) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi / raccoon / codex / copilot，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi/codex 登录不自动打开浏览器，只打印链接")
     parser.add_argument("--gh", action="store_true",

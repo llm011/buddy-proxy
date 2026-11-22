@@ -298,6 +298,10 @@ def main():
     parser.add_argument("--kimi", action="store_true", default=os.getenv("KIMI_ENABLED", "") == "1",
                         help="启用 Kimi provider（Kimi Code 订阅通道，kimi cli 同款 OAuth；"
                              "凭据跑 `buddy login kimi` 或在管理面板导入 token JSON）")
+    parser.add_argument("--raccoon", action="store_true",
+                        default=os.getenv("RACCOON_ENABLED", "") == "1",
+                        help="启用 商汤小浣熊 provider（SenseTime Raccoon；会话 JWT 或"
+                             "手机号+密码自动续期；凭据跑 `buddy login raccoon` 或在管理面板导入）")
     parser.add_argument("--copilot", action="store_true", default=os.getenv("COPILOT_ENABLED", "") == "1",
                         help="启用 GitHub Copilot provider（复用本机已登录的 GitHub 账号与 Copilot 订阅；"
                              "凭据跑 `buddy login copilot` / `buddy login copilot --gh` 或在管理面板导入 token）")
@@ -510,6 +514,21 @@ def main():
         print(f"[Kimi] Enabled ({_kh.get('nickname') or '未登录'} / {len(_kh.get('accounts') or [])} 个账号)")
     else:
         print("[Kimi] Disabled (pass --kimi or KIMI_ENABLED=1 to enable)")
+
+    if args.raccoon:
+        from buddy_proxy.raccoon.provider import RaccoonProvider
+
+        raccoon = RaccoonProvider()
+        try:
+            raccoon.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+        except HTTPException as exc:
+            logger.warning("raccoon provider 认证未就绪: %s", exc.detail)
+        providers[raccoon.id] = raccoon
+        _rh = raccoon.health()
+        logger.info("Raccoon provider enabled (%s 个账号)", len(_rh.get("accounts") or []))
+        print(f"[Raccoon] Enabled ({len(_rh.get('accounts') or [])} 个账号)")
+    else:
+        print("[Raccoon] Disabled (pass --raccoon or RACCOON_ENABLED=1 to enable)")
 
     if args.codex:
         from buddy_proxy.codex.provider import CodexProvider

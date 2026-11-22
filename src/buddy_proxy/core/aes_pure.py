@@ -172,3 +172,27 @@ def aes_cbc_decrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
         if 1 <= pad <= 16:
             plaintext = plaintext[:-pad]
     return plaintext
+
+
+def aes_cbc_encrypt(key: bytes, iv: bytes, data: bytes) -> bytes:
+    """AES-128-CBC 加密（PKCS7 填充）。
+
+    与 :func:`aes_cbc_decrypt` 对称。加解密必须成对存在：只解密能「读别人的
+    密文」，但要生成与上游同格式的密文（小浣熊手机号密码登录）就得有加密。
+    """
+    if len(key) != 16:
+        raise ValueError("AES-128 key 必须 16 字节")
+    if len(iv) != 16:
+        raise ValueError("AES-CBC IV 必须 16 字节")
+    round_keys = _key_expansion(key)
+    # PKCS7 填充：块边界上也要补一整块（pad=16），否则解密侧无法区分
+    pad = 16 - (len(data) % 16)
+    data = data + bytes([pad]) * pad
+    out = b""
+    prev = iv
+    for i in range(0, len(data), 16):
+        block = bytes(data[i + j] ^ prev[j] for j in range(16))
+        enc = _encrypt_block(block, round_keys)
+        out += enc
+        prev = enc
+    return out
