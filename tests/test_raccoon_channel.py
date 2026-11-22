@@ -582,3 +582,83 @@ def test_expire_ts_is_epoch_seconds_not_iso_string():
     # 无到期时间的包：expire_ts 必须是 None（组件据此不画到期）
     no_exp = next(it for it in items if "新人注册礼包" in it["label"])
     assert no_exp["expire_ts"] is None
+
+# ---------------------------------------------------------------------------
+# 10. 签到：以流水为准，金额进日历
+# ---------------------------------------------------------------------------
+
+def test_has_daily_grant_today_uses_bills_not_http():
+    """今日是否签到只看流水里的 ``daily_grant``，不看接口返回码。
+
+    上游对重复操作回 200 但余额不动（假成功），所以流水是唯一可信判据。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=8))
+    today = datetime.now(tz).replace(hour=10, minute=0, second=0, microsecond=0)
+    yesterday = today - timedelta(days=1)
+
+    bills = [
+        {"biz_type": "daily_grant",
+         "grant_at": today.isoformat(), "points": 300.0},
+        {"biz_type": "reward_grant",
+         "grant_at": today.isoformat(), "points": 3000.0},
+    ]
+    assert upstream.has_daily_grant_today(bills) is True
+
+    # 只有昨天那笔 → 今天没签
+    old = [{"biz_type": "daily_grant",
+            "grant_at": yesterday.isoformat(), "points": 300.0}]
+    assert upstream.has_daily_grant_today(old) is False
+
+    # 有别的发放但没 daily_grant → 今天没签
+    only_reward = [{"biz_type": "reward_grant",
+                    "grant_at": today.isoformat(), "points": 3000.0}]
+    assert upstream.has_daily_grant_today(only_reward) is False
+
+
+def test_today_grant_points_comes_from_bill_not_hardcoded():
+    """签到金额取流水里的 ``points``，**不硬编码 300**。
+
+    上游调过面额（CodeArts 的活动从 1000 降到过 100），写死会与实际到账不符。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from buddy_proxy.raccoon.provider import _today_daily_grant_points
+
+    tz = timezone(timedelta(hours=8))
+    today = datetime.now(tz).replace(hour=10, minute=0, second=0, microsecond=0)
+    bills = [{"biz_type": "daily_grant", "grant_at": today.isoformat(),
+              "points": 250.0}]
+    assert _today_daily_grant_points(bills) == 250.0
+    # 没有今天的发放 → None（不是 0，0 会把日历的合计糊掉）
+    assert _today_daily_grant_points([]) is None
+
+
+def test_next_daily_reset_is_next_midnight_cst():
+    """下次发放时刻是次日 00:00（+08:00），且明确标 ``inferred``。
+
+    上游没有「下次刷新」字段，是按「每天 00:00 发」的规则推的，界面要标注
+    来源而不是说成上游契约。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=8))
+    now = datetime.now(tz).replace(hour=15, minute=30, second=0, microsecond=0)
+    nxt = upstream.next_daily_reset_epoch(now=now.timestamp())
+    dt = datetime.fromtimestamp(nxt, tz)
+    assert dt.hour == 0 and dt.minute == 0
+    assert dt.date() == (now + timedelta(days=1)).date()
+
+
+def test_checkin_status_and_claim_carry_credits():
+    """签到状态/领取都要带 ``credits``，日历侧边栏靠它显示「加了多少」。"""
+    import inspect
+
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    assert getattr(RaccoonProvider, "supports_checkin", False) is True
+    src_status = inspect.getsource(RaccoonProvider.checkin_status)
+    src_claim = inspect.getsource(RaccoonProvider.checkin_claim)
+    assert '"credits": credits' in src_status, "status 要带 credits"
+    assert '"credits": credits' in src_claim, "claim 要带 credits（日历取这个值）"

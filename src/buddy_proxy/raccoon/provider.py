@@ -70,6 +70,9 @@ from .upstream import (
     CATALOG_PATH,
     CHAT_PATH,
     SETTING_INFO_PATH,
+    has_daily_grant_today,
+    next_daily_reset_epoch,
+    page_boot_requests,
     parse_bills,
     build_chat_body,
     build_headers,
@@ -802,6 +805,119 @@ class RaccoonProvider(BaseProvider):
             return {}
         return payload if isinstance(payload, dict) else {}
 
+    # ---- 签到（每日 300 分）-------------------------------------------
+    #
+    # 小浣熊**没有传统签到接口**：每日 300 分是上游在「当天第一次页面启动」时
+    # 补发的（2026-11-19 实测，只登录不打页面不给）。所以这里的签到动作 =
+    # 把浏览器打开 /work/home 的那串请求走一遍，再**以流水为准**核对到账。
+    #
+    # 判定绝不看 HTTP 200：上游对重复操作也回 200 但余额不动（假成功）。
+    # 只有 bills 里出现今天的 daily_grant 才算签上。
+
+    supports_checkin = True
+
+    def _bills(self, access_token: str, *, limit: int = 50) -> list[dict[str, Any]]:
+        """拉发放流水（只取 income，消费流水会把发放挤出窗口）。"""
+        payload = self._fetch_json(BILLS_PATH, access_token,
+                                   params={"paging.limit": limit, "type": "income"})
+        return parse_bills(payload)
+
+    def _first_account_token(self) -> tuple[str, str] | None:
+        """取第一个可用账号的 (id, token)；没有账号返回 None。"""
+        accounts = list_accounts()
+        for acct in accounts:
+            try:
+                token, _cred = ensure_account_token(acct.id)
+                return acct.id, token
+            except AuthError as exc:
+                log.debug("raccoon 签到跳过账号 %s: %s", acct.id, exc)
+                continue
+        return None
+
+    def checkin_status(self) -> dict[str, Any] | None:
+        """今日签到状态：以**发放流水**为准，不看接口返回码。
+
+        上游每日 300 分挂在「当天第一次页面启动」上，所以「今天有没有
+        ``daily_grant``」就是唯一可信的签到判据。
+        """
+        picked = self._first_account_token()
+        if picked is None:
+            return {
+                "checked_in": False,
+                "claimable": False,
+                "message": "未导入账号",
+            }
+        _aid, token = picked
+        bills = self._bills(token)
+        done = has_daily_grant_today(bills)
+        credits = _today_daily_grant_points(bills) if done else None
+        return {
+            "checked_in": done,
+            "claimable": not done,
+            "credits": credits,
+            # 每天 00:00 +08:00 发新的一笔；上游没给这个字段，是规则推断
+            "next_ts": next_daily_reset_epoch(),
+            "next_ts_source": "inferred",
+            "message": (f"今日 +{credits:g} 分已到账" if done and credits
+                        else "今日每日积分已到账" if done
+                        else "今日每日积分尚未到账（点「签到」触发页面启动）"),
+        }
+
+    def checkin_claim(self) -> dict[str, Any] | None:
+        """触发今日每日积分发放：走一遍「页面启动」序列，然后核对流水。
+
+        这是本通道唯一的「领取」动作——上游没有 claim 接口，补发挂在页面启动
+        事件上。执行后**重新读流水**判定是否真到账，返回的状态与
+        :meth:`checkin_status` 同构。
+
+        全部请求尽力而为：单步失败不影响其它步（是否到账以流水为准）。
+        """
+        picked = self._first_account_token()
+        if picked is None:
+            return {"checked_in": False, "claimable": False,
+                    "message": "未导入账号，无法签到"}
+        aid, token = picked
+        cred = load_account_cred(aid) or {}
+        device_id = str(cred.get("device_id") or "") or _derive_device_id(aid)
+        self._run_page_boot(token, device_id)
+        # 给上游几秒入账时间：实测到账在页面加载后数秒内
+        time.sleep(2.0)
+        bills = self._bills(token)
+        done = has_daily_grant_today(bills)
+        # 今日实际到账金额：日历侧边栏要显示「签到加了多少」，取流水里
+        # 今天那笔 daily_grant 的 points（不是硬编码 300——上游调整过面额）。
+        credits = _today_daily_grant_points(bills) if done else None
+        if done:
+            log.info("raccoon 账号 %s 今日每日积分已到账（%s 分）", aid, credits)
+        else:
+            log.warning("raccoon 账号 %s 页面启动后仍未见到今日 daily_grant", aid)
+        return {
+            "checked_in": done,
+            "claimable": not done,
+            "credits": credits,
+            "next_ts": next_daily_reset_epoch(),
+            "next_ts_source": "inferred",
+            "message": (f"签到成功，今日 +{credits:g} 分已到账" if done and credits
+                        else "签到成功，今日积分已到账" if done
+                        else "已触发页面启动，但流水里仍没有今天的发放"
+                             "（可能今天已领过或上游延迟，稍后再查）"),
+        }
+
+    def _run_page_boot(self, access_token: str, device_id: str) -> None:
+        """执行「页面启动」序列（尽力而为，逐步吞错）。"""
+        base = endpoint()
+        for method, url, headers, body in page_boot_requests(
+                access_token, device_id, base):
+            try:
+                with httpx.Client(timeout=_TIMEOUT) as c:
+                    if method == "GET":
+                        c.get(url, headers=headers)
+                    else:
+                        c.post(url, headers=headers, json=body or {})
+            except httpx.HTTPError as exc:
+                log.debug("raccoon page_boot 步骤失败（忽略）%s %s: %s",
+                          method, url.rsplit("/", 1)[-1], exc)
+
     def quota_epoch(self) -> str:
         """quota 缓存代：账号列表一变旧快照就该作废。"""
         return quota_epoch_from(list_accounts)
@@ -843,6 +959,43 @@ class _Gate:
         self.error_message = error_message
         self.model_mismatch = model_mismatch
         self.echoed_model = echoed_model
+
+
+def _today_daily_grant_points(bills: list[dict[str, Any]]) -> float | None:
+    """今天那笔 ``daily_grant`` 的积分金额；没有返回 None。
+
+    签到日历侧边栏要显示「今天签到加了多少」，数据源就是这笔流水的
+    ``points``。**不硬编码 300**：上游调整过面额（CodeArts 的活动就从
+    1000 降到过 100），写死会与实际到账不符。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=8))
+    today = datetime.now(tz).date()
+    for bill in bills or []:
+        if str(bill.get("biz_type") or "") != "daily_grant":
+            continue
+        try:
+            dt = datetime.fromisoformat(str(bill.get("grant_at") or ""))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz)
+        if dt.astimezone(tz).date() == today:
+            pts = bill.get("points")
+            return float(pts) if isinstance(pts, (int, float)) else None
+    return None
+
+
+def _derive_device_id(account_id: str) -> str:
+    """从账号 id 派生稳定 device_id（≤64 字符，上游对超长会回 500）。
+
+    上游对设备有长度限制（实测超 64 字符回 ``500 value too long for character
+    varying(64)``），所以哈希后截断，不用原始 id。
+    """
+    import hashlib
+
+    return hashlib.sha256(f"raccoon-device:{account_id}".encode()).hexdigest()[:32]
 
 
 def _epoch_from_iso(value: str) -> float:
