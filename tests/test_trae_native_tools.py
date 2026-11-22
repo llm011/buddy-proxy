@@ -166,6 +166,32 @@ def native_env(monkeypatch):
 
     monkeypatch.setattr(tp_impl, "_send_native_chat", fake_native)
     monkeypatch.setattr(tp_impl, "send_trae_chat", fake_legacy)
+
+    # 增量事件源：默认返回 None，让存量用例继续覆盖「整段兼容路径」
+    # （非流式缓冲 → 4001 节流重试 → 文本协议）。需要测真流式的用例把
+    # state._incremental_events 设成事件列表，或设 _incremental_reject=True
+    # 模拟零产出 4001。
+    def fake_stream_events(native_msgs, model, tools, stop=None):
+        if getattr(state, "_incremental_events", None) is None and not getattr(
+                state, "_incremental_reject", False):
+            return None
+        native_calls.append({"messages": native_msgs, "model": model,
+                             "stream": "incremental", "tools": tools})
+
+        def gen():
+            if getattr(state, "_incremental_reject", False):
+                from buddy_proxy.trae.native_tools import _NativeStreamRejected
+                raise _NativeStreamRejected('{"code":4001,"message":"param is invalid"}')
+            for ev in state._incremental_events:
+                if getattr(state, "_incremental_fail_after", None) is not None:
+                    if state._incremental_yielded >= state._incremental_fail_after:
+                        raise RuntimeError("socket broke mid-flight")
+                    state._incremental_yielded += 1
+                yield ev
+        return gen()
+
+    state._incremental_yielded = 0
+    monkeypatch.setattr(tp_impl, "_stream_native_chat_events", fake_stream_events)
     monkeypatch.setattr(tp_impl, "_auth", lambda: ("fake-token", "fake-uid"))
 
     # 注入一个假 work 账号（conftest 已隔离 trae state 目录，这里落假 cred）。
@@ -521,3 +547,67 @@ def test_native_nonstream_read_bounded_cuts_off_dribble():
     with pytest.raises(nt._NonStreamTimeout):
         nt._read_all_bounded(Dribble(), max_s=0.05)
     assert _time.monotonic() > 0  # 占位：确保异常路径先于断言失败
+
+
+# ───────────── 个人通道真流式（增量事件源，2026-11-23） ─────────────
+#
+# 背景：`_send_native_chat` 用 `_read_all_bounded` 把整个响应读完才返回，
+# provider 再切块「重放」。上游本身是真流式，整段缓冲让客户端 TTFT 等于
+# 总耗时（metrics 里 TTFT/总耗时 中位数 trae 0.998 vs codebuddy 0.308）。
+# 下面三条锁住「增量路径真的被走」「4001 零产出能安全回落」「已出字后断连
+# 不重放」。
+
+def test_incremental_stream_is_preferred_and_streams(client, native_env):
+    """有增量事件源时走它，且事件按到达顺序增量下发（不是整段重放）。"""
+    state, native_calls, legacy_calls = native_env
+    state._incremental_events = [
+        ("output", {"reasoning_content": "想一下"}),
+        ("output", {"response": "你"}),
+        ("output", {"response": "好"}),
+        ("token_usage", {"prompt_tokens": 7, "completion_tokens": 2,
+                         "total_tokens": 9}),
+        ("done", {}),
+    ]
+    r = client.post("/v1/chat/completions", json=_chat_body(stream=True, tools=False))
+    assert r.status_code == 200
+    assert "你" in r.text and "好" in r.text
+    # 走了增量源：native_calls 里那条的 stream 标记为 "incremental"
+    assert any(c["stream"] == "incremental" for c in native_calls), \
+        "流式请求没有走增量事件源（退回了整段缓冲路径）"
+    # 增量成功就不该再走整段 native 或文本兜底
+    assert not any(c["stream"] is True or c["stream"] is False for c in native_calls)
+    assert legacy_calls == []
+
+
+def test_incremental_4001_zero_output_falls_back_to_buffered(client, native_env):
+    """增量路径零产出就 4001：安全回落到整段路径，客户端仍拿到内容。
+
+    这是「可回落」的边界条件——一个字节都没发出去，重放不会造成重复内容。
+    """
+    state, native_calls, legacy_calls = native_env
+    state._incremental_reject = True      # 增量一上来就 4001
+    state._native_sse = _native_sse([{"response": "兜底成功"}])
+    r = client.post("/v1/chat/completions", json=_chat_body(stream=True, tools=False))
+    assert r.status_code == 200
+    assert "兜底成功" in r.text
+    # 回落路径确实被走了（增量失败后有一次整段 native 调用）
+    assert any(c["stream"] is True or c["stream"] is False for c in native_calls)
+    # 且被记进惩罚窗：TTL 内后续请求不再尝试流式
+    from buddy_proxy.trae import provider as trae_provider
+    assert trae_provider._stream_rejected_recently("glm-5.3-flash")
+
+
+def test_incremental_mid_flight_break_does_not_replay(client, native_env):
+    """已出字后断连：只报错、不重放，避免客户端看到重复内容。"""
+    state, native_calls, legacy_calls = native_env
+    state._incremental_events = [
+        ("output", {"response": "前半段"}),
+        ("output", {"response": "后半段"}),
+        ("done", {}),
+    ]
+    state._incremental_fail_after = 1     # 吐完第一条就断
+    r = client.post("/v1/chat/completions", json=_chat_body(stream=True, tools=False))
+    # 已经出过字，不能再回落到整段路径重放
+    assert not any(c["stream"] is True or c["stream"] is False for c in native_calls), \
+        "已出字后仍回落重放，客户端会看到重复内容"
+    assert legacy_calls == []
