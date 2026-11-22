@@ -34,8 +34,9 @@ function _trae_plan_badge(its) {
 }
 
 function _trae_sub_html(a) {
-  // 副标题：区域 / 冷却（acctSubHtml 公共件；trae 无通道特有 bit）
-  return acctSubHtml(a, null, 'data-trae-sub');
+  // 副标题：仅冷却（CN/海外已分面板展示，不再重复显示「CN 区」）。
+  if (!a) return '';
+  return acctSubHtml(Object.assign({}, a, { region: '' }), null, 'data-trae-sub');
 }
 
 function _trae_move_btns(idx, n, id) {
