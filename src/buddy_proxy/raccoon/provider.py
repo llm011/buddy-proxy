@@ -313,6 +313,11 @@ class RaccoonProvider(BaseProvider):
             if meta is not None:
                 meta["account"] = acct.id
 
+            # 请求前余额快照（结算用；读不到就是 None，不影响主链路）。
+            # 放线程池里：这是同步 HTTP，不能卡事件循环。
+            balance_before = await asyncio.to_thread(
+                self._balance_now, access_token)
+
             # 并发闸门：上游上限约 5，超了会停摆 25 分钟，必须本地卡住。
             lease = await rate_limit.limiter().acquire(acct.id)
             if lease is None:
@@ -363,7 +368,13 @@ class RaccoonProvider(BaseProvider):
                         failover.mark_relogin_needed(acct.id, reason="会话失效")
                     await _drain(resp)
                     continue
-                if failover.is_credit_exhausted(resp.status_code, code, detail):
+                if failover.is_account_risk_control(resp.status_code, code, detail):
+                    # 账号级风控：整号长冷却，**不能**降级成模型级——否则
+                    # 每个模型都去撞一次，持续给上游发「异常调用」信号。
+                    failover.mark_cooldown(
+                        acct.id, retry_after=str(int(failover._RISK_CONTROL_COOLDOWN_S)),
+                        reason=f"账号风控: {detail}")
+                elif failover.is_credit_exhausted(resp.status_code, code, detail):
                     failover.mark_cooldown(acct.id, quota=True,
                                            reason=f"积分耗尽: {detail}")
                 elif failover.is_model_rate_limited(resp.status_code, code, detail):
@@ -391,8 +402,13 @@ class RaccoonProvider(BaseProvider):
                 lease.release()
                 last_status, last_detail = gate.error_code, gate.error_message
                 code = _extract_code(gate.error_message)
-                if failover.is_credit_exhausted(gate.error_code, code,
-                                                gate.error_message):
+                if failover.is_account_risk_control(gate.error_code, code,
+                                                    gate.error_message):
+                    failover.mark_cooldown(
+                        acct.id, retry_after=str(int(failover._RISK_CONTROL_COOLDOWN_S)),
+                        reason=f"账号风控: {gate.error_message}")
+                elif failover.is_credit_exhausted(gate.error_code, code,
+                                                  gate.error_message):
                     failover.mark_cooldown(acct.id, quota=True,
                                            reason=f"积分耗尽: {gate.error_message}")
                 elif failover.is_model_rate_limited(gate.error_code, code,
@@ -425,23 +441,15 @@ class RaccoonProvider(BaseProvider):
             frame = ACCOUNT_META.get()
             if isinstance(frame, dict):
                 frame["account"] = acct.id
-                # 本条请求的积分消耗（写进 frame，observability 落库时读
-                # ``ag_credit``；与 antigravity 的结算走同一个键）。
-                #
-                # **小浣熊的计费口径与别家不同**：每笔请求扣
-                # ``1 × 模型倍率`` 分，**与 token 量无关**。所以不能走
-                # ``credit_estimate.estimate_credit``（那是按 token 估算的），
-                # 在这里直接结算。
-                credit = self._request_credit(entry)
-                if credit is not None:
-                    frame["ag_credit"] = credit
-                    # 标记为**精确值**：小浣熊是「1 × 倍率」的明文规则，
-                    # 不是按 token 估算。observability 据此不标「估算」。
-                    frame["ag_credit_exact"] = True
+                # 积分消耗在**响应收尾**结算（见 _settle_credit）：查一次真实
+                # 余额，与请求前读数相减。这里只记下请求前的余额快照，
+                # 不能凭倍率瞎算——见 _settle_credit 的说明。
 
             if stream:
                 replay = _ReplayStream(gate.resp, gate.buffered, gate.lines,
-                                       lease=lease)
+                                       lease=lease, provider=self,
+                                       access_token=access_token,
+                                       balance_before=balance_before)
                 if protocol == "anthropic":
                     # anthropic 出口必须用 **OpenAI chunk** 转换器：
                     # ``AnthropicStreamConverter``（mimo/copilot/ark 同款）。
@@ -486,6 +494,9 @@ class RaccoonProvider(BaseProvider):
                     )
 
                     payload = chat_completion_to_anthropic_message(payload, original)
+                # 非流式在这里结算（流式在 _ReplayStream.aclose 里）
+                after = await asyncio.to_thread(self._balance_now, access_token)
+                self._settle_credit(ACCOUNT_META.get(), balance_before, after)
                 return JSONResponse(content=payload)
             finally:
                 lease.release()
@@ -831,20 +842,50 @@ class RaccoonProvider(BaseProvider):
             return {}
         return payload if isinstance(payload, dict) else {}
 
-    @staticmethod
-    def _request_credit(entry: dict[str, Any]) -> float | None:
-        """本条请求的积分消耗 = ``1 × 模型倍率``。
+    # ---- 积分结算（读真实余额差）---------------------------------------
+    #
+    # 小浣熊**不提供**「本次请求扣了多少分」的字段。账单流水
+    # （/points/v2/bills）里虽然有 ``points=-2`` 这类消费记录，但**不带模型名
+    # 也不带请求 id**，无法归属到具体某条请求。
+    #
+    # 所以只有一条可靠口径：**请求前后各读一次余额，差值就是本条消耗**
+    # （与 antigravity 的「池水位落差」同一个思路）。
+    #
+    # 曾经试过「1 × 模型倍率」——那是错的：实测同模型短请求扣 2 分、
+    # 长请求扣 10~14 分，说明它是**按 token 量计费**的，倍率只是单价系数
+    # （2026-11-23 用受控实验证伪）。
 
-        小浣熊按**请求笔数**计费，不是按 token 量：上游目录里的
-        ``billing_effective_multiplier`` 就是「这笔扣几分」，``0`` 表示限免。
-        所以这里不做 token 换算——那会得出与账单完全不符的数字。
+    def _balance_now(self, access_token: str) -> float | None:
+        """读一次当前可用积分（结算用；失败返回 None）。"""
+        data = self._fetch_json(BALANCE_PATH, access_token)
+        parsed = parse_balance(data) if data else {}
+        val = parsed.get("credits")
+        return float(val) if isinstance(val, (int, float)) else None
 
-        拿不到倍率时返回 ``None``（面板记 —），不拿 0 冒充「免费」。
+    def _settle_credit(self, frame: dict[str, Any] | None,
+                       before: float | None, after: float | None) -> None:
+        """把「请求前后余额差」写进请求帧（observability 落库时读 ``ag_credit``）。
+
+        口径说明：
+
+        * 差值 ``<= 0``（余额没动/反而涨了）→ **不写**。面板记 —，不拿 0
+          冒充「免费」——免费模型与「读不到」在面板上必须可区分。
+        * 并发请求会让差值互相污染（两条同时在飞时，各自都可能看到对方扣的
+          分）。所以只有「本条在飞期间余额单调下降」这个前提成立时才可信；
+          我们的每账号并发闸门默认 2，偏差有界，且比编一个数字诚实。
+
+        异常一律吞掉：结算只是旁路，不能把已成功的请求变成失败。
         """
-        mult = entry.get("multiplier")
-        if isinstance(mult, bool) or not isinstance(mult, (int, float)):
-            return None
-        return float(mult)
+        if not isinstance(frame, dict):
+            return
+        if before is None or after is None:
+            return
+        delta = round(before - after, 2)
+        if delta <= 0:
+            return
+        frame["ag_credit"] = delta
+        # 余额差是**真实账单口径**（不是按 token 公式估算），所以不标「估算」
+        frame["ag_credit_exact"] = True
 
     # ---- 签到（每日 300 分）-------------------------------------------
     #
@@ -1066,12 +1107,19 @@ class _ReplayStream:
 
     def __init__(self, resp: httpx.Response, buffered: list[str],
                  lines: AsyncIterator[str] | None = None,
-                 lease: rate_limit.Lease | None = None) -> None:
+                 lease: rate_limit.Lease | None = None,
+                 provider: "RaccoonProvider | None" = None,
+                 access_token: str = "",
+                 balance_before: float | None = None) -> None:
         self._resp = resp
         self._buffered = list(buffered)
         self._lines = lines
         self._lease = lease
         self._usage: dict[str, Any] | None = None
+        # 积分结算所需的上下文（provider + 请求前余额）
+        self._provider = provider
+        self._access_token = access_token
+        self._balance_before = balance_before
 
     def _note_usage(self, line: str) -> None:
         """从上游 SSE 行里挑 token 数（供指标落库）。
@@ -1117,6 +1165,18 @@ class _ReplayStream:
             meta = ACCOUNT_META.get()
             if isinstance(meta, dict):
                 meta["usage"] = self._usage
+        # 积分结算：流结束后读一次余额，与请求前相减。
+        # 必须在 aclose 之前做完——``_instrument`` 会在流结束后立刻读 meta
+        # 落库，晚一步就记不上。
+        if self._provider is not None and self._access_token:
+            try:
+                after = await asyncio.to_thread(
+                    self._provider._balance_now, self._access_token)
+                self._provider._settle_credit(
+                    ACCOUNT_META.get(), self._balance_before, after)
+            except Exception as exc:  # noqa: BLE001 - 旁路，不能影响已完成的流
+                log.debug("raccoon 积分结算失败（忽略）: %s: %s",
+                          type(exc).__name__, exc)
         try:
             await self._resp.aclose()
         except Exception:  # noqa: BLE001 - 收尾失败不影响已完成的流
