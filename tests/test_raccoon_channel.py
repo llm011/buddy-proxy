@@ -316,3 +316,86 @@ def test_same_uid_upsert_updates_instead_of_duplicating(tmp_path, monkeypatch):
     assert len(creds.list_accounts()) == 1
     # priority/added_at 不变（重导不改变 failover 顺位）
     assert second.priority == first.priority
+
+# ---------------------------------------------------------------------------
+# 8. 登录请求体必须与上游口径一致（100004 回归）
+# ---------------------------------------------------------------------------
+
+def test_login_body_matches_upstream_spec():
+    """登录请求体三处必须对齐，错一处就是 ``100004 params_unsupport_error``。
+
+    2026-11-23 实测踩过：只加密密码、手机号传明文 + 用旧接口，上游直接回
+    ``400 100004 params_unsupport_error``。三处分别是：
+
+    1. 走 IAM 接口 ``/api/iam/v1/auth/login/password/phone``（不是旧
+       ``login_with_password``——旧接口不再补发当天积分）；
+    2. **手机号也要加密**（与密码同一个加密函数）；
+    3. ``nation_code`` 带 ``+`` 前缀。
+    """
+    import base64
+    import json as _json
+    from unittest import mock
+
+    def _jwt(uid="Raccoon-pu-x", exp=1797000000):
+        h = base64.urlsafe_b64encode(_json.dumps({"alg": "none"}).encode()).rstrip(b"=")
+        p = base64.urlsafe_b64encode(
+            _json.dumps({"sub": uid, "exp": exp}).encode()).rstrip(b"=")
+        return f"{h.decode()}.{p.decode()}.sig"
+
+    captured = []
+
+    class _Resp:
+        def __init__(self, code, payload):
+            self.status_code = code
+            self._p = payload
+            self.text = _json.dumps(payload)
+
+        def json(self):
+            return self._p
+
+    def _fake_post(self, url, json=None, headers=None):
+        captured.append({"url": url, "body": json, "headers": headers or {}})
+        if "iam/confirm" in url:
+            return _Resp(200, {"code": 0, "data": {}})
+        return _Resp(200, {"code": 0, "data": {"access_token": _jwt()}})
+
+    with mock.patch("httpx.Client.post", _fake_post):
+        raccoon_login.login_with_password("+86 138-0000-1111", "testpass1234")
+
+    login_req = captured[0]
+    assert login_req["url"].endswith("/api/iam/v1/auth/login/password/phone"), \
+        "必须走 IAM 接口：旧 login_with_password 不再补发当天每日积分"
+    assert login_req["body"]["nation_code"] == "+86", "nation_code 要带 + 前缀"
+    # 手机号必须是密文（明文会被上游判「参数不受支持」），且解出来是纯数字
+    assert raccoon_login.decrypt_password(login_req["body"]["phone"]) == "13800001111"
+    assert "+86" not in login_req["body"]["phone"]
+    # 密码不得明文上网
+    assert "testpass1234" not in login_req["body"]["password"]
+    # IAM 确认是必需第二步：不确认的会话打 /api/web/* 全 400
+    confirm = captured[1]
+    assert confirm["url"].endswith("/api/web/auth/v1/iam/confirm")
+    assert "xhx_token" in confirm["headers"]
+
+
+def test_phone_normalization():
+    """手机号归一：去分隔符与 +86/86 前缀（上游要纯数字，国家码单独传）。"""
+    for raw in ("+86 138-0000-1111", "8613800001111", "138 0000 1111",
+                "(138) 0000-1111", "13800001111"):
+        assert raccoon_login.normalize_phone(raw) == "13800001111", raw
+
+
+def test_sealed_password_is_not_decryptable_with_public_key():
+    """落盘密文**不能**用上游那个公开 key 解开——否则等于没加密。
+
+    这是「落盘用本机密钥」的核心断言：开源代码里能查到的 ``senseraccoon2023``
+    必须解不开磁盘上的密文，只有本机 ``.secret`` 能解。
+    """
+    sealed = raccoon_login.seal_password("mysecretpassword")
+    # 用上游公开 key 解：必须失败（解出乱码或抛错，不能等于原文）
+    try:
+        wrong = raccoon_login.decrypt_password(sealed)
+    except Exception:  # noqa: BLE001 - 解不开是预期结果之一
+        wrong = ""
+    assert wrong != "mysecretpassword"
+    # 用本机 key 解：必须正确
+    assert raccoon_login.unseal_password(sealed) == "mysecretpassword"
