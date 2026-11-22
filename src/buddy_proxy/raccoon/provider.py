@@ -658,26 +658,54 @@ class RaccoonProvider(BaseProvider):
 
     def _items_from_balance(self, parsed: dict[str, Any],
                             prefix: str) -> list[dict[str, Any]]:
-        """积分数据 → 面板条目（已用/上限口径，与其它通道一致）。"""
+        """积分数据 → 面板条目。
+
+        口径说明（重要，别把推导值当上游数据）：上游
+        ``/api/web/points/v1/balance`` 只给各池**当前剩余**，**不给上限**。
+        所以：
+
+        * 每日池：上限 2100 是按官方规则推出来的（每天发 300、每份 7 天有效
+          → 最多累积 7×300），面板 note 里写明「按规则推算」，进度条按它画；
+        * 其余池（奖励/充值/月度）：只给剩余，**不画进度条**（画了就是编数）。
+
+        每笔请求按模型倍率扣分（``0 = 限免``），与 token 量无关——所以不显示
+        token 余额。
+        """
         items: list[dict[str, Any]] = []
         daily = parsed.get("daily_points")
-        limit = parsed.get("daily_limit")
-        if isinstance(daily, (int, float)) and isinstance(limit, (int, float)) and limit > 0:
-            used = max(0.0, float(limit) - float(daily))
+        #: 每日池上限：规则推算（300/天 × 7 天有效）。上游不提供此字段。
+        daily_cap = 300 * 7
+        if isinstance(daily, (int, float)):
+            used = max(0.0, float(daily_cap) - float(daily))
             items.append({
                 "label": f"{prefix}每日积分（7 天有效）",
                 "used": round(used, 1),
-                "total": round(float(limit), 1),
+                "total": float(daily_cap),
                 "remaining": round(float(daily), 1),
-                "percent": round(used / float(limit) * 100, 2),
+                "percent": round(used / float(daily_cap) * 100, 2),
                 "reset_ts": parsed.get("expire_at"),
                 "expire_ts": parsed.get("expire_at"),
-                "note": "每日 00:00 发 300 分，每份 7 天有效；这是唯一会作废的余额",
+                "unit": "credits",
+                "note": ("每天 00:00 发 300 分、每份 7 天有效，是唯一会作废的余额；"
+                         f"上限 {daily_cap} 按规则推算（上游只给剩余量）"),
             })
+        # 其余分池：只显示剩余（不画进度条，因为没有可信上限）
+        for key, label in (("reward_points", "奖励积分"),
+                           ("topup_points", "充值积分"),
+                           ("monthly_points", "月度积分")):
+            val = parsed.get(key)
+            if isinstance(val, (int, float)) and float(val) > 0:
+                items.append({
+                    "label": f"{prefix}{label}",
+                    "used": None, "total": None,
+                    "remaining": round(float(val), 1),
+                    "percent": None, "reset_ts": None, "expire_ts": None,
+                    "unit": "credits",
+                })
         credits = parsed.get("credits")
         if isinstance(credits, (int, float)):
             items.append({
-                "label": f"{prefix}可用积分",
+                "label": f"{prefix}可用积分合计",
                 "used": None,
                 "total": None,
                 "remaining": round(float(credits), 1),

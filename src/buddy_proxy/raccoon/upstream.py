@@ -51,9 +51,18 @@ FREE_MULTIPLIER = 0.0
 
 
 def build_headers(access_token: str) -> dict[str, str]:
-    """上游请求头。认证只有一个 ``xhx_token``（会话 JWT）。
+    """上游请求头。
 
-    ``Origin`` / ``Referer`` / ``User-Agent`` 都带上：上游对「看起来像浏览器」
+    **认证要同时给两种形态**（缺一个就 401）：
+
+    * ``Authorization: Bearer <jwt>`` —— 必须。只发 ``xhx_token`` 时，
+      ``/api/web/points/v1/balance`` 与 ``/api/web/office/v3/setting_info``
+      一律回 ``401 {"code":200001,"message":"authorization_empty_error"}``。
+      2026-11-23 实测踩过：账号登录成功、额度却一直显示「查询失败」。
+    * ``Cookie: xhx_token=<jwt>`` —— 网页会话形态。部分接口（页面启动序列、
+      设备绑定）按 cookie 认会话，带上更贴近真实浏览器。
+
+    ``Origin`` / ``Referer`` / ``User-Agent`` 也带上：上游对「看起来像浏览器」
     的请求更宽容，这是成本最低的一层识别伪装（与 trae 缺 UA 吃 4011 同类）。
     """
     from .login import endpoint
@@ -67,7 +76,9 @@ def build_headers(access_token: str) -> dict[str, str]:
                        "Chrome/131.0.0.0 Safari/537.36"),
         "Origin": base,
         "Referer": f"{base}/",
+        "Authorization": f"Bearer {access_token}",
         "xhx_token": access_token,
+        "Cookie": f"xhx_token={access_token}",
     }
 
 
@@ -210,16 +221,32 @@ def parse_balance(payload: Any) -> dict[str, Any]:
         return {}
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
     out: dict[str, Any] = {}
-    credits = _first_number(data, ("credits", "total_credits", "balance",
-                                   "available_credits", "points"))
+
+    # 上游真实字段（2026-11-23 实测 /api/web/points/v1/balance）：
+    #   available_points / daily_points / monthly_points / reward_points /
+    #   topup_points / enterprise_topup_points / total_chargeable_points
+    # 分池明细保留下来给面板展示——四个池的过期规则不同，合成一个数会误导。
+    credits = _first_number(data, ("available_points", "credits", "total_credits",
+                                   "balance", "available_credits", "points"))
     if credits is not None:
         out["credits"] = credits
     daily = _first_number(data, ("daily_points", "daily_credits", "daily_balance"))
     if daily is not None:
         out["daily_points"] = daily
+    # 每日池上限：上游**不给**这个字段（只给当前剩余）。按官方规则「每天 300、
+    # 每份 7 天有效」推上限 2100 —— 这是**规则推出来的**，不是瞎编的数，
+    # 面板上会标注口径来源。
     limit = _first_number(data, ("daily_limit", "daily_max", "daily_total"))
     if limit is not None:
         out["daily_limit"] = limit
+    for key, names in (
+        ("monthly_points", ("monthly_points",)),
+        ("reward_points", ("reward_points",)),
+        ("topup_points", ("topup_points", "enterprise_topup_points")),
+    ):
+        val = _first_number(data, names)
+        if val is not None:
+            out[key] = val
     pools = data.get("pools") or data.get("windows")
     if isinstance(pools, list):
         out["pools"] = pools
