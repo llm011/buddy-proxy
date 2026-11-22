@@ -40,6 +40,22 @@ CATALOG_PATH = "/api/web/llm/v2/model_catalog"
 BALANCE_PATH = "/api/web/points/v1/balance"
 #: 积分流水（``type=income`` 只留发放 = 资源包明细；``all`` 会混消费）
 BILLS_PATH = "/api/web/points/v2/bills"
+
+#: 网页应用首页。每日积分**真正入账**发生在「页面启动」这一事件上，
+#: 不是登录本身（见 :func:`page_boot` 的说明）。
+PAGE_HOME_PATH = "/work/home?lang=zh"
+#: 页面启动时前端依次拉的几个接口（都幂等只读）。
+AGREEMENT_PATH = "/api/iam/v1/products/work/agreement/check"
+OFFICE_SETTING_PATH = "/api/web/office/v3/setting_info"
+ONLINE_ACTIVITY_PATH = "/api/web/office/v3/online_activities/current"
+#: 设备绑定：不绑的会话 ``trusted=false``，心跳恒 400，也不能延期。
+BIND_DEVICE_PATH = "/api/web/auth/v1/devices_current_bind"
+HEARTBEAT_PATH = "/api/web/auth/v1/devices_current_heartbeat"
+#: 活动上报（埋点，幂等）。``machine_id`` 是官方 bundle 里写死的常量，
+#: 照抄即可——服务端按它识别「真人客户端」。
+METRICS_PATH = "/api/web/b/v1/m"
+PAGE_MACHINE_ID = ("simulator-f31d2afc795804bbff66711fdc50fd44228798698e70"
+                   "438c70d4ba1501b248b8")
 SETTING_INFO_PATH = "/api/web/office/v3/setting_info"
 USER_INFO_PATH = "/api/web/auth/v1/user_info"
 
@@ -355,6 +371,110 @@ def parse_setting_balance(payload: Any) -> dict[str, Any]:
     if credits is not None:
         out["credits"] = credits
     return out
+
+
+def page_boot_requests(access_token: str, device_id: str,
+                       base: str) -> list[tuple[str, str, dict[str, str], Any]]:
+    """「页面启动」序列的请求清单（顺序与真实浏览器一致）。
+
+    ## 为什么需要这一串
+
+    上游把**每日 300 分的补发**挂在「页面启动」这个事件上，而不是登录本身。
+    只做 login + bind 的会话 ``trusted`` 虽是 true，当天 ``daily_grant`` 依然
+    不来——这是开源实现长期「登录成功但没积分」的根因（2026-11-19 实测）。
+
+    所以签到动作 = 把浏览器打开 ``/work/home`` 时那串请求走一遍：
+
+    1. 首页 HTML（SSR 侧才看得到浏览器会话，是真正的「页面加载」事件）；
+    2. 页面启动的三个 XHR（协议确认 / office 设置 / 在线活动）；
+    3. 设备绑定 + 心跳（把会话变成 trusted，同日才认「登录过」）；
+    4. 活动上报（埋点，``machine_id`` 用官方常量）。
+
+    全部幂等只读，**尽力而为**：单步失败不影响其它步，也不该把签到判负——
+    是否到账以流水为准（见 ``has_daily_grant_today``）。
+
+    返回 ``[(method, url, headers, json_body_or_None), ...]``，由调用方执行。
+    """
+    base = base.rstrip("/")
+    common = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) "
+                       "Chrome/131.0.0.0 Safari/537.36"),
+        "Cookie": f"xhx_token={access_token}",
+        "xhx_token": access_token,
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "X-Client-Platform": "web",
+        "X-Client-Version": "156.0.0.0",
+        "X-Client-Device-ID": device_id,
+        "X-Raccoon-Language": "zh",
+        "Origin": base,
+        "Referer": f"{base}/work/home?lang=zh",
+    }
+    html_headers = dict(common)
+    html_headers["Accept"] = "text/html"
+    return [
+        ("GET", f"{base}{PAGE_HOME_PATH}", html_headers, None),
+        ("GET", f"{base}{AGREEMENT_PATH}", common, None),
+        ("GET", f"{base}{OFFICE_SETTING_PATH}", common, None),
+        ("GET", f"{base}{ONLINE_ACTIVITY_PATH}", common, None),
+        ("POST", f"{base}{BIND_DEVICE_PATH}", common, {"device_id": device_id}),
+        ("POST", f"{base}{HEARTBEAT_PATH}", common, {"device_id": device_id}),
+        ("POST", f"{base}{METRICS_PATH}", common, {
+            "common_header": {"client_agent": common["User-Agent"],
+                              "machine_id": PAGE_MACHINE_ID},
+            "metrics": [{"metric_type": "event",
+                         "event": {"event_name": "activity"}}],
+        }),
+    ]
+
+
+def has_daily_grant_today(bills: list[dict[str, Any]], *,
+                          now: float | None = None) -> bool:
+    """今天有没有 ``daily_grant`` 发放（签到**唯一可信的判据**）。
+
+    为什么只看流水不看 HTTP 200：上游对重复操作回 200 但余额不动（「假成功」）。
+    流水是账本，账本上有这笔才算到账。
+
+    时区按 **+08:00**（上游的 ``grant_at`` 就是这个时区）。用「本地日期」比
+    「距今 24 小时」准：跨零点后昨天那笔不该再算今天的。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=8))
+    now_dt = datetime.fromtimestamp(now, tz) if now else datetime.now(tz)
+    today = now_dt.date()
+    for bill in bills or []:
+        if str(bill.get("biz_type") or "") != "daily_grant":
+            continue
+        stamp = str(bill.get("grant_at") or "")
+        try:
+            dt = datetime.fromisoformat(stamp)
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz)
+        if dt.astimezone(tz).date() == today:
+            return True
+    return False
+
+
+def next_daily_reset_epoch(*, now: float | None = None) -> int:
+    """下一次每日积分发放时刻（次日 00:00 +08:00，epoch 秒）。
+
+    上游没有「下次刷新」字段，但规则是每天 00:00 发——按这个推断。界面会标注
+    ``next_ts_source="inferred"``，不把它说成上游契约。
+    """
+    import time as _time
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=8))
+    now_dt = datetime.fromtimestamp(now if now is not None else _time.time(), tz)
+    tomorrow = (now_dt + timedelta(days=1)).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    return int(tomorrow.timestamp())
 
 
 def model_echo_matches(chunk: dict[str, Any], expected: str) -> bool:
