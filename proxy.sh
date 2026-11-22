@@ -2,7 +2,7 @@
 # proxy.sh - manage the buddy-proxy (buddy_proxy) FastAPI server
 #
 # Usage:
-#   ./proxy.sh start    [-p PORT] [-H HOST]     # 后台启动 (默认 0.0.0.0:8787，局域网可访问)
+#   ./proxy.sh start    [-p PORT] [-H HOST]     # 后台启动 (默认 127.0.0.1:8787，仅本机可访问)
 #   ./proxy.sh stop     [-p PORT] [-H HOST]     # 停止（非默认端口/host 需带同样参数）
 #   ./proxy.sh restart  [-p PORT] [-H HOST]     # 重启
 #   ./proxy.sh status                            # 查看状态
@@ -26,9 +26,12 @@ LOG_DIR="$SCRIPT_DIR/logs"
 mkdir -p "$LOG_DIR"
 
 # 默认配置
-# HOST 默认 0.0.0.0：允许局域网内其它机器访问（如 192.168.31.100:8787）。
-# 仅本机使用可显式指定：./proxy.sh start -H 127.0.0.1
-PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
+# HOST 默认 127.0.0.1：只监听回环，本机可用、局域网访问不到。
+# `/v1/*` 模型代理端点**本身没有鉴权**，一旦绑 0.0.0.0，同网段任何人都能
+# 白嫖你的订阅额度（用户 2026-11-23 实报「局域网可访问，不太安全」）。
+# 确需 LAN 访问时显式指定：./proxy.sh start -H 0.0.0.0（自负风险，建议加
+# 防火墙/反向代理鉴权）。
+PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-8787}"
 # 默认启用 ZCode（glm-* 编码通道，必须最先注册以免被 trae 截走）+ Trae
 # + 豆包（CDP 直连）+ MiMo（小米桌面登录态）+ Qoder（千问/GLM/Kimi 等）+
