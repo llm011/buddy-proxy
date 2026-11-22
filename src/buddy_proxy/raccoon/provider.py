@@ -427,18 +427,27 @@ class RaccoonProvider(BaseProvider):
                 frame["account"] = acct.id
 
             if stream:
-                from ..gemini.provider import _to_anthropic_stream, _to_openai_stream
-
                 replay = _ReplayStream(gate.resp, gate.buffered, gate.lines,
                                        lease=lease)
                 if protocol == "anthropic":
+                    # anthropic 出口才需要转换（上游是 OpenAI 形态）
+                    from ..gemini.provider import _to_anthropic_stream
+
                     return StreamingResponse(
                         _to_anthropic_stream(replay, upstream_model),
                         media_type="text/event-stream",
                         headers={"Cache-Control": "no-cache", "Connection": "close"},
                     )
+                # openai 出口**直通**：上游本身就是 OpenAI SSE。
+                #
+                # 以前这里错误地走了 gemini 的 ``_to_openai_stream``——它按
+                # Gemini 事件形状解析（``candidates``/``parts``），而 raccoon
+                # 上游发的是标准 ``choices``/``usage``，于是整条流被当成
+                # 「没有语义事件」丢掉，客户端拿不到内容、metrics 里
+                # ``prompt_tokens``/``completion_tokens`` 恒为 0
+                # （用户实报「日志里都看不到 token 消耗信息」）。
                 return StreamingResponse(
-                    _to_openai_stream(replay, upstream_model),
+                    _passthrough_sse(replay),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "Connection": "close"},
                 )
@@ -1030,15 +1039,52 @@ class _ReplayStream:
         self._buffered = list(buffered)
         self._lines = lines
         self._lease = lease
+        self._usage: dict[str, Any] | None = None
+
+    def _note_usage(self, line: str) -> None:
+        """从上游 SSE 行里挑 token 数（供指标落库）。
+
+        为什么必须有这一步：流式请求的 usage 只在**最后几帧**里，而
+        ``_instrument`` 读的是 ``ACCOUNT_META`` 里那份 meta。以前这个适配器
+        只做透传、不解析 usage，于是流式请求在 metrics 里恒为
+        ``prompt_tokens=0 / completion_tokens=0``——用户实报「日志里都看不到
+        token 消耗信息，只有耗时信息」正是这个原因。
+
+        上游在 ``stream_options.include_usage`` 时会于收尾前发一帧
+        ``choices: []`` + ``usage``（OpenAI 兼容口径）；取最后见到的为准。
+        """
+        if not line.startswith("data:"):
+            return
+        data = line[5:].strip()
+        if not data or data == "[DONE]":
+            return
+        try:
+            obj = json.loads(data)
+        except (ValueError, TypeError):
+            return
+        if not isinstance(obj, dict):
+            return
+        usage = obj.get("usage")
+        if isinstance(usage, dict):
+            self._usage = usage
 
     async def aiter_lines(self) -> AsyncIterator[str]:
         for line in self._buffered:
+            self._note_usage(line)
             yield line
         if self._lines is not None:
             async for line in self._lines:
+                self._note_usage(line)
                 yield line
 
     async def aclose(self) -> None:
+        # 把本流解析到的 usage 写进请求级 meta：``_instrument`` 在流结束时
+        # 读 ``ACCOUNT_META`` 那份 dict 落库（与 antigravity 的 _ReplayStream
+        # 同一条路径）。没有 usage 时不写，让指标保持 0 而不是编数。
+        if self._usage:
+            meta = ACCOUNT_META.get()
+            if isinstance(meta, dict):
+                meta["usage"] = self._usage
         try:
             await self._resp.aclose()
         except Exception:  # noqa: BLE001 - 收尾失败不影响已完成的流
@@ -1046,6 +1092,20 @@ class _ReplayStream:
         finally:
             if self._lease is not None:
                 self._lease.release()
+
+
+async def _passthrough_sse(stream: "_ReplayStream") -> AsyncIterator[str]:
+    """把上游 OpenAI SSE 原样转给客户端（不解析、不改写）。
+
+    只做两件事：逐行产出、结束时关流（``aclose`` 会释放并发 lease）。
+    行分隔符保持 ``\n\n``——SSE 规范允许 ``\n`` 或 ``\r\n``，客户端都认，
+    但保持与上游一致最省事。
+    """
+    try:
+        async for line in stream.aiter_lines():
+            yield line + "\n"
+    finally:
+        await stream.aclose()
 
 
 async def _drain(resp: httpx.Response, lines: AsyncIterator[str] | None = None) -> None:

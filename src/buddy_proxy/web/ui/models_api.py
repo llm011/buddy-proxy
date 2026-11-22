@@ -58,7 +58,10 @@ def _provider_models(provider: Any) -> list[dict[str, Any]]:
             "id": m.get("id"),
             "name": m.get("description") or m.get("name") or m.get("id"),
             "vendor": provider.id,
-            "credits": m.get("credits"),
+            # ``credits`` 是模型页那个 tag 位：raccoon 用它显示积分倍率
+            # （x0 = 限免）。其它通道的 credits 语义也是「计价倍率」，
+            # 口径一致，不需要为它单开字段。
+            "credits": m.get("credits") or _multiplier_label(m),
             "tier": m.get("tier"),
             "tags": m.get("tags", []),
             "context_window": m.get("context_window") or m.get("max_input"),
@@ -67,6 +70,21 @@ def _provider_models(provider: Any) -> list[dict[str, Any]]:
             "support": support_map.get(mid),
         })
     return models
+
+
+def _multiplier_label(m: dict[str, Any]) -> str | None:
+    """积分倍率 → 模型页 tag 文案（``x0`` 显式标「限免」）。
+
+    raccoon 这类「按倍率扣积分」的通道把倍率放在 ``multiplier`` 字段里。
+    模型页的 tag 位（``credits``）本来就是放计价倍率的，直接复用——用户要
+    一眼看出「哪些模型是限免的」，写在别处反而要来回对。
+    """
+    mult = m.get("multiplier")
+    if not isinstance(mult, (int, float)) or isinstance(mult, bool):
+        return None
+    if float(mult) == 0:
+        return "x0 限免"
+    return f"x{mult:g}"
 
 
 def _model_groups(state: Any, *, include_hidden: bool = False) -> list[dict[str, Any]]:

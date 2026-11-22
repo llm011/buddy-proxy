@@ -662,3 +662,87 @@ def test_checkin_status_and_claim_carry_credits():
     src_claim = inspect.getsource(RaccoonProvider.checkin_claim)
     assert '"credits": credits' in src_status, "status 要带 credits"
     assert '"credits": credits' in src_claim, "claim 要带 credits（日历取这个值）"
+
+# ---------------------------------------------------------------------------
+# 11. 流式必须直通（不能过 gemini 转换器）
+# ---------------------------------------------------------------------------
+
+def test_openai_stream_is_passthrough_not_gemini_converter():
+    """openai 出口必须**直通**上游 SSE，不能走 gemini 的转换器。
+
+    2026-11-23 用户实报「日志里都看不到 token 消耗信息，只有耗时信息」。
+    根因：上游本身就是 OpenAI SSE（``choices``/``usage``），却走了
+    ``gemini._to_openai_stream``——它按 Gemini 形状（``candidates``/``parts``）
+    解析，整条流被当成「没有语义事件」丢掉：客户端拿不到内容、
+    metrics 里 prompt/completion 恒为 0。
+
+    这条断言 forward 的流式分支用的是 ``_passthrough_sse`` 而不是
+    ``_to_openai_stream``（anthropic 出口仍需转换，单独判断）。
+    """
+    import inspect
+
+    from buddy_proxy.raccoon.provider import RaccoonProvider, _passthrough_sse
+
+    src = inspect.getsource(RaccoonProvider.forward)
+    assert "_passthrough_sse" in src, "openai 流式必须直通"
+    # gemini 的 openai 转换器不能出现在**代码行**里（注释里提到它不算——
+    # 解释「为什么不用它」是必要的）。所以逐行判、跳过注释。
+    code_lines = [ln for ln in src.splitlines()
+                  if not ln.lstrip().startswith("#")]
+    offenders = [ln.strip() for ln in code_lines if "_to_openai_stream(" in ln]
+    assert not offenders, (
+        "openai 出口不能过 gemini 转换器——上游是 OpenAI 形态，转换会把"
+        f"整条流当无语义事件丢掉：{offenders}")
+    # anthropic 出口仍要转换
+    assert "_to_anthropic_stream" in src
+    assert callable(_passthrough_sse)
+
+
+def test_passthrough_sse_keeps_usage_frame():
+    """直通要保留 usage 帧（metrics 靠它记 token）。"""
+    import asyncio
+
+    from buddy_proxy.raccoon.provider import _passthrough_sse
+
+    class _FakeStream:
+        def __init__(self):
+            self.closed = False
+            self._lines = [
+                'data: {"choices":[{"delta":{"content":"OK"}}]}',
+                'data: {"choices":[],"usage":{"prompt_tokens":33,'
+                '"completion_tokens":16,"total_tokens":49}}',
+                "data: [DONE]",
+            ]
+
+        async def aiter_lines(self):
+            for line in self._lines:
+                yield line
+
+        async def aclose(self):
+            self.closed = True
+
+    async def run():
+        stream = _FakeStream()
+        out = []
+        async for chunk in _passthrough_sse(stream):
+            out.append(chunk)
+        return out, stream
+
+    out, stream = asyncio.run(run())
+    joined = "".join(out)
+    assert '"usage"' in joined, "usage 帧必须保留"
+    assert '"prompt_tokens":33' in joined
+    assert "[DONE]" in joined
+    assert stream.closed, "流结束必须 aclose（释放并发 lease）"
+
+
+def test_multiplier_label_for_model_page():
+    """模型页 tag 位显示积分倍率，``x0`` 显式标「限免」。"""
+    from buddy_proxy.web.ui.models_api import _multiplier_label
+
+    assert _multiplier_label({"multiplier": 0}) == "x0 限免"
+    assert _multiplier_label({"multiplier": 0.25}) == "x0.25"
+    assert _multiplier_label({"multiplier": 1.0}) == "x1"
+    # 没有倍率字段的通道不显示（不能编一个）
+    assert _multiplier_label({}) is None
+    assert _multiplier_label({"multiplier": True}) is None
