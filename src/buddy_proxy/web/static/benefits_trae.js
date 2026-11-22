@@ -23,7 +23,8 @@ function _trae_plan_badge(its) {
     const lbl = String((it && it.label) || '').trim();
     if (!lbl || skip.has(lbl)) continue;
     if (lbl === '免费' || lbl === 'Free plan') {
-      return `<span class="tag" style="margin-left:6px;opacity:.75">${esc(lbl)}</span>`;
+      const text = lbl === '免费' ? 'Free' : lbl;
+      return `<span class="tag" style="margin-left:6px;opacity:.75">${esc(text)}</span>`;
     }
     if (/会员|Pro|Lite|Plus|Team|Ultra/i.test(lbl)) {
       return `<span class="tag ok" style="margin-left:6px">${esc(lbl)}</span>`;
