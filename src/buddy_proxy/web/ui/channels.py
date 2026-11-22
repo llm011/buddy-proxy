@@ -1282,3 +1282,214 @@ async def ui_copilot_models_refresh(request: Request):
     count = await provider.refresh_models(force=True)
     return {"ok": True, "count": count, "models": list(provider.models()),
             "error": provider.health().get("catalog_error", "")}
+
+
+# ---------------------------------------------------------------------------
+# 商汤小浣熊（raccoon）账号管理
+# ---------------------------------------------------------------------------
+#
+# 与其它多账号通道相比，这里多两个入口：**手机号+密码登录**与**桌面登录态
+# 复用**。原因是小浣熊没有 OAuth 设备码流程——网页端只有手机号+密码，
+# 会话 JWT 约 30 天到期。只做「粘 token」的话，多账号每月都要人工换一遍；
+# 存了密码就能自动续期（见 raccoon.login.relogin_account）。
+
+
+@app.get("/ui/api/raccoon/accounts")
+async def ui_raccoon_accounts(request: Request):
+    """raccoon 各账号本地凭据/冷却状态（纯本地，不触网，不含秘密）。
+
+    每条带 ``auto_renew``：有手机号+密码 = True，表示 token 过期会自动重新
+    登录；False 则到期后需要用户重新导入。面板据此显示不同提示。
+    """
+    _ensure_local(request)
+    try:
+        from ...raccoon import failover
+    except Exception:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "raccoon 通道不可用"}})
+    status = await asyncio.to_thread(failover.accounts_status)
+    # 桌面客户端登录态是否可用（只读探测，供「从桌面端导入」按钮显隐）
+    try:
+        from ...raccoon.login import desktop_auth_path
+
+        status["desktop_available"] = desktop_auth_path() is not None
+    except Exception:  # noqa: BLE001 - 探测失败不影响面板
+        status["desktop_available"] = False
+    return status
+
+
+@app.post("/ui/api/raccoon/accounts/import")
+async def ui_raccoon_accounts_import(request: Request):
+    """导入一个 raccoon 账号。支持三种输入：
+
+    * ``{"session": "<xhx_token 或整段 cookie>"}`` —— 粘会话；
+    * ``{"phone": "...", "password": "..."}`` —— 手机号+密码（可自动续期）；
+    * ``{"from_desktop": true}`` —— 读本机桌面客户端登录态（只读）。
+
+    ``password`` 加密落盘、不回显、不导出（见 ``raccoon.login``）。
+    """
+    _ensure_local(request)
+    try:
+        from ...raccoon import login as raccoon_login
+        from ...raccoon.credentials import AuthError
+    except Exception:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "raccoon 通道不可用"}})
+    body = await request.json()
+    from_desktop = bool(body.get("from_desktop"))
+    session = str(body.get("session") or "").strip()
+    phone = str(body.get("phone") or "").strip()
+    password = str(body.get("password") or "")
+
+    try:
+        if from_desktop:
+            data = await asyncio.to_thread(raccoon_login.read_desktop_auth)
+            if not data:
+                raise HTTPException(status_code=400, detail={"error": {
+                    "message": "没找到本机小浣熊桌面客户端的登录态"
+                               "（请先在客户端登录，或改用粘 token / 手机号密码）"}})
+            token = raccoon_login._parse_session_blob(json.dumps(data, ensure_ascii=False))
+            if not token:
+                raise HTTPException(status_code=400, detail={"error": {
+                    "message": "桌面端登录态里没有可用的会话 token"}})
+            ref = await asyncio.to_thread(raccoon_login.import_session, token)
+        elif phone and password:
+            result = await asyncio.to_thread(
+                raccoon_login.login_with_password, phone, password)
+            token = result["access_token"]
+            info = await asyncio.to_thread(raccoon_login.fetch_user_info, token)
+            nick = str(info.get("nickname") or info.get("screen_name") or "").strip()
+            ref = await asyncio.to_thread(
+                raccoon_login.import_session, token,
+                phone=phone, password=password, nickname=nick or phone)
+        elif session:
+            ref = await asyncio.to_thread(raccoon_login.import_session, session)
+        else:
+            raise HTTPException(status_code=400, detail={"error": {
+                "message": "请提供 session（xhx_token）、phone+password，"
+                           "或 from_desktop=true"}})
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+
+    from ...raccoon import failover
+
+    status = await asyncio.to_thread(failover.accounts_status)
+    status["imported"] = {"id": ref.id, "name": ref.name or ref.id}
+    return status
+
+
+@app.post("/ui/api/raccoon/accounts/order")
+async def ui_raccoon_accounts_order(request: Request):
+    """调整 raccoon 账号的 failover 顺位（管理页上移/下移按钮）。"""
+    _ensure_local(request)
+    try:
+        from ...raccoon import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "raccoon 通道不可用"}})
+    body = await request.json()
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        raise HTTPException(status_code=400, detail={
+            "error": {"message": "缺少 ids（账号 id 的完整顺序列表）"}})
+    try:
+        await asyncio.to_thread(creds.reorder_accounts, ids)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    from ...raccoon import failover
+
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/raccoon/accounts/delete")
+async def ui_raccoon_accounts_delete(request: Request):
+    """删除一个 raccoon 账号（索引条目 + cred 文件 + 冷却标记）。"""
+    _ensure_local(request)
+    try:
+        from ...raccoon import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "raccoon 通道不可用"}})
+    body = await request.json()
+    aid = body.get("id")
+    if not isinstance(aid, str) or not aid.strip():
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（要删除的账号 id）"}})
+    aid = aid.strip()
+    removed = await asyncio.to_thread(creds.delete_account, aid)
+    if not removed:
+        raise HTTPException(status_code=404,
+                            detail={"error": {"message": f"账号不存在: {aid}"}})
+    from ...raccoon import failover
+
+    await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/raccoon/accounts/rename")
+async def ui_raccoon_accounts_rename(request: Request):
+    """改一个 raccoon 账号的本地别名（管理页 ✎）。"""
+    _ensure_local(request)
+    try:
+        from ...raccoon import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "raccoon 通道不可用"}})
+    body = await request.json()
+    aid = str(body.get("id") or "").strip()
+    alias = str(body.get("alias") or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id"}})
+    try:
+        await asyncio.to_thread(creds.rename_account, aid, alias)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    from ...raccoon import failover
+
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/raccoon/accounts/relogin")
+async def ui_raccoon_accounts_relogin(request: Request):
+    """用落盘的手机号+密码强制重新登录一个账号（手动续期按钮）。
+
+    正常路径不需要它——token 过期时转发会自动重登。这个入口给「想立刻
+    刷新」或「自动重登失败后手动再试一次」用。
+    """
+    _ensure_local(request)
+    try:
+        from ...raccoon import login as raccoon_login
+        from ...raccoon.credentials import AuthError
+    except Exception:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "raccoon 通道不可用"}})
+    body = await request.json()
+    aid = str(body.get("id") or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 id"}})
+    try:
+        await asyncio.to_thread(raccoon_login.relogin_account, aid)
+    except AuthError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    from ...raccoon import failover
+
+    await asyncio.to_thread(failover.clear_cooldown, aid)
+    return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.post("/ui/api/raccoon/models/refresh")
+async def ui_raccoon_models_refresh(request: Request):
+    """强制从上游刷新模型目录（管理页「↻ 刷新目录」按钮）。
+
+    目录里带倍率，是「哪些模型限免」的唯一权威来源——所以这个按钮不只是
+    补模型，也是重新对齐积分倍率的手段。
+    """
+    _ensure_local(request)
+    provider = getattr(get_state(), "providers", {}).get("raccoon")
+    if provider is None:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "raccoon 通道未启用"}})
+    count = await provider.refresh_models(force=True)
+    return {"ok": True, "count": count, "models": list(provider.models()),
+            "error": provider.health().get("catalog_error", "")}

@@ -23,6 +23,9 @@ EXPECTED_ORDER = [
     "trae-panel",
     "traeintl-panel",
     "kimi-panel",
+    # raccoon（商汤小浣熊）紧跟 kimi：两者都是「按会话/订阅额度计费」的
+    # 编程助手通道，且都是多账号 failover（2026-11-23 新增）。
+    "raccoon-panel",
     "codex-panel",
     # copilot 紧跟 codex：两者都是「本地已登录订阅」类的编程助手通道（2026-11-15 新增）
     "copilot-panel",
