@@ -229,8 +229,12 @@ async def _instrument(
         provider_id, model_id, norm, account=account_meta.get("account", ""))
     settled = _frame_credit(account_meta)
     if settled is not None:
-        # antigravity 的水位落差结算优先于 token 估算（它才是上游真账单口径）。
-        credit, credit_estimated = settled, True
+        # provider 结算优先于 token 估算（它才是上游真账单口径）。
+        # ``exact`` 表示「这是上游明文规则算出来的精确值」（如小浣熊的
+        # 1×倍率），不是估算——面板据此不再标「估算」。
+        credit = settled
+        credit_estimated = not bool(
+            isinstance(account_meta, dict) and account_meta.get("ag_credit_exact"))
     _remember_baseline(provider_id, model_id, norm, account_meta.get("account", ""))
     metrics.record(
         provider=provider_id, model=model_id, protocol=protocol,
@@ -279,7 +283,10 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
             provider_id, model_id, u, account=(account_meta or {}).get("account", ""))
         settled = _frame_credit(account_meta)
         if settled is not None:
-            credit, credit_estimated = settled, True
+            credit = settled
+            credit_estimated = not bool(
+                isinstance(account_meta, dict)
+                and account_meta.get("ag_credit_exact"))
         _remember_baseline(provider_id, model_id, u, (account_meta or {}).get("account", ""))
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=500 if error else 200, duration_ms=_elapsed_ms(started),

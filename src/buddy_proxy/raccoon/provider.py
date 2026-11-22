@@ -425,6 +425,19 @@ class RaccoonProvider(BaseProvider):
             frame = ACCOUNT_META.get()
             if isinstance(frame, dict):
                 frame["account"] = acct.id
+                # 本条请求的积分消耗（写进 frame，observability 落库时读
+                # ``ag_credit``；与 antigravity 的结算走同一个键）。
+                #
+                # **小浣熊的计费口径与别家不同**：每笔请求扣
+                # ``1 × 模型倍率`` 分，**与 token 量无关**。所以不能走
+                # ``credit_estimate.estimate_credit``（那是按 token 估算的），
+                # 在这里直接结算。
+                credit = self._request_credit(entry)
+                if credit is not None:
+                    frame["ag_credit"] = credit
+                    # 标记为**精确值**：小浣熊是「1 × 倍率」的明文规则，
+                    # 不是按 token 估算。observability 据此不标「估算」。
+                    frame["ag_credit_exact"] = True
 
             if stream:
                 replay = _ReplayStream(gate.resp, gate.buffered, gate.lines,
@@ -813,6 +826,21 @@ class RaccoonProvider(BaseProvider):
         except ValueError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    @staticmethod
+    def _request_credit(entry: dict[str, Any]) -> float | None:
+        """本条请求的积分消耗 = ``1 × 模型倍率``。
+
+        小浣熊按**请求笔数**计费，不是按 token 量：上游目录里的
+        ``billing_effective_multiplier`` 就是「这笔扣几分」，``0`` 表示限免。
+        所以这里不做 token 换算——那会得出与账单完全不符的数字。
+
+        拿不到倍率时返回 ``None``（面板记 —），不拿 0 冒充「免费」。
+        """
+        mult = entry.get("multiplier")
+        if isinstance(mult, bool) or not isinstance(mult, (int, float)):
+            return None
+        return float(mult)
 
     # ---- 签到（每日 300 分）-------------------------------------------
     #

@@ -746,3 +746,38 @@ def test_multiplier_label_for_model_page():
     # 没有倍率字段的通道不显示（不能编一个）
     assert _multiplier_label({}) is None
     assert _multiplier_label({"multiplier": True}) is None
+
+# ---------------------------------------------------------------------------
+# 12. 积分消耗进 metrics（按笔数×倍率，不是按 token 估算）
+# ---------------------------------------------------------------------------
+
+def test_request_credit_is_multiplier_not_token_based():
+    """每笔消耗 = ``1 × 模型倍率``，**与 token 量无关**。
+
+    用户实报「日志里会有小浣熊的积分消息信息吧」——之前 credit 全是 None，
+    因为我没接结算。小浣熊按**请求笔数**计费，走 token 估算会得出与账单完全
+    不符的数字（它的倍率就是「这笔扣几分」）。
+    """
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    assert RaccoonProvider._request_credit({"multiplier": 0.75}) == 0.75
+    assert RaccoonProvider._request_credit({"multiplier": 0}) == 0.0
+    assert RaccoonProvider._request_credit({"multiplier": 1.0}) == 1.0
+    # 拿不到倍率时返回 None（面板记 —），不拿 0 冒充免费
+    assert RaccoonProvider._request_credit({}) is None
+    assert RaccoonProvider._request_credit({"multiplier": True}) is None
+
+
+def test_credit_marked_exact_not_estimated():
+    """写进 frame 时要标 ``ag_credit_exact``：这是精确规则，不是估算。
+
+    不标的话 observability 会把它当 antigravity 那种水位落差估算，面板上
+    多一个「估算」标记——而小浣熊的倍率是上游明文规则。
+    """
+    import inspect
+
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    src = inspect.getsource(RaccoonProvider.forward)
+    assert 'frame["ag_credit"] = credit' in src
+    assert 'frame["ag_credit_exact"] = True' in src
