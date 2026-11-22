@@ -1476,20 +1476,3 @@ async def ui_raccoon_accounts_relogin(request: Request):
 
     await asyncio.to_thread(failover.clear_cooldown, aid)
     return await asyncio.to_thread(failover.accounts_status)
-
-
-@app.post("/ui/api/raccoon/models/refresh")
-async def ui_raccoon_models_refresh(request: Request):
-    """强制从上游刷新模型目录（管理页「↻ 刷新目录」按钮）。
-
-    目录里带倍率，是「哪些模型限免」的唯一权威来源——所以这个按钮不只是
-    补模型，也是重新对齐积分倍率的手段。
-    """
-    _ensure_local(request)
-    provider = getattr(get_state(), "providers", {}).get("raccoon")
-    if provider is None:
-        raise HTTPException(status_code=503,
-                            detail={"error": {"message": "raccoon 通道未启用"}})
-    count = await provider.refresh_models(force=True)
-    return {"ok": True, "count": count, "models": list(provider.models()),
-            "error": provider.health().get("catalog_error", "")}

@@ -1,45 +1,63 @@
 {
-  "_comment": "商汤小浣熊模型目录（冷启动种子）。运行时可通过管理页「↻ 刷新目录」从上游 /api/web/llm/v2/model_catalog 拉全量覆盖。multiplier=0 表示限免，调度优先选。",
+  "_comment": "商汤小浣熊模型目录冷启动种子。**运行时以模型页「↻ 重新拉取」为准**（走 /ui/api/models/refresh → provider.refresh_models），从上游 /api/web/llm/v2/model_catalog 拉全量。这里只放实测存在的条目，别手猜名字——上游对未知模型回 100004 param model unsupport，而真实名字带版本后缀（如 -1017），猜不出来。multiplier=0 表示限免，调度优先选。",
   "models": [
+    {
+      "id": "sn-sensenova-6-8-flash",
+      "upstream": "sn-sensenova-6-8-flash",
+      "multiplier": 0.0,
+      "free": true,
+      "vision": true,
+      "context_window": 256000,
+      "description": "SenseNova-6.8-Flash（限免）"
+    },
     {
       "id": "sn-sensenova-6-8-flash-lite",
       "upstream": "sn-sensenova-6-8-flash-lite",
       "multiplier": 0.0,
       "free": true,
       "vision": true,
-      "description": "SenseNova 6.8 Flash Lite（限免，支持识图）"
+      "context_window": 256000,
+      "description": "SenseNova-6.8-Flash-Lite（限免）"
     },
     {
       "id": "sn-glm-5-3-flash",
       "upstream": "sn-glm-5-3-flash",
-      "multiplier": 0.1,
+      "multiplier": 0.2,
       "free": false,
-      "vision": true,
-      "description": "GLM 5.3 Flash（限时一折，支持识图）"
+      "context_window": 1000000,
+      "description": "GLM-5-3-Flash"
+    },
+    {
+      "id": "sn-deepseek-v4-1-flash-1017",
+      "upstream": "sn-deepseek-v4-1-flash-1017",
+      "multiplier": 0.25,
+      "free": false,
+      "context_window": 1000000,
+      "description": "DeepSeek-V4.1-Flash-1017"
+    },
+    {
+      "id": "sn-qwen4-max",
+      "upstream": "sn-qwen4-max",
+      "multiplier": 0.75,
+      "free": false,
+      "context_window": 1000000,
+      "description": "Qwen4-Max"
     },
     {
       "id": "sn-glm-5-3",
       "upstream": "sn-glm-5-3",
-      "multiplier": 1.0,
+      "multiplier": 0.75,
       "free": false,
-      "vision": false,
-      "description": "GLM 5.3（纯文本）"
+      "context_window": 1000000,
+      "description": "GLM-5-3"
     },
     {
-      "id": "sn-kimi-k3",
-      "upstream": "sn-kimi-k3",
+      "id": "sn-kimi-k3-1-pro",
+      "upstream": "sn-kimi-k3-1-pro",
       "multiplier": 1.0,
       "free": false,
-      "vision": true,
-      "description": "Kimi K3（支持识图）"
-    },
-    {
-      "id": "sn-deepseek-v4-1-flash",
-      "upstream": "sn-deepseek-v4-1-flash",
-      "multiplier": 1.0,
-      "free": false,
-      "vision": true,
-      "description": "DeepSeek V4.1 Flash（支持识图）"
+      "context_window": 1000000,
+      "description": "Kimi-K3.1-Pro"
     }
   ]
 }

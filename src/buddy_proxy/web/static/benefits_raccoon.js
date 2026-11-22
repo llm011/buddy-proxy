@@ -15,9 +15,13 @@
 let RACCOON_ACCTS = null;   // 最近一次 accounts 快照
 let RACCOON_IMPORTING = false;
 
-/** 单个账号在快照里的位置（按 index 对齐「小浣熊 #N」分组名）。 */
+/** 单个账号在快照里的位置（按 index 对齐「小浣熊 #N」分组名）。
+ *
+ *  单账号时后端 label 不带「#N」前缀，组名就是「小浣熊」——此时只有恰好
+ *  一个账号才认它（否则会把唯一那个号的名字安到别的组上）。
+ */
 function _raccoon_acct_for(idx) {
-  if (!RACCOON_ACCTS) return null;
+  if (!RACCOON_ACCTS || !RACCOON_ACCTS.length) return null;
   if (idx == null) return RACCOON_ACCTS.length === 1 ? RACCOON_ACCTS[0] : null;
   return RACCOON_ACCTS.find(a => a.index === idx) || null;
 }
@@ -228,19 +232,6 @@ async function raccoonImportDesktop() {
   }
 }
 
-/** 刷新上游模型目录（顺带重新对齐积分倍率——限免名单以目录为准）。 */
-async function raccoonRefreshModels() {
-  toast('正在刷新模型目录…');
-  try {
-    const r = await api('/ui/api/raccoon/models/refresh', { method: 'POST', body: '{}' });
-    const n = (r.models || []).length;
-    if (r.error) toast(`刷新失败：${r.error}（保留原目录 ${n} 个）`, 'err');
-    else toast(`已刷新 ${n} 个模型`);
-  } catch (e) {
-    toast('刷新失败：' + e.message, 'err');
-  }
-}
-
 // ---- 面板渲染 ---------------------------------------------------------------
 
 function renderRaccoonPanel() {
@@ -249,14 +240,18 @@ function renderRaccoonPanel() {
   const provider = (BENEFITS.providers || []).find(p => p.id === 'raccoon' && !p.disabled);
   if (!provider) { panel.innerHTML = ''; return; }
 
-  // 额度条目按「小浣熊 #N」分组（多账号时带前缀，单账号不带）
+  // 额度条目按「小浣熊 #N」分组（多账号带前缀，单账号不带 → 归到「小浣熊」）。
+  //
+  // 判据只看 ``query_failed``，**不能**照抄 kimi/antigravity 的
+  // ``percent == null && used == null``：本通道刻意不编上限（上游只给剩余量），
+  // 所以正常条目的 percent/used 天然都是 null。照抄会把所有资源包误判成
+  // 「静态说明条」，于是账号卡里一条明细都没有、全部横贯全宽地摊在外面
+  // ——2026-11-23 用户实报「还是不对呀，你要复用我多账号的逻辑」。
   const groups = new Map();
   const notices = [];
   for (const it of (provider.quota && provider.quota.supported ? provider.quota.items : []) || []) {
+    if (it.query_failed) { notices.push(it); continue; }
     const cut = it.label.indexOf(' · ');
-    if (it.query_failed || (it.percent == null && it.used == null && cut < 0)) {
-      notices.push(it); continue;
-    }
     const grp = cut >= 0 ? it.label.slice(0, cut) : '小浣熊';
     const sub = cut >= 0 ? it.label.slice(cut + 3) : it.label;
     if (!groups.has(grp)) groups.set(grp, []);
@@ -305,8 +300,6 @@ function renderRaccoonPanel() {
         ${quotaAccountTotal(groups)}
         <span class="muted" style="font-size:11px">积分制：按模型倍率扣分，倍率 0 = 限免</span>
         ${fold.toggle}${providerLoadBalanceToggle('raccoon', multi)}${providerRefreshButton('raccoon')}
-        <button class="ghost" title="从上游重新拉取模型目录（顺带对齐积分倍率与限免名单）"
-          onclick="raccoonRefreshModels()">↻ 目录</button>
         <button class="ghost" title="导入账号：手机号+密码（可自动续期）/ 粘 token / 桌面端复用"
           onclick="openRaccoonImport()">导入账号</button>
       </div>

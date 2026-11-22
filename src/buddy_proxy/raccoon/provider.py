@@ -101,9 +101,10 @@ _MODELS_JSON = Path(__file__).with_name("models.json")
 #: 限免的 SenseNova Flash Lite 与一折的 GLM Flash。
 _FALLBACK_MODELS = [
     {"id": "sn-sensenova-6-8-flash-lite", "upstream": "sn-sensenova-6-8-flash-lite",
-     "multiplier": 0.0, "free": True, "description": "SenseNova 6.8 Flash Lite（限免）"},
+     "multiplier": 0.0, "free": True,
+     "description": "SenseNova-6.8-Flash-Lite（限免）"},
     {"id": "sn-glm-5-3-flash", "upstream": "sn-glm-5-3-flash",
-     "multiplier": 0.1, "free": False, "description": "GLM 5.3 Flash"},
+     "multiplier": 0.2, "free": False, "description": "GLM-5-3-Flash"},
 ]
 
 #: 额度并发查询线程数。
@@ -667,25 +668,73 @@ class RaccoonProvider(BaseProvider):
                             ) -> list[dict[str, Any]]:
         """积分数据 → 面板条目。
 
-        **展示真实资源包，不编上限**。这是 2026-11-23 用户实报「我没用过积分，
-        为什么显示 2100 只剩 300」的教训：
+        ## 「已用」怎么来的（不是编的）
 
-        上游 ``/points/v1/balance`` 只给各池**当前剩余量**，**没有任何上限
-        字段**。我当初按「每天 300 × 7 天」推了个 2100 当上限，于是「剩 300」
-        被算成「已用 1800 / 85.71%」——用户一分没花却看到用了八成。
+        上游 ``/points/v1/balance`` **只给各池剩余量**，没有 used/total 字段。
+        但「已用」是可以**推出来的**：
 
-        正确做法是用 ``/points/v2/bills?type=income`` 的**发放流水**：每笔
-        发放就是一个资源包，有自己的金额与到期时间。这才回答得了「我有几个
-        包」。拿不到流水时只显示各池剩余量，**不画进度条**——没有可信上限，
-        画了就是编数。
+            已用 = Σ(未过期发放流水) − 当前可用积分
+
+        两个数都是上游真实给的：流水来自 ``/points/v2/bills?type=income``
+        （每笔发放的金额与到期时间），可用积分来自 balance。差额就是消耗。
+
+        实测佐证（用户账号）：两笔发放 300 + 3000 = 3300，balance 也是 3300
+        → 已用 = 0，与该用户「我都没用过一点积分」的自述一致。
+
+        ## 为什么不像上次那样编上限
+
+        上次我按「每天 300 × 7 天」推了个 2100 当上限，于是「剩 300」被算成
+        「已用 1800」——那是**规则推算**，没有数据支撑。这次的分子分母都来自
+        上游实际记录，且差额能被用户自己的账单验证。
+
+        拿不到流水时**不画进度条**（只显示剩余量）：没有分母就不该有百分比。
         """
         items: list[dict[str, Any]] = []
+        credits = parsed.get("credits")
+        available = float(credits) if isinstance(credits, (int, float)) else None
 
-        # 优先展示资源包明细（每笔发放独立到期）
+        # 未过期发放合计 = 进度条的分母（上游真实记录之和）
+        granted_total: float | None = None
         if bills:
+            granted_total = 0.0
+            now = time.time()
             for bill in bills:
                 points = bill.get("points") or 0
                 expire = bill.get("expire_at") or ""
+                if expire and _epoch_from_iso(expire) and _epoch_from_iso(expire) < now:
+                    continue  # 已过期的包不计入分母
+                granted_total += float(points)
+
+        # 总额度条目：带进度条（已用 = 发放合计 − 剩余）
+        if available is not None and granted_total and granted_total > 0:
+            used = max(0.0, granted_total - available)
+            items.append({
+                "label": f"{prefix}积分总额",
+                "used": round(used, 1),
+                "total": round(granted_total, 1),
+                "remaining": round(available, 1),
+                "percent": round(used / granted_total * 100, 2),
+                "reset_ts": None,
+                "expire_ts": None,
+                "unit": "credits",
+                # 刻意**不设** head_only：head_only 的条目会被 quotaItemsHtml
+                # 跳过、只由 quotaHeadSum 渲染成标题行的「剩 X / Y」文字，
+                # **不带进度条**。用户明确要进度条，所以让它作为普通明细行，
+                # 由现成的 quotaItemHtml 画出 qbar。
+                "note": ("已用 = 未过期发放合计 − 当前可用积分（两者都来自上游流水）；"
+                         "每笔请求按模型倍率扣分，倍率 0 = 限免"),
+            })
+
+        # 资源包明细：每笔发放一个包，独立到期（不给进度条——单包没有可信上限）
+        #
+        # ``expire_ts`` 必须是 **epoch 秒**：前端 ``fmtExpireMmdd`` 按
+        # ``new Date(ts * 1000)`` 算，传 ISO 字符串会渲染成
+        # 「NaN-NaN-NaN 到期」（2026-11-23 用户实报）。
+        if bills:
+            for bill in bills:
+                points = bill.get("points") or 0
+                expire_iso = bill.get("expire_at") or ""
+                expire_epoch = _epoch_from_iso(expire_iso)
                 items.append({
                     "label": f"{prefix}{bill.get('event') or '积分发放'}",
                     "used": None,
@@ -693,13 +742,15 @@ class RaccoonProvider(BaseProvider):
                     "remaining": round(float(points), 1),
                     "percent": None,
                     "reset_ts": None,
-                    "expire_ts": expire or None,
+                    "expire_ts": expire_epoch or None,
                     "unit": "credits",
-                    "note": ("无到期时间" if not expire
-                             else f"发放 {bill.get('grant_at') or '?'}，到期 {expire}"),
+                    # note 只留一句人话；具体日期由组件按 expire_ts 渲染，
+                    # 别在 note 里重复一遍 ISO（用户实报「又长又不好看」）
+                    "note": ("无到期时间" if not expire_epoch
+                             else "到期后这部分积分作废"),
                 })
 
-        # 汇总剩余量（上游真实字段，不做减法）
+        # 分池剩余量（上游真实字段，不做减法）
         for key, label in (("daily_points", "每日积分剩余"),
                            ("reward_points", "奖励积分剩余"),
                            ("topup_points", "充值积分剩余"),
@@ -714,18 +765,15 @@ class RaccoonProvider(BaseProvider):
                     "unit": "credits",
                 })
 
-        credits = parsed.get("credits")
-        if isinstance(credits, (int, float)):
+        # 兜底：既没流水也没分池时，至少把可用积分显示出来
+        if not items and available is not None:
             items.append({
-                "label": f"{prefix}可用积分合计",
-                "used": None,
-                "total": None,
-                "remaining": round(float(credits), 1),
-                "percent": None,
-                "reset_ts": None,
-                "expire_ts": None,
+                "label": f"{prefix}可用积分",
+                "used": None, "total": None,
+                "remaining": round(available, 1),
+                "percent": None, "reset_ts": None, "expire_ts": None,
                 "unit": "credits",
-                "note": "每笔请求按模型倍率扣分（倍率 0 = 限免），与 token 量无关",
+                "note": "上游未返回发放流水，无法推算已用量",
             })
         if not items:
             items.append(_static_notice(f"{prefix}小浣熊", "上游未返回可用积分"))
@@ -795,6 +843,24 @@ class _Gate:
         self.error_message = error_message
         self.model_mismatch = model_mismatch
         self.echoed_model = echoed_model
+
+
+def _epoch_from_iso(value: str) -> float:
+    """ISO 时间 → epoch 秒；解析失败返回 0（当作「没有到期时间」）。
+
+    上游的 ``expire_at`` 形如 ``2026-11-29T23:59:59+08:00``（带时区）。
+    解析不了就不当过期——宁可多算进分母，也别把一个有效包当过期剔掉
+    （那会让「已用」凭空变大）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        from datetime import datetime
+
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        return 0.0
 
 
 class _ReplayStream:
