@@ -781,3 +781,67 @@ def test_credit_marked_exact_not_estimated():
     src = inspect.getsource(RaccoonProvider.forward)
     assert 'frame["ag_credit"] = credit' in src
     assert 'frame["ag_credit_exact"] = True' in src
+
+def test_anthropic_stream_emits_content_blocks():
+    """anthropic 出口必须真的产出 content_block，不能只有 start/stop。
+
+    2026-11-23 实测：最初走了 ``gemini._to_anthropic_stream``（按 Gemini 事件
+    形状解析），结果整条流只有 ``message_start`` 紧跟 ``message_stop``，
+    **没有一个 content_block**——客户端拿到空回复。这与 openai 出口踩的是
+    同一个坑（上游是 OpenAI 形态，不能过 Gemini 的转换器）。
+
+    改用 ``AnthropicStreamConverter``（mimo/copilot/ark 同款，本来就吃
+    OpenAI chunk）。
+    """
+    import asyncio
+
+    from buddy_proxy.raccoon.provider import _to_anthropic_openai_stream
+
+    class _FakeStream:
+        def __init__(self):
+            self.closed = False
+
+        async def aiter_lines(self):
+            for line in [
+                'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}',
+                'data: {"choices":[{"delta":{"content":"OK"}}]}',
+                'data: {"choices":[],"usage":{"prompt_tokens":15,'
+                '"completion_tokens":3}}',
+                "data: [DONE]",
+            ]:
+                yield line
+
+        async def aclose(self):
+            self.closed = True
+
+    async def run():
+        stream = _FakeStream()
+        out = []
+        async for ev in _to_anthropic_openai_stream(stream, "sn-glm-5-3-flash"):
+            out.append(ev)
+        return out, stream
+
+    events, stream = asyncio.run(run())
+    joined = "".join(events)
+    assert "message_start" in joined
+    assert "content_block_start" in joined, "必须有内容块（否则客户端拿到空回复）"
+    assert "content_block_delta" in joined
+    assert "OK" in joined, "正文内容要真的转出来"
+    assert "content_block_stop" in joined
+    assert "message_stop" in joined
+    # usage 要透传（message_delta 里带 input/output）
+    assert '"input_tokens": 15' in joined or '"input_tokens":15' in joined
+    assert stream.closed, "流结束必须 aclose（释放并发 lease）"
+
+
+def test_anthropic_stream_never_uses_gemini_converter():
+    """无论哪个出口，都不能再引入 gemini 的流转换器（同一个坑）。"""
+    import inspect
+
+    from buddy_proxy.raccoon.provider import _to_anthropic_openai_stream
+
+    src = inspect.getsource(_to_anthropic_openai_stream)
+    assert "AnthropicStreamConverter" in src
+    code_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("_to_anthropic_stream(" in ln for ln in code_lines), (
+        "gemini 的 _to_anthropic_stream 按 Gemini 形状解析，用在这里会产出空流")

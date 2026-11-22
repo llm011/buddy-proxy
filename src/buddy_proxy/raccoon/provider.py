@@ -443,11 +443,15 @@ class RaccoonProvider(BaseProvider):
                 replay = _ReplayStream(gate.resp, gate.buffered, gate.lines,
                                        lease=lease)
                 if protocol == "anthropic":
-                    # anthropic 出口才需要转换（上游是 OpenAI 形态）
-                    from ..gemini.provider import _to_anthropic_stream
-
+                    # anthropic 出口必须用 **OpenAI chunk** 转换器：
+                    # ``AnthropicStreamConverter``（mimo/copilot/ark 同款）。
+                    #
+                    # 不能用 ``gemini._to_anthropic_stream``——它按 Gemini 事件
+                    # 形状解析，而本通道上游发的是 OpenAI ``choices``，结果是
+                    # 只有 ``message_start`` 紧跟 ``message_stop``、**没有一个
+                    # content_block**（2026-11-23 实测：客户端拿到空回复）。
                     return StreamingResponse(
-                        _to_anthropic_stream(replay, upstream_model),
+                        _to_anthropic_openai_stream(replay, upstream_model),
                         media_type="text/event-stream",
                         headers={"Cache-Control": "no-cache", "Connection": "close"},
                     )
@@ -1120,6 +1124,71 @@ class _ReplayStream:
         finally:
             if self._lease is not None:
                 self._lease.release()
+
+
+async def _to_anthropic_openai_stream(stream: "_ReplayStream",
+                                       model: str) -> AsyncIterator[str]:
+    """OpenAI SSE → Anthropic Messages 事件流。
+
+    与 :func:`_passthrough_sse` 同一份输入（上游 OpenAI chunk），只是出口协议
+    不同。转换交给 ``AnthropicStreamConverter``——它本来就吃 OpenAI chunk，
+    mimo/copilot/ark 都用这一份，不必自己再写。
+
+    收尾必须**先关块再抛**：``feed_chunk`` 对畸形 chunk 会抛，不兜的话客户端
+    拿到的是「内容块悬空、没有 message_stop」的残流，比直接报错更难查
+    （mimo 那边踩过同样的坑）。
+    """
+    from ..protocols.anthropic_adapter import AnthropicStreamConverter
+
+    converter = AnthropicStreamConverter(model)
+
+    def _emit(name: str, payload: dict[str, Any]) -> str:
+        return (f"event: {name}\ndata: "
+                f"{json.dumps(payload, ensure_ascii=False)}\n\n")
+
+    def _close_open() -> list[str]:
+        try:
+            return [_emit(n, p) for n, p in converter.close_open_blocks()]
+        except Exception:  # noqa: BLE001 - 收尾失败不能盖掉原错误
+            return []
+
+    def _abort(msg: str) -> list[str]:
+        out = _close_open()
+        out.append(_emit("error", {"type": "error",
+                                   "error": {"type": "api_error", "message": msg}}))
+        return out
+
+    try:
+        async for line in stream.aiter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                chunk = json.loads(data)
+            except (ValueError, TypeError):
+                continue
+            if not isinstance(chunk, dict):
+                continue
+            if chunk.get("error"):
+                err = chunk["error"]
+                msg = str(err.get("message", err)) if isinstance(err, dict) else str(err)
+                for event in _abort(msg):
+                    yield event
+                return
+            for name, payload in converter.feed_chunk(chunk):
+                yield _emit(name, payload)
+        for name, payload in converter.finish():
+            yield _emit(name, payload)
+    except Exception as exc:  # noqa: BLE001 - 上游畸形数据不该让客户端只收到半截流
+        log.warning("raccoon anthropic stream aborted: %s: %s",
+                    type(exc).__name__, exc)
+        for event in _abort(f"{type(exc).__name__}: {exc}"):
+            yield event
+        return
+    finally:
+        await stream.aclose()
 
 
 async def _passthrough_sse(stream: "_ReplayStream") -> AsyncIterator[str]:
