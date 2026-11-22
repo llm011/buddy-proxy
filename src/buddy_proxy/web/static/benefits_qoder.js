@@ -155,11 +155,15 @@ function renderQoderPanel() {
     // 总量（后端 sum_items 声明可合计）。quotaHeadSum 原本服务「列表头部」，
     // 借用它产出同款「剩 X / Y」chip，放进账号卡标题行下。
     const headSum = quotaHeadSum({items: its, sum_items: true});
+    const planBadge = _qoder_plan_badge(its);
+    const badgeRow = (planBadge || headSum)
+      ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 4px">${planBadge}${headSum}</div>`
+      : '';
     return `
     <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-qoder-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.email || acct.id) : grp)}</span>${_qoder_plan_badge(its)}
+      <span class="pat-pkg-name"${m ? ` data-qoder-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.email || acct.id) : grp)}</span>
       ${_qoder_sub_html(acct)}
-      ${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}
+      ${badgeRow}
       ${quotaItemsHtml(its, 'qoder:' + grp)}
       ${rowBtns}
     </div>`;
@@ -266,9 +270,13 @@ function renderQoderIntlPanel() {
       : (inRegion.length === 1 ? inRegion[0] : null);
     const title = acct ? (acct.alias || acct.name || acct.email || acct.id) : grp;
     const headSum = quotaHeadSum({items: its, sum_items: true});
-    return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-qoderintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>${_qoder_plan_badge(its)}` +
+    const planBadge = _qoder_plan_badge(its);
+    const badgeRow = (planBadge || headSum)
+      ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 4px">${planBadge}${headSum}</div>`
+      : '';
+    return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-qoderintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>` +
       `${_qoder_sub_html(acct, false)}` +
-      `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
+      `${badgeRow}` +
       `${quotaItemsHtml(its, 'qoderintl:' + grp)}` +
       `${acct ? `<span class="ag-move">${acctRenameButton('qoderintl', acct)}${acctDisableButton('qoderintl', acct)}</span>` : ''}</div>`;
   }).join('');

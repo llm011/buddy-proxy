@@ -158,11 +158,15 @@ function renderTraePanel() {
     // 合计行：总额度那条（head_only，unshift 到组首）单独供数——各权益包是
     // 它的明细不能相加，quotaHeadSum 走非 sum_items 分支取第一条有数的。
     const headSum = quotaHeadSum({items: its});
+    const planBadge = _trae_plan_badge(its);
+    const badgeRow = (planBadge || headSum)
+      ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 4px">${planBadge}${headSum}</div>`
+      : '';
     return `
     <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-trae-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.nickname || acct.id) : grp)}</span>${_trae_plan_badge(its)}
+      <span class="pat-pkg-name"${m ? ` data-trae-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.nickname || acct.id) : grp)}</span>
       ${_trae_sub_html(acct)}
-      ${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}
+      ${badgeRow}
       ${quotaItemsHtml(its, 'trae:' + grp)}
       ${rowBtns}
     </div>`;
@@ -279,9 +283,13 @@ function renderTraeIntlPanel() {
       ? `<span class="ag-move">${acctRenameButton('traeintl', acct)}` +
         `${acctDisableButton('traeintl', acct)}</span>`
       : '';
-    return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>${_trae_plan_badge(its)}` +
+    const planBadge = _trae_plan_badge(its);
+    const badgeRow = (planBadge || headSum)
+      ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 4px">${planBadge}${headSum}</div>`
+      : '';
+    return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>` +
       `${rowBtns}` +
-      `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
+      `${badgeRow}` +
       `${quotaItemsHtml(its, 'traeintl:' + grp)}</div>`;
   }).join('');
   const noticeHtml = notices.map(quotaItemHtml).join('');
