@@ -15,6 +15,15 @@ function _qoder_acct_for(idx, region) {
   return inRegion[idx - 1] || null;
 }
 
+function _qoder_plan_badge(its) {
+  if (!Array.isArray(its) || !its.length) return '';
+  const hasSub = its.some(it => String((it && it.label) || '') === '订阅额度' && (it.total || 0) > 0);
+  if (hasSub) return '<span class="tag ok" style="margin-left:6px">付费订阅</span>';
+  const hasAddon = its.some(it => String((it && it.label) || '') === '加油包' && (it.total || 0) > 0);
+  if (hasAddon) return '<span class="tag" style="margin-left:6px">加油包</span>';
+  return '<span class="tag" style="margin-left:6px;opacity:.75">免费/无订阅</span>';
+}
+
 function _qoder_sub_html(a, withRegion) {
   // 副标题（进度条上面那行 muted 小字）：区域 / 冷却
   // （「token 剩 Xh」删了：access token 几小时自动刷新，读了只会误导）
@@ -148,7 +157,7 @@ function renderQoderPanel() {
     const headSum = quotaHeadSum({items: its, sum_items: true});
     return `
     <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-qoder-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.email || acct.id) : grp)}</span>
+      <span class="pat-pkg-name"${m ? ` data-qoder-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.email || acct.id) : grp)}</span>${_qoder_plan_badge(its)}
       ${_qoder_sub_html(acct)}
       ${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}
       ${quotaItemsHtml(its, 'qoder:' + grp)}
@@ -257,7 +266,7 @@ function renderQoderIntlPanel() {
       : (inRegion.length === 1 ? inRegion[0] : null);
     const title = acct ? (acct.alias || acct.name || acct.email || acct.id) : grp;
     const headSum = quotaHeadSum({items: its, sum_items: true});
-    return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-qoderintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>` +
+    return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-qoderintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>${_qoder_plan_badge(its)}` +
       `${_qoder_sub_html(acct, false)}` +
       `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
       `${quotaItemsHtml(its, 'qoderintl:' + grp)}` +

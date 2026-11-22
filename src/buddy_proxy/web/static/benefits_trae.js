@@ -16,6 +16,22 @@ function _trae_acct_for(idx) {
   return TRAE_ACCTS.find(a => a.index === idx) || null;
 }
 
+function _trae_plan_badge(its) {
+  if (!Array.isArray(its) || !its.length) return '';
+  const skip = new Set(['总额度', '签到奖励', '每月登录赠送', '积分返还']);
+  for (const it of its) {
+    const lbl = String((it && it.label) || '').trim();
+    if (!lbl || skip.has(lbl)) continue;
+    if (lbl === '免费' || lbl === 'Free plan') {
+      return `<span class="tag" style="margin-left:6px;opacity:.75">${esc(lbl)}</span>`;
+    }
+    if (/会员|Pro|Lite|Plus|Team|Ultra/i.test(lbl)) {
+      return `<span class="tag ok" style="margin-left:6px">${esc(lbl)}</span>`;
+    }
+  }
+  return '';
+}
+
 function _trae_sub_html(a) {
   // 副标题：区域 / 冷却（acctSubHtml 公共件；trae 无通道特有 bit）
   return acctSubHtml(a, null, 'data-trae-sub');
@@ -143,7 +159,7 @@ function renderTraePanel() {
     const headSum = quotaHeadSum({items: its});
     return `
     <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-trae-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.nickname || acct.id) : grp)}</span>
+      <span class="pat-pkg-name"${m ? ` data-trae-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.nickname || acct.id) : grp)}</span>${_trae_plan_badge(its)}
       ${_trae_sub_html(acct)}
       ${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}
       ${quotaItemsHtml(its, 'trae:' + grp)}
@@ -262,7 +278,7 @@ function renderTraeIntlPanel() {
       ? `<span class="ag-move">${acctRenameButton('traeintl', acct)}` +
         `${acctDisableButton('traeintl', acct)}</span>`
       : '';
-    return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>` +
+    return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>${_trae_plan_badge(its)}` +
       `${rowBtns}` +
       `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
       `${quotaItemsHtml(its, 'traeintl:' + grp)}</div>`;
