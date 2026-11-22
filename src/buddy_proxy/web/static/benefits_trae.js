@@ -160,7 +160,7 @@ function renderTraePanel() {
     const headSum = quotaHeadSum({items: its});
     const planBadge = _trae_plan_badge(its);
     const badgeRow = (planBadge || headSum)
-      ? `<div style="display:flex;align-items:center;gap:6px;margin:0 0 6px">${planBadge}${headSum}</div>`
+      ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 4px">${planBadge}${headSum}</div>`
       : '';
     return `
     <div class="pat-pkg">
@@ -285,7 +285,7 @@ function renderTraeIntlPanel() {
       : '';
     const planBadge = _trae_plan_badge(its);
     const badgeRow = (planBadge || headSum)
-      ? `<div style="display:flex;align-items:center;gap:6px;margin:0 0 6px">${planBadge}${headSum}</div>`
+      ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 4px">${planBadge}${headSum}</div>`
       : '';
     return `<div class="pat-pkg"><span class="pat-pkg-name">${esc(grp)}</span>` +
       `${rowBtns}` +
