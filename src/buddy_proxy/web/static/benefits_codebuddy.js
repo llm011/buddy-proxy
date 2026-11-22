@@ -15,6 +15,19 @@ function _codebuddy_acct_for(idx) {
   return CODEBUDDY_ACCTS.find(a => a.index === idx) || null;
 }
 
+function _codebuddy_plan_badge(its) {
+  if (!Array.isArray(its) || !its.length) return '';
+  const sub = its.find(it => String((it && it.label) || '') === '订阅套餐' && (it.total || 0) > 0);
+  if (sub) {
+    const exp = sub.expire_ts && typeof fmtExpireMmdd === 'function' ? fmtExpireMmdd(sub.expire_ts) : '';
+    const expTxt = exp ? ` · ${exp} 到期` : '';
+    return `<span class="tag ok" style="margin-left:6px">付费订阅${esc(expTxt)}</span>`;
+  }
+  const hasAddon = its.some(it => String((it && it.label) || '') === '资源包' && (it.total || 0) > 0);
+  if (hasAddon) return '<span class="tag" style="margin-left:6px">资源包</span>';
+  return '<span class="tag" style="margin-left:6px;opacity:.75">免费/无订阅</span>';
+}
+
 function _codebuddy_sub_html(a) {
   // 副标题（进度条上面那行 muted 小字）：冷却（无 region——codebuddy 全账号同域）
   if (!a) return '';
@@ -137,7 +150,7 @@ function renderCodebuddyPanel() {
     const headSum = quotaHeadSum({items: its, sum_items: true});
     return `
     <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-codebuddy-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.nickname || acct.id) : grp)}</span>
+      <span class="pat-pkg-name"${m ? ` data-codebuddy-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.nickname || acct.id) : grp)}</span>${_codebuddy_plan_badge(its)}
       ${_codebuddy_sub_html(acct)}
       ${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}
       ${quotaItemsHtml(its, 'codebuddy:' + grp)}
@@ -240,7 +253,7 @@ function renderCodebuddyIntlPanel() {
       : (inRegion.length === 1 ? inRegion[0] : null);
     const title = acct ? (acct.alias || acct.nickname || acct.id) : grp;
     const headSum = quotaHeadSum({items: its, sum_items: true});
-    return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-codebuddyintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>` +
+    return `<div class="pat-pkg"><span class="pat-pkg-name"${m ? ` data-codebuddyintl-idx="${Number(m[1])}"` : ''}>${esc(title)}</span>${_codebuddy_plan_badge(its)}` +
       `${acctSubHtml(acct, null, 'data-codebuddyintl-sub')}` +
       `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
       `${quotaItemsHtml(its, 'codebuddyintl:' + grp)}` +

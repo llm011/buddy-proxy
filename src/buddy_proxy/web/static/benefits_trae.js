@@ -27,7 +27,9 @@ function _trae_plan_badge(its) {
       return `<span class="tag" style="margin-left:6px;opacity:.75">${esc(text)}</span>`;
     }
     if (/会员|Pro|Lite|Plus|Team|Ultra/i.test(lbl)) {
-      return `<span class="tag ok" style="margin-left:6px">${esc(lbl)}</span>`;
+      const exp = it.expire_ts && typeof fmtExpireMmdd === 'function' ? fmtExpireMmdd(it.expire_ts) : '';
+      const expTxt = exp ? ` · ${exp} 到期` : '';
+      return `<span class="tag ok" style="margin-left:6px">${esc(lbl + expTxt)}</span>`;
     }
   }
   return '';

@@ -17,22 +17,25 @@ function _qoder_acct_for(idx, region) {
 
 function _qoder_plan_badge(its) {
   if (!Array.isArray(its) || !its.length) return '';
-  const hasSub = its.some(it => String((it && it.label) || '') === '订阅额度' && (it.total || 0) > 0);
-  if (hasSub) return '<span class="tag ok" style="margin-left:6px">付费订阅</span>';
+  const sub = its.find(it => String((it && it.label) || '') === '订阅额度' && (it.total || 0) > 0);
+  if (sub) {
+    const exp = sub.expire_ts && typeof fmtExpireMmdd === 'function' ? fmtExpireMmdd(sub.expire_ts) : '';
+    const expTxt = exp ? ` · ${exp} 到期` : '';
+    return `<span class="tag ok" style="margin-left:6px">付费订阅${esc(expTxt)}</span>`;
+  }
   const hasAddon = its.some(it => String((it && it.label) || '') === '加油包' && (it.total || 0) > 0);
   if (hasAddon) return '<span class="tag" style="margin-left:6px">加油包</span>';
   return '<span class="tag" style="margin-left:6px;opacity:.75">免费/无订阅</span>';
 }
 
-function _qoder_sub_html(a, withRegion) {
-  // 副标题（进度条上面那行 muted 小字）：区域 / 冷却
-  // （「token 剩 Xh」删了：access token 几小时自动刷新，读了只会误导）
+function _qoder_sub_html(a) {
+  // 副标题（进度条上面那行 muted 小字）：冷却 + 模型受限
+  // （CN/海外已分面板展示，不再重复显示「CN 区」/「Global 区」）
   // 整块包一层 data-qoder-sub 容器：就地回填靠这个属性删旧插新——模型受限行
   // 以前不带标记，回填时删不掉，状态每变一次就多积一行（真机实报的重复）。
   if (!a) return '';
   const rows = [];
   const bits = [];
-  if (withRegion !== false && a.region) bits.push(a.region === 'cn' ? 'CN 区' : 'Global 区');
   for (const c of a.cooling || []) {
     const left = c.minutes_left >= 120 ? (c.minutes_left / 60).toFixed(1) + 'h' : c.minutes_left + 'min';
     bits.push(`${c.kind === 'quota' ? '额度' : '账号'}冷却 ${left}`);
