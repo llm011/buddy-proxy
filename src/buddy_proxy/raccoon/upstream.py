@@ -38,6 +38,8 @@ log = logging.getLogger(__name__)
 CHAT_PATH = "/api/web/llm/v2/chat/completions"
 CATALOG_PATH = "/api/web/llm/v2/model_catalog"
 BALANCE_PATH = "/api/web/points/v1/balance"
+#: 积分流水（``type=income`` 只留发放 = 资源包明细；``all`` 会混消费）
+BILLS_PATH = "/api/web/points/v2/bills"
 SETTING_INFO_PATH = "/api/web/office/v3/setting_info"
 USER_INFO_PATH = "/api/web/auth/v1/user_info"
 
@@ -253,6 +255,51 @@ def parse_balance(payload: Any) -> dict[str, Any]:
     expire = data.get("expire_at") or data.get("next_expire_at")
     if isinstance(expire, (int, float)) and not isinstance(expire, bool):
         out["expire_at"] = float(expire)
+    return out
+
+
+def parse_bills(payload: Any) -> list[dict[str, Any]]:
+    """积分发放流水 → 资源包列表（每笔独立到期）。
+
+    这是**唯一能展示「我有几个资源包」的数据源**：``/points/v1/balance``
+    只给各池的汇总剩余量，看不出包的数量、金额与到期时间。
+
+    上游 ``/api/web/points/v2/bills?type=income`` 的条目形如::
+
+        {
+          "event_name": "每日积分发放",     # 人可读的事件名
+          "biz_type": "daily_grant",        # 机器口径（daily_grant / reward_grant / …）
+          "points": 300,                    # 这笔发了多少
+          "created_at": "2026-11-23T01:24:58+08:00",
+          "grant_at": "2026-11-23T00:00:00+08:00",
+          "expire_at": "2026-11-29T23:59:59+08:00"   # 可能缺失（永不过期）
+        }
+
+    ``type=income`` 过滤掉消费流水——用 ``all`` 的话活跃账号的消费会把发放
+    挤出条数窗口（参考实现实测过：60 条窗口里一条 grant 都看不到）。
+    """
+    if not isinstance(payload, dict):
+        return []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        points = _first_number(it, ("points", "amount", "value"))
+        if points is None:
+            continue
+        out.append({
+            "event": str(it.get("event_name") or it.get("biz_type") or "积分发放"),
+            "biz_type": str(it.get("biz_type") or ""),
+            "points": float(points),
+            "grant_at": str(it.get("grant_at") or it.get("created_at") or ""),
+            "expire_at": str(it.get("expire_at") or ""),
+        })
+    # 快到期的排前面（与「先烧将过期额度」的调度口径一致）
+    out.sort(key=lambda e: (e["expire_at"] or "9999", e["grant_at"]))
     return out
 
 

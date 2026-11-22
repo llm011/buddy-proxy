@@ -66,9 +66,11 @@ from .credentials import (
 from .login import endpoint, fetch_user_info, session_healthy
 from .upstream import (
     BALANCE_PATH,
+    BILLS_PATH,
     CATALOG_PATH,
     CHAT_PATH,
     SETTING_INFO_PATH,
+    parse_bills,
     build_chat_body,
     build_headers,
     model_echo_matches,
@@ -654,45 +656,54 @@ class RaccoonProvider(BaseProvider):
             parsed = parse_setting_balance(data) if data else {}
         if not parsed:
             return [], False
-        return self._items_from_balance(parsed, prefix), True
+        # 资源包明细：只有 bills 接口能看出「有几个包、各多少、何时到期」。
+        # balance 只给汇总剩余量，单靠它只能画一个总数，用户会问「我的包呢」。
+        bills = parse_bills(self._fetch_json(BILLS_PATH, token, params={
+            "paging.limit": 50, "type": "income"}))
+        return self._items_from_balance(parsed, prefix, bills), True
 
-    def _items_from_balance(self, parsed: dict[str, Any],
-                            prefix: str) -> list[dict[str, Any]]:
+    def _items_from_balance(self, parsed: dict[str, Any], prefix: str,
+                            bills: list[dict[str, Any]] | None = None,
+                            ) -> list[dict[str, Any]]:
         """积分数据 → 面板条目。
 
-        口径说明（重要，别把推导值当上游数据）：上游
-        ``/api/web/points/v1/balance`` 只给各池**当前剩余**，**不给上限**。
-        所以：
+        **展示真实资源包，不编上限**。这是 2026-11-23 用户实报「我没用过积分，
+        为什么显示 2100 只剩 300」的教训：
 
-        * 每日池：上限 2100 是按官方规则推出来的（每天发 300、每份 7 天有效
-          → 最多累积 7×300），面板 note 里写明「按规则推算」，进度条按它画；
-        * 其余池（奖励/充值/月度）：只给剩余，**不画进度条**（画了就是编数）。
+        上游 ``/points/v1/balance`` 只给各池**当前剩余量**，**没有任何上限
+        字段**。我当初按「每天 300 × 7 天」推了个 2100 当上限，于是「剩 300」
+        被算成「已用 1800 / 85.71%」——用户一分没花却看到用了八成。
 
-        每笔请求按模型倍率扣分（``0 = 限免``），与 token 量无关——所以不显示
-        token 余额。
+        正确做法是用 ``/points/v2/bills?type=income`` 的**发放流水**：每笔
+        发放就是一个资源包，有自己的金额与到期时间。这才回答得了「我有几个
+        包」。拿不到流水时只显示各池剩余量，**不画进度条**——没有可信上限，
+        画了就是编数。
         """
         items: list[dict[str, Any]] = []
-        daily = parsed.get("daily_points")
-        #: 每日池上限：规则推算（300/天 × 7 天有效）。上游不提供此字段。
-        daily_cap = 300 * 7
-        if isinstance(daily, (int, float)):
-            used = max(0.0, float(daily_cap) - float(daily))
-            items.append({
-                "label": f"{prefix}每日积分（7 天有效）",
-                "used": round(used, 1),
-                "total": float(daily_cap),
-                "remaining": round(float(daily), 1),
-                "percent": round(used / float(daily_cap) * 100, 2),
-                "reset_ts": parsed.get("expire_at"),
-                "expire_ts": parsed.get("expire_at"),
-                "unit": "credits",
-                "note": ("每天 00:00 发 300 分、每份 7 天有效，是唯一会作废的余额；"
-                         f"上限 {daily_cap} 按规则推算（上游只给剩余量）"),
-            })
-        # 其余分池：只显示剩余（不画进度条，因为没有可信上限）
-        for key, label in (("reward_points", "奖励积分"),
-                           ("topup_points", "充值积分"),
-                           ("monthly_points", "月度积分")):
+
+        # 优先展示资源包明细（每笔发放独立到期）
+        if bills:
+            for bill in bills:
+                points = bill.get("points") or 0
+                expire = bill.get("expire_at") or ""
+                items.append({
+                    "label": f"{prefix}{bill.get('event') or '积分发放'}",
+                    "used": None,
+                    "total": None,
+                    "remaining": round(float(points), 1),
+                    "percent": None,
+                    "reset_ts": None,
+                    "expire_ts": expire or None,
+                    "unit": "credits",
+                    "note": ("无到期时间" if not expire
+                             else f"发放 {bill.get('grant_at') or '?'}，到期 {expire}"),
+                })
+
+        # 汇总剩余量（上游真实字段，不做减法）
+        for key, label in (("daily_points", "每日积分剩余"),
+                           ("reward_points", "奖励积分剩余"),
+                           ("topup_points", "充值积分剩余"),
+                           ("monthly_points", "月度积分剩余")):
             val = parsed.get(key)
             if isinstance(val, (int, float)) and float(val) > 0:
                 items.append({
@@ -702,6 +713,7 @@ class RaccoonProvider(BaseProvider):
                     "percent": None, "reset_ts": None, "expire_ts": None,
                     "unit": "credits",
                 })
+
         credits = parsed.get("credits")
         if isinstance(credits, (int, float)):
             items.append({
@@ -719,13 +731,17 @@ class RaccoonProvider(BaseProvider):
             items.append(_static_notice(f"{prefix}小浣熊", "上游未返回可用积分"))
         return items
 
-    def _fetch_json(self, path: str, access_token: str) -> dict[str, Any]:
-        """同步 GET 上游 JSON（额度查询走线程池，不占事件循环）。"""
+    def _fetch_json(self, path: str, access_token: str,
+                    params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """同步 GET 上游 JSON（额度查询走线程池，不占事件循环）。
+
+        ``params`` 给查询串（如流水接口的 ``paging.limit`` / ``type``）。
+        """
         headers = build_headers(access_token)
         headers["Accept"] = "application/json"
         try:
             with httpx.Client(timeout=_TIMEOUT) as c:
-                resp = c.get(f"{endpoint()}{path}", headers=headers)
+                resp = c.get(f"{endpoint()}{path}", headers=headers, params=params)
         except httpx.HTTPError as exc:
             log.warning("raccoon %s 请求失败: %s", path, exc)
             return {}

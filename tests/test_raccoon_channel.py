@@ -399,3 +399,65 @@ def test_sealed_password_is_not_decryptable_with_public_key():
     assert wrong != "mysecretpassword"
     # 用本机 key 解：必须正确
     assert raccoon_login.unseal_password(sealed) == "mysecretpassword"
+
+# ---------------------------------------------------------------------------
+# 9. 资源包展示：不许编上限（2026-11-23 用户实报回归）
+# ---------------------------------------------------------------------------
+
+def test_parse_bills_extracts_real_packs():
+    """流水 → 资源包：每笔发放一个包，带金额与到期时间。
+
+    上游 ``/points/v1/balance`` 只给汇总剩余量，看不出「有几个包」。
+    真实包明细只在 ``/points/v2/bills?type=income`` 里。
+    """
+    payload = {"data": {"items": [
+        {"event_name": "每日积分发放", "biz_type": "daily_grant", "points": 300,
+         "grant_at": "2026-11-23T00:00:00+08:00",
+         "expire_at": "2026-11-29T23:59:59+08:00"},
+        {"event_name": "新人注册礼包", "biz_type": "reward_grant", "points": 3000,
+         "grant_at": "2026-11-23T01:24:46+08:00"},
+    ], "has_more": False}}
+    bills = upstream.parse_bills(payload)
+    assert len(bills) == 2
+    # 快到期的排前面
+    assert bills[0]["event"] == "每日积分发放"
+    assert bills[0]["points"] == 300.0
+    assert bills[0]["expire_at"].startswith("2026-11-29")
+    assert bills[1]["event"] == "新人注册礼包"
+    assert bills[1]["points"] == 3000.0
+    assert bills[1]["expire_at"] == ""   # 无到期时间 = 永不过期
+
+
+def test_quota_items_never_invent_upper_limit():
+    """**关键回归**：拿不到上限时绝不编一个。
+
+    2026-11-23 用户实报：「我都没用过一点积分，不可能 2100 里只剩下 300」。
+    我当时按「每天 300 × 7 天」推了个 2100 当上限，于是「剩 300」被算成
+    「已用 1800 / 85.71%」——用户一分没花却看到用了八成。
+
+    这条测试锁死：所有条目 ``total`` 必须是 ``None``（除非上游真给了上限），
+    ``percent`` 必须全为 ``None``。
+    """
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    provider = RaccoonProvider()
+    parsed = {"credits": 3300.0, "daily_points": 300.0,
+              "reward_points": 3000.0, "monthly_points": 0.0, "topup_points": 0.0}
+    bills = [
+        {"event": "每日积分发放", "points": 300.0,
+         "grant_at": "2026-11-23T00:00:00+08:00",
+         "expire_at": "2026-11-29T23:59:59+08:00"},
+        {"event": "新人注册礼包", "points": 3000.0, "grant_at": "", "expire_at": ""},
+    ]
+    items = provider._items_from_balance(parsed, "", bills)
+    for it in items:
+        assert it.get("total") is None, f"不许编上限：{it}"
+        assert it.get("percent") is None, f"没有上限就不该有百分比：{it}"
+        assert it.get("used") is None, f"没有上限就不该算已用：{it}"
+    # 真实包必须出现在条目里
+    labels = [it["label"] for it in items]
+    assert any("每日积分发放" in x for x in labels)
+    assert any("新人注册礼包" in x for x in labels)
+    # 剩余量照实显示
+    pack = next(it for it in items if "新人注册礼包" in it["label"])
+    assert pack["remaining"] == 3000.0
