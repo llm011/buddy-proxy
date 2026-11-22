@@ -123,26 +123,58 @@ def normalize_model_id(raw: str) -> str:
 def parse_catalog(payload: Any) -> list[dict[str, Any]]:
     """上游模型目录 → 本通道的模型条目列表。
 
+    ## 真实结构（2026-11-23 实测，别再猜）
+
+    ``/api/web/llm/v2/model_catalog`` 返回的是**按分类分组**的形状::
+
+        {"code": 0, "data": {"categories": [
+            {"type": "chat", "default_model": "raccoon-090dd3",
+             "models": [
+               {"name": "sn-sensenova-6-8-flash-lite",
+                "model_name": "sn-sensenova-6-8-flash-lite",
+                "billing_effective_multiplier": 0,     # 0 = 限免
+                "visible": true,
+                "tags": ["general", "vision", ...],
+                "params": {"context_window": 1000000, "max_tokens": 100000},
+                "description": "Raccoon-Work", "display_description": "..."},
+               ...
+             ]},
+        ]}}
+
+    早期我按 ``data`` 是 list 写解析器，一个模型都取不出来——于是
+    ``models.json`` 里那几个**手猜的名字**（``sn-deepseek-v4-1-flash``）
+    被当真发了出去，上游回 ``100004 param model unsupport``。真实名字带
+    版本后缀（``sn-deepseek-v4-1-flash-1017``），猜不出来。
+
+    所以现在：**只信目录**，解析器同时兼容 list / categories 两种形状；
+    ``visible=false`` 的条目（内部代号 ``raccoon-*``）不进对外列表。
+
     每个条目保留调度与展示需要的字段：
 
-    * ``id``：对外模型名（带 ``sn-`` 前缀）
-    * ``upstream``：上游真名（转发时用它）
+    * ``id`` / ``upstream``：对外名与上游真名（当前两者相同）
     * ``multiplier``：积分倍率（``0`` = 限免，调度优先选）
-    * ``context_window`` / ``max_output``：上下文与输出上限（前端展示 + 裁剪）
-    * ``vision`` / ``reasoning``：能力标记
-
-    目录形状在不同版本间变过（顶层 list / ``{data: [...]}`` / ``{models: [...]}``），
-    三种都认。
+    * ``context_window`` / ``max_output``：上下文与输出上限
+    * ``vision`` / ``reasoning``：能力标记（从 ``tags`` 读）
     """
-    items: Any = payload
+    items: list[Any] = []
     if isinstance(payload, dict):
-        for key in ("data", "models", "list", "catalog"):
-            val = payload.get(key)
-            if isinstance(val, list):
-                items = val
-                break
-        else:
-            items = []
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        if isinstance(data, dict):
+            cats = data.get("categories")
+            if isinstance(cats, list):
+                for cat in cats:
+                    if isinstance(cat, dict) and isinstance(cat.get("models"), list):
+                        items.extend(cat["models"])
+            else:
+                for key in ("models", "list", "catalog", "data"):
+                    val = data.get(key)
+                    if isinstance(val, list):
+                        items = val
+                        break
+        elif isinstance(data, list):
+            items = data
+    elif isinstance(payload, list):
+        items = payload
     if not isinstance(items, list):
         return []
 
@@ -150,36 +182,41 @@ def parse_catalog(payload: Any) -> list[dict[str, Any]]:
     for it in items:
         if not isinstance(it, dict):
             continue
-        raw_name = str(it.get("model") or it.get("model_name") or it.get("name")
-                       or it.get("id") or "").strip()
+        # 内部代号不对外：visible=false 的都是 raccoon-* 这类路由代号，
+        # 用户选到它们只会拿到「unsupport」
+        if it.get("visible") is False:
+            continue
+        raw_name = str(it.get("name") or it.get("model_name")
+                       or it.get("model") or it.get("id") or "").strip()
         if not raw_name:
             continue
-        # 倍率字段在不同版本叫法不同，都试一遍；缺失按 1.0（不当作限免，
-        # 免得把付费模型误判成免费而优先烧掉）
         mult = _first_number(it, ("billing_effective_multiplier", "multiplier",
-                                  "credit_multiplier", "rate"))
+                                  "billing_multiplier", "credit_multiplier", "rate"))
         if mult is None:
             mult = 1.0
+        params = it.get("params") if isinstance(it.get("params"), dict) else {}
+        tags = it.get("tags") if isinstance(it.get("tags"), list) else []
+        tag_set = {str(t).lower() for t in tags}
         entry: dict[str, Any] = {
             "id": normalize_model_id(raw_name),
             "upstream": raw_name,
             "multiplier": float(mult),
             "free": float(mult) == FREE_MULTIPLIER,
-            "description": str(it.get("description") or it.get("display_name") or ""),
+            "description": str(it.get("display_description")
+                               or it.get("description") or ""),
+            "vision": "vision" in tag_set,
+            "reasoning": "reasoning" in tag_set,
         }
-        ctx = _first_number(it, ("context_window", "context_length", "max_context",
-                                 "max_input_tokens"))
+        ctx = _first_number(params, ("context_window", "context_length", "max_context"))
+        if ctx is None:
+            ctx = _first_number(it, ("context_window", "context_length", "max_context"))
         if ctx:
             entry["context_window"] = int(ctx)
-        max_out = _first_number(it, ("max_output", "max_output_tokens",
-                                     "max_tokens", "output_limit"))
+        max_out = _first_number(params, ("max_tokens", "max_output", "max_output_tokens"))
+        if max_out is None:
+            max_out = _first_number(it, ("max_output", "max_output_tokens"))
         if max_out:
             entry["max_output"] = int(max_out)
-        caps = it.get("capabilities") if isinstance(it.get("capabilities"), dict) else {}
-        entry["vision"] = bool(it.get("vision") or it.get("supports_vision")
-                               or caps.get("vision"))
-        entry["reasoning"] = bool(it.get("reasoning") or it.get("supports_reasoning")
-                                  or caps.get("reasoning"))
         out.append(entry)
     # 限免的排前面：调度按列表顺序取，省得每个调用点都再排一次
     out.sort(key=lambda e: (not e["free"], e["id"]))

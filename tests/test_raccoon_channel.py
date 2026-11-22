@@ -254,19 +254,42 @@ def test_lease_release_is_idempotent():
 # 6. 目录与积分解析
 # ---------------------------------------------------------------------------
 
-def test_parse_catalog_extracts_multiplier_and_free_flag():
-    """倍率 0 = 限免，且限免的排在前面（调度优先烧限免额度）。"""
-    payload = {"data": [
-        {"model": "sn-paid", "billing_effective_multiplier": 1.0},
-        {"model": "sn-free", "billing_effective_multiplier": 0,
-         "context_window": 128000, "vision": True},
-    ]}
+def test_parse_catalog_real_structure():
+    """解析上游**真实**目录形状：``data.categories[].models[]``。
+
+    2026-11-23 实测踩过：我按 ``data`` 是 list 写解析器，一个模型都取不出来，
+    于是 models.json 里手猜的名字被发出去，上游回
+    ``100004 param model unsupport``（真实名字带版本后缀如 ``-1017``）。
+
+    这条用真实响应结构锁住解析器。
+    """
+    payload = {"code": 0, "data": {"categories": [{
+        "type": "chat", "default_model": "raccoon-090dd3",
+        "models": [
+            {"name": "raccoon-090dd3", "visible": False,
+             "billing_effective_multiplier": 1},
+            {"name": "sn-glm-5-3-flash", "visible": True,
+             "billing_effective_multiplier": 0.2,
+             "tags": ["general", "vision"],
+             "params": {"context_window": 1000000, "max_tokens": 100000}},
+            {"name": "sn-sensenova-6-8-flash-lite", "visible": True,
+             "billing_effective_multiplier": 0,
+             "tags": ["vision", "reasoning"],
+             "params": {"context_window": 256000}},
+        ],
+    }]}}
     models = upstream.parse_catalog(payload)
-    assert [m["id"] for m in models] == ["sn-free", "sn-paid"]
+    # visible=false 的内部代号不进对外列表
+    assert [m["id"] for m in models] == [
+        "sn-sensenova-6-8-flash-lite", "sn-glm-5-3-flash"]
     free = models[0]
     assert free["free"] is True and free["multiplier"] == 0.0
-    assert free["context_window"] == 128000 and free["vision"] is True
-    assert models[1]["free"] is False
+    assert free["context_window"] == 256000
+    assert free["vision"] is True and free["reasoning"] is True
+    paid = models[1]
+    assert paid["free"] is False and paid["multiplier"] == 0.2
+    assert paid["context_window"] == 1000000
+    assert paid["max_output"] == 100000
 
 
 def test_parse_catalog_missing_multiplier_defaults_to_paid():
@@ -428,15 +451,19 @@ def test_parse_bills_extracts_real_packs():
     assert bills[1]["expire_at"] == ""   # 无到期时间 = 永不过期
 
 
-def test_quota_items_never_invent_upper_limit():
-    """**关键回归**：拿不到上限时绝不编一个。
+def test_used_derived_from_real_grants_not_invented():
+    """「已用」必须由**上游真实数据**推出，不能按规则编。
 
     2026-11-23 用户实报：「我都没用过一点积分，不可能 2100 里只剩下 300」。
     我当时按「每天 300 × 7 天」推了个 2100 当上限，于是「剩 300」被算成
-    「已用 1800 / 85.71%」——用户一分没花却看到用了八成。
+    「已用 1800 / 85.71%」——纯属编数。
 
-    这条测试锁死：所有条目 ``total`` 必须是 ``None``（除非上游真给了上限），
-    ``percent`` 必须全为 ``None``。
+    正确口径（两者都是上游给的）：
+
+        已用 = Σ(未过期发放流水) − 当前可用积分
+
+    用户账号实测：发放 300 + 3000 = 3300，balance 也 3300 → 已用 0，
+    与其「一分没用」的自述一致。
     """
     from buddy_proxy.raccoon.provider import RaccoonProvider
 
@@ -450,14 +477,108 @@ def test_quota_items_never_invent_upper_limit():
         {"event": "新人注册礼包", "points": 3000.0, "grant_at": "", "expire_at": ""},
     ]
     items = provider._items_from_balance(parsed, "", bills)
-    for it in items:
-        assert it.get("total") is None, f"不许编上限：{it}"
-        assert it.get("percent") is None, f"没有上限就不该有百分比：{it}"
-        assert it.get("used") is None, f"没有上限就不该算已用：{it}"
-    # 真实包必须出现在条目里
+
+    head = next(it for it in items if it["label"].endswith("积分总额"))
+    assert head["total"] == 3300.0, "分母 = 未过期发放合计（上游流水之和）"
+    assert head["remaining"] == 3300.0
+    assert head["used"] == 0.0, "一分没用就必须是 0，不能是推算出来的 1800"
+    assert head["percent"] == 0.0
+    # 必须有 total+used 才能让现成组件画出进度条（head_only 会被跳过）
+    assert not head.get("head_only"), "积分总额不能标 head_only，否则没有进度条"
+
+    # 单包条目**不画进度条**：单笔发放没有可信上限
+    packs = [it for it in items if it is not head]
+    for it in packs:
+        assert it.get("percent") is None, f"单包不该有百分比：{it}"
+        assert it.get("total") is None, f"单包不该有分母：{it}"
+
     labels = [it["label"] for it in items]
     assert any("每日积分发放" in x for x in labels)
     assert any("新人注册礼包" in x for x in labels)
-    # 剩余量照实显示
-    pack = next(it for it in items if "新人注册礼包" in it["label"])
-    assert pack["remaining"] == 3000.0
+
+
+def test_used_reflects_actual_consumption():
+    """真花了积分时，已用要跟着变（不是恒 0）。"""
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    provider = RaccoonProvider()
+    # 发放 3300，只剩 2300 → 花了 1000
+    parsed = {"credits": 2300.0}
+    bills = [
+        {"event": "每日积分发放", "points": 300.0, "grant_at": "", "expire_at": ""},
+        {"event": "新人注册礼包", "points": 3000.0, "grant_at": "", "expire_at": ""},
+    ]
+    items = provider._items_from_balance(parsed, "", bills)
+    head = next(it for it in items if it["label"].endswith("积分总额"))
+    assert head["total"] == 3300.0
+    assert head["used"] == 1000.0
+    assert round(head["percent"], 1) == 30.3
+
+
+def test_expired_grants_excluded_from_denominator():
+    """已过期的发放不算进分母——否则「已用」会凭空变大。"""
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    provider = RaccoonProvider()
+    parsed = {"credits": 3000.0}
+    bills = [
+        # 已过期（2020 年）
+        {"event": "过期包", "points": 500.0, "grant_at": "",
+         "expire_at": "2020-01-01T00:00:00+08:00"},
+        {"event": "新人注册礼包", "points": 3000.0, "grant_at": "", "expire_at": ""},
+    ]
+    items = provider._items_from_balance(parsed, "", bills)
+    head = next(it for it in items if it["label"].endswith("积分总额"))
+    assert head["total"] == 3000.0, "过期包不进分母"
+    assert head["used"] == 0.0
+
+
+def test_no_bills_means_no_progress_bar():
+    """拿不到流水时不画进度条（没有可信分母），只显示剩余量。"""
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    provider = RaccoonProvider()
+    items = provider._items_from_balance({"credits": 3300.0}, "", [])
+    for it in items:
+        assert it.get("total") is None
+        assert it.get("percent") is None
+    assert any(it["remaining"] == 3300.0 for it in items)
+
+def test_expire_ts_is_epoch_seconds_not_iso_string():
+    """``expire_ts`` 必须是 **epoch 秒**，不能是 ISO 字符串。
+
+    2026-11-23 用户实报「每日积分发放 · NaN-NaN-NaN 到期」：前端
+    ``fmtExpireMmdd`` 按 ``new Date(ts * 1000)`` 算，传 ISO 字符串会得到
+    Invalid Date → 渲染成 NaN-NaN-NaN。
+
+    这条锁死契约：所有条目的 ``expire_ts`` 要么是 ``None``，要么是数字。
+    """
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    provider = RaccoonProvider()
+    parsed = {"credits": 3300.0}
+    bills = [
+        {"event": "每日积分发放", "points": 300.0,
+         "grant_at": "2026-11-23T00:00:00+08:00",
+         "expire_at": "2026-11-29T23:59:59+08:00"},
+        {"event": "新人注册礼包", "points": 3000.0, "grant_at": "", "expire_at": ""},
+    ]
+    items = provider._items_from_balance(parsed, "", bills)
+
+    for it in items:
+        exp = it.get("expire_ts")
+        assert exp is None or isinstance(exp, (int, float)), (
+            f"expire_ts 必须是 epoch 秒或 None，实际 {exp!r}（ISO 字符串会让前端"
+            f"渲染成 NaN-NaN-NaN）：{it['label']}")
+
+    # 有到期时间的那笔要转成正确的 epoch（2026-11-29 23:59:59 +08:00）
+    pack = next(it for it in items if "每日积分发放" in it["label"])
+    assert pack["expire_ts"] is not None
+    import datetime
+    dt = datetime.datetime.fromtimestamp(pack["expire_ts"],
+                                        datetime.timezone(datetime.timedelta(hours=8)))
+    assert dt.year == 2026 and dt.month == 11 and dt.day == 29
+
+    # 无到期时间的包：expire_ts 必须是 None（组件据此不画到期）
+    no_exp = next(it for it in items if "新人注册礼包" in it["label"])
+    assert no_exp["expire_ts"] is None
