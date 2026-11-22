@@ -14,7 +14,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import HTTPException
 
@@ -22,11 +22,12 @@ from .config import (
     _NATIVE_FUNCTION,
     _WORK_CHAT_MAX_ATTEMPTS,
     TRAE_NONSTREAM_MAX_S,
+    TRAE_SEMANTIC_TIMEOUT,
     map_model_for,
     resolve_trae_region,
 )
 from .credentials import _auth, _build_headers, _load_work_cred, _work_headers
-from .sse import _parse_sse
+from .sse import _SSEDecoder, _parse_sse
 from .text_protocol import _content_blocks
 
 log = logging.getLogger(__name__)
@@ -277,6 +278,128 @@ def _send_native_chat(
     )
 
 
+class _NativeStreamRejected(RuntimeError):
+    """原生流式通道被上游参数拒绝（4001），且尚未吐出任何事件。
+
+    只在**零事件**时抛：此时还没往客户端发过任何字节，调用方可以安全回落到
+    整段兼容路径（非流式 → 文本协议）。一旦已经开始出字就只能把错误当普通
+    ``error`` 事件透传，不能重放——否则客户端会看到重复内容。
+    """
+
+
+def _stream_native_chat_events(
+    native_msgs: list[dict[str, Any]],
+    model: str,
+    tools: list[dict[str, Any]] | None,
+    stop: Any = None,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """原生通道真流式：逐个产生上游 SSE 事件，不缓冲整轮响应。
+
+    **为什么要有这条路径**：``_send_native_chat`` 用 ``_read_all_bounded`` 把
+    整个响应读完才返回，provider 再把它切块「重放」给客户端。可上游本身是
+    真流式（2026-11-23 实测：首块 0.87s，178 个 chunk 分 6.93s 陆续到齐）。
+    整段缓冲让客户端看到的 TTFT 等于总耗时——同日 metrics 统计
+    ``TTFT/总耗时`` 中位数：trae 0.998、codebuddy 0.308、raccoon 0.709。
+    换句话说 trae 的 6.4s「首字延迟」里约 5.5s 纯粹是缓冲浪费。
+
+    PAT 子类早就有增量事件源（``pat.stream_pat_native``）；个人 Work/IDE 通道
+    一直走整段兼容路径（``TraeProvider._stream_native_events`` 返回 None）。
+    本函数补上这一支，事件形状与 ``_parse_sse`` 完全一致，provider 的消费
+    循环无需改动。
+
+    ``stop`` 为 ``threading.Event``：置位后立刻停止读取（客户端断开时由外层
+    set，读线程得以释放 socket）。
+    """
+    work = _load_work_cred()
+    region = resolve_trae_region(work.get("region") if work else None)
+    trae_model = map_model_for(region.key, model)
+    body = _build_native_body(native_msgs, trae_model, True, tools)
+    if work and work.get("access_token"):
+        headers = _work_headers(work)
+    else:
+        token, user_id = _auth()
+        headers = _build_headers(token, user_id)
+    headers = {**headers, "Accept": "text/event-stream"}
+    url = f"{region.chat_base}/api/agent/v3/llm_utils_chat"
+    payload = json.dumps(body).encode("utf-8")
+    # read 超时必须晚于 provider 外层语义超时：上游首字可能迟至
+    # TRAE_SEMANTIC_TIMEOUT 才到，urlopen 先超时的话客户端会误拿 502，
+    # 外层来不及按语义超时发心跳/504。留 5s 保护窗让外层先 set stop。
+    read_timeout = max(float(TRAE_SEMANTIC_TIMEOUT) + 5.0, 30.0)
+
+    yielded = 0
+    last_error: Exception | None = None
+    for attempt in range(1, _WORK_CHAT_MAX_ATTEMPTS + 1):
+        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+        try:
+            resp = urllib.request.urlopen(req, timeout=read_timeout)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", errors="replace")[:2000]
+            if e.code == 400:
+                # Go schema 拒绝的另一种壳：与 _send_native_chat 一致，交给
+                # 调用方按 4001 处理回落。还没出字时用异常表达（可安全重试），
+                # 已出字就只能当错误事件透传。
+                if not yielded:
+                    raise _NativeStreamRejected(detail or '{"code":4001}') from None
+                yield ("error", {"code": 4001, "message": detail})
+                return
+            if e.code in (401, 403):
+                # 凭据级失败：透传真实状态码，provider 的 failover 闸门靠它
+                # 判「换号可能好转」。包成 502 会让坏账号永不被冷却跳过。
+                raise HTTPException(
+                    status_code=e.code,
+                    detail=f"trae native stream failed: {e.code} {detail}") from None
+            raise HTTPException(
+                status_code=502,
+                detail=f"trae native stream failed: {e.code} {detail}") from None
+        except Exception as e:  # noqa: BLE001 — 连接级瞬态，可重试
+            last_error = e
+            if yielded:
+                # 已经出过字：不能重放（会重复内容），直接上报
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"trae native stream broke mid-flight: {e}") from None
+            if attempt < _WORK_CHAT_MAX_ATTEMPTS:
+                log.warning(
+                    "Trae native stream attempt %d/%d failed (%s: %s), retrying",
+                    attempt, _WORK_CHAT_MAX_ATTEMPTS, type(e).__name__, e,
+                )
+                time.sleep(attempt)
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail=f"trae native stream failed after "
+                       f"{_WORK_CHAT_MAX_ATTEMPTS} attempts: {last_error}") from None
+
+        decoder = _SSEDecoder()
+        try:
+            while True:
+                if stop is not None and stop.is_set():
+                    return
+                chunk = resp.read1(65536)
+                if not chunk:
+                    break
+                for event in decoder.feed(chunk):
+                    # 首事件即 4001 且零产出：上游整体拒绝，让调用方回落
+                    if (not yielded and event[0] == "error"
+                            and str((event[1] or {}).get("code")) == "4001"):
+                        raise _NativeStreamRejected(json.dumps(event[1], ensure_ascii=False))
+                    yielded += 1
+                    yield event
+            for event in decoder.finish():
+                if (not yielded and event[0] == "error"
+                        and str((event[1] or {}).get("code")) == "4001"):
+                    raise _NativeStreamRejected(json.dumps(event[1], ensure_ascii=False))
+                yielded += 1
+                yield event
+            return
+        finally:
+            try:
+                resp.close()
+            except Exception:  # noqa: BLE001 — 关连接失败不影响已产出的事件
+                pass
+
+
 class _NativeToolAccumulator:
     """按 index 合并原生通道流式 tool_calls 分片。
 
@@ -285,7 +408,6 @@ class _NativeToolAccumulator:
     arguments 非空分片为**追加**而非替换（观测到 '{"c' 这样的残片）。空串
     字段一律忽略。
     """
-
     def __init__(self) -> None:
         self._calls: dict[int, dict[str, str]] = {}
 

@@ -45,10 +45,12 @@ from .credentials import (
 )
 from .leak_guard import _StreamLeakCleaner, _sanitize_agent_leak
 from .native_tools import (
+    _NativeStreamRejected,
     _NativeToolAccumulator,
     _native_messages,
     _native_rejected,
     _send_native_chat,
+    _stream_native_chat_events,
 )
 from .sse import (_parse_sse, _trae_error_text, _wrap_anthropic_stream,
                   _sse_error_status)
@@ -503,8 +505,17 @@ class TraeProvider(BaseProvider):
         tools: list[dict[str, Any]] | None,
         stop: threading.Event,
     ):
-        """PAT 子类覆盖为增量事件源；个人通道继续沿用整段兼容路径。"""
-        return None
+        """原生通道的增量事件源（真流式）。
+
+        历史上这里恒返回 None，个人 Work/IDE 通道因此走整段兼容路径：读线程
+        用 ``_send_native_chat`` 把整个响应读完，再交给主线程切块「重放」。
+        上游本身是真流式（2026-11-23 实测首块 0.87s / 178 chunk / 6.93s），
+        整段缓冲让客户端 TTFT 等于总耗时——metrics 里 ``TTFT/总耗时`` 中位数
+        trae 0.998、codebuddy 0.308。改成增量后首字能立刻下发。
+
+        PAT 子类仍覆盖本方法走自己的账号体系（``pat.stream_pat_native``）。
+        """
+        return _stream_native_chat_events(native_msgs, model, tools, stop=stop)
 
     # ---- 打卡 / 额度（/ui 管理页消费，均经 asyncio.to_thread 调用） ----
 
@@ -1276,15 +1287,38 @@ class TraeProvider(BaseProvider):
             def _read_upstream() -> None:
                 try:
                     if native is not None:
-                        event_source = self._stream_native_events(
-                            native["messages"], model, native["tools"], _stop)
+                        # 惩罚窗内不碰流式（增量或整段都一样必败）：直接落到
+                        # 下面的非流式缓冲分支，省一次注定失败的往返，也不
+                        # 再喂养惩罚窗口。增量路径同样受这条 TTL 管辖。
+                        event_source = (
+                            None if (not self._keeps_native_error(model)
+                                     and _stream_rejected_recently(model))
+                            else self._stream_native_events(
+                                native["messages"], model, native["tools"], _stop)
+                        )
                         if event_source is not None:
-                            for upstream_event in event_source:
-                                if _stop.is_set():
-                                    return
-                                _ev_q.put(("event", upstream_event))
-                            _ev_q.put(("eof", None))
-                            return
+                            try:
+                                for upstream_event in event_source:
+                                    if _stop.is_set():
+                                        return
+                                    _ev_q.put(("event", upstream_event))
+                            except _NativeStreamRejected:
+                                # 上游整体拒绝流式且零产出：此时客户端一个字节
+                                # 都还没收到，安全回落到下面的整段兼容路径
+                                # （非流式 → 4001 节流重试 → 文本协议）。
+                                # 已出过字的情况在事件源里就转成 error 事件透传，
+                                # 不会走到这里——重放会让客户端看到重复内容。
+                                log.warning(
+                                    "trae native incremental stream rejected "
+                                    "(4001), fall back to buffered path: model=%s",
+                                    model)
+                                _debug_dump("trae_native_fallback", model=model,
+                                            phase="incremental")
+                                _mark_stream_rejected(model)
+                                _pace_after_reject(model)
+                            else:
+                                _ev_q.put(("eof", None))
+                                return
                         skip_stream = (not self._keeps_native_error(model)
                                        and _stream_rejected_recently(model))
                         if skip_stream:
