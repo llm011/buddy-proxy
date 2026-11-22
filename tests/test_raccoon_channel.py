@@ -751,21 +751,49 @@ def test_multiplier_label_for_model_page():
 # 12. 积分消耗进 metrics（按笔数×倍率，不是按 token 估算）
 # ---------------------------------------------------------------------------
 
-def test_request_credit_is_multiplier_not_token_based():
-    """每笔消耗 = ``1 × 模型倍率``，**与 token 量无关**。
+def test_credit_uses_balance_delta_not_multiplier():
+    """积分必须用**余额差**结算，不能按倍率瞎算。
 
-    用户实报「日志里会有小浣熊的积分消息信息吧」——之前 credit 全是 None，
-    因为我没接结算。小浣熊按**请求笔数**计费，走 token 估算会得出与账单完全
-    不符的数字（它的倍率就是「这笔扣几分」）。
+    2026-11-23 实测证伪了「1 × 倍率」：同一模型倍率固定，但短请求扣 2 分、
+    中等扣 10、长扣 14——差 7 倍。说明它**按 token 量计费**，倍率只是单价
+    系数。凭倍率算出来的数字与账单完全不符。
+
+    正确口径：请求前后各读一次余额，差值就是本条消耗（与 antigravity 的
+    池水位落差同一个思路）。账单流水虽记了 ``points=-2``，但不带模型名和
+    请求 id，无法归属到具体请求。
     """
     from buddy_proxy.raccoon.provider import RaccoonProvider
 
-    assert RaccoonProvider._request_credit({"multiplier": 0.75}) == 0.75
-    assert RaccoonProvider._request_credit({"multiplier": 0}) == 0.0
-    assert RaccoonProvider._request_credit({"multiplier": 1.0}) == 1.0
-    # 拿不到倍率时返回 None（面板记 —），不拿 0 冒充免费
-    assert RaccoonProvider._request_credit({}) is None
-    assert RaccoonProvider._request_credit({"multiplier": True}) is None
+    provider = RaccoonProvider()
+
+    # 正常下降：差值就是消耗
+    frame: dict = {}
+    provider._settle_credit(frame, 3300.0, 3298.0)
+    assert frame["ag_credit"] == 2.0
+    assert frame["ag_credit_exact"] is True
+
+    # 余额没动 / 反而涨了 → 不写（面板记 —，不拿 0 冒充免费）
+    for before, after in ((3300.0, 3300.0), (3300.0, 3301.0)):
+        f: dict = {}
+        provider._settle_credit(f, before, after)
+        assert "ag_credit" not in f, f"余额没降就不该记：{before}→{after}"
+
+    # 读不到余额 → 不写
+    for before, after in ((None, 3298.0), (3300.0, None)):
+        f = {}
+        provider._settle_credit(f, before, after)
+        assert "ag_credit" not in f
+
+
+def test_no_multiplier_based_credit_remains():
+    """确认「按倍率算积分」的实现已经彻底删掉（防止回退）。"""
+    import inspect
+
+    from buddy_proxy.raccoon import provider as raccoon_provider
+
+    src = inspect.getsource(raccoon_provider)
+    assert "_request_credit" not in src, (
+        "按倍率算积分的 _request_credit 必须删掉——它与真实账单不符")
 
 
 def test_credit_marked_exact_not_estimated():
@@ -778,8 +806,8 @@ def test_credit_marked_exact_not_estimated():
 
     from buddy_proxy.raccoon.provider import RaccoonProvider
 
-    src = inspect.getsource(RaccoonProvider.forward)
-    assert 'frame["ag_credit"] = credit' in src
+    src = inspect.getsource(RaccoonProvider._settle_credit)
+    assert 'frame["ag_credit"] = delta' in src
     assert 'frame["ag_credit_exact"] = True' in src
 
 def test_anthropic_stream_emits_content_blocks():
@@ -845,3 +873,26 @@ def test_anthropic_stream_never_uses_gemini_converter():
     code_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
     assert not any("_to_anthropic_stream(" in ln for ln in code_lines), (
         "gemini 的 _to_anthropic_stream 按 Gemini 形状解析，用在这里会产出空流")
+
+def test_account_risk_control_is_account_level_not_model_level():
+    """``200108`` 账号风控必须整号长冷却，不能降级成模型级。
+
+    2026-11-23 实测：账号已被风控时，我的代码把它当模型级限流处理，结果
+    同一秒打出 4 条 429（每个模型都去撞一次）——持续给上游发「异常调用」
+    信号，风控窗口越拉越长。
+
+    正确行为：整号冷却 30 分钟，所有模型都不再尝试。
+    """
+    from buddy_proxy.raccoon import failover
+
+    # 识别
+    assert failover.is_account_risk_control(
+        429, "200108", "系统检测到当前账号存在异常调用") is True
+    assert failover.is_account_risk_control(
+        429, "", "200108 系统检测到当前账号存在异常调用") is True
+    # 模型级限流不能被误判成账号风控
+    assert failover.is_account_risk_control(
+        429, "user_model_rate_limited", "") is False
+
+    # 冷却时长：30 分钟（不是模型级那种 60 秒）
+    assert failover._RISK_CONTROL_COOLDOWN_S == 1800.0

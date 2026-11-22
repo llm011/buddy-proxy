@@ -66,6 +66,29 @@ def is_model_rate_limited(code: int, error_code: str = "", message: str = "") ->
     return code == 429 and "model" in text
 
 
+#: 账号级风控（``200108``）的冷却时长。上游提示「稍后重试」，实测短时间高频
+#: 调用会触发；给 30 分钟——3 小时太长（正常使用等不了），30 分钟足够让
+#: 风控窗口过去，也不会因为马上重试而把账号彻底打废。
+_RISK_CONTROL_COOLDOWN_S = 1800.0
+
+
+def is_account_risk_control(code: int, error_code: str = "",
+                            message: str = "") -> bool:
+    """是否是**账号级风控**（``200108 系统检测到当前账号存在异常调用``）。
+
+    与模型级限流（``user_model_rate_limited``）必须分开：
+
+    * 模型级只挡一个模型，其它模型还能用；
+    * 账号级是**整个账号**被限制，必须整号长冷却——否则每个模型都去撞一次，
+      等于持续给上游发「异常调用」信号，把风控窗口越拉越长
+      （2026-11-23 实测：账号已冷却时并发重试，同一秒打出 4 条 429）。
+    """
+    if str(error_code) == "200108":
+        return True
+    text = (message or "")
+    return "200108" in text or "存在异常调用" in text
+
+
 def is_credit_exhausted(code: int, error_code: str = "", message: str = "") -> bool:
     """积分是否耗尽（整号停摆，不是单模型限流）。"""
     if code == 402:
