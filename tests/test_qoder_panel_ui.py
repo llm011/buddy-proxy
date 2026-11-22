@@ -218,14 +218,17 @@ def test_qoder_sub_wraps_all_rows_in_single_data_qoder_sub():
     out = _run_js("""
 const a = {region: 'cn', cooling: [], models_limited: ['glm-5.3', 'kimi-k3']};
 const withLim = _qoder_sub_html(a);
-const withoutLim = _qoder_sub_html({region: 'cn', cooling: []});
-console.log(JSON.stringify({withLim, withoutLim}));
+const withCool = _qoder_sub_html({region: 'cn', cooling: [{kind: 'account', minutes_left: 5}]});
+const empty = _qoder_sub_html({region: 'cn', cooling: []});
+console.log(JSON.stringify({withLim, withCool, empty}));
 """)
     data = json.loads(out.strip().splitlines()[-1])
     assert data["withLim"].count("data-qoder-sub") == 1, "副标题块必须只有一层容器"
     assert 'data-qoder-sub><div' in data["withLim"], "容器应包住全部小字行"
     assert "模型受限" in data["withLim"]
-    assert data["withoutLim"].count("data-qoder-sub") == 1
+    assert "CN 区" not in data["withLim"]
+    assert data["withCool"].count("data-qoder-sub") == 1
+    assert data["empty"] == ""
 
 
 def test_qoder_acct_matching_is_region_scoped():
