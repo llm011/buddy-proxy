@@ -28,7 +28,7 @@
 #   buddy install
 #
 # 环境变量（对 start / service install 生效）：
-#   PROXY_HOST（默认 0.0.0.0）、PROXY_PORT（默认 8787）、PROXY_EXTRA_ARGS（附加启动参数）
+#   PROXY_HOST（默认 127.0.0.1，仅本机）、PROXY_PORT（默认 8787）、PROXY_EXTRA_ARGS（附加启动参数）
 #   BUDDY_LOG_KEEP_DAYS（cleanup 保留天数，默认 15）
 
 set -euo pipefail
@@ -37,7 +37,7 @@ set -euo pipefail
 BUDDY_HOME="${BUDDY_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 PROXY_SH="$BUDDY_HOME/proxy.sh"
 
-PROXY_HOST="${PROXY_HOST:-0.0.0.0}"
+PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-8787}"
 # 必须与 proxy.sh 的 EXTRA_ARGS **整串**一致（tests/test_login_cli.py 会逐字比对，
 # 加通道 flag 时两处一起改，否则 CI 红）。兜底通道用 codebuddy：它是唯一恒在的

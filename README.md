@@ -73,7 +73,7 @@ buddy service uninstall
 ```
 
 - When the service is installed, `buddy start/stop/restart` automatically use `launchctl`; otherwise they fall back to `proxy.sh`'s pid management.
-- Env vars `PROXY_HOST` (default `0.0.0.0`), `PROXY_PORT` (default `8787`) and `PROXY_EXTRA_ARGS` apply to both `start` and `service install`.
+- Env vars `PROXY_HOST` (default `127.0.0.1`, loopback only), `PROXY_PORT` (default `8787`) and `PROXY_EXTRA_ARGS` apply to both `start` and `service install`. The `/v1/*` proxy endpoints carry **no authentication**, so the default binds loopback; exposing them on `0.0.0.0` lets anyone on your LAN spend your subscription quota — pass `-H 0.0.0.0` explicitly only behind a firewall or an authenticating reverse proxy.
 - `buddy usage` / `buddy logs` / `buddy doctor` are local tools for the running proxy. Details below.
 
 ### Usage / logs / doctor from the terminal
@@ -901,7 +901,7 @@ providers:
 ## Command-line options
 
 ```
---host HOST               bind address (default 127.0.0.1; proxy.sh uses 0.0.0.0)
+--host HOST               bind address (default 127.0.0.1, loopback only; pass 0.0.0.0 to expose on LAN)
 --port PORT               bind port (default 8787)
 --endpoint ENDPOINT       CodeBuddy backend address
 --session-file PATH       session file (default ~/.codebuddy-session.json)

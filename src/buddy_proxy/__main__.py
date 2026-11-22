@@ -10,7 +10,7 @@ Features:
 Usage with uv:
     uv run python -m buddy_proxy
     uv run python -m buddy_proxy --desensitize
-    uv run python -m buddy_proxy --host 0.0.0.0 --port 8787
+    uv run python -m buddy_proxy --host 127.0.0.1 --port 8787
 
 模块结构（2026-09 拆分）：
 - ``logging_setup``  日志配置与运行时信息工具
