@@ -29,10 +29,12 @@ cookie 再粘进来」——一次性、到期必须人工重取，多账号管�
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import pathlib
+import re
 import time
 from typing import Any
 
@@ -47,9 +49,21 @@ log = logging.getLogger(__name__)
 #: 上游站点（``RACCOON_API_ENDPOINT`` 可覆盖，测试/代理用）。
 DEFAULT_ENDPOINT = "https://xiaohuanxiong.com"
 
-#: 网页端登录接口。
-_LOGIN_PATH = "/api/web/auth/v1/login_with_password"
+#: 现行登录链路（2026-11-19 起）：IAM 登录 → iam/confirm。
+#:
+#: 为什么不用旧的 ``/api/web/auth/v1/login_with_password``：那个接口仍能换
+#: token，但**不再补发当天的每日积分**（``daily_grant``）。换 IAM 后同样的
+#: 账号当天就能拿到 300 分——这解释了此前「登录成功、签到仍然没积分」。
+_LOGIN_PATH = "/api/iam/v1/auth/login/password/phone"
+_IAM_CONFIRM_PATH = "/api/web/auth/v1/iam/confirm"
 _USER_INFO_PATH = "/api/web/auth/v1/user_info"
+
+#: IAM 登录的 ``nation_code`` **带 ``+`` 前缀**（浏览器实测 ``"+86"``）。
+#: 旧接口 ``login_with_password`` 用的是 ``"86"``——换链路时别照抄旧值。
+NATION_CODE = "+86"
+
+#: 手机号里的分隔符：用户从通讯录复制常带 ``+86``、空格、横线、括号。
+_PHONE_SEPARATORS = re.compile(r"[\s\-()（）]")
 
 #: 上游密码加密参数（与网页端同款，实测口径）。
 _PASSWORD_AES_KEY = b"senseraccoon2023"
@@ -68,47 +82,169 @@ def endpoint() -> str:
 
 
 # ---------------------------------------------------------------------------
-# 密码加解密
+# 密码加解密：**两套密钥，用途不同**
 # ---------------------------------------------------------------------------
+#
+# 这里刻意分成两套，别合并：
+#
+# 1. ``encrypt_password`` / ``decrypt_password`` —— **上游线路格式**。
+#    key 是网页端硬编码的 ``senseraccoon2023``（公开可查），只在「发给上游
+#    的请求体」上用。这是上游协议的既定事实，不由我们选。
+#
+# 2. ``seal_password`` / ``unseal_password`` —— **落盘格式**。
+#    key 是本机随机生成的 32 字节（``~/.buddy-proxy/raccoon/.secret``，0600），
+#    与上游无关。落盘**绝不用**那个公开 key：否则任何拿到你磁盘文件的人，
+#    用开源代码里就能查到的常量一把解开明文密码——那等于没加密。
+#
+# 两套都是可逆加密（自动续期必须拿到明文去重新登录，哈希做不到这件事），
+# 区别只在「谁能解开」：线路密文上游能解，落盘密文只有本机 secret 能解。
 
-def encrypt_password(password: str) -> str:
-    """按网页端口径加密密码：AES-CFB(key, IV 前置) → Base64。
+#: 落盘密钥文件名（与 index.json 同目录）。
+_SECRET_NAME = ".secret"
 
-    返回的字符串可直接放进登录请求体的 ``password`` 字段。
+#: 落盘密文的格式标记（cred 里的 ``password_enc`` 字段）。
+_SEAL_FORMAT = "aes-cfb-local-v1"
+
+
+def _secret_path() -> pathlib.Path:
+    return creds.raccoon_state_dir() / _SECRET_NAME
+
+
+#: 进程内 secret 缓存：文件不会变（只有首次运行才创建），读一次就够。
+#: 加这层是因为 seal/unseal 会被额度查询等路径间接调用，虽然单次只有
+#: 0.012ms 的读盘（page cache 命中），但没必要每次都 syscall。
+_secret_cache: bytes | None = None
+
+
+def _load_or_create_secret() -> bytes:
+    """读本机落盘密钥；没有就生成一个（0600）。
+
+    密钥与凭据文件分开放：这样即便只泄漏 ``<uid>.json``（比如贴日志、发截图、
+    云备份只同步了 json），密码仍然解不开。
+
+    并发安全：先写临时文件再 ``os.replace`` 原子落位，两个进程同时首次运行
+    也只会有一个赢，另一个读赢家的那份（不存在「一半用 A 一半用 B」）。
+
+    进程内缓存：文件创建后不再变，首次读到的值缓存起来（省掉后续 syscall）。
     """
-    iv = os.urandom(16)
-    # CFB 用 CBC 的块函数逐块异或实现：CFB-128 的加密与 CBC 单块加密同源，
-    # 区别只在反馈的是密文块。这里直接复用 aes_cbc_encrypt 会引入填充，
-    # 所以用「零填充 + 只取前 n 字节」的方式构造 CFB 流。
-    plain = password.encode("utf-8")
+    global _secret_cache
+    if _secret_cache is not None:
+        return _secret_cache
+    path = _secret_path()
+    try:
+        raw = path.read_bytes()
+        if len(raw) == 32:
+            _secret_cache = raw
+            return raw
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fresh = os.urandom(32)
+    tmp = path.with_name(f".{_SECRET_NAME}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(fresh)
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:  # noqa: BLE001 - 非 POSIX 文件系统
+            pass
+        os.replace(tmp, path)
+        _secret_cache = fresh
+        return fresh
+    except OSError as exc:
+        log.warning("raccoon 落盘密钥写入失败（退回内存态）: %s", exc)
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _secret_cache = fresh
+        return fresh
+
+
+def _derive_seal_key(secret: bytes) -> bytes:
+    """本机 secret → 16 字节 AES key（sha256 截断，够用且不引入新依赖）。
+
+    不直接用 secret 前 16 字节：secret 是随机字节，截断没有额外好处，
+    哈希一次能让「secret 长度变化」也稳定映射到固定长度 key。
+    """
+    return hashlib.sha256(secret + b"raccoon-seal-v1").digest()[:16]
+
+
+def _cfb_encrypt(key: bytes, plain: bytes, iv: bytes) -> bytes:
+    """AES-CFB128 加密（IV 不前置，由调用方决定拼法）。"""
     out = b""
     prev = iv
     for i in range(0, len(plain), 16):
         chunk = plain[i:i + 16]
-        ks = aes_cbc_encrypt(_PASSWORD_AES_KEY, b"\x00" * 16, prev)[:len(chunk)]
+        ks = aes_cbc_encrypt(key, b"\x00" * 16, prev)[:len(chunk)]
         enc = bytes(chunk[j] ^ ks[j] for j in range(len(chunk)))
         out += enc
-        # CFB 反馈的是**密文**块（不足 16 字节时补零继续，与网页端一致）
         prev = (enc + b"\x00" * 16)[:16]
-    return base64.b64encode(iv + out).decode("ascii")
+    return out
 
 
-def decrypt_password(blob: str) -> str:
-    """解出落盘的密码密文（仅用于调试/校验；转发路径不解密）。
-
-    对称实现见 :func:`encrypt_password`。
-    """
-    raw = base64.b64decode(blob)
-    iv, data = raw[:16], raw[16:]
+def _cfb_decrypt(key: bytes, data: bytes, iv: bytes) -> bytes:
+    """AES-CFB128 解密（与 :func:`_cfb_encrypt` 对称）。"""
     out = b""
     prev = iv
     for i in range(0, len(data), 16):
         chunk = data[i:i + 16]
-        ks = aes_cbc_encrypt(_PASSWORD_AES_KEY, b"\x00" * 16, prev)[:len(chunk)]
+        ks = aes_cbc_encrypt(key, b"\x00" * 16, prev)[:len(chunk)]
         dec = bytes(chunk[j] ^ ks[j] for j in range(len(chunk)))
         out += dec
         prev = (chunk + b"\x00" * 16)[:16]
-    return out.decode("utf-8", errors="replace")
+    return out
+
+
+def encrypt_password(password: str) -> str:
+    """按**上游网页端**口径加密：AES-CFB(key=senseraccoon2023, IV 前置) → Base64。
+
+    只用于「发给上游的登录请求体」——上游按这个格式解，换 key 就登不上。
+    """
+    iv = os.urandom(16)
+    return base64.b64encode(iv + _cfb_encrypt(_PASSWORD_AES_KEY,
+                                             password.encode("utf-8"), iv)).decode("ascii")
+
+
+def decrypt_password(blob: str) -> str:
+    """解**上游线路格式**的密文（调试/校验用）。"""
+    raw = base64.b64decode(blob)
+    return _cfb_decrypt(_PASSWORD_AES_KEY, raw[16:], raw[:16]).decode("utf-8", "replace")
+
+
+def seal_password(password: str) -> str:
+    """落盘加密：AES-CFB(key=本机随机 secret, IV 前置) → Base64。
+
+    与 :func:`encrypt_password` 的差别只在 key 来源——这把 key 只在本机
+    ``~/.buddy-proxy/raccoon/.secret`` 里，不与任何公开常量相关。
+    """
+    if not password:
+        return ""
+    iv = os.urandom(16)
+    key = _derive_seal_key(_load_or_create_secret())
+    return base64.b64encode(iv + _cfb_encrypt(key, password.encode("utf-8"), iv)).decode("ascii")
+
+
+def unseal_password(blob: str) -> str:
+    """解**落盘格式**的密文；解不开（secret 丢了/换了机器）返回空串。
+
+    返回空串而不是抛错：调用方据此判定「这份凭据不能再自动续期」，
+    提示用户重新导入，而不是把整个转发链路打成 500。
+    """
+    if not blob:
+        return ""
+    try:
+        raw = base64.b64decode(blob)
+        if len(raw) <= 16:
+            return ""
+        key = _derive_seal_key(_load_or_create_secret())
+        text = _cfb_decrypt(key, raw[16:], raw[:16]).decode("utf-8", "replace")
+    except (ValueError, OSError):
+        return ""
+    # 解不开时会得到乱码：用「是否含不可打印字符」粗判，避免把乱码当密码
+    # 反复去撞上游（那会累积风控）。正常密码是可打印文本。
+    if not text or any(ord(ch) < 32 for ch in text):
+        return ""
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -185,22 +321,54 @@ def _raise_for_login(payload: Any, status: int) -> None:
     raise AuthError(f"小浣熊登录失败 HTTP {status} {code} {msg}{hint}".strip())
 
 
-def login_with_password(phone: str, password: str) -> dict[str, Any]:
-    """手机号 + 密码登录，返回上游原始响应（含会话 JWT）。
+def normalize_phone(raw: str) -> str:
+    """手机号归一成纯数字：去分隔符与 ``+86`` / ``86`` 前缀。
 
-    密码先按网页端口径加密再发（明文不上网）。失败抛 :class:`AuthError`，
-    消息里带上游的业务码，便于区分「密码错」与「要求验证码」。
+    上游要的是**不带国家码**的号码（``nation_code`` 单独传）。这里不校验位数
+    ——号码对不对是上游的事，归一只是为了别把 ``+86 139…`` 这种常见写法送进去。
     """
-    phone = str(phone or "").strip()
-    if not phone:
+    text = _PHONE_SEPARATORS.sub("", str(raw or ""))
+    if text.startswith("+86"):
+        text = text[3:]
+    elif len(text) == 13 and text.startswith("86"):
+        text = text[2:]
+    return text
+
+
+def login_with_password(phone: str, password: str) -> dict[str, Any]:
+    """手机号 + 密码登录，返回 ``{access_token, raw}``。
+
+    走**现行 IAM 链路**：``POST /api/iam/v1/auth/login/password/phone`` →
+    ``POST /api/web/auth/v1/iam/confirm``。
+
+    三个必须对齐的点（错一个就是 ``100004 params_unsupport_error`` 或拿到
+    一张不能用的会话）：
+
+    1. **手机号也要加密**——上游前端对 ``phone`` 和 ``password`` 过同一个加密
+       函数。只加密密码、手机号传明文，服务端直接判「参数不受支持」。
+    2. ``nation_code`` 必须带 ``+``（``"+86"``）。
+    3. 拿到 token 后**必须**调 ``iam/confirm``：不确认的会话打 ``/api/web/*``
+       一律 ``400 200901 iam_confirm_required``，等于换了一张废票。
+
+    不用旧的 ``login_with_password`` 接口：它仍能换 token，但**不再补发当天
+    的每日积分**（``daily_grant``）——换 IAM 后同样账号当天就能拿到 300。
+    """
+    phone_norm = normalize_phone(phone)
+    if not phone_norm:
         raise AuthError("缺少手机号")
     if len(str(password or "")) < MIN_PASSWORD_LEN:
         raise AuthError(f"密码至少 {MIN_PASSWORD_LEN} 位（上游要求）")
-    body = {"phone": phone, "password": encrypt_password(password)}
-    url = f"{endpoint()}{_LOGIN_PATH}"
+    body = {
+        "nation_code": NATION_CODE,
+        # 两个字段都加密：这是上游前端的实际口径，不是我们的选择
+        "phone": encrypt_password(phone_norm),
+        "password": encrypt_password(password),
+    }
+    headers = _base_headers()
+    headers["Accept-Language"] = "zh-Hans"
     try:
         with _client() as c:
-            resp = c.post(url, json=body, headers=_base_headers())
+            resp = c.post(f"{endpoint()}{_LOGIN_PATH}", json=body, headers=headers)
     except httpx.HTTPError as exc:
         raise AuthError(f"登录请求失败：{exc}") from exc
     try:
@@ -212,7 +380,34 @@ def login_with_password(phone: str, password: str) -> dict[str, Any]:
     token = _extract_token(payload)
     if not token:
         _raise_for_login(payload, resp.status_code or 200)
+    confirm_iam(token)
     return {"access_token": token, "raw": payload}
+
+
+def confirm_iam(access_token: str) -> None:
+    """IAM 登录后的第二步确认（浏览器同款，幂等）。
+
+    不调这一步的会话对 ``/api/web/*`` 一律不可用（``400 200901
+    iam_confirm_required``）。失败抛 :class:`AuthError`：确认不成功说明这次
+    登录拿不到可用会话，调用方不该把半张会话落库。
+    """
+    headers = _base_headers()
+    headers["xhx_token"] = access_token
+    headers["Authorization"] = f"Bearer {access_token}"
+    headers["Referer"] = f"{endpoint()}/"
+    try:
+        with _client() as c:
+            resp = c.post(f"{endpoint()}{_IAM_CONFIRM_PATH}",
+                          json={"registration_attribution":
+                                {"registration_source": "web"}},
+                          headers=headers)
+    except httpx.HTTPError as exc:
+        raise AuthError(f"IAM 确认请求失败：{exc}") from exc
+    if resp.status_code >= 400:
+        raise AuthError(
+            f"IAM 确认失败 HTTP {resp.status_code}（{resp.text[:160]}）；"
+            "未确认的会话无法调用任何 /api/web 接口"
+        )
 
 
 def fetch_user_info(access_token: str) -> dict[str, Any]:
@@ -274,9 +469,10 @@ def _build_cred(token: str, *, phone: str = "", password: str = "",
         "region": "cn",
     }
     if password:
-        # 密码加密落盘：能解出明文（自动续期需要），安全性靠目录 0600/0700。
-        cred["password"] = encrypt_password(password)
-        cred["password_enc"] = "aes-cfb-b64"
+        # 落盘用**本机密钥**（seal），不是上游那个公开常量——见文件头
+        # 「两套密钥」的说明。自动续期要能解回明文，所以是加密不是哈希。
+        cred["password"] = seal_password(password)
+        cred["password_enc"] = _SEAL_FORMAT
     return cred
 
 
@@ -358,7 +554,14 @@ def relogin_account(account_id: str) -> dict[str, Any]:
             f"raccoon 账号 {account_id} 没有手机号+密码，无法自动续期；"
             "请重新导入（建议同时填手机号与密码）"
         )
-    password = decrypt_password(enc)
+    # 优先按落盘格式解；老版本（若曾用上游格式存过）回退一次，便于迁移
+    fmt = str(cred.get("password_enc") or "")
+    password = unseal_password(enc) if fmt == _SEAL_FORMAT else decrypt_password(enc)
+    if not password:
+        raise AuthError(
+            f"raccoon 账号 {account_id} 的密码解不开（本机密钥 .secret 丢失或换机器）；"
+            "请重新导入账号（建议同时填手机号与密码）"
+        )
     result = login_with_password(phone, password)
     token = result["access_token"]
     cred["access_token"] = token
