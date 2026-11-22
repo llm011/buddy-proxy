@@ -16,21 +16,37 @@ function _trae_acct_for(idx) {
   return TRAE_ACCTS.find(a => a.index === idx) || null;
 }
 
+// 套餐标记条目（免费 / Free plan / 会员 Pro·Lite·Ultra…）——它们是「这个账号
+// 是什么套餐」，不是一笔可花可用的额度。免费套餐在上游只是一个带 end_time 的
+// entitlement（`free_utc202611_<uid>`，quota 里全是 enable_solo_* 能力位、
+// 没有任何数字），画成明细行就成了「免费 · 11-30 到期」——既和标题的 Free
+// 徽标重复，又让人以为「免费也会到期」（2026-11-23 用户实报）。所以：
+// 只有带真实额度数字的套餐条（如「会员 Lite 连续包月 剩 2000」）才进明细，
+// 纯标记条只喂给标题徽标。
+function _trae_is_plan_label(lbl) {
+  const s = String(lbl || '').trim();
+  if (!s) return false;
+  if (s === '免费' || s === 'Free plan' || s === 'Free') return true;
+  return /会员|Pro|Lite|Plus|Team|Ultra/i.test(s);
+}
+
+function _trae_has_quota_number(it) {
+  return (it && (it.total != null || it.remaining != null || it.used != null)) || false;
+}
+
 function _trae_plan_badge(its) {
   if (!Array.isArray(its) || !its.length) return '';
-  const skip = new Set(['总额度', '签到奖励', '每月登录赠送', '积分返还']);
   for (const it of its) {
     const lbl = String((it && it.label) || '').trim();
-    if (!lbl || skip.has(lbl)) continue;
-    if (lbl === '免费' || lbl === 'Free plan') {
-      const text = lbl === '免费' ? 'Free' : lbl;
-      return `<span class="tag" style="margin-left:6px;opacity:.75">${esc(text)}</span>`;
+    if (!lbl || !_trae_is_plan_label(lbl)) continue;
+    if (lbl === '免费' || lbl === 'Free plan' || lbl === 'Free') {
+      // 免费套餐不标到期：上游的 end_time 只是本期免费额度的周期边界，
+      // 不是「免费资格要过期了」，标上去只会制造焦虑。
+      return '<span class="tag" style="margin-left:6px;opacity:.75">Free</span>';
     }
-    if (/会员|Pro|Lite|Plus|Team|Ultra/i.test(lbl)) {
-      const exp = it.expire_ts && typeof fmtExpireMmdd === 'function' ? fmtExpireMmdd(it.expire_ts) : '';
-      const expTxt = exp ? ` · ${exp} 到期` : '';
-      return `<span class="tag ok" style="margin-left:6px">${esc(lbl + expTxt)}</span>`;
-    }
+    const exp = it.expire_ts && typeof fmtExpireMmdd === 'function' ? fmtExpireMmdd(it.expire_ts) : '';
+    const expTxt = exp ? ` · ${exp} 到期` : '';
+    return `<span class="tag ok" style="margin-left:6px">${esc(lbl + expTxt)}</span>`;
   }
   return '';
 }
@@ -124,6 +140,7 @@ function renderTraePanel() {
   //   归进各账号子卡片当一行明细（横贯全宽反而像独立告警——用户 2026-10-06
   //   反馈）；连前缀都没有的孤条（未登录说明等）才进 notices 横贯全宽。
   const groups = new Map();
+  const planByGrp = new Map();  // grp -> 纯套餐标记条（只喂徽标，不进明细）
   const notices = [];
   for (const it of (trae.quota && trae.quota.supported ? trae.quota.items : []) || []) {
     if (it.query_failed ||
@@ -144,6 +161,15 @@ function renderTraePanel() {
     const grp = idx >= 0 ? it.label.slice(0, idx) : 'Trae';
     const sub = idx >= 0 ? it.label.slice(idx + 3) : it.label;
     if (!groups.has(grp)) groups.set(grp, []);
+    // 纯套餐标记条（免费/Free plan，没有额度数字）：只喂标题徽标，不进明细。
+    // 见 _trae_is_plan_label 的注释——画出来就是「免费 · 11-30 到期」那种
+    // 既重复又吓人的行。单独攒在 planByGrp 里，不混进 groups（groups 直接
+    // 喂 quotaItemsHtml，混进去就得在调用处过滤，破坏「各面板同构调用」）。
+    if (_trae_is_plan_label(sub) && !_trae_has_quota_number(it)) {
+      if (!planByGrp.has(grp)) planByGrp.set(grp, []);
+      planByGrp.get(grp).push(Object.assign({}, it, {label: sub}));
+      continue;
+    }
     groups.get(grp).push(Object.assign({}, it, {label: sub}));
   }
   const n = Math.max(...[...groups.keys()]
@@ -161,7 +187,9 @@ function renderTraePanel() {
     // 合计行：总额度那条（head_only，unshift 到组首）单独供数——各权益包是
     // 它的明细不能相加，quotaHeadSum 走非 sum_items 分支取第一条有数的。
     const headSum = quotaHeadSum({items: its});
-    const planBadge = _trae_plan_badge(its);
+    // 徽标要同时看两组：有数字的套餐条留在 its 里（会员 Lite 那类带额度），
+    // 纯标记条被摘到 planByGrp（免费套餐没有数字，画不了明细）。
+    const planBadge = _trae_plan_badge(its.concat(planByGrp.get(grp) || []));
     const badgeRow = (planBadge || headSum)
       ? `<div style="display:flex;align-items:center;gap:6px;margin:2px 0 4px">${planBadge}${headSum}</div>`
       : '';

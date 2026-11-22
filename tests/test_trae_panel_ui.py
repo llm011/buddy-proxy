@@ -165,15 +165,22 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
 
 
 def test_trae_free_pack_into_account_card_not_notice():
-    """无数字但有组前缀的包（如「免费」包，只有到期日）归进各账号子卡片；
-    连前缀都没有的孤条（未登录说明）才横贯全宽（用户 2026-10-06 反馈：
-    「Trae #1 · 免费 · 10/31 到期」单独挂在外面像条独立告警）。"""
+    """无数字的「免费」套餐条只喂标题徽标，不再画成明细行。
+
+    上游把免费套餐表达成一个带 end_time 的 entitlement（quota 里只有
+    enable_solo_* 能力位、没有任何数字）。早先把它当普通权益包铺进子卡片，
+    界面上就是「Free 徽标 + 免费 · 11-30 到期」两行——既重复，又让人以为
+    「免费也会到期」（2026-11-23 用户实报）。现在：徽标只显示 Free，明细里
+    不再出现「免费」行；孤条（未登录说明）仍横贯全宽。
+    """
     out = _run_js("""
 BENEFITS.providers = [{
   id: 'trae', name: 'Trae', quota: {supported: true, items: [
     {label: 'Trae #1 · 总额度', remaining: 87.17, total: 5300, percent: 98,
      used: 5212.83, head_only: true},
     {label: 'Trae #1 · 免费', expire_ts: 1791302400},
+    {label: 'Trae #1 · 每月登录赠送', remaining: 500, total: 500, percent: 0,
+     used: 0, expire_ts: 1796054399},
     {label: '请先登录 trae', remaining: '跑 buddy login trae'},
   ]},
 }];
@@ -189,9 +196,9 @@ console.log(JSON.stringify({html: PANEL.innerHTML}));
     assert grid_at > 0, "组卡没渲染出来"
     head, card = html[:grid_at], html[grid_at:]
 
-    assert "免费" not in head, "「免费」包不该横贯全宽（应归进账号子卡片）"
-    assert "免费" in card, "「免费」包应作为明细行出现在子卡片里"
-    assert "到期" in card, "到期日跟着包名一起进子卡片"
+    assert "Free" in head + card, "标题徽标应显示 Free"
+    assert "免费" not in head + card, "「免费」套餐条不该再画成明细行"
+    assert "每月登录赠送" in card, "有数字的权益包仍进子卡片"
     assert "请先登录" in head, "无前缀孤条仍进全宽说明区"
 
 
