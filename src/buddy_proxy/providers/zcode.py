@@ -85,6 +85,10 @@ def _openai_base_for(anthropic_base: str) -> str:
 # 这样 forward_chat 的「自动匹配 provider.models()」能命中 zcode，
 # 不至于让 glm-* 请求错误落到 codebuddy 兜底通道。
 DEFAULT_MODELS: dict[str, str] = {
+    # 5.4 只有裸名一个：``glm-5.4-flash`` / ``-flashx`` / ``-turbo`` 上游一律
+    # 回 1211「模型不存在」（2026-11-23 实测，``/models`` 列表里也只有
+    # ``glm-5.4``）。别照 5.3 的形状顺手补变体，那是凭空的。
+    "glm-5.4": "GLM-5.4 (thinking, multimodal, 1M ctx)",
     "glm-5.3": "GLM-5.3 (thinking, 1M ctx)",
     "glm-5.3-flash": "GLM-5.3-Flash (thinking, multimodal, 1M ctx)",
     "glm-5.3-flashx": "GLM-5.3-FlashX (thinking, 1M ctx)",
@@ -97,6 +101,7 @@ DEFAULT_MODELS: dict[str, str] = {
 # GLM-5.3-FlashX / GLM-5.3-flashx 四种写法都解析到同一个 GLM-5.3-FlashX
 # （乱名才报 1211 模型不存在）。保留映射只为与既有约定一致、日志可读。
 MODEL_NAME_CANONICAL: dict[str, str] = {
+    "glm-5.4": "GLM-5.4",
     "glm-5.3": "GLM-5.3",
     "glm-5.3-flash": "GLM-5.3-Flash",
     "glm-5.3-flashx": "GLM-5.3-FlashX",
@@ -118,7 +123,21 @@ MODEL_NAME_CANONICAL: dict[str, str] = {
 #: OpenAI 口径（**含**缓存命中），估算前先减掉 cached 得到未命中输入。
 #: GLM-5-Turbo / GLM-4.7 上游自动切换为 GLM-5.3-Flash，按 Flash 系数抵扣；
 #: glm-5.3-flashx 套餐未开放（调用即被拒），不配系数 → 不出估算值。
+#:
+#: ``glm-5.4`` 的系数官方文档还没更新（docs 仍停在 5.3 那版，2026-11-23 查），
+#: 所以是**实测标定**的，方法：拿真实 key 发已知 token 量的请求，用
+#: ``/api/monitor/usage/quota/limit`` 的 currentValue 差值反解
+#: ``(Δ积分×10000 - 已知项) / 未知 token 数``。三个系数分开测，各自放大信号：
+#:
+#:   * output 16.0 —— 小 prompt + 长输出（3 次共 16124 输出 token，Δ=26 分）
+#:   * input  4.60 —— 30 万 token 唯一输入（避免缓存）+ 3 token 输出，Δ=138 分
+#:   * cached 1.10 —— 同 body 连发两次，第二次 cached=400000，Δ=44 分
+#:
+#: 比例与 5.3 的 (6.9, 1.7, 24.0) 同构（约 2/3），但**不能拿 2/3 顶替**：
+#: 按 2/3 算 5.4 是 (4.6, 1.13, 16.0)，cached 实测 1.10，估算会偏。
+#: 官方更新文档后应回来核对一次。
 CREDIT_COEFFS: dict[str, tuple[float, float, float]] = {
+    "glm-5.4": (4.6, 1.1, 16.0),
     "glm-5.3": (6.9, 1.7, 24.0),
     "glm-5.3-flash": (2.3, 0.56, 8.0),
     "glm-5-turbo": (2.3, 0.56, 8.0),

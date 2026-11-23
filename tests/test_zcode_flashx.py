@@ -157,3 +157,76 @@ def test_no_ethan_secrets_reference_in_source():
         if ".ethan/.secrets" in line
     ]
     assert hits == [], f"仍在引用外部 secrets 目录: {hits}"
+
+
+# ---------------------------------------------------------------------------
+# GLM-5.4（2026-11-23 接入）
+# ---------------------------------------------------------------------------
+
+def test_glm_5_4_is_in_the_catalog():
+    """5.4 要能被 forward_chat 的「自动匹配 provider.models()」命中。
+
+    漏了它，``glm-5.4`` 请求会落到 codebuddy 兜底通道，报一个跟模型无关的错。
+    """
+    from buddy_proxy.providers.zcode import DEFAULT_MODELS
+
+    assert "glm-5.4" in DEFAULT_MODELS
+    # 描述里要标出 1M 上下文与多模态（实测两者都成立，见下一条）
+    desc = DEFAULT_MODELS["glm-5.4"]
+    assert "1M ctx" in desc
+    assert "multimodal" in desc
+
+
+def test_glm_5_4_has_no_variants():
+    """5.4 只有裸名——别照 5.3 的形状顺手补 -flash/-flashx/-turbo。
+
+    2026-11-23 实测：``glm-5.4-flash`` / ``glm-5.4-flashx`` / ``glm-5.4-turbo``
+    上游一律回 ``400 {"code":1211,"message":"模型不存在，请检查模型代码。"}``，
+    而上游 ``/models`` 列表里 5.4 系列也只有 ``glm-5.4`` 一项。
+
+    这条测试的作用是**拦住「补全变体」的冲动**：目录里一旦出现 5.4 变体，
+    用户在 /ui 里选中它就是个必然失败的入口。
+    """
+    from buddy_proxy.providers.zcode import DEFAULT_MODELS
+
+    for suffix in ("-flash", "-flashx", "-turbo", "-air"):
+        assert f"glm-5.4{suffix}" not in DEFAULT_MODELS, (
+            f"glm-5.4{suffix} 上游不存在（1211），不该进目录")
+
+
+def test_glm_5_4_catalog_tables_stay_in_sync():
+    """三张表必须同键：目录 / 大小写归一 / 抵扣系数。
+
+    只加其中一张的后果各不相同且都很难查：
+    - 缺 CANONICAL → anthropic 直通时上游拿到未归一的 name（日志难读）；
+    - 缺 COEFFS → 积分列永远空，用户以为免费；
+    - 多出目录外的键 → 该模型选不到，白算。
+    """
+    from buddy_proxy.providers.zcode import (
+        CREDIT_COEFFS, DEFAULT_MODELS, MODEL_NAME_CANONICAL,
+    )
+
+    assert set(DEFAULT_MODELS) == set(MODEL_NAME_CANONICAL)
+    assert set(CREDIT_COEFFS) <= set(DEFAULT_MODELS)
+    assert MODEL_NAME_CANONICAL["glm-5.4"] == "GLM-5.4"
+
+
+def test_glm_5_4_credit_estimate_uses_measured_coeffs():
+    """5.4 的抵扣系数是实测标定的（官方文档还没更新到 5.4）。
+
+    标定值 (4.6, 1.1, 16.0) 与 5.3 的 (6.9, 1.7, 24.0) 同构（约 2/3），
+    但**不能拿 2/3 顶替**：2/3 会算出 cached=1.13，实测是 1.10。
+
+    这里锁一个手算过的数：10000 输入（其中 8000 命中缓存）+ 1000 输出，高峰：
+        2000×4.6 + 8000×1.1 + 1000×16.0 = 9200 + 8800 + 16000 = 34000
+        34000 / 10000 = 3.4
+    """
+    from buddy_proxy.core.credit_estimate import estimate_credit
+    from buddy_proxy.providers.zcode import CREDIT_COEFFS
+
+    assert CREDIT_COEFFS["glm-5.4"] == (4.6, 1.1, 16.0)
+
+    est = estimate_credit("zcode", "glm-5.4", 10000, 1000, cached_tokens=8000)
+    assert est is not None, "5.4 必须能出估算值（否则积分列空白）"
+    # 非高峰 5 折，所以只断言量级落在两档之间，避免绑死时段
+    assert 1.5 <= est <= 3.5
