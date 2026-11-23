@@ -700,37 +700,42 @@ class BenefitsManager:
             "quota": {"supported": False},
         }
         if supports_checkin:
-            status = await self._cached(f"checkin:{pid}", p.checkin_status)
-            done_today = not claimable_now(status) and (
-                today in done.get(pid, set())
-                or bool(status and status.get("checked_in"))
-            )
-            # 状态里**不能被顶层覆盖**的键：
-            # - ``supported``：上面的 ``{"supported": supports_checkin}`` 是前端
-            #   ``p.checkin.supported`` 唯一的判据，被 provider 状态盖掉就整行
-            #   打卡卡不渲染（qoder 状态里恰好也有个 supported）；
-            # - ``checkin_dates``：这是**日历合并用的中间字段**（BenefitsManager
-            #   自己消费后写进 calendar），provider 给的完整签到日期列表可达几十
-            #   个日期，每个通道都塞进响应白占带宽；``sign_in_days`` 才是下发给
-            #   界面的那份（多账号面板的签到列要用到，比如打卡日历里点某一天）。
-            entry["checkin"].update({
-                "done_today": done_today,
-                **{k: v for k, v in (status or {}).items()
-                   if k not in ("supported", "checkin_dates")},
-            })
-            # 声明支持打卡却查不出状态（返回裸 None / 非 dict）：必须标成
-            # 「查询失败」而不是让它退化成「未签到」。缺了这个标记，前端只在
-            # ``c.error``/``query_failed`` 下才显示「状态未知」，否则会画成
-            # 「未签到」+ 可点的「立即打卡」——看起来像今天还没打，实际是
-            # 拿不到状态（dumate 在无本机登录态时就是这条路径）。
-            if not isinstance(status, dict):
-                entry["checkin"]["query_failed"] = True
-                entry["checkin"].setdefault(
-                    "message", "签到状态查询失败（未登录/网络异常）")
+            ckey = f"checkin:{pid}"
+            if fast_only and ckey not in self._cache:
+                self._kick_refresh(ckey, p.checkin_status)
+                entry["loading"] = True
+            else:
+                status = await self._cached(ckey, p.checkin_status)
+                done_today = not claimable_now(status) and (
+                    today in done.get(pid, set())
+                    or bool(status and status.get("checked_in"))
+                )
+                # 状态里**不能被顶层覆盖**的键：
+                # - ``supported``：上面的 ``{"supported": supports_checkin}`` 是前端
+                #   ``p.checkin.supported`` 唯一的判据，被 provider 状态盖掉就整行
+                #   打卡卡不渲染（qoder 状态里恰好也有个 supported）；
+                # - ``checkin_dates``：这是**日历合并用的中间字段**（BenefitsManager
+                #   自己消费后写进 calendar），provider 给的完整签到日期列表可达几十
+                #   个日期，每个通道都塞进响应白占带宽；``sign_in_days`` 才是下发给
+                #   界面的那份（多账号面板的签到列要用到，比如打卡日历里点某一天）。
+                entry["checkin"].update({
+                    "done_today": done_today,
+                    **{k: v for k, v in (status or {}).items()
+                       if k not in ("supported", "checkin_dates")},
+                })
+                # 声明支持打卡却查不出状态（返回裸 None / 非 dict）：必须标成
+                # 「查询失败」而不是让它退化成「未签到」。缺了这个标记，前端只在
+                # ``c.error``/``query_failed`` 下才显示「状态未知」，否则会画成
+                # 「未签到」+ 可点的「立即打卡」——看起来像今天还没打，实际是
+                # 拿不到状态（dumate 在无本机登录态时就是这条路径）。
+                if not isinstance(status, dict):
+                    entry["checkin"]["query_failed"] = True
+                    entry["checkin"].setdefault(
+                        "message", "签到状态查询失败（未登录/网络异常）")
         # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
         # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
         qkey = self._quota_key(pid, p)
-        if fast_only and pid in SLOW_PROVIDERS and qkey not in self._cache:
+        if fast_only and qkey not in self._cache:
             self._kick_refresh(qkey, p.quota)
             entry["loading"] = True
             return entry
