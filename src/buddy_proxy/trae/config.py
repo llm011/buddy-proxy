@@ -262,6 +262,10 @@ MODEL_IDS: list[str] = [
     # 实测回 1005（extra.plan=1，同 kimi-k3.1-pro）——名字与倍率照面板/目录收，
     # 能不能调由上游按账号诚实裁决。
     "qwen4-max",
+    # 2026-11-23 get_detail_param 新增条目（rate=1.91，全目录最贵；200k 上下文、
+    # 多模态）。本机两个 CN 账号实测 1005（extra.plan=1，同上）——按既有约定
+    # 「目录可见即收录、可用性交给真请求裁决」照收。
+    "kimi-k3.1-pro-highspeed",
 ]
 
 # 模型积分倍率：整理自知识库《模型及成本整理-workbuddy-trae-含选用建议》
@@ -360,6 +364,10 @@ MODEL_CREDITS: dict[str, str] = {
     # qwen4-max 在面板上是灰锁看不到数字，目录接口 consumption_rate 实测为 0.69
     # （同 qwen3.8-flash 一样是会员档位不足灰锁，能不能调由上游按账号裁决）。
     "qwen4-max": "x0.69",
+    # 2026-11-23 CN 目录新增条目，consumption_rate 实测 1.91（全目录最贵，
+    # 高于 kimi-k3 的 1.83）。与 kimi-k3.1-pro 同状态：名字有效、本机账号
+    # 1005 档位不足。
+    "kimi-k3.1-pro-highspeed": "x1.91",
     # glm-5.3 面板 0.39（带「会员5折」徽章，原 0.40 小差）；deepseek-v4-flash
     # 0.10（「闲时折扣」）不进表——内部目录只有 deepseek-v4.1-flash
 }
