@@ -56,6 +56,7 @@ from .credentials import _pat_headers
 from .keeper import start_token_keeper
 from .models import pat_gateway_is_plus
 from .pacing import mark_rate_limited, try_reserve, wait_for_slot
+from . import net
 
 log = logging.getLogger(__name__)
 
@@ -200,7 +201,7 @@ def _post_chat(url: str, payload: bytes, credentials: PatCredentials, stream: bo
             time.sleep(delay)
         request = urllib.request.Request(url, data=payload, method="POST", headers=headers)
         try:
-            with urllib.request.urlopen(request, timeout=_CHAT_TIMEOUT_S) as response:
+            with net.open_direct(request, timeout=_CHAT_TIMEOUT_S) as response:
                 return _read_all_bounded(response)
         except Exception as exc:
             if attempt >= len(delays) or not _is_retryable_connect_error(exc):

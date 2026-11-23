@@ -17,6 +17,7 @@ import buddy_proxy.trae.pat as _ns
 
 from .config import _EXCHANGE_TIMEOUT_S, _PLUS_GATEWAY, ensure_pat_config
 from .credentials import _pat_headers
+from . import net
 
 # ───────────────────────── 模型负载查询 ─────────────────────────
 
@@ -40,7 +41,7 @@ def _fetch_hot_by_config(plus: str, credentials: Any, function: str) -> dict[str
         method="POST",
         headers=_pat_headers(credentials, "*/*"),
     )
-    with urllib.request.urlopen(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
+    with net.open_direct(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
         raw = json.loads(response.read().decode("utf-8", errors="replace"))
     hot_by_config: dict[str, float | None] = {}
     for entry in raw.get("config_info_list") or []:

@@ -22,6 +22,7 @@ import buddy_proxy.trae.pat as _ns
 from .config import _PLUS_GATEWAY, PatProfile, ensure_pat_config
 from .credentials import _pat_headers
 from .store import _account_state, _mutate_account
+from . import net
 
 log = logging.getLogger(__name__)
 
@@ -272,7 +273,7 @@ def _fetch_one_account(
         request = urllib.request.Request(
             f"{plus}/trae/api/v1/pay/ide_user_ent_usage", data=b"{}", method="POST",
             headers=_pat_headers(credentials, "application/json"))
-        with urllib.request.urlopen(request, timeout=_QUOTA_TIMEOUT_S) as response:
+        with net.open_direct(request, timeout=_QUOTA_TIMEOUT_S) as response:
             data = json.loads(response.read().decode("utf-8", errors="replace"))
         items = _quota_items(data, profile, multi)
         _save_quota(profile, "advanced", items)

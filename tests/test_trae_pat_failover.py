@@ -21,6 +21,8 @@ import pytest
 from fastapi import HTTPException
 
 from buddy_proxy.trae import pat
+from buddy_proxy.trae.pat import chat as pat_chat_module
+from buddy_proxy.trae.pat import net as _PAT_NET
 from buddy_proxy.trae import provider as provider_module
 from buddy_proxy.trae.pat_provider import TraePatProvider
 from buddy_proxy.trae.sse import _SSEDecoder
@@ -1723,7 +1725,7 @@ def test_quota_skips_requests_when_gateway_unreachable(monkeypatch):
         calls.append("urlopen")
         raise AssertionError("网关不可达时不应发起请求")
 
-    monkeypatch.setattr(pat.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(_PAT_NET, "open_direct", boom)
 
     t0 = time.monotonic()
     items = pat.fetch_pat_ent_usage()
@@ -1747,7 +1749,7 @@ def test_quota_reports_failure_count_when_gateway_ok(monkeypatch):
     def boom(*a, **k):
         raise urllib.error.URLError("offline")
 
-    monkeypatch.setattr(pat.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(_PAT_NET, "open_direct", boom)
     items = pat.fetch_pat_ent_usage()
     assert items[0]["query_failed"] is True
     assert items[0]["unreachable"] is False
@@ -1789,7 +1791,7 @@ def test_quota_probe_result_is_cached_between_calls(monkeypatch):
 
     monkeypatch.setattr(pat, "_gateway_reachable", probe)
     _install_credentials(monkeypatch)
-    monkeypatch.setattr(pat.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("x")))
+    monkeypatch.setattr(_PAT_NET, "open_direct", lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("x")))
 
     pat.fetch_pat_ent_usage()
     pat.fetch_pat_ent_usage()
@@ -1827,7 +1829,7 @@ def test_quota_accounts_queried_concurrently(monkeypatch):
             time.sleep(0.4)
             return payload
 
-    monkeypatch.setattr(pat.urllib.request, "urlopen", lambda *a, **k: Resp())
+    monkeypatch.setattr(_PAT_NET, "open_direct", lambda *a, **k: Resp())
 
     t0 = time.monotonic()
     items = pat.fetch_pat_ent_usage()
@@ -2050,9 +2052,9 @@ def test_provider_exposes_quota_pack_per_model(monkeypatch):
 
     assert listed["gpt-6.1-sol"]["quota_pack"] == "日包（GPT-6.1）"
     assert listed["gpt-5.6-sol"]["quota_pack"] == "日包（GPT-5.6 Sol）"
-    # 公共模型吃 CN 共享余额
-    assert listed["glm-5.3"]["quota_pack"] == "CN 共享余额"
-    assert listed["deepseek-v4.1-flash"]["quota_pack"] == "CN 共享余额"
+    # 公共模型扣的是同一个 Trae 账号的 work 余额（实测 PAT 请求也吃这份）
+    assert listed["glm-5.3"]["quota_pack"] == "Trae 账号余额"
+    assert listed["deepseek-v4.1-flash"]["quota_pack"] == "Trae 账号余额"
     # 同在 plus 网关、account_type 报 ptu，但实测两个计数器都不动
     assert listed["gpt-5.4"]["quota_pack"] == "免费（不扣余额）"
 
@@ -2122,3 +2124,74 @@ def test_dead_weekly_pool_is_skipped_but_other_weekly_is_not(monkeypatch):
     assert len(items) == 1, labels
     assert "周包" in labels[0]
     assert "300" not in str(items[0].get("total"))
+
+
+# ---------------------------------------------------------------------------
+# 出站传输：默认直连，可用环境变量切回代理
+# ---------------------------------------------------------------------------
+def test_chat_transport_uses_direct_opener(monkeypatch):
+    """``pat/chat.py`` 用的是 ``net.open_direct``，不是全局 ``urlopen``。
+
+    2026-11-24 的事故：本机 ``getproxies()`` 指着 ``127.0.0.1:7890``，而
+    ``urlopen`` 默认读它，导致 PAT 请求 30s 超时。额度页表现成「网关不可达」，
+    聊天则只是「有时候特别慢」——有建连长超时 + 重试在兜着。
+
+    这里只验**接线**（源码里没有裸 ``urllib.request.urlopen`` 调用），不跑
+    ``_post_chat`` 的读循环：那条路要构造完整 SSE 流，跑起来是几秒级的集成
+    测试，而接线错了会秒红——这正是要守卫的东西。
+    """
+    from pathlib import Path
+
+    source = Path(pat_chat_module.__file__).read_text(encoding="utf-8")
+    # 允许出现在注释/docstring 里，但不许是真实调用
+    calls = [line for line in source.splitlines()
+             if "urllib.request.urlopen(" in line and not line.lstrip().startswith("#")]
+    assert not calls, f"chat.py 里还有裸 urlopen 调用：{calls}"
+    assert "net.open_direct(" in source
+
+
+def test_direct_opener_can_be_dialed_back_to_proxy(monkeypatch):
+    """``BUDDY_PAT_USE_PROXY=1`` 时恢复走环境代理（逃生口）。
+
+    为什么要这个开关：一律直连对绝大多数场景更好，但它把「本地代理坏了」和
+    「上游挂了」变成同一种可观测症状。真需要代理才能出网的用户（墙外线路、
+    公司强制 egress）没有别的办法，只能改代码——那不可接受。
+    """
+    import urllib.request as ur
+
+    calls = []
+    monkeypatch.setattr(ur, "urlopen", lambda req, timeout=None: calls.append("proxy") or "PROXIED")
+    monkeypatch.setenv(_PAT_NET.PROXY_ENV, "1")
+
+    request = ur.Request("https://example.invalid/x")
+    assert _PAT_NET.open_direct(request, timeout=5) == "PROXIED"
+    assert calls == ["proxy"]
+
+
+def test_direct_opener_is_default_when_flag_unset(monkeypatch):
+    """开关为空 / ``0`` / ``false`` / ``no`` 都按直连处理。
+
+    只断言**不调全局 urlopen**：真去连 example.invalid 会等 DNS/超时，让单测
+    从毫秒级变成十几秒，不值得。直连 opener 被调用到就说明走对了分支。
+    """
+    import urllib.request as ur
+
+    monkeypatch.setattr(
+        ur, "urlopen",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("不该走全局 urlopen")))
+
+    used: list[str] = []
+
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            used.append("direct")
+            return "DIRECT"
+
+    monkeypatch.setattr(_PAT_NET, "_DIRECT_OPENER", FakeOpener())
+    request = ur.Request("https://example.invalid/x")
+
+    for value in ("", "0", "false", "no", "NO", "  "):
+        monkeypatch.setenv(_PAT_NET.PROXY_ENV, value)
+        assert _PAT_NET.open_direct(request, timeout=5) == "DIRECT"
+
+    assert used == ["direct"] * 6

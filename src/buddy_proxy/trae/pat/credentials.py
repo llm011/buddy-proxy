@@ -31,6 +31,7 @@ from .config import (
     ensure_pat_config,
 )
 from .store import _account_state, _ensure_fingerprint, _mutate_account, _refresh_lock
+from . import net
 
 log = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ def _exchange(bearer: str) -> tuple[str, str, float]:
         headers={"Authorization": f"Bearer {bearer}", "Accept": "application/json",
                  "User-Agent": "ByteDanceCLI/1.0"},
     )
-    with urllib.request.urlopen(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
+    with net.open_direct(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
         jwt = (response.headers.get("x-jwt-token") or "").strip()
     if not jwt:
         raise HTTPException(status_code=502, detail="PAT 第一步交换未返回令牌")
@@ -61,7 +62,7 @@ def _exchange(bearer: str) -> tuple[str, str, float]:
         headers={"x-jwt-token": jwt, "Accept": "application/json",
                  "Content-Type": "application/json", "User-Agent": "ByteDanceCLI/1.0"},
     )
-    with urllib.request.urlopen(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
+    with net.open_direct(request, timeout=_EXCHANGE_TIMEOUT_S) as response:
         payload = json.loads(response.read().decode("utf-8", errors="replace"))
     result = payload.get("Result") or payload.get("result") or {}
     token = result.get("Token") or ""
