@@ -45,6 +45,10 @@ PAT_PUBLIC_MODELS: dict[str, tuple[str, str]] = {}
 PAT_MODEL_FUNCTIONS: dict[str, str] = {}
 # 模型 -> 上游频控窗口 (requests, window_s)，见 pacing；未声明的模型不节流
 PAT_MODEL_RATE_LIMITS: dict[str, tuple[int, float]] = {}
+# 模型 -> 扣哪个额度包（models_config.json 的 ``quota_pack``）。
+# 缺省 = 该模型不计入任何 entitlement 包（见模块末尾的长注释：实测公共模型
+# 走免费额度，从 0 涨起来的包一个都没动）。
+PAT_MODEL_QUOTA_PACKS: dict[str, str] = {}
 _config_mtime: float | None = None
 
 
@@ -74,6 +78,7 @@ def _reload_pat_models() -> None:
     public: dict[str, tuple[str, str]] = {}
     functions: dict[str, str] = {}
     rate_limits: dict[str, tuple[int, float]] = {}
+    quota_packs: dict[str, str] = {}
     try:
         data = json.loads(_MODEL_CONFIG_FILE.read_text("utf-8"))
         for model in data.get("models", []):
@@ -90,6 +95,9 @@ def _reload_pat_models() -> None:
             limit = _parse_rate_limit(model.get("rate_limit"))
             if model_id and limit:
                 rate_limits[model_id] = limit
+            pack = str(model.get("quota_pack") or "").strip()
+            if model_id and pack:
+                quota_packs[model_id] = pack
     except Exception as exc:
         log.warning("PAT 模型配置解析失败（沿用上次内容）: %s", type(exc).__name__)
         return
@@ -101,6 +109,8 @@ def _reload_pat_models() -> None:
     PAT_MODEL_FUNCTIONS.update(functions)
     PAT_MODEL_RATE_LIMITS.clear()
     PAT_MODEL_RATE_LIMITS.update(rate_limits)
+    PAT_MODEL_QUOTA_PACKS.clear()
+    PAT_MODEL_QUOTA_PACKS.update(quota_packs)
     PAT_MODELS.clear()
     PAT_MODELS.update({**plus, **public})
     _config_mtime = mtime

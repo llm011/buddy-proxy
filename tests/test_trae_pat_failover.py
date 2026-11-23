@@ -1999,3 +1999,48 @@ def test_quota_pool_is_reused_not_recreated(monkeypatch):
     # 每轮新建会留 6 个线程/轮 → 3 轮涨 18 个；常驻池只多一次固定开销
     assert after - before <= 8, f"线程在累积：{before} → {after}"
     assert pat_quota._quota_pool() is pat_quota._quota_pool()
+
+
+# ---------------------------------------------------------------------------
+# 额度包归因（2026-11-23 实测）
+# ---------------------------------------------------------------------------
+def test_quota_pack_marks_only_models_measured_to_consume(monkeypatch):
+    """只有实测确认扣包的模型才带 ``quota_pack``，其余一律不带。
+
+    2026-11-23 用同一账号逐模型发请求、前后各拉一次 entitlement 快照做差：
+    只有 GPT 系四个模型让包里的 ``basic_usage_amount`` 动了，公共模型
+    （glm / deepseek / kimi / qwen / doubao / mimo / minimax / step）**一个都没动**
+    ——包括 ``account_type`` 报 ``ptu`` / ``paygo`` 的 gpt-5.4 / gpt-5.5-max /
+    gemini-3-flash。所以「plus 网关」不等于「扣包」，别按网关猜。
+
+    这条锁两件事：
+    1. 该标的标上（漏标 → 用户以为它免费，实际在吃包）；
+    2. 不该标的别标（多标 → 用户不敢用，而它其实走免费额度）。
+    """
+    from buddy_proxy.trae.pat import PAT_MODEL_QUOTA_PACKS
+
+    assert PAT_MODEL_QUOTA_PACKS == {
+        "gpt-5.6-sol": "日包（GPT-5.6 Sol）",
+        "gpt-5.6-sol-max": "日包（GPT-5.6 Sol）",
+        "gpt-6-astra-max": "日包（GPT-6）",
+        "gpt-6.1-sol": "日包（GPT-6.1）",
+    }
+
+
+def test_provider_exposes_quota_pack_per_model(monkeypatch):
+    """``models()`` 要把包名带给 UI；没归因的模型给 None（不是空串）。
+
+    ``None`` 和 ``""`` 的区别在 UI 上很实在：前者 JSON 里是 ``null``，
+    前端 ``m.quota_pack ? ... : ''`` 不渲染徽标；后者虽然也 falsy，但一旦有人
+    改成 ``m.quota_pack !== undefined`` 就会渲染出一个空标签。
+    """
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", _profiles({"bearer": "offline-bearer"}))
+    listed = {m["id"]: m for m in TraePatProvider().models()}
+
+    assert listed["gpt-6.1-sol"]["quota_pack"] == "日包（GPT-6.1）"
+    assert listed["gpt-5.6-sol"]["quota_pack"] == "日包（GPT-5.6 Sol）"
+    # 公共模型：实测不扣包
+    assert listed["glm-5.3"]["quota_pack"] is None
+    assert listed["deepseek-v4.1-flash"]["quota_pack"] is None
+    # 同在 plus 网关但不扣包 —— 这条最容易标错
+    assert listed["gpt-5.4"]["quota_pack"] is None

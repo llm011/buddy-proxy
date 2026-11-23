@@ -68,6 +68,10 @@ def _provider_models(provider: Any) -> list[dict[str, Any]]:
             "reasoning": bool(m.get("reasoning")),
             # 仅受账号限制的模型带 {"limited": true, "accounts": [...]}；无限制不带
             "support": support_map.get(mid),
+            # 扣哪个额度包（目前只有 traepat 的 GPT 系带）。没有这个键 = 该模型
+            # 不计入任何包，模型页就不显示包名——「不显示」本身就是信息，
+            # 不要为了列对齐补一个「无」。
+            "quota_pack": m.get("quota_pack"),
         })
     return models
 
