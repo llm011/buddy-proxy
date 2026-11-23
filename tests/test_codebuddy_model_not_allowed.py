@@ -246,3 +246,44 @@ def test_glm54_not_added_to_trae_static_table():
     assert "glm-5.3" in MODEL_IDS, "能用的 glm-5.3 必须在底表里"
     assert "glm-5.4" not in MODEL_IDS, (
         "glm-5.4 在 trae 侧账号无权限（1005），收录会把 glm-5.3 家族隐藏")
+
+
+def test_all_accounts_denied_reports_model_not_allowed_not_cooldown(monkeypatch):
+    """全部账号都没权限时，报错要说明「模型不可用」，不能说成「冷却中」。
+
+    这条是 review 时发现的：``cooldown_report()`` 只查**账号级**键，而 11158
+    打的是 ``(账号,模型)`` 复合键 → report 是空串 → 旧文案输出
+
+        「所有账号均在冷却中：；额度冷却到点自动恢复」
+
+    空理由 + 错误指引。用户会以为等一会儿就好，可这是**授权**问题，等到天亮
+    也不会恢复。glm-5.4 上线后免费账号第二次请求必踩这条路。
+    """
+    import asyncio
+
+    import buddy_proxy.codebuddy_provider as cbp
+    from buddy_proxy.codebuddy_provider.provider import CodeBuddyProvider
+    from types import SimpleNamespace
+    from buddy_proxy.core import state as st
+
+    monkeypatch.setattr(st, "proxy_state", SimpleNamespace(
+        enable_desensitize=False, logger=None, write_log=lambda *a, **k: None))
+
+    _setup_free_then_paid(monkeypatch)
+    # 两个账号都已因 11158 被标记（等价于「上一次请求把号都试过了」）
+    failover.mark_model_cooldown("free", "glm-5.4")
+    failover.mark_model_cooldown("paid", "glm-5.4")
+    assert failover.available_accounts("cn", model="glm-5.4") == []
+
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(CodeBuddyProvider().forward(
+            {"model": "glm-5.4", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]},
+            "openai", None))
+
+    detail = ei.value.detail["error"]
+    assert detail["type"] == "model_not_allowed", "不能再说成 rate_limit"
+    assert "11158" in detail["message"]
+    assert "冷却" not in detail["message"].split("这不是")[0] or "不是额度冷却" in detail["message"]
+    assert "；额度冷却到点自动恢复" not in detail["message"], "别给会等错方向的指引"
