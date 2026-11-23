@@ -538,8 +538,8 @@
     },
     {
       "id": "gpt-5.6-luna-max",
+      "quota_pack": "按量额度（未计费）",
       "credit_rate": 0,
-      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.6-Luna Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -552,8 +552,8 @@
     },
     {
       "id": "gpt-5.6-terra-max",
+      "quota_pack": "PTU 预留额度（未计费）",
       "credit_rate": 0,
-      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.6-Terra Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -566,8 +566,8 @@
     },
     {
       "id": "gpt-5.5-max",
+      "quota_pack": "PTU 预留额度（未计费）",
       "credit_rate": 0,
-      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.5 Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -580,8 +580,8 @@
     },
     {
       "id": "gpt-5.4",
+      "quota_pack": "PTU 预留额度（未计费）",
       "credit_rate": 0,
-      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.4",
       "vendor": "trae",
       "provider": "traepat",
@@ -594,8 +594,8 @@
     },
     {
       "id": "gpt-5.2",
+      "quota_pack": "按量额度（未计费）",
       "credit_rate": 0,
-      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.2",
       "vendor": "trae",
       "provider": "traepat",
@@ -639,8 +639,8 @@
     },
     {
       "id": "gemini-3-flash",
+      "quota_pack": "未观察到扣费",
       "credit_rate": 0,
-      "quota_pack": "免费（不扣余额）",
       "name": "Gemini-3-Flash（实为 DeepSeek-V4.1-Flash）",
       "vendor": "trae",
       "provider": "traepat",

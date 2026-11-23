@@ -46,13 +46,32 @@ function renderGroups() {
   //   数字 > 0 → 相对 deepseek 的倍数，同样的 prompt 贵多少倍
   //   0        → 实测不扣余额（免费）
   //   null     → 走日包：余额维度不扣，但花的是包里按 token 折的点，不是免费
-  function _creditRateTag(rate) {
+  // 「查不到扣费」的模型**不能一律标免费**——上游从没说过它们不收钱。
+  // 实测只能证明「余额和日包两个计数器都不动」，不能证明「免费」。
+  // 所以按 account_type 分三种口径，各给各的 tooltip：
+  //   ptu   包月预置吞吐，按并发/速率限流，第 5 个之后的 token 不计费
+  //   paygo 按量，但额度页看不到消耗（上游不报）
+  //   ''    走公共网关，同样查不到
+  const _FREE_KINDS = {
+    'ptu': { txt: 'PTU 预留', tip: 'account_type=ptu：包月预置吞吐配额，按并发/速率限流，不按 token 计费。额度页的日包计数器不统计它，所以查不到消耗——这不等于「免费」，只是上游没给这个口径。' },
+    'paygo': { txt: '按量未计', tip: 'account_type=paygo：按量计费通道，但上游不在额度页报它的消耗（实测余额与日包都不动）。真实账单可能在别处，这里只能说「查不到」。' },
+    '': { txt: '未观察到扣费', tip: '实测调用前后余额和日包都没变，上游也未给出计费口径。按「查不到扣费」处理，不写「免费」——上游没这么说。' },
+  };
+  function _creditRateTag(rate, pack) {
     if (rate === null || rate === undefined) {
       return rate === null
         ? '<span class="tag" title="走日包：不扣共享余额，花的是日包里的额度点（按 token 折算，实测）">🎫 扣日包</span>'
         : '';
     }
-    if (!rate) return '<span class="tag ok" title="实测不扣共享余额（调用前后余额都没变）">免费</span>';
+    if (!rate) {
+      // pack 里带着口径（「PTU 预留额度（未计费）」/「按量额度（未计费）」/
+      // 「未观察到扣费」），从它反推，别在 JS 里再猜一遍 account_type。
+      const kind = !pack ? 'ptu'
+        : pack.startsWith('PTU') ? 'ptu'
+        : pack.startsWith('按量') ? 'paygo' : '';
+      const k = _FREE_KINDS[kind];
+      return `<span class="tag ok" title="${esc(k.tip)}">${esc(k.txt)}</span>`;
+    }
     const txt = rate === 1 ? '×1（基准）' : `×${rate}`;
     return `<span class="tag" title="费率倍数：以 GLM-5.3 为 1.0，同样的 prompt 花 ${rate} 倍余额（实测，非官方标价）">${esc(txt)}</span>`;
   }
@@ -126,7 +145,7 @@ function renderGroups() {
             ${schTag}
             ${ordTag}</td>
         <td class="muted"${dim}>${esc(m.name || '')}</td>
-        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.quota_pack ? `<span class="tag ok" title="这份用量记在哪：该模型每次调用都记在这里，记满了即止（实测归因，非估算）">📦 ${esc(m.quota_pack)}</span>` : ''}${_creditRateTag(m.credit_rate)}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
+        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.quota_pack ? `<span class="tag ok" title="这份用量记在哪：该模型每次调用都记在这里，记满了即止（实测归因，非估算）">📦 ${esc(m.quota_pack)}</span>` : ''}${_creditRateTag(m.credit_rate, m.quota_pack)}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
         <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.recent_count && st.recent_avg_ms != null ? fmtMs(st.recent_avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
