@@ -81,3 +81,23 @@ def test_tools_payload_unaffected():
     body = _build_native_body(_msgs(), "glm-5.4", False, tools)
     assert "config_name" not in body
     assert body.get("tools"), "tools 必须照常带上"
+
+
+def test_text_protocol_fallback_also_omits_config_name():
+    """文本协议兜底路径（inline_chat）同样不能带 config_name。
+
+    review 时发现：native 通道 4001 后会回落到文本协议，而那条路径的
+    ``_build_chat_body`` 也在写 config_name。只修 native 的话，回落路径会
+    继续报 4001——实测 glm-5.4 在 inline_chat 上带 config_name 就是 4001，
+    去掉才出流。两处必须共用同一份名单。
+    """
+    from buddy_proxy.trae.text_protocol import _build_chat_body
+
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    body54 = _build_chat_body(msgs, "glm-5.4", False)
+    assert "config_name" not in body54, "回落路径也要省略"
+    assert body54["model"] == "glm-5.4"
+
+    # 既有模型不受影响
+    body53 = _build_chat_body(msgs, "glm-5.3", False)
+    assert body53["config_name"] == "glm-5.3"
