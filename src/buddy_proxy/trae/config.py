@@ -266,6 +266,15 @@ MODEL_IDS: list[str] = [
     # 多模态）。本机两个 CN 账号实测 1005（extra.plan=1，同上）——按既有约定
     # 「目录可见即收录、可用性交给真请求裁决」照收。
     "kimi-k3.1-pro-highspeed",
+    # 2026-11-24 收录。四个 CN 账号（含付费 Ethan1）native chat_v3 实测全部 200
+    # 出流，读图也验过（512px 纯蓝图答「深蓝色」）。
+    #
+    # ⚠ 请求体**不能带 config_name**，否则上游回 1005「套餐权益不足」——看着像
+    # 账号权限问题，实际是那个历史字段的锅，见 native_tools._NATIVE_NO_CONFIG_NAME。
+    #
+    # 用户 2026-11-24 明确要求：5.4 与 5.3 家族**并存**，不许代际收敛顶掉 5.3。
+    # 见 provider._COEXIST_GENERATIONS。
+    "glm-5.4",
 ]
 
 # 模型积分倍率：整理自知识库《模型及成本整理-workbuddy-trae-含选用建议》
@@ -368,6 +377,9 @@ MODEL_CREDITS: dict[str, str] = {
     # 高于 kimi-k3 的 1.83）。与 kimi-k3.1-pro 同状态：名字有效、本机账号
     # 1005 档位不足。
     "kimi-k3.1-pro-highspeed": "x1.91",
+    # 2026-11-24：用户「模型倍率」面板显示 GLM-5.4 为 0.69x（带「订阅优先」徽章），
+    # 与 codebuddy 侧同值。CN 目录 consumption_rate 报 0.78，以面板为准。
+    "glm-5.4": "x0.69",
     # glm-5.3 面板 0.39（带「会员5折」徽章，原 0.40 小差）；deepseek-v4-flash
     # 0.10（「闲时折扣」）不进表——内部目录只有 deepseek-v4.1-flash
 }
@@ -388,7 +400,7 @@ MODEL_CREDITS: dict[str, str] = {
 # 误剥图片，表现为「不支持读图」——即使模型本身支持。
 #
 # 未在此列表中的模型一律按不支持处理（保守）。
-MODEL_SUPPORTS_IMAGES: set[str] = {"deepseek-v4.1-flash"}
+MODEL_SUPPORTS_IMAGES: set[str] = {"deepseek-v4.1-flash", "glm-5.4"}
 
 # 实测计价（2026-09-30，官方「使用记录」对账法）：模型 -> (输入单价, 输出单价, 校准倍率)。
 # 单价单位：积分/token，是**校准时刻的绝对值**（已含当时倍率与折扣）。

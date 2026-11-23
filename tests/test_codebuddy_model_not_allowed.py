@@ -229,23 +229,30 @@ def test_forward_fails_over_from_free_account_to_paid(monkeypatch):
 # --- 目录收录的边界 ---------------------------------------------------------
 
 
-def test_glm54_not_added_to_trae_static_table():
-    """glm-5.4 **不能**进 trae 的静态底表——会把能用的 glm-5.3 挤掉。
+def test_glm54_and_glm53_both_stay_in_trae_catalog():
+    """glm-5.4 与 glm-5.3 家族必须**并存**（用户 2026-11-24 明确要求）。
 
-    2026-11-24 实测：trae CN 目录里 glm-5.4 确实在（rate 0.78 / 116000 窗口 /
-    multimodal），但 native chat_v3 对**所有本机账号**都回 1005「权益不足」，
-    而同账号的 glm-5.3 照常 200。
+    早期版本这里是反的：当时以为 trae 侧 glm-5.4 没权限（1005），
+    写进 ``MODEL_IDS`` 只会触发代际收敛、把能用的 glm-5.3 挤掉。后来查明
+    1005 是请求体带 ``config_name`` 导致的（见 ``test_trae_glm54_config_name``），
+    5.4 实际可用，于是改为收录 + 给 glm 家族设代际下限
+    （``_GENERATION_FLOOR``）保住 5.3。
 
-    把 5.4 写进 ``MODEL_IDS`` 后 ``models()`` 的代际收敛（``_is_old_generation``）
-    会把整个 glm-5.3 家族判成旧代从 ``/v1/models`` 移除——结果目录里只剩一个
-    **调不动**的模型，把唯一能用的那个顶掉了。这条测试锁住这个坑：收录前先
-    确认它真能出流，别只看目录。
+    这条测试锁住「两代都在」，防止有人顺手把下限删了。
     """
     from buddy_proxy.trae.config import MODEL_IDS
+    from buddy_proxy.trae_provider import TraeProvider
 
     assert "glm-5.3" in MODEL_IDS, "能用的 glm-5.3 必须在底表里"
-    assert "glm-5.4" not in MODEL_IDS, (
-        "glm-5.4 在 trae 侧账号无权限（1005），收录会把 glm-5.3 家族隐藏")
+    assert "glm-5.4" in MODEL_IDS, "5.4 实测可用，也要在底表里"
+
+    ids = {m["id"] for m in TraeProvider().models()}
+    assert "glm-5.4" in ids, "5.4 不能被自己的代际收敛藏掉"
+    for kept in ("glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"):
+        assert kept in ids, f"{kept} 被 5.4 顶掉了（_GENERATION_FLOOR 失效）"
+    # 底线之下的老代际仍照旧被收敛（用户 2026-10-25 点名过 glm-5.1/5.2 没用）
+    assert "glm-5.2" not in ids and "glm-5.1" not in ids
+
 
 
 def test_all_accounts_denied_reports_model_not_allowed_not_cooldown(monkeypatch):

@@ -101,3 +101,28 @@ def test_text_protocol_fallback_also_omits_config_name():
     # 既有模型不受影响
     body53 = _build_chat_body(msgs, "glm-5.3", False)
     assert body53["config_name"] == "glm-5.3"
+
+
+def test_glm_generation_floor_keeps_53_but_drops_52():
+    """glm 家族代际下限 5.3：5.3 及以上并存，5.2 及以下照旧被收敛。
+
+    这条同时防两种退化：
+    1. 有人删掉 ``_GENERATION_FLOOR`` → 5.3 全家被 5.4 顶掉（用户明确不要）；
+    2. 有人把缺省值写成 0.0（``version >= floor.get(family, 0.0)``）→ 所有家族
+       都免于收敛，gpt-5.6 / deepseek-v4-pro 一起复活。
+    """
+    from buddy_proxy.trae.provider import (
+        _GENERATION_FLOOR,
+        _is_old_generation,
+    )
+
+    pool = {"glm-5.2", "glm-5.3", "glm-5.4"}
+    assert _is_old_generation("glm-5.3", pool) is False, "5.3 必须保留"
+    assert _is_old_generation("glm-5.4", pool) is False
+    assert _is_old_generation("glm-5.2", pool) is True, "5.2 仍要被收敛"
+
+    # 别的家族不受影响（缺省不是 0.0）
+    assert _is_old_generation("gpt-5.6-sol", {"gpt-5.6-sol", "gpt-6.1-sol"}) is True
+    assert _is_old_generation("deepseek-v4-pro", {"deepseek-v4-pro", "deepseek-v4.1-flash"}) is True
+
+    assert _GENERATION_FLOOR.get("glm") == 5.3
