@@ -319,3 +319,24 @@ def test_static_catalog_2026_11_17_update(trae_env):
     # 代际收敛：qwen4-max 在场时 qwen3.8-max / qwen3.8-flash 退隐（点名仍可调）
     assert "qwen3.8-max" not in listed
     assert "qwen3.8-flash" not in listed
+
+
+def test_static_catalog_2026_11_23_update(trae_env):
+    """2026-11-23 目录核对：kimi-k3.1-pro-highspeed 是本期唯一新增。
+
+    收录理由是既有约定「目录可见即收录、可用性交给真请求裁决」——本机两个 CN
+    账号实测回 1005（extra.plan=1，会员档位不足），和 kimi-k3.1-pro / qwen4-max
+    同状态。所以这条只锁「名字与倍率进了表」，不锁「能调」。
+
+    倍率 1.91 是全目录最高的（高于 kimi-k3 的 1.83）：抄错成 0.91 这种量级，
+    用户会以为它比 glm-5.3 还便宜，这里锁死数值。
+    """
+    from buddy_proxy.trae.provider import TraeProvider
+
+    mid = "kimi-k3.1-pro-highspeed"
+    assert mid in trae_config.MODEL_IDS
+    assert trae_config.credit_multiplier("cn", mid) == "x1.91"
+
+    listed = {m["id"]: m for m in TraeProvider().models()}
+    assert mid in listed, "目录里可见的模型没进 /v1/models"
+    assert listed[mid]["credits"] == "x1.91"
