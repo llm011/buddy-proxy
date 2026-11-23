@@ -219,13 +219,26 @@ def _extract_prompt(
 
 def _build_chat_body(messages: list[dict[str, Any]], model: str, stream: bool) -> dict[str, Any]:
     session_id = str(uuid.uuid4())
-    return {
+    body: dict[str, Any] = {
         "messages": messages,
         "model": model,
-        "config_name": model,  # Work 通道必须 config_name + model 成对（traework2api 实测）
         "function": "inline_chat",
         "stream": stream,
         "request_id": session_id,
         "session_id": session_id,
     }
+    # ``config_name`` 是 Work 通道要求 model/config_name 成对的老约定，但**不是
+    # 所有模型都吃**。2026-11-24 实测 glm-5.4 在两条 function 上都一样：
+    #
+    #   inline_chat + config_name → 4001 param is invalid
+    #   inline_chat 无 config_name → 正常出流
+    #
+    # 与 native 通道（``native_tools._build_native_body``）是同一份模型名单，
+    # 共用 ``_NATIVE_NO_CONFIG_NAME``——两处必须一起改，只改一处会让 4001 回落
+    # 路径继续挂（native 失败正好会落到这里）。
+    from .native_tools import _omits_config_name  # 延迟导入：native_tools 依赖本模块
+
+    if not _omits_config_name(model):
+        body["config_name"] = model
+    return body
 
