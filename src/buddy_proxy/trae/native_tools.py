@@ -169,17 +169,41 @@ def _build_native_body(
     body = {
         "messages": native_msgs,
         "model": trae_model,
-        "config_name": trae_model,
         "function": _NATIVE_FUNCTION,
         "stream": stream,
         "request_id": session_id,
         "session_id": session_id,
     }
+    # ``config_name`` 是 Work 通道（traework2api）要求 model/config_name 成对的老约定，
+    # 但**不是所有模型都吃它**——2026-11-24 实测 glm-5.4：
+    #
+    #   带 config_name="glm-5.4"  → SSE event:error code 1005（extra.plan=2）
+    #   带 config_name="GLM-5.4"  → SSE event:error code 4001 param is invalid
+    #   不带 config_name          → 正常出流
+    #
+    # 而 glm-5.3 / glm-5.3-flash 带它照常 200。也就是说 5.4 是新路由，不认这个
+    # 历史字段，给了反而被当成「另一个模型」判成套餐不支持（1005）。
+    #
+    # 这个坑极难从现象反推：1005 的官方文案是「套餐权益不足」，看起来像账号权限
+    # 问题——但四个 CN 账号（含付费的 Ethan1）全都会中，且**同一个账号**去掉这个
+    # 字段就立刻 200。所以按模型决定带不带，而不是一律带。
+    if not _omits_config_name(trae_model):
+        body["config_name"] = trae_model
     tools_payload = _native_tools_payload(tools)
     if tools_payload:
         # 纯聊天请求不带 tools 键（实测裸请求与空数组均可，省略更干净）
         body["tools"] = tools_payload
     return body
+
+
+#: 不吃 ``config_name`` 字段的模型（小写比对）。新增模型若实测 1005/4001 且
+#: 去掉该字段就好转，加到这里——别改成「一律不带」，那是拿老模型做实验。
+_NATIVE_NO_CONFIG_NAME: frozenset[str] = frozenset({"glm-5.4"})
+
+
+def _omits_config_name(trae_model: str) -> bool:
+    """该上游模型名是否要省略 ``config_name``（见 ``_build_native_body`` 注释）。"""
+    return str(trae_model or "").strip().lower() in _NATIVE_NO_CONFIG_NAME
 
 
 class _NonStreamTimeout(TimeoutError):
