@@ -170,11 +170,10 @@ function renderCodebuddyPanel() {
       <div class="pat-head">
         <span class="name">CodeBuddy</span>
         <span class="tag">${multi ? '多账号 · 自动切换' : 'CodeBuddy 订阅'}</span>${fold.badge}
-        <span class="grow"></span>
-        ${quotaAccountTotal(groups, {sumItems: true})}
-        <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
-        ${providerLoadBalanceToggle('codebuddy', multi)}
-        ${fold.toggle}${providerRefreshButton('codebuddy')}
+        <span class="pat-head-mid">${quotaAccountTotal(groups, {sumItems: true})}
+          <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
+        </span>
+        <span class="pat-head-actions">${providerLoadBalanceToggle('codebuddy', multi)}${fold.toggle}${providerRefreshButton('codebuddy')}</span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login codebuddy</span>）</div>'}${fold.bodyEnd}
@@ -267,9 +266,9 @@ function renderCodebuddyIntlPanel() {
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head"><span class="name">CodeBuddy 海外版</span>
-        <span class="tag">Global · 额度与签到</span>${fold.badge}<span class="grow"></span>
-        ${quotaAccountTotal(groups, {sumItems: true})}
-        ${fold.toggle}${providerLoadBalanceToggle('codebuddyintl', groups.size > 1)}${providerRefreshButton('codebuddyintl')}
+        <span class="tag">Global · 额度与签到</span>${fold.badge}
+        <span class="pat-head-mid">${quotaAccountTotal(groups, {sumItems: true})}</span>
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('codebuddyintl', groups.size > 1)}${providerRefreshButton('codebuddyintl')}</span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（<span class="mono">buddy login codebuddy --region global</span> 后重启 Buddy）</div>'}${fold.bodyEnd}

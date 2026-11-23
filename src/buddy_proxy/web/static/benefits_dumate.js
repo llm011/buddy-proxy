@@ -101,12 +101,13 @@ function renderDumatePanel() {
       <div class="pat-head">
         <span class="name">百度搭子 (DuMate)</span>
         <span class="tag">本地代理 · 复用 App 登录态</span>${fold.badge}
-        <span class="grow"></span>
-        <span class="muted" style="font-size:11px;display:flex;align-items:center;gap:5px">
-          <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor}"></i>
-          ${esc(stateText)}${esc(ver)}${st && st.bceconsole_authenticated ? ' · 已登录' : ''}
+        <span class="pat-head-mid">
+          <span class="muted" style="font-size:11px;display:flex;align-items:center;gap:5px">
+            <i style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${dotColor}"></i>
+            ${esc(stateText)}${esc(ver)}${st && st.bceconsole_authenticated ? ' · 已登录' : ''}
+          </span>
         </span>
-        ${fold.toggle}${providerLoadBalanceToggle('dumate', _dumate_multi(items))}${providerRefreshButton('dumate')}
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('dumate', _dumate_multi(items))}${providerRefreshButton('dumate')}</span>
       </div>
       ${fold.bodyStart}<div class="pat-quota-grid">
         <div class="pat-pkg">

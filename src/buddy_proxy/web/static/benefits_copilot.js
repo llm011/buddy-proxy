@@ -254,11 +254,12 @@ function renderCopilotPanel() {
       <div class="pat-head">
         <span class="name">Copilot</span>
         <span class="tag">${multi ? '多账号 · 自动切换' : 'GitHub Copilot 订阅 · 自动切换'}</span>${fold.badge}
-        <span class="grow"></span>
-        <span class="muted" style="font-size:11px">${multi ? '429/401 自动冷却换号（按账号顺位）' : '额度耗尽自动切换下一个账号'}</span>
-        ${fold.toggle}${providerLoadBalanceToggle('copilot', multi)}${providerRefreshButton('copilot')}
+        <span class="pat-head-mid">
+          <span class="muted" style="font-size:11px">${multi ? '429/401 自动冷却换号（按账号顺位）' : '额度耗尽自动切换下一个账号'}</span>
+        </span>
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('copilot', multi)}${providerRefreshButton('copilot')}
         <button class="ghost" title="从上游重新拉取模型目录（新模型上线时用）" onclick="copilotRefreshModels(this)">刷新模型</button>
-        <button class="ghost" title="粘贴 GitHub token，或从本机 gh 导入（无需安装 Copilot 客户端）" onclick="openCopilotImport()">导入账号</button>
+        <button class="ghost" title="粘贴 GitHub token，或从本机 gh 导入（无需安装 Copilot 客户端）" onclick="openCopilotImport()">导入账号</button></span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${ordered.length ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}

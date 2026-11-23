@@ -123,12 +123,12 @@ function renderKiroPanel() {
     <div class="pat-head">
       <span class="name">Kiro</span>
       <span class="tag">${esc(multi ? '多账号 · 自动切换' : levelTag)}</span>${fold.badge}
-      <span class="grow"></span>
-      ${quotaAccountTotal(groups, !!(kiro.quota && kiro.quota.sum_items))}
-      <span class="muted" style="font-size:11px">${multi ? '402/429/403 自动切换（按导入顺位）' : `${accts.length} 个账号`}</span>
-      ${fold.toggle}${providerLoadBalanceToggle('kiro', multi)}${providerRefreshButton('kiro')}
+      <span class="pat-head-mid">${quotaAccountTotal(groups, !!(kiro.quota && kiro.quota.sum_items))}
+        <span class="muted" style="font-size:11px">${multi ? '402/429/403 自动切换（按导入顺位）' : `${accts.length} 个账号`}</span>
+      </span>
+      <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('kiro', multi)}${providerRefreshButton('kiro')}
       <button class="ghost" onclick="kiroOpenImport()">导入 auth 文件</button>
-      <button class="ghost" onclick="kiroStartLogin()">浏览器授权</button>
+      <button class="ghost" onclick="kiroStartLogin()">浏览器授权</button></span>
     </div>
     ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${ordered.length ? `<div class="pat-quota-grid">${quotaHtml}</div>`
       : '<div class="empty" style="padding:10px 0">还没有账号</div>'}

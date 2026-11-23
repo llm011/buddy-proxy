@@ -196,10 +196,9 @@ function renderKimiPanel() {
       <div class="pat-head">
         <span class="name">Kimi</span>
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Kimi Code 订阅'}</span>${fold.badge}
-        <span class="grow"></span>
-        ${quotaAccountTotal(groups)}
-        ${fold.toggle}${providerLoadBalanceToggle('kimi', multi)}${providerRefreshButton('kimi')}
-        <button class="ghost" title="粘贴 kimi cli 导出的 token JSON" onclick="openKimiImport()">导入账号</button>
+        <span class="pat-head-mid">${quotaAccountTotal(groups)}</span>
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('kimi', multi)}${providerRefreshButton('kimi')}
+        <button class="ghost" title="粘贴 kimi cli 导出的 token JSON" onclick="openKimiImport()">导入账号</button></span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}
