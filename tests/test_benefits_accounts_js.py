@@ -446,6 +446,53 @@ console.log(JSON.stringify(calls));
     assert len(data) == 4, "未知 pid 不调用任何处理（也不报错中断后续）"
 
 
+def test_every_channel_using_move_buttons_is_dispatchable():
+    """凡是调 ``acctMoveButtons('<pid>', …)`` 的通道，acctMove 必须能路由到它。
+
+    这是 2026-11-23 用户实报的回归：raccoon 卡片上 ▲▼ 点了毫无反应，而 ✕
+    删除正常。原因是删除按钮**直接绑** ``raccoonDeleteAccount``，只有 ▲▼ 走
+    通用分发 ``acctMove``，而分发表里漏了 ``raccoon``——算出的函数名是
+    ``undefinedMoveAccount``，取到 undefined 后 ``if (fn)`` 静默返回，连报错
+    都没有。
+
+    旧测试只断言「已登记的 pid 能路由」，漏登记的通道永远不会红。这里改成
+    从真实静态文件里**扫出所有使用者**再逐个验证：新增通道忘记登记就会红。
+    """
+    import re
+
+    users = set()
+    for js in _STATIC.glob("*.js"):
+        for pid in re.findall(r"acctMoveButtons\(\s*'([^']+)'", js.read_text(encoding="utf-8")):
+            users.add(pid)
+    assert users, "没扫到任何 acctMoveButtons 调用方——扫描正则或文件布局变了"
+
+    # 分发前缀与 pid 不必同名（antigravity→ag），所以前缀表本身就是要锁的契约：
+    # 直接从源码里读 ACCT_MOVE_PREFIX，再用它造桩验证 acctMove 真能调到。
+    src = HELPERS_JS.read_text(encoding="utf-8")
+    m = re.search(r"ACCT_MOVE_PREFIX\s*=\s*\{(.*?)\}", src, re.S)
+    assert m, "benefits_accounts.js 里找不到 ACCT_MOVE_PREFIX（分发前缀表被改名？）"
+    prefix = dict(re.findall(r"(\w+)\s*:\s*'([^']+)'", m.group(1)))
+
+    missing = sorted(users - set(prefix))
+    assert not missing, (
+        f"这些通道用了 acctMoveButtons 但 ACCT_MOVE_PREFIX 里没登记：{missing}；"
+        f"漏登记的通道算出的函数名是 undefinedMoveAccount，▲▼ 会静默失效"
+    )
+
+    lines = ["const calls = [];"]
+    for pid in sorted(users):
+        lines.append(
+            f"globalThis['{prefix[pid]}MoveAccount'] = (...a) => calls.push(['{pid}', ...a]);"
+        )
+    for pid in sorted(users):
+        lines.append(f"acctMove('{pid}', 2, -1, 'acct-{pid}');")
+    lines.append("console.log(JSON.stringify(calls));")
+    out = _run_js("\n".join(lines))
+    calls = json.loads(out.strip().splitlines()[-1])
+    routed = {c[0] for c in calls}
+    assert routed == users, f"分发没覆盖：{sorted(users - routed)}"
+
+
 # --- dumate 面板就绪态重渲（loadDumateStatus 拿 ready 后主动 render） ----------
 
 

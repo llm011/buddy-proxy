@@ -470,14 +470,24 @@ function acctFor(state, idx) {
 // 通道的处理。ag/kimi/qoder 用各自的 agMoveAccount/agDeleteAccount 等（不动它们）；
 // trae 用 traeMoveAccount/traeDeleteAccount；dumate 用下面的 dumateMove/dumateDelete。
 // 新增多账号通道时在这里登记即可。
+//: pid → 处理函数前缀。**新增多账号通道必须在这里登记**，否则 acctMove
+//: 算出的函数名是 `undefinedMoveAccount`，取到 undefined 后静默返回——按钮
+//: 点下去毫无反应，连报错都没有（raccoon 就这么漏了：它的删除按钮是直接
+//: 绑 ``raccoonDeleteAccount`` 的，所以只有 ▲▼ 失效，更难联想到分发）。
+const ACCT_MOVE_PREFIX = {
+  antigravity: 'ag', kimi: 'kimi', codex: 'codex', copilot: 'copilot',
+  qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy', kiro: 'kiro',
+  raccoon: 'raccoon',
+};
+
 function acctMove(pid, idx, delta, id) {
   if (pid === 'dumate') return dumateMove(idx, delta, id);
-  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', codex: 'codex', copilot: 'copilot', qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy', kiro: 'kiro'})[pid] + 'MoveAccount'];
+  const fn = globalThis[ACCT_MOVE_PREFIX[pid] + 'MoveAccount'];
   if (fn) fn(idx, delta, id);
 }
 function acctDelete(pid, id) {
   if (pid === 'dumate') return dumateDelete(id);
-  const fn = globalThis[({antigravity: 'ag', kimi: 'kimi', codex: 'codex', copilot: 'copilot', qoder: 'qoder', trae: 'trae', codebuddy: 'codebuddy', kiro: 'kiro'})[pid] + 'DeleteAccount'];
+  const fn = globalThis[ACCT_MOVE_PREFIX[pid] + 'DeleteAccount'];
   if (fn) fn(id);
 }
 
