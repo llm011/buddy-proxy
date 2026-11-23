@@ -419,6 +419,34 @@ def _is_account_error(e: HTTPException) -> bool:
 _MODEL_SCOPED_429_CODES = frozenset({6004})
 
 
+#: 「这个账号的套餐不允许用这个模型」的上游错误码。
+#:
+#: 2026-11-24 实测：``glm-5.4`` 上线后，7 个 CN 账号里 6 个回
+#:
+#:     400 {"code":11158,"msg":"model [glm-5.4] is not allowed for user type
+#:          [personal_free_user]"}
+#:
+#: 只有付费账号返回 200。这是**账号 × 模型**的授权分层，不是请求写错了：
+#: 同一个请求换个账号就能过，所以必须换号，否则一个能用的账号排在后面也永远
+#: 轮不到它——用户看到的是「模型明明在目录里却一直 400」。
+#:
+#: 为什么**不**冷却账号：这个码只否定「该账号 + 该模型」这一格，账号本身
+#: 完全健康（同账号的 glm-5.3 / deepseek 照常 200）。按账号冷却会重演 6004
+#: 那次事故（6 个号全冷 5 分钟，连别的模型都用不了）。所以走
+#: :func:`failover.mark_model_cooldown` 的复合键，只跳过这一格。
+#:
+#: 与 11128 的区别：11128 是「这条通道不接受这个客户端」（换号无用、整通道
+#: 该歇），11158 是「这个账号没有这个模型的权限」（换号正是解法）。
+_MODEL_NOT_ALLOWED_CODES = frozenset({11158})
+
+
+def _is_model_not_allowed(e: HTTPException) -> bool:
+    """这个 400 是不是「该账号的套餐不允许该模型」（换号可能好转）。"""
+    if e.status_code != 400:
+        return False
+    return _upstream_error_code(str(e.detail)) in _MODEL_NOT_ALLOWED_CODES
+
+
 def _is_model_scoped_429(e: HTTPException) -> bool:
     """这个 429 是不是「只有该模型被限流」（能换号、但不该冷却账号）。"""
     if e.status_code != 429:
@@ -1406,10 +1434,41 @@ class CodeBuddyProvider(BaseProvider):
             model=str(upstream_body.get("model") or "") or None)
         if not accounts:
             hint = "" if self._region == "cn" else "（海外版）"
+            model = str(upstream_body.get("model") or "")
+            # 空候选有两种成因，**两种都要报出来**——只报一种会让用户照着错的
+            # 方向干等：
+            #
+            #   a) 账号级冷却（额度耗尽 / 凭据失效）：等一会儿或充值就好，
+            #      ``cooldown_report()`` 有内容；
+            #   b) 该模型在这个账号上没有权限（400/11158）：打的是
+            #      ``(账号, 模型)`` 复合键，``cooldown_report()`` **查不到**
+            #      （它只查账号级键），所以这一条必须单独查、单独说。
+            #
+            # 为什么两种要同时报：混合场景下（付费号额度耗尽 + 免费号无权限）
+            # 两边都非空，只报冷却会让用户以为「充钱/等待」能解决，可权限那部分
+            # 永远好不了。2026-11-24 glm-5.4 上线后这是常态：免费号第一次请求
+            # 就被打成复合冷却，付费号又常常额度见底。
+            account_report = failover.cooldown_report()
+            denied = ([a.id for a in failover.list_accounts()
+                       if failover.model_cooldown_left(a.id, model)[0] > 0]
+                      if model else [])
+            if denied:
+                parts = [f"{len(denied)} 个账号被上游判为「套餐不支持该模型」"
+                         "（code 11158，需付费账号）"]
+                if account_report:
+                    parts.append(f"另有账号在冷却：{account_report}")
+                raise HTTPException(
+                    status_code=429,
+                    detail={"error": {
+                        "message": (f"codebuddy{hint} 没有账号能调用模型 {model}："
+                                    + "；".join(parts)
+                                    + "。权限问题等待不会恢复——请换模型，"
+                                      "或给该通道加一个付费账号。"),
+                        "type": "model_not_allowed"}})
             raise HTTPException(
                 status_code=429,
                 detail={"error": {
-                    "message": (f"codebuddy{hint} 所有账号均在冷却中：{failover.cooldown_report()}"
+                    "message": (f"codebuddy{hint} 所有账号均在冷却中：{account_report}"
                                 "；额度冷却到点自动恢复"),
                     "type": "rate_limit_error"}})
         last_exc: BaseException | None = None
@@ -1437,6 +1496,15 @@ class CodeBuddyProvider(BaseProvider):
                             failover.mark_cooldown(
                                 acct.id, quota=e.status_code == 429,
                                 reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
+                        continue
+                    # 400 + 11158「该账号套餐不支持该模型」：不是账号坏了，是这一格
+                    # 没授权。换号（别的号可能是付费账号）并只冷却 (账号, 模型)，
+                    # 否则一个能用的付费号排在后面永远轮不到，用户看到的就是
+                    # 「模型在目录里却一直 400」。
+                    if _is_model_not_allowed(e) and i < len(accounts) - 1:
+                        failover.mark_model_cooldown(
+                            acct.id, str(upstream_body.get("model") or ""),
+                            reason=f"HTTP 400 账号套餐不支持该模型: {str(e.detail)[:100]}")
                         continue
                     raise
         except HTTPException as e:

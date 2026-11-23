@@ -99,6 +99,19 @@
       "desc": "Hy4 免费档（2026-11-04 实测 upstream usage.credit=0）。上游名必须写 hy4free（无横杠），回包 model 字段才是 hy4-free；请求写 hy4-free 会 11102"
     },
     {
+      "id": "glm-5.4",
+      "name": "GLM-5.4",
+      "vendor": "zhipu",
+      "max_input": 1000000,
+      "max_output": 48000,
+      "tool_call": true,
+      "images": true,
+      "reasoning": true,
+      "credits": "x0.69 credits",
+      "desc": "GLM-5.4 旗舰（2026-11-24 CodeBuddy 实测：1M 上下文、读图、工具调用、reasoning_effort 全通；0.69x 取自用户「模型倍率」面板）。**按账号分层**：多数 personal_free_user 账号回 11158，只有付费账号能调",
+      "tags": ["badge:订阅优先:#F59E0B"]
+    },
+    {
       "id": "glm-5.3",
       "credit_rate": 1.0,
       "quota_pack": "CN 共享余额",
