@@ -45,11 +45,11 @@ function renderTraepatPanel() {
       <div class="pat-head">
         <span class="name">Trae PAT</span>
         <span class="tag">多账号 · 自愈</span>${fold.badge}
-        <span class="grow"></span>
-        ${quotaAccountTotal(groups)}
-        <span class="pat-keeper" id="pat-keeper"></span>
-        ${fold.toggle}${providerRefreshButton('traepat')}
-        <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button>
+        <span class="pat-head-mid">${quotaAccountTotal(groups)}
+          <span class="pat-keeper" id="pat-keeper"></span>
+        </span>
+        <span class="pat-head-actions">${fold.toggle}${providerRefreshButton('traepat')}
+        <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button></span>
       </div>
       ${fold.bodyStart}<div class="pat-quota-grid">${quotaHtml}</div>
       <div id="traepat-account-error"></div>

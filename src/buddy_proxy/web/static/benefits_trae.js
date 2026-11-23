@@ -215,10 +215,10 @@ function renderTraePanel() {
       <div class="pat-head">
         <span class="name">Trae</span>
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Trae Work'}</span>${fold.badge}
-        <span class="grow"></span>
-        ${quotaAccountTotal(groups)}
-        <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
-        ${fold.toggle}${providerLoadBalanceToggle('trae', multi)}${providerRefreshButton('trae')}
+        <span class="pat-head-mid">${quotaAccountTotal(groups)}
+          <span class="muted" style="font-size:11px">${multi ? '401/额度尽自动冷却换号（按登录顺位）' : '401/额度尽自动切换下一个账号'}</span>
+        </span>
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('trae', multi)}${providerRefreshButton('trae')}</span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login trae</span>）</div>'}${fold.bodyEnd}
@@ -331,10 +331,11 @@ function renderTraeIntlPanel() {
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head"><span class="name">Trae 海外版</span>
-        <span class="tag">Global · 海外额度</span>${fold.badge}<span class="grow"></span>
-        ${quotaAccountTotal(groups)}
-        <span class="muted" style="font-size:11px">海外版无每日签到</span>
-        ${fold.toggle}${providerLoadBalanceToggle('traeintl', groups.size > 1)}${providerRefreshButton('traeintl')}
+        <span class="tag">Global · 海外额度</span>${fold.badge}
+        <span class="pat-head-mid">${quotaAccountTotal(groups)}
+          <span class="muted" style="font-size:11px">海外版无每日签到</span>
+        </span>
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('traeintl', groups.size > 1)}${providerRefreshButton('traeintl')}</span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无海外账号额度数据（<span class="mono">buddy login traeintl</span> 后重启 Buddy）</div>'}${fold.bodyEnd}

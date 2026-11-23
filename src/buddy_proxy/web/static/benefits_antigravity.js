@@ -174,8 +174,9 @@ function renderAntigravityPanel() {
         <div class="pat-head">
           <span class="name">Antigravity</span>
           <span class="tag">多账号 · 自动切换</span>
-          <span class="grow"></span>
-          <span class="muted" style="font-size:12px">⟳ 额度加载中…</span>
+          <span class="pat-head-mid">
+            <span class="muted" style="font-size:12px">⟳ 额度加载中…</span>
+          </span>
         </div>
       </div>`;
     return;
@@ -248,9 +249,8 @@ function renderAntigravityPanel() {
       <div class="pat-head">
         <span class="name">Antigravity</span>
         <span class="tag" title="429/403 自动冷却换号（按登录顺位）">多账号 · 自动切换</span>${fold.badge}
-        <span class="grow"></span>
-        ${quotaAccountTotal(groups)}
-        ${fold.toggle}${providerLoadBalanceToggle('antigravity', n > 1)}${providerRefreshButton('antigravity')}
+        <span class="pat-head-mid">${quotaAccountTotal(groups)}</span>
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('antigravity', n > 1)}${providerRefreshButton('antigravity')}</span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}<div class="pat-quota-grid">${quotaHtml}</div>${fold.bodyEnd}
     </div>`;

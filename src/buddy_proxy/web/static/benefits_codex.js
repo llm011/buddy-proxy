@@ -279,9 +279,9 @@ function renderCodexPanel() {
       <div class="pat-head">
         <span class="name">Codex</span>
         <span class="tag" title="${multi ? '429/403 自动冷却换号（按账号顺位）' : '额度耗尽自动切换下一个账号'}">${multi ? '多账号 · 自动切换' : 'ChatGPT 订阅 · 自动切换'}</span>${fold.badge}
-        <span class="grow"></span>
-        ${fold.toggle}${providerLoadBalanceToggle('codex', multi)}${providerRefreshButton('codex')}
-        <button class="ghost" title="粘贴 ~/.codex/auth.json 或同构 JSON（无需安装 Codex CLI）" onclick="openCodexImport()">导入账号</button>
+        <span class="pat-head-mid"></span>
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('codex', multi)}${providerRefreshButton('codex')}
+        <button class="ghost" title="粘贴 ~/.codex/auth.json 或同构 JSON（无需安装 Codex CLI）" onclick="openCodexImport()">导入账号</button></span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${allGrps.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}

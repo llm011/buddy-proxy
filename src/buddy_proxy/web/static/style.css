@@ -581,10 +581,33 @@
   .qmore[hidden] { display: none; }
   .qbar > div { height: 100%; border-radius: 4px; }
   /* TRAE PAT 面板：账号额度卡两栏；token 状态并入各自标题；模型负载另起两栏。 */
-  .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; white-space: nowrap; margin-bottom: 10px; }
-  .pat-head::-webkit-scrollbar { display: none; }
-  .pat-head > * { flex-shrink: 0; }
-  .pat-head .name { font-weight: 600; }
+  /* 面板标题行：**整行不横向滚动**，中间的长信息自己滚。
+     旧的写法是整行 ``overflow-x: auto`` + 所有子元素 ``flex-shrink: 0``：一旦
+     中间那段合计 chip / 状态文案变长（多账号合计、kiro 的「402/429/403 自动
+     切换」、dumate 的登录态串），整行就变成一条横向滚动带，**最右侧的 ↻ / 负载
+     均衡开关 / 导入按钮被推出可视区**——用户 2026-11-24 实报「按钮有可能就看不到」。
+     现在拆成三段：
+       .pat-head          纯布局容器，不滚（overflow: visible）
+       .pat-head-mid      中间那段（合计 chip + 状态文案），flex:1 + min-width:0，
+                          超出就**自己**横向滚（滚轮/拖动都只动它）
+       .pat-head-actions  右侧按钮组，flex-shrink:0，永远贴右可见
+     按钮不是「被挤出后能滚到」，而是根本不会离开视野——这才是用户要的。 */
+  .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
+              white-space: nowrap; margin-bottom: 10px; }
+  .pat-head .name { font-weight: 600; flex-shrink: 0; }
+  /* 标签/徽标/折叠按钮这类短元素不参与压缩，否则会被挤成竖排。 */
+  .pat-head > .tag, .pat-head > .ghost, .pat-head > .qmore,
+  .pat-head > .lb-toggle { flex-shrink: 0; }
+  /* 中间段：唯一可收缩的容器。子元素（合计 chip、状态文案）可能很长，
+     让它们在这一段内部横向滚动，而不是撑开整行。 */
+  .pat-head .pat-head-mid { flex: 1 1 auto; min-width: 0; display: flex;
+                            align-items: center; gap: 8px; overflow-x: auto;
+                            scrollbar-width: thin; }
+  .pat-head .pat-head-mid > * { flex-shrink: 0; }
+  /* 右侧按钮组：不收缩、不换行，永远可见。 */
+  .pat-head .pat-head-actions { flex: 0 0 auto; display: flex; align-items: center;
+                                gap: 6px; }
+  .pat-head .pat-head-actions > * { flex-shrink: 0; }
   .pat-head .grow { flex: 1 1 auto; min-width: 0; }
   /* 负载均衡开关（通道标题行）：带边框的小胶囊，与 .tag 同尺寸，勾选后高亮。
      用 accent-color 而不是自绘开关——原生 checkbox 在暗色主题下也跟随系统

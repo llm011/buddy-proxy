@@ -296,12 +296,12 @@ function renderRaccoonPanel() {
       <div class="pat-head">
         <span class="name">商汤小浣熊</span>
         <span class="tag">${multi ? '多账号 · 自动切换' : 'SenseTime Raccoon'}</span>${fold.badge}
-        <span class="grow"></span>
-        ${quotaAccountTotal(groups)}
-        <span class="muted" style="font-size:11px">积分制：按模型倍率扣分，倍率 0 = 限免</span>
-        ${fold.toggle}${providerLoadBalanceToggle('raccoon', multi)}${providerRefreshButton('raccoon')}
+        <span class="pat-head-mid">${quotaAccountTotal(groups)}
+          <span class="muted" style="font-size:11px">积分制：按模型倍率扣分，倍率 0 = 限免</span>
+        </span>
+        <span class="pat-head-actions">${fold.toggle}${providerLoadBalanceToggle('raccoon', multi)}${providerRefreshButton('raccoon')}
         <button class="ghost" title="导入账号：手机号+密码（可自动续期）/ 粘 token / 桌面端复用"
-          onclick="openRaccoonImport()">导入账号</button>
+          onclick="openRaccoonImport()">导入账号</button></span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
         : '<div class="empty" style="padding:12px 0">暂无账号额度数据</div>'}${fold.bodyEnd}
