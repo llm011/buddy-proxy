@@ -325,8 +325,10 @@ async def ui_benefits(request: Request, fast: int = 0):
 
     通道间并发查询；缓存过期时先回旧值、后台刷新（stale-while-revalidate），
     管理页打开即渲染，不再等整串上游（首开冷缓存除外）。
-    ``fast=1`` 时，慢通道（``SLOW_PROVIDERS``）若无缓存不阻塞，先返回
-    ``loading: true`` 并后台预热，由前端拆分子请求单独拉取。
+    ``fast=1`` 时**绝不触网**：任何需要打上游的通道都先返回 ``loading: true``
+    并后台预热，由前端拆分子请求单独拉取。缓存里的旧值（含失败结果、已翻转
+    快照）照旧下发，所以首屏总能立刻渲染。没有这个保证时，单个卡住的通道会
+    让整页等满 ``QUERY_TIMEOUT_S``，几家叠加就是「额度页卡死」。
     """
     _ensure_local(request)
     state = get_state()
