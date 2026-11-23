@@ -583,18 +583,6 @@
       "rate_limit": {"requests": 6, "window_s": 75}
     },
     {
-      "id": "gemini-3.1-pro",
-      "name": "Gemini-3.1-Pro",
-      "vendor": "trae",
-      "provider": "traepat",
-      "gateway": "plus",
-      "upstream_model": "gemini-3.1-pro",
-      "config_name": "gemini-3.1-pro",
-      "max_input": 200000,
-      "reasoning": true,
-      "tool_call": true
-    },
-    {
       "id": "gemini-3-flash",
       "name": "Gemini-3-Flash",
       "vendor": "trae",
@@ -602,66 +590,6 @@
       "gateway": "plus",
       "upstream_model": "gemini-3-flash",
       "config_name": "gemini-3-flash",
-      "max_input": 200000,
-      "reasoning": true,
-      "tool_call": true
-    },
-    {
-      "id": "openrouter-4o-max",
-      "name": "OpenRouter-4o Max",
-      "vendor": "trae",
-      "provider": "traepat",
-      "gateway": "plus",
-      "upstream_model": "openrouter-4o__max",
-      "config_name": "openrouter-4o",
-      "max_input": 1000000,
-      "reasoning": true,
-      "tool_call": true
-    },
-    {
-      "id": "openrouter-3o-max",
-      "name": "OpenRouter-3o Max",
-      "vendor": "trae",
-      "provider": "traepat",
-      "gateway": "plus",
-      "upstream_model": "openrouter-3o__max",
-      "config_name": "openrouter-3o",
-      "max_input": 1000000,
-      "reasoning": true,
-      "tool_call": true
-    },
-    {
-      "id": "openrouter-2o-max",
-      "name": "OpenRouter-2o Max",
-      "vendor": "trae",
-      "provider": "traepat",
-      "gateway": "plus",
-      "upstream_model": "openrouter-2o__max",
-      "config_name": "openrouter-2o",
-      "max_input": 1000000,
-      "reasoning": true,
-      "tool_call": true
-    },
-    {
-      "id": "openrouter-1o",
-      "name": "OpenRouter-1o",
-      "vendor": "trae",
-      "provider": "traepat",
-      "gateway": "plus",
-      "upstream_model": "openrouter-1o",
-      "config_name": "openrouter-1o",
-      "max_input": 200000,
-      "reasoning": true,
-      "tool_call": true
-    },
-    {
-      "id": "openrouter-1",
-      "name": "OpenRouter-1",
-      "vendor": "trae",
-      "provider": "traepat",
-      "gateway": "plus",
-      "upstream_model": "openrouter-1",
-      "config_name": "openrouter-1",
       "max_input": 200000,
       "reasoning": true,
       "tool_call": true
