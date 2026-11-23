@@ -25,6 +25,27 @@ git checkout main && git pull --ff-only
 
 commit body 写**中文**，说清「为什么改」和「踩过什么坑」，不是复述 diff。
 
+### 合码要走 `dev-pr` 技能
+
+用户说「/dev-pr」「走一下 review 合码流程」「review 完合并」「照流程合了」，
+或问「这点小改动要不要开 PR」时，**加载 `dev-pr` 技能并照它执行**，不要自己
+临场发挥。技能装在 `~/.agents/skills/dev-pr/`（`~/.claude/skills/dev-pr` 是
+指向它的软链接，Claude 与 DSH 共用同一份）。
+
+它比本文件更细的地方，**以技能为准**：
+
+- 阶段 -1 的小改动直推阈值（≤2 文件且 diff ≤50 行）；
+- 阶段 3 **认真 review**：每条发现都要回源码核实、能构造失败场景，只留 1–3 条；
+- 阶段 4 把发现发成 **inline PR 评论**（`ethanlyn011` 身份），不许只写在对话里；
+- 阶段 6 切回 `jsongo` 身份回复并 **resolve 线程**；
+- 阶段 7 `gh pr merge --squash` **不要加 `--delete-branch`**（主仓库占着 main 时
+  会 `fatal: 'main' is already checked out`，合并成功但命令报错，容易误判）；
+- `git branch -d` 在 squash 后必然失败，用 `-D`，这是预期不是异常。
+
+**踩过的坑**：这个仓库里 `dev-pr` 曾经只在 `~/.claude/skills/`，DSH 读不到，
+于是「合码」被简化成「提 PR + 等 CI + squash merge」——**跳过了阶段 3/4 的
+review**。如果手上只有「改完了要不要合」的念头，先回来确认这个技能在不在。
+
 ---
 
 ## 改动范围：超过 1 个文件就开 worktree
