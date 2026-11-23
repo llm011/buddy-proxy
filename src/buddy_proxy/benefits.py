@@ -68,9 +68,6 @@ LOAD_BALANCE_WARM_DELAY_S = 60
 # 网络风暴」的病态挂起不该把整个管理页拖住（实测 mimo 单键挂过 930s）。
 # 超时按失败处理走 FAILURE_TTL_S 短缓存，30s 后下一轮自然重试。
 QUERY_TIMEOUT_S = 12.0
-# 慢通道集合：首屏 fast_only=True 时若无缓存不阻塞整页，先标记 loading=True
-# 并后台预热，由前端拆分子请求单独拉取；未来按需增删此处即可。
-SLOW_PROVIDERS: frozenset[str] = frozenset({"antigravity"})
 DEFAULT_CHECKIN_TIME = "09:30"
 # 「翻转点已过 → 提前作废快照」只在这个宽限窗口内生效。正常轮换最多让缓存
 # 早退这么多；超出说明上游给的 next_ts 已经不可信，退回按 TTL 过期。
@@ -701,11 +698,14 @@ class BenefitsManager:
         }
         if supports_checkin:
             ckey = f"checkin:{pid}"
-            if fast_only and ckey not in self._cache:
-                self._kick_refresh(ckey, p.checkin_status)
+            # 与 quota 同一条规矩：fast_only 只读缓存、绝不 await 上游（见
+            # _peek_or_kick）。签到状态同样是「失败结果/已翻转」会触发同步重查，
+            # 只判键存在挡不住，首屏照样会被拖满 QUERY_TIMEOUT_S。
+            status = self._peek_or_kick(ckey, p.checkin_status) if fast_only \
+                else await self._cached(ckey, p.checkin_status)
+            if fast_only and status is None:
                 entry["loading"] = True
             else:
-                status = await self._cached(ckey, p.checkin_status)
                 done_today = not claimable_now(status) and (
                     today in done.get(pid, set())
                     or bool(status and status.get("checked_in"))
@@ -735,9 +735,17 @@ class BenefitsManager:
         # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
         # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
         qkey = self._quota_key(pid, p)
-        if fast_only and qkey not in self._cache:
-            self._kick_refresh(qkey, p.quota)
-            entry["loading"] = True
+        if fast_only:
+            # 首屏**绝不触网**：只读缓存，没有就标 loading 让前端拆子请求。
+            # 旧写法只判「键不存在」，缓存里躺着失败结果/已翻转快照时仍会走
+            # _cached 的同步重查分支——每个这样的通道各等满 QUERY_TIMEOUT_S
+            # （12s），几家凑起来就是用户看到的「额度页卡死」。
+            quota = self._peek_or_kick(qkey, p.quota)
+            if quota is None:
+                entry["loading"] = True
+                return entry
+            entry["quota"] = {"supported": True, **quota}
+            _feed_load_balance(pid, p, quota)
             return entry
         quota = await self._cached(qkey, p.quota)
         if quota is not None:
@@ -773,6 +781,31 @@ class BenefitsManager:
         """
         epoch_fn = getattr(provider, "quota_epoch", None)
         return f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
+
+    def _peek_or_kick(self, key: str, fn: Callable, *args) -> Any | None:
+        """``fast_only`` 专用的**绝不阻塞**读缓存：有值就回值，否则只排后台任务。
+
+        与 :meth:`_cached` 的区别是它**不 await 任何上游**。``_cached`` 在三种
+        情况下会同步打上游：冷缓存、缓存是失败结果、快照已翻转。首屏路径不能
+        接受任何一种——单个通道等满 ``QUERY_TIMEOUT_S``（12s），几家叠加就是
+        「额度页卡死」（2026-11-24 用户报障：traepat 换 token 端点不可达时，
+        每个账号白等 80s，整页永远出不来）。
+
+        过期/失败/已翻转的旧值**照旧回给前端**：这些通道本就会显示「查询失败」
+        或倒计时，比空白卡片有信息量；后台任务刷完下一轮自然换新值。真正的
+        冷缓存（无值可回）才返回 None，由调用方标 ``loading`` 让前端拆子请求。
+        """
+        cached = self._cache.get(key)
+        if cached is None:
+            self._kick_refresh(key, fn, *args)
+            return None
+        data = cached[1]
+        # 需要刷新就排后台（_kick_refresh 自带同键去重），但无论刷不刷都先回旧值
+        if _is_failure(data) or _state_flipped(data, time.time()) \
+                or time.time() - cached[0] >= (
+                    FAILURE_TTL_S if _is_failure(data) else SNAPSHOT_TTL_S):
+            self._kick_refresh(key, fn, *args)
+        return data
 
     async def _cached(self, key: str, fn: Callable, *args):
         """TTL 缓存的 to_thread 调用；上游抛错时返回错误结构而不是 500。
