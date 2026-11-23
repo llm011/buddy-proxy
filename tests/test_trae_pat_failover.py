@@ -21,6 +21,7 @@ import pytest
 from fastapi import HTTPException
 
 from buddy_proxy.trae import pat
+from buddy_proxy.trae.pat import net as _PAT_NET
 from buddy_proxy.trae import provider as provider_module
 from buddy_proxy.trae.pat_provider import TraePatProvider
 from buddy_proxy.trae.sse import _SSEDecoder
@@ -1723,7 +1724,7 @@ def test_quota_skips_requests_when_gateway_unreachable(monkeypatch):
         calls.append("urlopen")
         raise AssertionError("网关不可达时不应发起请求")
 
-    monkeypatch.setattr(pat.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(_PAT_NET, "open_direct", boom)
 
     t0 = time.monotonic()
     items = pat.fetch_pat_ent_usage()
@@ -1747,7 +1748,7 @@ def test_quota_reports_failure_count_when_gateway_ok(monkeypatch):
     def boom(*a, **k):
         raise urllib.error.URLError("offline")
 
-    monkeypatch.setattr(pat.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(_PAT_NET, "open_direct", boom)
     items = pat.fetch_pat_ent_usage()
     assert items[0]["query_failed"] is True
     assert items[0]["unreachable"] is False
@@ -1789,7 +1790,7 @@ def test_quota_probe_result_is_cached_between_calls(monkeypatch):
 
     monkeypatch.setattr(pat, "_gateway_reachable", probe)
     _install_credentials(monkeypatch)
-    monkeypatch.setattr(pat.urllib.request, "urlopen", lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("x")))
+    monkeypatch.setattr(_PAT_NET, "open_direct", lambda *a, **k: (_ for _ in ()).throw(urllib.error.URLError("x")))
 
     pat.fetch_pat_ent_usage()
     pat.fetch_pat_ent_usage()
@@ -1827,7 +1828,7 @@ def test_quota_accounts_queried_concurrently(monkeypatch):
             time.sleep(0.4)
             return payload
 
-    monkeypatch.setattr(pat.urllib.request, "urlopen", lambda *a, **k: Resp())
+    monkeypatch.setattr(_PAT_NET, "open_direct", lambda *a, **k: Resp())
 
     t0 = time.monotonic()
     items = pat.fetch_pat_ent_usage()

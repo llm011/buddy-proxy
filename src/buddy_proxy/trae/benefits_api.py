@@ -21,6 +21,7 @@ from typing import Any
 
 from .config import resolve_trae_region
 from .credentials import _auth
+from .pat import net
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +196,7 @@ def _post_ug(path: str, token: str = "", account_id: str = "",
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with net.open_direct(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Trae UG {path} [{e.code}]: {e.read().decode()[:300]}")
@@ -287,7 +288,7 @@ def fetch_ent_usage(token: str = "", account_id: str = "",
         data=b"{}", headers=headers, method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with net.open_direct(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Trae usage [{e.code}]: {e.read().decode()[:300]}")
