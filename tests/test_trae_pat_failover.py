@@ -2051,9 +2051,9 @@ def test_provider_exposes_quota_pack_per_model(monkeypatch):
 
     assert listed["gpt-6.1-sol"]["quota_pack"] == "日包（GPT-6.1）"
     assert listed["gpt-5.6-sol"]["quota_pack"] == "日包（GPT-5.6 Sol）"
-    # 公共模型吃 CN 共享余额
-    assert listed["glm-5.3"]["quota_pack"] == "CN 共享余额"
-    assert listed["deepseek-v4.1-flash"]["quota_pack"] == "CN 共享余额"
+    # 公共模型扣的是同一个 Trae 账号的 work 余额（实测 PAT 请求也吃这份）
+    assert listed["glm-5.3"]["quota_pack"] == "Trae 账号余额"
+    assert listed["deepseek-v4.1-flash"]["quota_pack"] == "Trae 账号余额"
     # 同在 plus 网关、account_type 报 ptu，但实测两个计数器都不动
     assert listed["gpt-5.4"]["quota_pack"] == "免费（不扣余额）"
 
