@@ -156,13 +156,37 @@ def _ensure_leading_system(messages: Any) -> Any:
 #: 匹配**区分大小写**，按原样逐字比对。只有这两条是实测确认会拒的形态；
 #: 未测过的变体（如全大写 ``DEEPSEEK HARNESS``）不猜着往里加，避免误改用户
 #: prompt，见 ``test_codebuddy_system_signature.py`` 里 ``test_near_misses_untouched``。
+#:
+#: ⚠ Claude 那条**刻意不带句末标点**。Claude Code 2.1.278 的二进制里有两种
+#: 首段 persona，只差结尾一个字符：
+#:
+#:   ``You are Claude Code, Anthropic's official CLI for Claude.``
+#:   ``You are Claude Code, Anthropic's official CLI for Claude, running
+#:   within the Claude Agent SDK.``
+#:
+#: 2026-11-23 对真实上游逐条实测（cn 账号 / deepseek-v4.1-flash / 流式）：
+#: 带句号的那条签名 ``startswith`` 匹配不到逗号变体，后者照样
+#: ``400 {"code":11128}``——正是「只覆盖了当时实测到的那一种形态」的第三次。
+#: 去掉句号后两条都能前缀命中；掩码时把紧跟的一个标点一并吃掉（见
+#: ``_SYSTEM_PROMPT_MASK_TAIL_PUNCT``），所以标准形态仍精确等于掩码。
+#:
+#: 同一批实测还确认：``You are a Claude agent, built on Anthropic's Claude
+#: Agent SDK.``（Agent SDK 的**独立** persona）上游返回 **200**，不该加进来
+#: ——按本文件「未实测确认的不加」的约定，加了只会平白篡改用户 prompt。
 _SYSTEM_PROMPT_SIGNATURES = (
     "You are an AI agent powered by DeepSeek Harness.",
-    "You are Claude Code, Anthropic's official CLI for Claude.",
+    "You are Claude Code, Anthropic's official CLI for Claude",
 )
 
 #: 命中处的替换文本。不带任何 Agent 品牌字样，也不会被第二个签名匹配到。
 _SYSTEM_PROMPT_MASK = "[redacted: client identity]"
+
+#: 签名被掩码后，紧跟其后的一个句末标点一并吃掉。
+#:
+#: 因为 Claude 那条签名不带句号（见 ``_SYSTEM_PROMPT_SIGNATURES``），
+#: ``...for Claude.`` 会剩一个孤零零的句号（``[redacted: client identity].``）。
+#: 掩码不该带着原客户端的标点尾巴；吃掉后标准形态精确等于 ``_SYSTEM_PROMPT_MASK``。
+_SYSTEM_PROMPT_MASK_TAIL_PUNCT = ".,;:。，"
 
 #: 首段锚点：只有前导**空格**不算数，其余任何字符（含换行、制表符）都会让签名
 #: 失效。见下方实测矩阵（2026-11-02，逐条对照 CN 账号）：
@@ -204,7 +228,13 @@ def _neutralize_system_signature(content: str) -> str:
         if head.startswith(sig):
             log.info("codebuddy 上游渠道校验会拦这个 system prompt 签名，已中性化：%r",
                      sig[:40])
-            return content[:stripped_at] + _SYSTEM_PROMPT_MASK + head[len(sig):]
+            rest = head[len(sig):]
+            # Claude 那条签名不带句号（见 ``_SYSTEM_PROMPT_SIGNATURES``），标准
+            # 形态 ``...for Claude.`` 会剩一个孤零零的句号。掩码不该继承原客户端
+            # 的标点尾巴，所以紧跟的一个句末标点一并吃掉。
+            if rest[:1] in _SYSTEM_PROMPT_MASK_TAIL_PUNCT:
+                rest = rest[1:]
+            return content[:stripped_at] + _SYSTEM_PROMPT_MASK + rest
     return content
 
 
