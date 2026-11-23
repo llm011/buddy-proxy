@@ -13,6 +13,7 @@ import os
 import stat
 import threading
 import time
+import types
 import urllib.error
 from typing import Any
 
@@ -2092,3 +2093,32 @@ def test_credit_rate_table_is_complete_and_calibrated(monkeypatch):
     # 免费 / 扣日包的模型不该同时出现「>0 的倍数」
     assert all(v == 0 for m, v in rates.items()
                if PAT_MODEL_QUOTA_PACKS.get(m, "").startswith("免费"))
+
+
+def test_dead_weekly_pool_is_skipped_but_other_weekly_is_not(monkeypatch):
+    """死池按**显式名单**跳过，不按 ``weekly`` 子串。
+
+    2026-11-23 实测 ``free_weekly_*``（300 点）从未被任何模型消耗——它对应
+    openrouter 那条已撤线的上游，所以在额度页不显示。
+
+    但过滤条件必须窄到「这个具体池」，否则上游将来新加一个 weekly 池
+    （换个 model_key 就是新池）会被静默吃掉，用户看不到、我们也不会知道。
+    这条正是钉住那个边界：``free_weekly_`` 跳过，别的 weekly 照常显示。
+    """
+    profile = types.SimpleNamespace(index=0)
+    data = {
+        "user_entitlement_pack_list": [
+            {"entitlement_base_info": {"entitlement_id": "free_weekly_x",
+                                       "quota": {"basic_usage_limit": 300}},
+             "usage": {"basic_usage_amount": 0}},
+            # 同是 weekly，但不在死池名单里 —— 必须显示出来
+            {"entitlement_base_info": {"entitlement_id": "vip_weekly_x",
+                                       "quota": {"basic_usage_limit": 500}},
+             "usage": {"basic_usage_amount": 12}},
+        ]
+    }
+    items = pat._quota_items(data, profile, True)
+    labels = [it["label"] for it in items]
+    assert len(items) == 1, labels
+    assert "周包" in labels[0]
+    assert "300" not in str(items[0].get("total"))

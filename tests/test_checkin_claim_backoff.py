@@ -69,16 +69,17 @@ def test_backoff_grows_with_consecutive_failures():
     """
     mgr = _manager()
     delays = []
-    # 只测到 give-up 阈值之前：第 CLAIM_GIVE_UP_STREAK 次会切到「明天再说」，
-    # 那一刻退避是「到明天 00:05」，和指数翻倍不在一个量纲上——晚上跑测试时
-    # 它只有几百秒，比 3600 小，断言递减就红了（2026-11-23 23:58 实测：
-    # [1800, 3600, 359]，夜里才红，白天跑一直是绿的）。
-    for n in range(1, B.CLAIM_GIVE_UP_STREAK):
+    # 跨过 give-up 阈值也要单调：第 CLAIM_GIVE_UP_STREAK 次切到「明天再说」，
+    # 实现里取 max(指数退避, 到明天)，所以深夜（到明天只有几百秒）也不会比
+    # 上一档更短。这条断言曾经在夜里必红——2026-11-23 23:58 实测
+    # [1800, 3600, 359]，白天跑却一直是绿的。
+    for n in range(1, B.CLAIM_GIVE_UP_STREAK + 2):
         before = time.time()
         mgr._track_claim_failure("doubao", {"ok": False, "message": f"fail {n}"})
         delays.append(mgr._claim_next_try["doubao"] - before)
 
     assert delays[1] > delays[0], f"第 2 次退避应大于第 1 次：{delays}"
+    assert delays[2] > delays[1], f"第 3 次（跨 give-up 阈值）仍需递增：{delays}"
 
 
 def test_backoff_is_capped():
