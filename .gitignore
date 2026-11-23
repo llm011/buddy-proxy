@@ -63,6 +63,11 @@ build/
 # 会把同样的实验再跑一遍，而这份记录存在的唯一理由就是防止那个。
 # 文中不含任何凭据明文（抓包存档走 tools/capture_doubao_checkin.py 统一脱敏）。
 !docs/doubao-checkin-investigation.md
+# PAT 额度归属与费率实测：README 的 PAT 段落直接链过去。三档归属（日包 /
+# Trae 账号余额 / 免费）、费率倍数表、以及"重测时怎么避开代理和量化误差"
+# 全在里面——上游一调价就得凭它重跑，不入库等于逼下一个人重新发明一遍。
+# 文中只出现模型名、倍数和包的容量，不含 token / uid / 账号邮箱。
+!docs/traepat-quota-attribution.md
 
 # VS Code 扩展文件
 *.vsix
