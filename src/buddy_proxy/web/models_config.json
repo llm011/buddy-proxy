@@ -26,6 +26,8 @@
     },
     {
       "id": "kimi-k3",
+      "credit_rate": 6.649,
+      "quota_pack": "CN 共享余额",
       "name": "Kimi-K3",
       "vendor": "moonshot",
       "max_input": 256000,
@@ -60,6 +62,8 @@
     },
     {
       "id": "mimo-v2.6-pro",
+      "credit_rate": 0.128,
+      "quota_pack": "CN 共享余额",
       "name": "Xiaomi MiMo-V2.6-Pro",
       "vendor": "xiaomi",
       "max_input": 256000,
@@ -96,6 +100,8 @@
     },
     {
       "id": "glm-5.3",
+      "credit_rate": 1.0,
+      "quota_pack": "CN 共享余额",
       "name": "GLM-5.3",
       "vendor": "zhipu",
       "max_input": 200000,
@@ -109,6 +115,8 @@
     },
     {
       "id": "glm-5.3-flash",
+      "credit_rate": 0.121,
+      "quota_pack": "CN 共享余额",
       "name": "GLM-5.3-Flash",
       "vendor": "zhipu",
       "max_input": 200000,
@@ -122,6 +130,8 @@
     },
     {
       "id": "glm-5.3-flashx",
+      "credit_rate": 0.415,
+      "quota_pack": "CN 共享余额",
       "name": "GLM-5.3-FlashX",
       "vendor": "zhipu",
       "max_input": 200000,
@@ -135,6 +145,8 @@
     },
     {
       "id": "glm-5.2",
+      "credit_rate": 1.16,
+      "quota_pack": "CN 共享余额",
       "name": "GLM-5.2",
       "vendor": "zhipu",
       "max_input": 200000,
@@ -222,6 +234,8 @@
       "descriptionZh": "原生多模态,擅长代码、智能体任务",
       "disabledMultimodal": false,
       "id": "minimax-m3",
+      "credit_rate": 0.245,
+      "quota_pack": "CN 共享余额",
       "maxAllowedSize": 512000,
       "maxInputTokens": 512000,
       "maxOutputTokens": 128000,
@@ -295,6 +309,8 @@
       "descriptionEn": "A multimodal model, good for daily use.",
       "descriptionZh": "多模态模型,适合日常任务",
       "id": "kimi-k2.8-preview",
+      "credit_rate": 2.021,
+      "quota_pack": "CN 共享余额",
       "maxAllowedSize": 256000,
       "maxInputTokens": 256000,
       "maxOutputTokens": 32000,
@@ -343,6 +359,8 @@
       "descriptionEn": "DeepSeek flagship model with native image input, supporting 1M context window",
       "descriptionZh": "DeepSeek 旗舰模型,原生支持图片输入,支持 1M 上下文窗口",
       "id": "deepseek-v4.1-flash",
+      "credit_rate": 0.104,
+      "quota_pack": "CN 共享余额",
       "maxAllowedSize": 1000000,
       "maxInputTokens": 1000000,
       "window_tier": 600000,
@@ -408,6 +426,8 @@
     },
     {
       "id": "step-5-preview",
+      "credit_rate": 1.16,
+      "quota_pack": "CN 共享余额",
       "name": "Step-5-Preview",
       "vendor": "stepfun",
       "max_input": 128000,
@@ -423,6 +443,8 @@
       "descriptionEn": "DeepSeek flagship model, supporting 1M context window",
       "descriptionZh": "DeepSeek 旗舰模型,支持 1M 上下文窗口",
       "id": "deepseek-v4-flash",
+      "credit_rate": 0.128,
+      "quota_pack": "CN 共享余额",
       "maxAllowedSize": 1000000,
       "maxInputTokens": 1000000,
       "window_tier": 600000,
@@ -449,6 +471,8 @@
       "descriptionEn": "DeepSeek flagship model, supporting 1M context window",
       "descriptionZh": "DeepSeek 旗舰模型,支持 1M 上下文窗口",
       "id": "deepseek-v4-pro",
+      "credit_rate": 2.011,
+      "quota_pack": "CN 共享余额",
       "maxAllowedSize": 1000000,
       "maxInputTokens": 1000000,
       "window_tier": 600000,
@@ -473,6 +497,8 @@
     },
     {
       "id": "gpt-5.6-sol-max",
+      "credit_rate": null,
+      "quota_pack": "日包（GPT-5.6 Sol）",
       "name": "GPT-5.6-Sol Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -485,6 +511,8 @@
     },
     {
       "id": "gpt-5.6-sol",
+      "credit_rate": null,
+      "quota_pack": "日包（GPT-5.6 Sol）",
       "name": "GPT-5.6-Sol",
       "vendor": "trae",
       "provider": "traepat",
@@ -497,6 +525,8 @@
     },
     {
       "id": "gpt-5.6-luna-max",
+      "credit_rate": 0,
+      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.6-Luna Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -509,6 +539,8 @@
     },
     {
       "id": "gpt-5.6-terra-max",
+      "credit_rate": 0,
+      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.6-Terra Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -521,6 +553,8 @@
     },
     {
       "id": "gpt-5.5-max",
+      "credit_rate": 0,
+      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.5 Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -533,6 +567,8 @@
     },
     {
       "id": "gpt-5.4",
+      "credit_rate": 0,
+      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.4",
       "vendor": "trae",
       "provider": "traepat",
@@ -545,6 +581,8 @@
     },
     {
       "id": "gpt-5.2",
+      "credit_rate": 0,
+      "quota_pack": "免费（不扣余额）",
       "name": "GPT-5.2",
       "vendor": "trae",
       "provider": "traepat",
@@ -557,6 +595,8 @@
     },
     {
       "id": "gpt-6-astra-max",
+      "credit_rate": null,
+      "quota_pack": "日包（GPT-6）",
       "name": "GPT-6-Astra Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -570,6 +610,8 @@
     },
     {
       "id": "gpt-6.1-sol",
+      "credit_rate": null,
+      "quota_pack": "日包（GPT-6.1）",
       "name": "GPT-6.1-Sol",
       "vendor": "openai",
       "provider": "traepat",
@@ -584,7 +626,9 @@
     },
     {
       "id": "gemini-3-flash",
-      "name": "Gemini-3-Flash",
+      "credit_rate": 0,
+      "quota_pack": "免费（不扣余额）",
+      "name": "Gemini-3-Flash（实为 DeepSeek-V4.1-Flash）",
       "vendor": "trae",
       "provider": "traepat",
       "gateway": "plus",
@@ -596,6 +640,8 @@
     },
     {
       "id": "glm-5.2",
+      "credit_rate": 1.16,
+      "quota_pack": "CN 共享余额",
       "name": "glm-5.2",
       "vendor": "trae",
       "provider": "traepat",
@@ -608,6 +654,8 @@
     },
     {
       "id": "kimi-k2.7-code",
+      "credit_rate": 0.447,
+      "quota_pack": "CN 共享余额",
       "name": "Kimi-K2.7-Code",
       "vendor": "trae",
       "provider": "traepat",
@@ -620,6 +668,8 @@
     },
     {
       "id": "kimi-k2.8-preview",
+      "credit_rate": 2.021,
+      "quota_pack": "CN 共享余额",
       "name": "Kimi-K2.8-Preview",
       "vendor": "trae",
       "provider": "traepat",
@@ -631,6 +681,8 @@
     },
     {
       "id": "qwen3.8-flash",
+      "credit_rate": 0.083,
+      "quota_pack": "CN 共享余额",
       "name": "Qwen3.8-Flash",
       "vendor": "trae",
       "provider": "traepat",
@@ -642,6 +694,8 @@
     },
     {
       "id": "qwen3.8-max",
+      "credit_rate": 0.851,
+      "quota_pack": "CN 共享余额",
       "name": "Qwen3.8-Max",
       "vendor": "trae",
       "provider": "traepat",
@@ -654,6 +708,8 @@
     },
     {
       "id": "qwen-3.7-plus",
+      "credit_rate": 0.426,
+      "quota_pack": "CN 共享余额",
       "name": "Qwen-3.7-Plus",
       "vendor": "trae",
       "provider": "traepat",
@@ -666,6 +722,8 @@
     },
     {
       "id": "doubao-seed-evolving",
+      "credit_rate": 2.915,
+      "quota_pack": "CN 共享余额",
       "name": "Doubao-Seed-Evolving",
       "vendor": "trae",
       "provider": "traepat",
@@ -677,6 +735,8 @@
     },
     {
       "id": "Doubao-Seed-2.1-Pro",
+      "credit_rate": 2.723,
+      "quota_pack": "CN 共享余额",
       "name": "Seed-2.1-Pro",
       "vendor": "trae",
       "provider": "traepat",
@@ -689,6 +749,8 @@
     },
     {
       "id": "Doubao-Seed-Code",
+      "credit_rate": 0.17,
+      "quota_pack": "CN 共享余额",
       "name": "Seed-Code",
       "vendor": "trae",
       "provider": "traepat",
@@ -701,6 +763,8 @@
     },
     {
       "id": "glm-5.3",
+      "credit_rate": 1.0,
+      "quota_pack": "CN 共享余额",
       "name": "glm-5.3",
       "vendor": "trae",
       "provider": "traepat",
@@ -713,6 +777,8 @@
     },
     {
       "id": "glm-5.3-flashx",
+      "credit_rate": 0.415,
+      "quota_pack": "CN 共享余额",
       "name": "glm-5.3-flashx",
       "vendor": "trae",
       "provider": "traepat",
@@ -724,6 +790,8 @@
     },
     {
       "id": "glm-5.3-flash",
+      "credit_rate": 0.121,
+      "quota_pack": "CN 共享余额",
       "name": "glm-5.3-flash",
       "vendor": "trae",
       "provider": "traepat",
@@ -736,6 +804,8 @@
     },
     {
       "id": "deepseek-v4-pro",
+      "credit_rate": 2.011,
+      "quota_pack": "CN 共享余额",
       "name": "DeepSeek-V4-Pro",
       "vendor": "trae",
       "provider": "traepat",
@@ -748,6 +818,8 @@
     },
     {
       "id": "deepseek-v4.1-flash",
+      "credit_rate": 0.104,
+      "quota_pack": "CN 共享余额",
       "name": "DeepSeek-V4.1-Flash",
       "vendor": "trae",
       "provider": "traepat",
@@ -759,6 +831,8 @@
     },
     {
       "id": "deepseek-v4-flash",
+      "credit_rate": 0.128,
+      "quota_pack": "CN 共享余额",
       "name": "DeepSeek-V4-Flash",
       "vendor": "trae",
       "provider": "traepat",
@@ -771,6 +845,8 @@
     },
     {
       "id": "step-5-preview",
+      "credit_rate": 1.16,
+      "quota_pack": "CN 共享余额",
       "name": "Step-5-Preview",
       "vendor": "trae",
       "provider": "traepat",
@@ -782,6 +858,8 @@
     },
     {
       "id": "kimi-k3",
+      "credit_rate": 6.649,
+      "quota_pack": "CN 共享余额",
       "name": "kimi-k3",
       "vendor": "trae",
       "provider": "traepat",
@@ -794,6 +872,8 @@
     },
     {
       "id": "minimax-m3",
+      "credit_rate": 0.245,
+      "quota_pack": "CN 共享余额",
       "name": "MiniMax-M3",
       "vendor": "trae",
       "provider": "traepat",

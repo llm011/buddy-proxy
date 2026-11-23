@@ -45,6 +45,17 @@ PAT_PUBLIC_MODELS: dict[str, tuple[str, str]] = {}
 PAT_MODEL_FUNCTIONS: dict[str, str] = {}
 # 模型 -> 上游频控窗口 (requests, window_s)，见 pacing；未声明的模型不节流
 PAT_MODEL_RATE_LIMITS: dict[str, tuple[int, float]] = {}
+# 模型 -> 这份用量记在哪（models_config.json 的 ``quota_pack``）：
+# 日包名 / 「CN 共享余额」/ 「免费（不扣余额）」。2026-11-23 逐模型实测填充，
+# 现在没有缺省值——目录里每个模型都有归属。
+PAT_MODEL_QUOTA_PACKS: dict[str, str] = {}
+# 模型 -> 实测费率倍数（models_config.json 的 ``credit_rate``，以
+# **glm-5.3 = 1.0** 为基准）。三种取值语义不同，UI 上也分开渲染：
+#   数字 > 0 → 相对 glm-5.3 的倍数（同样的 prompt 花多少倍余额）
+#   0        → 实测不扣共享余额（调用前后 total_balance 没变）
+#   None     → 走日包：余额维度不扣，但花的是包里按 token 折的点，不是免费
+# 实测方法与原始读数见 models_config.json 的 credit_rate / quota_pack 注释。
+PAT_MODEL_CREDIT_RATES: dict[str, float | None] = {}
 _config_mtime: float | None = None
 
 
@@ -74,6 +85,8 @@ def _reload_pat_models() -> None:
     public: dict[str, tuple[str, str]] = {}
     functions: dict[str, str] = {}
     rate_limits: dict[str, tuple[int, float]] = {}
+    quota_packs: dict[str, str] = {}
+    credit_rates: dict[str, float | None] = {}
     try:
         data = json.loads(_MODEL_CONFIG_FILE.read_text("utf-8"))
         for model in data.get("models", []):
@@ -90,6 +103,14 @@ def _reload_pat_models() -> None:
             limit = _parse_rate_limit(model.get("rate_limit"))
             if model_id and limit:
                 rate_limits[model_id] = limit
+            pack = str(model.get("quota_pack") or "").strip()
+            if model_id and pack:
+                quota_packs[model_id] = pack
+            # ``credit_rate: null`` 与「缺这个键」不同：前者是实测走过、余额维度
+            # 确实不扣（GPT 日包），后者是还没测。用 in 判断再取值。
+            if model_id and "credit_rate" in model:
+                raw_rate = model.get("credit_rate")
+                credit_rates[model_id] = None if raw_rate is None else float(raw_rate)
     except Exception as exc:
         log.warning("PAT 模型配置解析失败（沿用上次内容）: %s", type(exc).__name__)
         return
@@ -101,6 +122,10 @@ def _reload_pat_models() -> None:
     PAT_MODEL_FUNCTIONS.update(functions)
     PAT_MODEL_RATE_LIMITS.clear()
     PAT_MODEL_RATE_LIMITS.update(rate_limits)
+    PAT_MODEL_QUOTA_PACKS.clear()
+    PAT_MODEL_QUOTA_PACKS.update(quota_packs)
+    PAT_MODEL_CREDIT_RATES.clear()
+    PAT_MODEL_CREDIT_RATES.update(credit_rates)
     PAT_MODELS.clear()
     PAT_MODELS.update({**plus, **public})
     _config_mtime = mtime

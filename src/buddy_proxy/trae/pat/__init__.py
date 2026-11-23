@@ -38,6 +38,8 @@ from .config import (  # noqa: F401
 from .models import (  # noqa: F401
     PAT_MODELS,
     PAT_MODEL_FUNCTIONS,
+    PAT_MODEL_CREDIT_RATES,
+    PAT_MODEL_QUOTA_PACKS,
     PAT_MODEL_RATE_LIMITS,
     PAT_PLUS_MODELS,
     PAT_PUBLIC_MODELS,

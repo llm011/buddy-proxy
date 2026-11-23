@@ -13,6 +13,7 @@ import os
 import stat
 import threading
 import time
+import types
 import urllib.error
 from typing import Any
 
@@ -845,13 +846,11 @@ def test_quota_items_distinguish_daily_model_families(monkeypatch):
     _configure_two(monkeypatch)
     profile = pat.ensure_pat_config()[0]
     data = {"user_entitlement_pack_list": [
-        {"entitlement_base_info": {"entitlement_id": "free_weekly_x", "quota": {"basic_usage_limit": 300}}, "usage": {"basic_usage_amount": 1}},
         {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_56_sol", "quota": {"basic_usage_limit": 58}}, "usage": {"basic_usage_amount": 2}},
         {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_6", "quota": {"basic_usage_limit": 58}}, "usage": {"basic_usage_amount": 3}},
     ]}
     labels = [item["label"] for item in pat._quota_items(data, profile, True)]
     assert labels == [
-        "PAT #1 · Orange 包",
         "PAT #1 · 日包（GPT-5.6 Sol）",
         "PAT #1 · 日包（GPT-6）",
     ]
@@ -904,12 +903,12 @@ def test_quota_items_missing_usage_is_unknown_not_zero(monkeypatch):
     _configure_two(monkeypatch)
     profile = pat.ensure_pat_config()[0]
     data = {"user_entitlement_pack_list": [
-        {"entitlement_base_info": {"entitlement_id": "free_weekly_x",
-                                   "quota": {"basic_usage_limit": 300}}},
+        {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_6",
+                                   "quota": {"basic_usage_limit": 58}}},
     ]}
     (item,) = pat._quota_items(data, profile, True)
-    assert item["total"] == 300
-    assert item["remaining"] == 300
+    assert item["total"] == 58
+    assert item["remaining"] == 58
     assert item["used"] is None
     assert item["percent"] is None
 
@@ -919,13 +918,13 @@ def test_quota_items_zero_usage_is_a_real_zero(monkeypatch):
     _configure_two(monkeypatch)
     profile = pat.ensure_pat_config()[0]
     data = {"user_entitlement_pack_list": [
-        {"entitlement_base_info": {"entitlement_id": "free_weekly_x",
-                                   "quota": {"basic_usage_limit": 300}},
+        {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_6",
+                                   "quota": {"basic_usage_limit": 58}},
          "usage": {"basic_usage_amount": 0}},
     ]}
     (item,) = pat._quota_items(data, profile, True)
     assert item["used"] == 0
-    assert item["remaining"] == 300
+    assert item["remaining"] == 58
     assert item["percent"] == 0
 
 
@@ -1807,10 +1806,12 @@ def test_quota_accounts_queried_concurrently(monkeypatch):
     monkeypatch.setattr(pat, "_gateway_reachable", lambda *a, **k: True)
     _install_credentials(monkeypatch)
 
+    # fixture 用日包而不是周包：周包是死池，_quota_items 现在会整条跳过
+    # （没有模型会消耗它，见 quota.py 的注释），用它就测不到「并发查询」本身了。
     payload = json.dumps({
         "user_entitlement_pack_list": [
-            {"entitlement_base_info": {"entitlement_id": "free_weekly_x",
-                                       "quota": {"basic_usage_limit": 300}},
+            {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_6",
+                                       "quota": {"basic_usage_limit": 58}},
              "usage": {"basic_usage_amount": 1}},
         ]
     }).encode()
@@ -1835,7 +1836,7 @@ def test_quota_accounts_queried_concurrently(monkeypatch):
     assert len(items) == 6
     assert elapsed < 1.6, f"疑似串行执行：{elapsed:.2f}s"
     # 顺序稳定：结果按 profiles 顺序拼接
-    assert [it["label"] for it in items] == [f"PAT #{i + 1} · Orange 包" for i in range(6)]
+    assert [it["label"] for it in items] == [f"PAT #{i + 1} · 日包（GPT-6）" for i in range(6)]
 
 
 def test_quota_single_request_timeout_is_short(monkeypatch):
@@ -1999,3 +2000,125 @@ def test_quota_pool_is_reused_not_recreated(monkeypatch):
     # 每轮新建会留 6 个线程/轮 → 3 轮涨 18 个；常驻池只多一次固定开销
     assert after - before <= 8, f"线程在累积：{before} → {after}"
     assert pat_quota._quota_pool() is pat_quota._quota_pool()
+
+
+# ---------------------------------------------------------------------------
+# 额度包归因（2026-11-23 实测）
+# ---------------------------------------------------------------------------
+def test_quota_pack_marks_only_models_measured_to_consume(monkeypatch):
+    """每个模型都标出「这份用量记在哪」，不留空。
+
+    2026-11-23 用同一账号逐模型发同一条 42 字 prompt，前后各拉一次快照做差，
+    40 个 traepat 模型全部落到三档里，没有模棱两可的：
+
+        日包（GPT 系 4 个）—— 包里的 basic_usage_amount 涨
+        CN 共享余额（19 个）—— balance_summary.total_balance 降
+        免费（5 个）—— 两个都没动
+
+    这条锁「不许漏标」。漏标的模型在 UI 上就不带徽标，而用户看到的空位会
+    被理解成「不知道扣什么」，实际上每一条都测过了。
+    """
+    from buddy_proxy.trae.pat import PAT_MODEL_QUOTA_PACKS
+
+    packs = PAT_MODEL_QUOTA_PACKS
+    # 一一对应：目录里有几个模型就有几条归因，多一条少一条都说明配置漂了
+    assert set(packs) == set(_pat_model_ids())
+
+    assert {m for m, v in packs.items() if v.startswith("日包")} == {
+        "gpt-5.6-sol", "gpt-5.6-sol-max", "gpt-6-astra-max", "gpt-6.1-sol",
+    }
+    assert packs["gpt-6.1-sol"] == "日包（GPT-6.1）"
+    assert packs["gpt-6-astra-max"] == "日包（GPT-6）"
+
+    # 免费那 5 个最容易误标成扣余额——它们走 plus 网关，account_type 还报
+    # ptu / paygo，看着像在花钱，实测两个计数器都是零。
+    assert {m for m, v in packs.items() if v.startswith("免费")} == {
+        "gpt-5.4", "gpt-5.2", "gpt-5.5-max", "gpt-5.6-luna-max",
+        "gpt-5.6-terra-max", "gemini-3-flash",
+    }
+
+
+def _pat_model_ids() -> list[str]:
+    from buddy_proxy.trae.pat import pat_model_names
+    return pat_model_names()
+
+
+def test_provider_exposes_quota_pack_per_model(monkeypatch):
+    """``models()`` 要把归因带给 UI，且全部模型都带（现在没有「未归因」这一档）。"""
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", _profiles({"bearer": "offline-bearer"}))
+    listed = {m["id"]: m for m in TraePatProvider().models()}
+
+    assert listed["gpt-6.1-sol"]["quota_pack"] == "日包（GPT-6.1）"
+    assert listed["gpt-5.6-sol"]["quota_pack"] == "日包（GPT-5.6 Sol）"
+    # 公共模型吃 CN 共享余额
+    assert listed["glm-5.3"]["quota_pack"] == "CN 共享余额"
+    assert listed["deepseek-v4.1-flash"]["quota_pack"] == "CN 共享余额"
+    # 同在 plus 网关、account_type 报 ptu，但实测两个计数器都不动
+    assert listed["gpt-5.4"]["quota_pack"] == "免费（不扣余额）"
+
+
+def test_credit_rate_table_is_complete_and_calibrated(monkeypatch):
+    """费率表：每个 traepat 模型都有取值，且以 glm-5.3 = 1.0 为锚。
+
+    2026-11-23 实测方法：同一条 ~300 字 prompt 逐模型发一次，前后各拉一次
+    ``balance_summary.total_balance`` 做差；低费模型连发 5 次取均值，压掉
+    余额只报两位小数带来的 0.01 量化误差。
+
+    为什么锁倍数而不锁绝对扣费：绝对值和账号套餐、上下文长度、输出长度都
+    相关，换个场景立刻对不上；倍数在两个模型回答长度相当的前提下是稳定的，
+    也是用户「这个模型值不值得用」真正要看的那个数。
+    """
+    from buddy_proxy.trae.pat import PAT_MODEL_CREDIT_RATES, PAT_MODEL_QUOTA_PACKS
+
+    rates = PAT_MODEL_CREDIT_RATES
+    assert set(rates) == set(_pat_model_ids()), "有模型没标费率，或有费率没模型"
+
+    # 锚点：基准模型必须是 1.0，改基准等于整张表失去意义。
+    # 选 glm-5.3 而不是最便宜的 deepseek：以最便宜那条为 1 会让贵模型显示成
+    # ×60+，看着像天价；以主力模型为 1，倍数落在 0.1~6.6 区间，好读。
+    assert rates["glm-5.3"] == 1.0
+
+    # 抽样锁几个跨度大的，防止有人手滑改数量级
+    assert rates["kimi-k3"] > 6           # 全表最贵
+    assert 0.4 < rates["glm-5.3-flashx"] < 0.44
+    assert 0.08 < rates["qwen3.8-flash"] < 0.09
+    assert rates["deepseek-v4.1-flash"] < rates["glm-5.3-flash"]
+
+    # 三种「不花余额」的取值必须各就各位：
+    #   0    → 实测免费（余额不动）
+    #   None → 走日包（余额不动，但花包里的点）
+    assert rates["gpt-5.4"] == 0
+    assert rates["gpt-6.1-sol"] is None
+
+    # 免费 / 扣日包的模型不该同时出现「>0 的倍数」
+    assert all(v == 0 for m, v in rates.items()
+               if PAT_MODEL_QUOTA_PACKS.get(m, "").startswith("免费"))
+
+
+def test_dead_weekly_pool_is_skipped_but_other_weekly_is_not(monkeypatch):
+    """死池按**显式名单**跳过，不按 ``weekly`` 子串。
+
+    2026-11-23 实测 ``free_weekly_*``（300 点）从未被任何模型消耗——它对应
+    openrouter 那条已撤线的上游，所以在额度页不显示。
+
+    但过滤条件必须窄到「这个具体池」，否则上游将来新加一个 weekly 池
+    （换个 model_key 就是新池）会被静默吃掉，用户看不到、我们也不会知道。
+    这条正是钉住那个边界：``free_weekly_`` 跳过，别的 weekly 照常显示。
+    """
+    profile = types.SimpleNamespace(index=0)
+    data = {
+        "user_entitlement_pack_list": [
+            {"entitlement_base_info": {"entitlement_id": "free_weekly_x",
+                                       "quota": {"basic_usage_limit": 300}},
+             "usage": {"basic_usage_amount": 0}},
+            # 同是 weekly，但不在死池名单里 —— 必须显示出来
+            {"entitlement_base_info": {"entitlement_id": "vip_weekly_x",
+                                       "quota": {"basic_usage_limit": 500}},
+             "usage": {"basic_usage_amount": 12}},
+        ]
+    }
+    items = pat._quota_items(data, profile, True)
+    labels = [it["label"] for it in items]
+    assert len(items) == 1, labels
+    assert "周包" in labels[0]
+    assert "300" not in str(items[0].get("total"))

@@ -909,11 +909,16 @@ class BenefitsManager:
         # CLAIM_RETRY_BACKOFF_MAX_S。达到 CLAIM_GIVE_UP_STREAK 就退到「明天
         # 再说」——同一个接口连续 3 次同步失败不会在几分钟内自愈，继续打只会
         # 刷噪音并加重可能的账号风控（见 CLAIM_RETRY_BACKOFF_MAX_S 的注释）。
+        backoff = min(RETRY_THROTTLE_S * (2 ** (n - 1)),
+                      CLAIM_RETRY_BACKOFF_MAX_S)
         if n >= CLAIM_GIVE_UP_STREAK:
-            delay = self._seconds_until_tomorrow()
+            # 「明天再说」是**下限**，不是替代：深夜跑时「到明天 00:05」只有
+            # 几百秒，比上一档的指数退避还短，方向就反了——23:58 失败一次反而
+            # 比 18:00 失败一次更早重试（359s vs 3600s）。取 max 既保留
+            # 「别在几分钟内反复打」的语义，又保证退避单调不回头。
+            delay = max(backoff, self._seconds_until_tomorrow())
         else:
-            delay = min(RETRY_THROTTLE_S * (2 ** (n - 1)),
-                        CLAIM_RETRY_BACKOFF_MAX_S)
+            delay = backoff
         self._claim_next_try[provider_id] = time.time() + delay
         if n >= CLAIM_FAIL_ALERT_STREAK:
             # 只在刚达到阈值时打一次 ERROR，之后每 6 倍阈值再提醒一次，

@@ -141,6 +141,11 @@ def _save_quota(profile: PatProfile, quota_class: str, items: list[dict[str, Any
     _mutate_account(profile.cache_key, store)
 
 
+#: 已实测确认**没有任何模型会消耗**的额度包（entitlement_id 前缀）。
+#: 见 ``_quota_items`` 里的说明：判定依据是实测，不是名字。
+DEAD_QUOTA_PACKS: tuple[str, ...] = ("free_weekly_",)
+
+
 def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for pack in data.get("user_entitlement_pack_list") or []:
@@ -152,11 +157,25 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
         if not isinstance(limit, (int, float)) or limit <= 0:
             continue
         entitlement_id = str(base.get("entitlement_id") or "pack")
+        # 死池：额度还在上游账上，但**没有任何模型会消耗它**。
+        #
+        # 2026-11-23 实测：逐模型发请求前后各拉一次快照，`free_weekly_*`（300 点）
+        # 的 basic_usage_amount 一次都没动过。它对应 openrouter/es1_orange_*
+        # 那条上游线（标签从前叫「PAT Orange 包」），而 openrouter 的 5 个模型
+        # 当天已确认全线撤除（4001，见 #309 的删除）。
+        #
+        # 留一行「300 / 300」在页面上，用户会以为还有 300 点能花，然后找不到
+        # 任何消耗它的模型——比不显示更误导。
+        #
+        # 为什么用**显式名单**而不是 `"weekly" in entitlement_id`：那个子串判定
+        # 会连带吃掉将来任何一个新加的 weekly 池（上游换个 model_key 就是新池），
+        # 而且是静默的——用户看不到、我们也不知道。判据要落在「实测没消耗」上，
+        # 落不到名字约定上。哪天这池改绑到活的模型线，从这里删掉即可。
+        if any(entitlement_id.startswith(dead) for dead in DEAD_QUOTA_PACKS):
+            continue
         if "weekly" in entitlement_id:
-            # 上游 entitlement_id 是 free_weekly_*（周期重置的通用池），但这池实际
-            # 对应 openrouter/es1_orange_* 那条上游线，用户侧按「Orange 包」认知，
-            # 故 UI 直呼其名而非笼统的「周包/通用额度」。
-            label = "PAT Orange 包"
+            # 剩下的 weekly 池是活的：周期重置的通用额度，照常展示。
+            label = "PAT 周包"
         elif "daily" in entitlement_id:
             # 同一账号会同时返回多个日包（例如 GPT-5.6 与 GPT-6），不能都叫
             # “高级模型共享”，否则 UI 看起来像重复额度。只从 entitlement_id 的

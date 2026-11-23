@@ -41,6 +41,21 @@ async function copyModelName(btn, full) {
 }
 
 function renderGroups() {
+  // 实测费率倍数（以 glm-5.3 = 1.0 为基准）。三种取值语义不同，
+  // 不能合并：
+  //   数字 > 0 → 相对 deepseek 的倍数，同样的 prompt 贵多少倍
+  //   0        → 实测不扣余额（免费）
+  //   null     → 走日包：余额维度不扣，但花的是包里按 token 折的点，不是免费
+  function _creditRateTag(rate) {
+    if (rate === null || rate === undefined) {
+      return rate === null
+        ? '<span class="tag" title="走日包：不扣共享余额，花的是日包里的额度点（按 token 折算，实测）">🎫 扣日包</span>'
+        : '';
+    }
+    if (!rate) return '<span class="tag ok" title="实测不扣共享余额（调用前后余额都没变）">免费</span>';
+    const txt = rate === 1 ? '×1（基准）' : `×${rate}`;
+    return `<span class="tag" title="费率倍数：以 GLM-5.3 为 1.0，同样的 prompt 花 ${rate} 倍余额（实测，非官方标价）">${esc(txt)}</span>`;
+  }
   // 「近 3 次耗时」单元格的 tooltip：逐条列出样本（新→旧），并对照 14 天均值
   function _recentMsTitle(st) {
     const ring = (st && st.recent_ms) || [];
@@ -111,7 +126,7 @@ function renderGroups() {
             ${schTag}
             ${ordTag}</td>
         <td class="muted"${dim}>${esc(m.name || '')}</td>
-        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
+        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.quota_pack ? `<span class="tag ok" title="这份用量记在哪：该模型每次调用都记在这里，记满了即止（实测归因，非估算）">📦 ${esc(m.quota_pack)}</span>` : ''}${_creditRateTag(m.credit_rate)}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
         <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.recent_count && st.recent_avg_ms != null ? fmtMs(st.recent_avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
