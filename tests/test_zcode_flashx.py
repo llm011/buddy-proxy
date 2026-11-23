@@ -230,3 +230,25 @@ def test_glm_5_4_credit_estimate_uses_measured_coeffs():
     assert est is not None, "5.4 必须能出估算值（否则积分列空白）"
     # 非高峰 5 折，所以只断言量级落在两档之间，避免绑死时段
     assert 1.5 <= est <= 3.5
+
+
+def test_zcode_start_stays_on_flash_only():
+    """Start Plan 套餐只有 glm-5.3-flash——别跟着 coding-plan 一起加 5.4。
+
+    2026-11-23 接 5.4 时有人问「``zcode_start.py`` 是不是漏改了」。核实结论
+    是**确认过的边界**：那是另一个套餐（``zcode-plan/anthropic`` 端点），本机
+    ZCode CLI 配置里 ``bigmodel-start-plan`` 的默认模型也还是 ``glm-5.3-flash``
+    ——官方客户端都没把 5.4 挂上去。
+
+    这条测试的作用：等哪天真要加 5.4 到 Start Plan，它会红一次，提醒你把
+    ``DEFAULT_MODELS`` / ``MODEL_NAME_CANONICAL`` 两张表一起补，而不是只改一张。
+    """
+    from buddy_proxy.providers.zcode_start import (
+        DEFAULT_MODELS as START_MODELS,
+        MODEL_NAME_CANONICAL as START_CANONICAL,
+    )
+
+    assert set(START_MODELS) == {"glm-5.3-flash"}, (
+        "Start Plan 目录变了？确认套餐真放开了，并同步 MODEL_NAME_CANONICAL")
+    assert set(START_MODELS) == set(START_CANONICAL)
+    assert "glm-5.4" not in START_MODELS

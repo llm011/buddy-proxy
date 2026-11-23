@@ -84,10 +84,18 @@ def _openai_base_for(anthropic_base: str) -> str:
 # id 用**小写**（与全站 models_config.json / Claude Code 侧配置一致），
 # 这样 forward_chat 的「自动匹配 provider.models()」能命中 zcode，
 # 不至于让 glm-* 请求错误落到 codebuddy 兜底通道。
+#
+# ``max_tokens`` 上游上限 **131072**，超了回
+# ``400 {"code":1210,"message":"max_tokens参数非法：限制数值范围[1,131072]"}``
+# （2026-11-23 实测）。客户端传更大值时要提前夹住，否则用户看到的是一个
+# 跟模型能力无关的参数报错。注意这**不是**上下文窗口（那个约 1M，见下）。
 DEFAULT_MODELS: dict[str, str] = {
     # 5.4 只有裸名一个：``glm-5.4-flash`` / ``-flashx`` / ``-turbo`` 上游一律
     # 回 1211「模型不存在」（2026-11-23 实测，``/models`` 列表里也只有
     # ``glm-5.4``）。别照 5.3 的形状顺手补变体，那是凭空的。
+    #
+    # 上下文窗口是**二分实测**的：1037500 token 通过、1053125 被
+    # ``1261 Prompt exceeds max length`` 拒 → 约 1M，与 5.3 同档。
     "glm-5.4": "GLM-5.4 (thinking, multimodal, 1M ctx)",
     "glm-5.3": "GLM-5.3 (thinking, 1M ctx)",
     "glm-5.3-flash": "GLM-5.3-Flash (thinking, multimodal, 1M ctx)",
@@ -131,11 +139,16 @@ MODEL_NAME_CANONICAL: dict[str, str] = {
 #:
 #:   * output 16.0 —— 小 prompt + 长输出（3 次共 16124 输出 token，Δ=26 分）
 #:   * input  4.60 —— 30 万 token 唯一输入（避免缓存）+ 3 token 输出，Δ=138 分
+#:     （另用 52 万 token + ``max_tokens=1`` 零输出复核得 4.603）
 #:   * cached 1.10 —— 同 body 连发两次，第二次 cached=400000，Δ=44 分
+#:
+#: **精度警告**：这个计数器只记到**整数分**，单请求误差 ±0.5 分。所以要测某个
+#: 系数就把该 token 量放大到几百分，别用小请求——实测 304 输出 token 的请求
+#: 额度变化是 **0**，据此反解会算出负数。cached 那组 44 分的样本对应约
+#: ±0.01 的系数误差，够用但不算宽裕；官方更新文档后应回来核对一次。
 #:
 #: 比例与 5.3 的 (6.9, 1.7, 24.0) 同构（约 2/3），但**不能拿 2/3 顶替**：
 #: 按 2/3 算 5.4 是 (4.6, 1.13, 16.0)，cached 实测 1.10，估算会偏。
-#: 官方更新文档后应回来核对一次。
 CREDIT_COEFFS: dict[str, tuple[float, float, float]] = {
     "glm-5.4": (4.6, 1.1, 16.0),
     "glm-5.3": (6.9, 1.7, 24.0),

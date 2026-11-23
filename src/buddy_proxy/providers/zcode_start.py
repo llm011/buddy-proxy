@@ -64,6 +64,20 @@ _SYSTEM_PROMPT = "\n\n".join(_SYSTEM_BLOCKS) if _SYSTEM_BLOCKS else ""
 
 ZCODE_START_ANTHROPIC_BASE = "https://zcode.z.ai/api/v1/zcode-plan/anthropic"
 
+#: Start Plan（Trust Build）**只有 glm-5.3-flash**，别跟着 ``providers/zcode.py``
+#: 一起加 GLM-5.4。
+#:
+#: 2026-11-23 接 5.4 时专门确认过（当时有人问「是不是漏改了这边」）：
+#:
+#: * 这是**另一个套餐**，走 ``zcode-plan/anthropic`` 端点，与 coding-plan 的
+#:   ``open.bigmodel.cn/api/anthropic`` 不是一条线；
+#: * 本机 ZCode CLI 自己的配置（``~/.zcode/cli/config.json``）里，
+#:   ``bigmodel-start-plan`` 的默认模型仍是 ``glm-5.3-flash``——官方客户端
+#:   都没把 5.4 挂到这个套餐上；
+#: * 本机没配 ``~/.buddy-proxy/zcode_start_api_key``，无法直接实测。
+#:
+#: 所以这里是**确认过的边界**，不是遗漏。等 Start Plan 放开 5.4（或拿到 key
+#: 实测通过）再加，加的时候三张表一起补。
 DEFAULT_MODELS: dict[str, str] = {
     "glm-5.3-flash": "GLM-5.3-Flash (Start Plan)",
 }
