@@ -369,7 +369,11 @@ Zhipu **GLM Coding Plan** via its Anthropic-compatible endpoint, passed through 
 buddy start
 ```
 
-Credentials come from `ZCODE_API_KEY`, `~/.buddy-proxy/zcode_api_key` (override the directory with `BUDDY_PROXY_STATE_DIR`), or `~/.zcode/v2/config.json`. `ZCODE_OPENAI_BASE` overrides the base URL. Models are listed by `/v1/models` and appear under the `zcode/` prefix (e.g. `zcode/glm-5.3`).
+Credentials come from `ZCODE_API_KEY`, `~/.buddy-proxy/zcode_api_key` (override the directory with `BUDDY_PROXY_STATE_DIR`), or `~/.zcode/v2/config.json`. `ZCODE_OPENAI_BASE` overrides the base URL. Models are listed by `/v1/models` and appear under the `zcode/` prefix (e.g. `zcode/glm-5.4`).
+
+The model table is **static** (`DEFAULT_MODELS` in `providers/zcode.py`), not fetched from the upstream `/v1/models` — and that matters more than it looks: the anthropic endpoint's list lags the release. `glm-5.4` (shipped 2026-11-23 with the Coding Plan) appears in the OpenAI-side list (`/api/coding/paas/v4/models`, `created=1795406400`) but the anthropic-side `/v1/models` still ends at `glm-5.3-flashx-legal`, so waiting for the list to update means never seeing the new model. Measured on a lite plan (2026-11-23): 1M context (`"hello "×1,000,000` passes, ×1,100,000 gets `1261 Prompt exceeds max length`), `max_tokens` up to `131072` (`131073` gets `1210` range error), vision works through the anthropic endpoint, and tool calls come back as real `tool_calls`. There is **no** `glm-5.4-flash` / `-flashx` yet — both return `1211 模型不存在`; don't extrapolate from the 5.3 family.
+
+Because `glm-5.4` is served **only** by zcode and its same-upstream `glm` sibling (codebuddy answers `11102`, traepat is not in that catalog), the catalog has to carry its capabilities itself: `models()` attaches `images` / `tool_call` / `reasoning` / `max_input` / `max_output` from `MODEL_CAPABILITIES`. Without that, aggregation has nothing to merge and `/v1/models` reports `supports_images: false` — the client then strips images locally before sending, even though 5.4 reads them fine. The 5.3 family deliberately stays out of that table: several channels report it, so aggregation takes the union, and a zcode-side `images: false` would narrow every channel instead.
 
 There is no browser login to automate: the credential is an API key issued in the Zhipu console, and minting one is a manual click. `buddy login zcode` therefore just reports the current state and prints how to get a key — the console URL (<https://bigmodel.cn/usercenter/proj-mgmt/apikeys>), the plan purchase page (<https://bigmodel.cn/glm-coding>), and the three ways to configure it. Already have the ZCode CLI logged into coding-plan? That path works too; the key is read from its config.
 
@@ -391,7 +395,7 @@ buddy start
 
 `GlmProvider` subclasses `ZcodeProvider` — passthrough forwarding, SSE pumping, the model table and the quota endpoint are all inherited. The only difference is the credential chain: `GLM_API_KEY` or `~/.buddy-proxy/glm_api_key`, and **never** `~/.zcode` — the two channels' keys belong to independently purchased plans, and cross-reading them would bill one plan for the other's usage (and mix up the quota cards). Registered *after* zcode, so a bare `glm-*` request still lands on zcode when both are enabled; use the explicit `glm/<model>` prefix to pin the official key.
 
-`buddy login glm` reports state and prints the key setup steps, same style as zcode (no automatable browser login — the key is minted by hand in the Zhipu console). Plan access measured 2026-10-06 (lite): `glm-5.3` / `glm-5.3-flash` / `glm-5-turbo` work; `glm-5.3-flashx` is refused with `1311 套餐暂未开放` until the plan is upgraded — the model stays in the table as a reserve, no code change needed when it unlocks.
+`buddy login glm` reports state and prints the key setup steps, same style as zcode (no automatable browser login — the key is minted by hand in the Zhipu console). Plan access measured 2026-10-06 (lite): `glm-5.3` / `glm-5.3-flash` / `glm-5-turbo` work; `glm-5.3-flashx` is refused with `1311 套餐暂未开放` until the plan is upgraded — the model stays in the table as a reserve, no code change needed when it unlocks. `glm-5.4` (2026-11-23) works on the same plan and is inherited from zcode's table.
 
 ### DeepSeek official provider (optional)
 

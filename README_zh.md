@@ -1218,7 +1218,7 @@ Trae PAT 频控：部分扩展模型上游按「账号 × 模型」限频（队�
 | --- | --- |
 | 凭据 | `ZCODE_API_KEY` → `~/.buddy-proxy/zcode_api_key`（目录可用 `BUDDY_PROXY_STATE_DIR` 整体挪走）→ `~/.zcode/v2/config.json`（ZCode CLI 同款配置） |
 | 端点 | 智谱 GLM Coding Plan 的 Anthropic 兼容端点直通；`ZCODE_OPENAI_BASE` 可覆盖 |
-| 模型 | 以 `zcode/<id>` 寻址（如 `zcode/glm-5.3`），经 `/v1/models` 一并列出 |
+| 模型 | 以 `zcode/<id>` 寻址（如 `zcode/glm-5.4`），经 `/v1/models` 一并列出 |
 | 登录 | `buddy login zcode`：**没有可自动化的浏览器登录**（凭据是智谱控制台签发的 coding-plan API key，得人工点），所以这条命令负责把「去哪领 key、怎么配」打印清楚 |
 
 领 key：<https://bigmodel.cn/usercenter/proj-mgmt/apikeys>（还没套餐先开通 <https://bigmodel.cn/glm-coding>），
@@ -1236,6 +1236,22 @@ coding-plan，然后 `buddy restart`。
 5 小时档在前；若改回按 `nextResetTime` 排，没有时间戳的 5 小时档会被甩到末位，标题行（取
 第一条）就显示了月档而不是更紧迫的那档。另外这两档是**各自独立的额度**，要分开看，不能相加。
 
+**模型表是静态的**（`providers/zcode.py` 的 `DEFAULT_MODELS`），不从上游 `/v1/models` 拉——
+这件事比看上去要紧：anthropic 端点的列表**落后于发布**。`glm-5.4`（2026-11-23 随 Coding Plan
+上线）在 OpenAI 侧列表（`/api/coding/paas/v4/models`，`created=1795406400`）里已经有了，但
+anthropic 侧 `/v1/models` 还停在 `glm-5.3-flashx-legal`，等它自己冒出来等于永远看不到新模型。
+lite 套餐实测（2026-11-23）：1M 上下文（`"hello "×1,000,000` 通过，×1,100,000 报
+`1261 Prompt exceeds max length`）、`max_tokens` 到 `131072`（`131073` 报 `1210` 范围错）、
+anthropic 端点带图 200 且答对颜色、openai 端点工具调用回真 `tool_calls`。目前**没有**
+`glm-5.4-flash` / `-flashx`（两者都 `1211 模型不存在`），别按 5.3 的 flash 家族类推。
+
+`glm-5.4` **只有** zcode 和同源的 `glm` 两个通道提供（codebuddy 回 11102、traepat 不在目录），
+所以目录必须自己带出能力：`models()` 从 `MODEL_CAPABILITIES` 附加 `images` / `tool_call` /
+`reasoning` / `max_input` / `max_output`。不带的后果不是「少个图标」——聚合拿不到可合并的
+字段，`/v1/models` 就报 `supports_images: false`，客户端据此在本地把图剥掉再发，而它明明
+能看图。5.3 系列**故意不进**这张表：多通道都在报，聚合取并集更宽松，单在 zcode 侧声明
+`images: false` 反而把所有通道一起收窄。
+
 **ZCode Start Plan 错误响应**——`zcode-start/glm-5.3-flash` 的成功响应必须是 Anthropic Message（流式首个有效事件为 `message_start`）。上游即使返回 HTTP 200，若实际是额度/错误 JSON 或没有有效首事件，也不再向 Claude Code 伪报 200：额度错误（含 `1308`）转成 HTTP 429，其他无效响应转成 HTTP 502。若配置了模型顺序，未提交的失败可继续换档。OpenAI 兼容流式转换也支持上游以 LF 或 CRLF 分帧的 SSE（包括换行符跨网络块）。
 
 **GLM 官方渠道（`providers/glm.py`，可选）**——`GlmProvider` 是 `ZcodeProvider` 的子类，
@@ -1246,6 +1262,7 @@ coding-plan，然后 `buddy restart`。
 负责打印领 key/配 key 指引（同 zcode：key 得在智谱控制台人工签发，无可自动化的登录）。
 套餐权限 2026-10-06 实测（lite 档）：`glm-5.3` / `glm-5.3-flash` / `glm-5-turbo` 可用；
 `glm-5.3-flashx` 仍 `1311 套餐暂未开放`，升级套餐后无需改代码即可用（预备接入）。
+`glm-5.4`（2026-11-23）同套餐可用，模型表继承自 zcode。
 
 
 ### 7. MiMo Provider（`mimo/` 子包）

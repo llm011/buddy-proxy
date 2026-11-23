@@ -103,6 +103,45 @@ DEFAULT_MODELS: dict[str, str] = {
     "glm-5-turbo": "GLM-5-Turbo (200K ctx)",
 }
 
+#: glm-5.4 是 2026-11-23 随 Coding Plan 上线的旗舰（实测上游 openai 端点
+#: ``/models`` 已列出，created=1795406400；anthropic 端点的 ``/v1/models``
+#: **还没跟上**，列表止于 glm-5.3-flashx-legal）。所以这张表必须手写补上：
+#: 本 provider 的目录是静态表，等上游列表自动出现等于永远看不到新模型。
+#:
+#: 实测口径（2026-11-23，本机 lite 套餐）：
+#: - 上下文：1,048,576（"hello "×1,000,000 通过；×1,100,000 报
+#:   ``1261 Prompt exceeds max length``，中间档撞 5 小时额度上限没能细切，
+#:   故取 1M 整）
+#: - 输出：max_tokens 131072 合法、131073 起报 ``1210 限制数值范围[1,131072]``
+#: - 视觉：anthropic 端点带 base64 图片 200 且答对了颜色
+#: - 工具调用：openai 端点 ``finish_reason=tool_calls``，arguments 是合法 JSON
+#: - ``glm-5.4-flash`` / ``glm-5.4-flashx`` 均 1211 模型不存在，别按 5.3 的
+#:   flash 家族类推。
+GLM_54_MAX_INPUT = 1_048_576
+GLM_54_MAX_OUTPUT = 131_072
+
+#: 小写 id → ``models()`` 要额外带出的能力/窗口字段。
+#:
+#: 只登记**实测过**的模型：这张表是给客户端的承诺（图片会不会被本地剥掉、
+#: 上下文判断多少），没测过的模型不写，聚合时自然退回其它通道或「未知」。
+#: ``glm-5.3`` 系列不在这里——它们由 codebuddy/trae/qoder 等多个通道一起报，
+#: 聚合时取并集更宽松，单在这里声明反而会把能力收窄。
+#:
+#: 这些字段**只是目录元数据**，本仓库里没有任何代码拿 ``max_output`` 去夹请求：
+#: ``web/ui/models_api.py`` 分组时只挑 ``context_window``，``web/static/*.js``
+#: 连 ``context_window`` 都没读（纯 Codex/OpenAI 目录扩展项）。所以客户端传
+#: 200k ``max_tokens`` 时，上游那条 ``1210 限制数值范围[1,131072]`` 仍然会原样
+#: 冒出来——夹住它是调用方的事。别以为改了这里的数字就能防住那个报错。
+MODEL_CAPABILITIES: dict[str, dict[str, Any]] = {
+    "glm-5.4": {
+        "images": True,
+        "tool_call": True,
+        "reasoning": True,
+        "max_input": GLM_54_MAX_INPUT,
+        "max_output": GLM_54_MAX_OUTPUT,
+    },
+}
+
 # 小写 id → 上游正式模型名（ZCode/智谱侧的大小写字面量）。
 # anthropic 直通时若上游对 model 名大小写敏感，用它归一化后再转发。
 # 实测（2026-09-19）：该端点的 model 名**大小写不敏感**——glm-5.3-flashx /
@@ -463,6 +502,11 @@ class ZcodeProvider(BaseProvider):
                 "created": 0,
                 "owned_by": self.id,
                 "description": desc,
+                # 能力/窗口字段只有实测过的模型才带（见 MODEL_CAPABILITIES）。
+                # 必须带：``glm-5.4`` 目前只有本通道提供，聚合时拿不到别的通道
+                # 的并集——这里不声明 images，客户端就会把图片本地剥掉再发，
+                # 而 5.4 明明能看图（实测 200 且答对颜色）。
+                **MODEL_CAPABILITIES.get(model_id, {}),
             }
             for model_id, desc in DEFAULT_MODELS.items()
         ]
