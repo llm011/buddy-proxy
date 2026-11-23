@@ -581,9 +581,11 @@
   .qmore[hidden] { display: none; }
   .qbar > div { height: 100%; border-radius: 4px; }
   /* TRAE PAT 面板：账号额度卡两栏；token 状态并入各自标题；模型负载另起两栏。 */
-  .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+  .pat-head { display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; white-space: nowrap; margin-bottom: 10px; }
+  .pat-head::-webkit-scrollbar { display: none; }
+  .pat-head > * { flex-shrink: 0; }
   .pat-head .name { font-weight: 600; }
-  .pat-head .grow { flex: 1; }
+  .pat-head .grow { flex: 1 1 auto; min-width: 0; }
   /* 负载均衡开关（通道标题行）：带边框的小胶囊，与 .tag 同尺寸，勾选后高亮。
      用 accent-color 而不是自绘开关——原生 checkbox 在暗色主题下也跟随系统
      配色，不必再维护一套三态视觉。 */
@@ -616,16 +618,17 @@
      父容器」。minmax(0, …) 把下限压到 0，两列严格等宽，长文本按 .qlabel 的省略
      号收起。这条对共用该类的一票面板（trae PAT / antigravity / kimi / qoder /
      codebuddy / dumate）一起生效，别改回 1fr。 */
-  .pat-quota-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 22px; }
+  .pat-quota-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
   @media (max-width: 720px) { .pat-quota-grid { grid-template-columns: minmax(0, 1fr); } }
   /* 账号块 = 卡中卡：背景亮一档 + 描边 + 圆角。原先只有一条 rgba(.4) 的
      底线，两栏并排时两个账号的额度内容直接糊成一片（用户截图：分隔看不
      出来）。trae PAT / antigravity / kimi 三个面板共用这个类，一起变样。
      overflow:hidden 把圆角外的背景切干净，也让卡内超长内容不外溢。 */
-  .pat-pkg { position: relative; overflow: hidden; padding: 10px 12px 12px;
-             background: var(--card2); border: 1px solid var(--line);
-             border-radius: 8px; }
-  .pat-pkg-head { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; min-width: 0; }
+  .pat-pkg { position: relative; overflow: hidden; padding: 12px 14px;
+             background: var(--card2); border: 1px solid rgba(255, 255, 255, 0.12);
+             border-radius: 10px; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.22); }
+  .pat-pkg-head { display: flex; align-items: center; gap: 10px; padding-bottom: 6px;
+                  margin-bottom: 8px; border-bottom: 1px solid rgba(255, 255, 255, 0.06); min-width: 0; }
   .pat-pkg-name { font-weight: 600; font-size: 12px; min-width: 0; overflow: hidden;
                   text-overflow: ellipsis; white-space: nowrap; }
   .pat-pkg-status { margin-left: auto; font-size: 11px; text-align: right; white-space: nowrap; }
