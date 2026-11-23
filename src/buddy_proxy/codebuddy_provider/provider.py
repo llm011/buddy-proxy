@@ -1435,29 +1435,36 @@ class CodeBuddyProvider(BaseProvider):
         if not accounts:
             hint = "" if self._region == "cn" else "（海外版）"
             model = str(upstream_body.get("model") or "")
-            # 空候选有两种成因，报错必须分开说——否则用户会照着错的提示干等：
+            # 空候选有两种成因，**两种都要报出来**——只报一种会让用户照着错的
+            # 方向干等：
             #
-            #   a) 账号级冷却（额度耗尽/凭据失效）：等一会儿或充值就好，
-            #      ``cooldown_report()`` 有内容，照旧说「冷却中」；
-            #   b) **全部账号都没有该模型的权限**（400/11158）：``cooldown_report()``
-            #      是**空字符串**（它只查账号级键），于是旧文案会输出
-            #      「所有账号均在冷却中：；额度冷却到点自动恢复」——空理由 + 错误
-            #      指引，用户等一辈子也不会好。2026-11-24 glm-5.4 上线后，免费账号
-            #      第一次请求就会把每个号都打成 (账号,模型) 冷却，第二次必踩这里。
+            #   a) 账号级冷却（额度耗尽 / 凭据失效）：等一会儿或充值就好，
+            #      ``cooldown_report()`` 有内容；
+            #   b) 该模型在这个账号上没有权限（400/11158）：打的是
+            #      ``(账号, 模型)`` 复合键，``cooldown_report()`` **查不到**
+            #      （它只查账号级键），所以这一条必须单独查、单独说。
+            #
+            # 为什么两种要同时报：混合场景下（付费号额度耗尽 + 免费号无权限）
+            # 两边都非空，只报冷却会让用户以为「充钱/等待」能解决，可权限那部分
+            # 永远好不了。2026-11-24 glm-5.4 上线后这是常态：免费号第一次请求
+            # 就被打成复合冷却，付费号又常常额度见底。
             account_report = failover.cooldown_report()
-            if not account_report and model:
-                denied = [a.id for a in failover.list_accounts()
-                          if failover.model_cooldown_left(a.id, model)[0] > 0]
-                if denied:
-                    raise HTTPException(
-                        status_code=429,
-                        detail={"error": {
-                            "message": (
-                                f"codebuddy{hint} 没有账号能调用模型 {model}："
-                                f"{len(denied)} 个账号被上游判为「套餐不支持该模型」"
-                                "（code 11158，需付费账号）。这不是额度冷却，"
-                                "等待不会恢复；请换模型，或给该通道加一个付费账号。"),
-                            "type": "model_not_allowed"}})
+            denied = ([a.id for a in failover.list_accounts()
+                       if failover.model_cooldown_left(a.id, model)[0] > 0]
+                      if model else [])
+            if denied:
+                parts = [f"{len(denied)} 个账号被上游判为「套餐不支持该模型」"
+                         "（code 11158，需付费账号）"]
+                if account_report:
+                    parts.append(f"另有账号在冷却：{account_report}")
+                raise HTTPException(
+                    status_code=429,
+                    detail={"error": {
+                        "message": (f"codebuddy{hint} 没有账号能调用模型 {model}："
+                                    + "；".join(parts)
+                                    + "。权限问题等待不会恢复——请换模型，"
+                                      "或给该通道加一个付费账号。"),
+                        "type": "model_not_allowed"}})
             raise HTTPException(
                 status_code=429,
                 detail={"error": {

@@ -287,3 +287,36 @@ def test_all_accounts_denied_reports_model_not_allowed_not_cooldown(monkeypatch)
     assert "11158" in detail["message"]
     assert "冷却" not in detail["message"].split("这不是")[0] or "不是额度冷却" in detail["message"]
     assert "；额度冷却到点自动恢复" not in detail["message"], "别给会等错方向的指引"
+
+
+def test_mixed_denied_and_cooldown_reports_both(monkeypatch):
+    """混合场景（付费号额度耗尽 + 免费号无权限）两种原因都要说。
+
+    review 提的点：只报冷却会让用户以为「充钱/等待」能解决，可权限那部分
+    永远好不了。glm-5.4 上线后这是常态——免费号第一次请求就被打成复合冷却，
+    付费号又常常额度见底。
+    """
+    import asyncio
+
+    from fastapi import HTTPException
+    from types import SimpleNamespace
+    from buddy_proxy.core import state as st
+    from buddy_proxy.codebuddy_provider.provider import CodeBuddyProvider
+
+    monkeypatch.setattr(st, "proxy_state", SimpleNamespace(
+        enable_desensitize=False, logger=None, write_log=lambda *a, **k: None))
+
+    _setup_free_then_paid(monkeypatch)
+    failover.mark_model_cooldown("free", "glm-5.4")   # 权限
+    failover.mark_cooldown("paid", quota=True)         # 额度耗尽
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(CodeBuddyProvider().forward(
+            {"model": "glm-5.4", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]},
+            "openai", None))
+
+    msg = ei.value.detail["error"]["message"]
+    assert "11158" in msg, "权限原因必须出现"
+    assert "额度冷却" in msg, "额度原因也必须出现（不能只报一种）"
+    assert ei.value.detail["error"]["type"] == "model_not_allowed"
