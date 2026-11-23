@@ -916,34 +916,115 @@ class RaccoonProvider(BaseProvider):
                 continue
         return None
 
-    def checkin_status(self) -> dict[str, Any] | None:
-        """今日签到状态：以**发放流水**为准，不看接口返回码。
+    def _checkin_for_account(self, acct: Any, *,
+                             index: int) -> tuple[dict[str, Any] | None, str]:
+        """单账号签到状态。返回 ``(status, error)``；失败时 status 为 None。
 
-        上游每日 300 分挂在「当天第一次页面启动」上，所以「今天有没有
-        ``daily_grant``」就是唯一可信的签到判据。
+        判据是**流水**而不是接口返回码：上游对重复操作也回 200 但余额不动。
         """
-        picked = self._first_account_token()
-        if picked is None:
-            return {
-                "checked_in": False,
-                "claimable": False,
-                "message": "未导入账号",
-            }
-        _aid, token = picked
-        bills = self._bills(token)
+        try:
+            token, _cred = ensure_account_token(acct.id)
+        except AuthError as exc:
+            return None, str(exc)[:120]
+        try:
+            bills = self._bills(token)
+        except Exception as exc:  # noqa: BLE001 — 单账号失败不该让整页 500
+            log.warning("raccoon 签到状态查询失败（%s）: %s", acct.id, exc)
+            return None, str(exc)[:120]
         done = has_daily_grant_today(bills)
         credits = _today_daily_grant_points(bills) if done else None
         return {
             "checked_in": done,
             "claimable": not done,
             "credits": credits,
+            # 日历合并用（与 codebuddy/dumate 同字段名、同 YYYY-MM-DD 口径）：
+            # 上游没有签到历史接口，靠流水里的 daily_grant 反推。
+            "checkin_dates": _daily_grant_dates(bills),
             # 每天 00:00 +08:00 发新的一笔；上游没给这个字段，是规则推断
             "next_ts": next_daily_reset_epoch(),
             "next_ts_source": "inferred",
             "message": (f"今日 +{credits:g} 分已到账" if done and credits
                         else "今日每日积分已到账" if done
                         else "今日每日积分尚未到账（点「签到」触发页面启动）"),
+        }, ""
+
+    def checkin_status(self) -> dict[str, Any] | None:
+        """今日签到状态：以**发放流水**为准，不看接口返回码。
+
+        上游每日 300 分挂在「当天第一次页面启动」上，所以「今天有没有
+        ``daily_grant``」就是唯一可信的签到判据。
+
+        多账号**每个都查**（2026-11-23 用户实报：导入了两个号，签到卡只反映
+        一个号）。聚合口径与 codebuddy 一致：任一可领→可领；全部已签→已签；
+        个别账号失败只在明细里标、不阻塞整页。单账号直通、不带 ``accounts``
+        明细——徽标本身就是它的状态，展开纯属噪音。
+        """
+        accounts = list_accounts()
+        if not accounts:
+            return {
+                "checked_in": False,
+                "claimable": False,
+                "message": "未导入账号",
+            }
+        if len(accounts) == 1:
+            st, err = self._checkin_for_account(accounts[0], index=1)
+            if st is None:
+                return {"checked_in": False, "claimable": False,
+                        "message": err or "查询失败"}
+            return st
+
+        claimable_accts: list[str] = []
+        signed_accts: list[str] = []
+        failed = 0
+        details: list[dict[str, Any]] = []
+        total_credits = 0.0
+        all_dates: set[str] = set()
+        for pos, acct in enumerate(accounts, 1):
+            name = acct.alias or acct.name or acct.id
+            st, err = self._checkin_for_account(acct, index=pos)
+            if st is None:
+                failed += 1
+                details.append({"index": pos, "id": acct.id, "name": name,
+                                "error": err or "查询失败"})
+                continue
+            if st.get("claimable"):
+                claimable_accts.append(f"#{pos}")
+            elif st.get("checked_in"):
+                signed_accts.append(f"#{pos}")
+            if isinstance(st.get("credits"), (int, float)):
+                total_credits += st["credits"]
+            all_dates.update(st.get("checkin_dates") or [])
+            details.append({
+                "index": pos,
+                "id": acct.id,
+                "name": name,
+                "checked_in": bool(st.get("checked_in")),
+                "claimable": bool(st.get("claimable")),
+                "daily_credit": st.get("credits"),
+                "message": st.get("message"),
+            })
+
+        status: dict[str, Any] = {
+            "checked_in": bool(signed_accts) and not claimable_accts,
+            "claimable": bool(claimable_accts),
+            "next_ts": next_daily_reset_epoch(),
+            "next_ts_source": "inferred",
+            "accounts": details,
+            # 多账号取**并集**：日历画的是「这个通道这天有没有签」，任一账号
+            # 签过就该显示（按账号分别画会需要改日历的数据结构，收益不大）。
+            "checkin_dates": sorted(all_dates),
+            "message": "",
         }
+        if claimable_accts:
+            status["message"] = f"账号 {'、'.join(claimable_accts)} 可领"
+        elif signed_accts:
+            status["message"] = f"账号 {'、'.join(signed_accts)} 已签"
+        if failed:
+            status["message"] = (status["message"] + " " if status["message"] else "") + \
+                f"（{failed}/{len(accounts)} 个账号查询失败）"
+        if total_credits:
+            status["credits"] = total_credits
+        return status
 
     def checkin_claim(self) -> dict[str, Any] | None:
         """触发今日每日积分发放：走一遍「页面启动」序列，然后核对流水。
@@ -953,14 +1034,75 @@ class RaccoonProvider(BaseProvider):
         :meth:`checkin_status` 同构。
 
         全部请求尽力而为：单步失败不影响其它步（是否到账以流水为准）。
+
+        多账号**每个都签**（2026-11-23 用户实报：两个号只处理了一个）。逐号
+        执行页面启动、各自核对流水；单号失败只记明细，不阻断其它号。
         """
-        picked = self._first_account_token()
-        if picked is None:
+        accounts = list_accounts()
+        if not accounts:
             return {"checked_in": False, "claimable": False,
                     "message": "未导入账号，无法签到"}
-        aid, token = picked
-        cred = load_account_cred(aid) or {}
-        device_id = str(cred.get("device_id") or "") or _derive_device_id(aid)
+        if len(accounts) == 1:
+            st = self._claim_for_account(accounts[0], index=1)
+            return st
+
+        details: list[dict[str, Any]] = []
+        signed: list[str] = []
+        failed = 0
+        total_credits = 0.0
+        all_dates: set[str] = set()
+        for pos, acct in enumerate(accounts, 1):
+            name = acct.alias or acct.name or acct.id
+            st = self._claim_for_account(acct, index=pos)
+            if st.get("error"):
+                failed += 1
+                details.append({"index": pos, "id": acct.id, "name": name,
+                                "error": st["error"]})
+                continue
+            if st.get("checked_in"):
+                signed.append(f"#{pos}")
+            if isinstance(st.get("credits"), (int, float)):
+                total_credits += st["credits"]
+            all_dates.update(st.get("checkin_dates") or [])
+            details.append({
+                "index": pos,
+                "id": acct.id,
+                "name": name,
+                "checked_in": bool(st.get("checked_in")),
+                "claimable": bool(st.get("claimable")),
+                "daily_credit": st.get("credits"),
+                "message": st.get("message"),
+            })
+
+        status: dict[str, Any] = {
+            "checked_in": bool(signed) and not failed,
+            "claimable": False,
+            "next_ts": next_daily_reset_epoch(),
+            "next_ts_source": "inferred",
+            "accounts": details,
+            "checkin_dates": sorted(all_dates),
+            "message": "",
+        }
+        if signed:
+            status["message"] = f"账号 {'、'.join(signed)} 签到成功"
+        if failed:
+            status["message"] = (status["message"] + " " if status["message"] else "") + \
+                f"（{failed}/{len(accounts)} 个账号签到失败）"
+        if total_credits:
+            status["credits"] = total_credits
+        return status
+
+    def _claim_for_account(self, acct: Any, *, index: int) -> dict[str, Any]:
+        """单账号签到：跑一遍页面启动，再以流水核对是否真到账。
+
+        返回结构同 :meth:`_checkin_for_account`；拿不到 token 时给 ``error``。
+        """
+        try:
+            token, _cred = ensure_account_token(acct.id)
+        except AuthError as exc:
+            return {"checked_in": False, "claimable": False, "error": str(exc)[:120]}
+        cred = load_account_cred(acct.id) or {}
+        device_id = str(cred.get("device_id") or "") or _derive_device_id(acct.id)
         self._run_page_boot(token, device_id)
         # 给上游几秒入账时间：实测到账在页面加载后数秒内
         time.sleep(2.0)
@@ -970,13 +1112,15 @@ class RaccoonProvider(BaseProvider):
         # 今天那笔 daily_grant 的 points（不是硬编码 300——上游调整过面额）。
         credits = _today_daily_grant_points(bills) if done else None
         if done:
-            log.info("raccoon 账号 %s 今日每日积分已到账（%s 分）", aid, credits)
+            log.info("raccoon 账号 %s 今日每日积分已到账（%s 分）", acct.id, credits)
         else:
-            log.warning("raccoon 账号 %s 页面启动后仍未见到今日 daily_grant", aid)
+            log.warning("raccoon 账号 %s 页面启动后仍未见到今日 daily_grant",
+                        acct.id)
         return {
             "checked_in": done,
             "claimable": not done,
             "credits": credits,
+            "checkin_dates": _daily_grant_dates(bills),
             "next_ts": next_daily_reset_epoch(),
             "next_ts_source": "inferred",
             "message": (f"签到成功，今日 +{credits:g} 分已到账" if done and credits
@@ -1069,6 +1213,36 @@ def _today_daily_grant_points(bills: list[dict[str, Any]]) -> float | None:
     return None
 
 
+def _daily_grant_dates(bills: list[dict[str, Any]]) -> list[str]:
+    """从发放流水反推**历史签到日期**（``YYYY-MM-DD``，+08:00 口径）。
+
+    为什么需要它：签到日历（``/ui`「打卡日历」）靠各通道返回的
+    ``checkin_dates`` 合并历史，raccoon 原来**一个都不给**，于是日历里
+    完全没有小浣熊——用户实报「打卡日历里也没有展示小浣熊的」（2026-11-23）。
+
+    上游没有「签到历史」接口，但流水里每笔 ``daily_grant`` 都带 ``grant_at``，
+    那就是当天签到到账的时刻，逐条取日期即可。``_bills`` 默认只拉 50 条
+    income，覆盖最近几十天，够日历用（35 天窗口）。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=8))
+    out: list[str] = []
+    for bill in bills or []:
+        if str(bill.get("biz_type") or "") != "daily_grant":
+            continue
+        try:
+            dt = datetime.fromisoformat(str(bill.get("grant_at") or ""))
+        except ValueError:
+            continue
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=tz)
+        day = dt.astimezone(tz).date().isoformat()
+        if day not in out:
+            out.append(day)
+    return sorted(out)
+
+
 def _derive_device_id(account_id: str) -> str:
     """从账号 id 派生稳定 device_id（≤64 字符，上游对超长会回 500）。
 
@@ -1158,6 +1332,27 @@ class _ReplayStream:
                 yield line
 
     async def aclose(self) -> None:
+        # ⚠️ 顺序是**契约**，不是风格：lease 必须在最外层 finally 里释放，
+        # 且结算/关流全都要在它之前、并且各自兜住 CancelledError。
+        #
+        # 2026-11-23 用户实报「raccoon 越来越慢，最后全是 429」的根因就在这里：
+        # 原来是「先 await 余额结算（网络 IO），再 finally 释放 lease」。客户端
+        # 中途断开时 Starlette 会 cancel 这个生成器，CancelledError 正好打在
+        # 结算那个 await 上——而 CancelledError 继承 BaseException，`except
+        # Exception` 兜不住，于是直接跳过了后面的 lease.release()。
+        #
+        # 每断开一次漏一个名额（每账号上限 2），漏满就**永久**拿不到，全通道
+        # 停摆，且症状极具误导性：上游完全正常（直连 1.9s），本地却排队 90s
+        # 后报「并发排队超时」。所以这里用 try/finally 把 release 提到最外层，
+        # 并把结算降级为「失败也无所谓」的旁路。
+        try:
+            await self._settle_and_close()
+        finally:
+            if self._lease is not None:
+                self._lease.release()
+
+    async def _settle_and_close(self) -> None:
+        """结算积分 + 关上游流。任何一步失败都只记日志，绝不影响 lease 释放。"""
         # 把本流解析到的 usage 写进请求级 meta：``_instrument`` 在流结束时
         # 读 ``ACCOUNT_META`` 那份 dict 落库（与 antigravity 的 _ReplayStream
         # 同一条路径）。没有 usage 时不写，让指标保持 0 而不是编数。
@@ -1168,22 +1363,23 @@ class _ReplayStream:
         # 积分结算：流结束后读一次余额，与请求前相减。
         # 必须在 aclose 之前做完——``_instrument`` 会在流结束后立刻读 meta
         # 落库，晚一步就记不上。
+        #
+        # 这里捕 BaseException：客户端断开时这条路径会被 cancel，而
+        # CancelledError 不是 Exception。吞掉它是安全的——结算只是旁路，
+        # 而且外层 finally 照样会释放 lease。
         if self._provider is not None and self._access_token:
             try:
                 after = await asyncio.to_thread(
                     self._provider._balance_now, self._access_token)
                 self._provider._settle_credit(
                     ACCOUNT_META.get(), self._balance_before, after)
-            except Exception as exc:  # noqa: BLE001 - 旁路，不能影响已完成的流
+            except BaseException as exc:  # noqa: BLE001 - 旁路，不能影响 lease 释放
                 log.debug("raccoon 积分结算失败（忽略）: %s: %s",
                           type(exc).__name__, exc)
         try:
             await self._resp.aclose()
-        except Exception:  # noqa: BLE001 - 收尾失败不影响已完成的流
+        except BaseException:  # noqa: BLE001 - 收尾失败不影响 lease 释放
             pass
-        finally:
-            if self._lease is not None:
-                self._lease.release()
 
 
 async def _to_anthropic_openai_stream(stream: "_ReplayStream",

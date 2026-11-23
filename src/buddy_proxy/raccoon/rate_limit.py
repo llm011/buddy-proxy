@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -75,12 +76,15 @@ class Lease:
     limiter: "AccountConcurrencyLimiter"
     account_id: str
     released: bool = False
+    #: 占位处（便于排查「谁没还」）。只做诊断，不影响逻辑。
+    origin: str = ""
+    acquired_at: float = 0.0
 
     def release(self) -> None:
         if self.released:
             return
         self.released = True
-        self.limiter._release(self.account_id)
+        self.limiter._release(self)
 
 
 class AccountConcurrencyLimiter:
@@ -93,6 +97,8 @@ class AccountConcurrencyLimiter:
         self._queue_timeout_s = (DEFAULT_QUEUE_TIMEOUT_S if queue_timeout_s is None
                                  else queue_timeout_s)
         self._inflight: dict[str, int] = {}
+        #: 未归还的 lease 对象（诊断用；release 时摘掉）。
+        self._live: list[Lease] = []
         self._lock = threading.Lock()
 
     @classmethod
@@ -132,17 +138,27 @@ class AccountConcurrencyLimiter:
                 cur = self._inflight.get(account_id, 0)
                 if cur < self._max:
                     self._inflight[account_id] = cur + 1
-                    return Lease(self, account_id)
+                    lease = Lease(self, account_id, acquired_at=time.monotonic(),
+                                  origin=_caller_origin())
+                    self._live.append(lease)
+                    return lease
             if time.monotonic() >= deadline:
                 log.warning(
-                    "raccoon 账号 %s 并发已满（%d/%d），排队 %.0fs 仍无空位",
+                    "raccoon 账号 %s 并发已满（%d/%d），排队 %.0fs 仍无空位；"
+                    "未归还的占位：%s",
                     account_id, self.inflight(account_id), self._max, limit,
+                    self.leaks(min_age_s=1.0) or "无（可能是瞬时并发）",
                 )
                 return None
             await asyncio.sleep(_POLL_S)
 
-    def _release(self, account_id: str) -> None:
+    def _release(self, lease: Lease) -> None:
         with self._lock:
+            try:
+                self._live.remove(lease)
+            except ValueError:
+                pass
+            account_id = lease.account_id
             cur = self._inflight.get(account_id, 0)
             if cur <= 1:
                 self._inflight.pop(account_id, None)
@@ -154,11 +170,43 @@ class AccountConcurrencyLimiter:
         with self._lock:
             return {"max": self._max, "inflight": dict(self._inflight)}
 
+    def leaks(self, min_age_s: float = 60.0) -> list[dict[str, Any]]:
+        """占位超过 ``min_age_s`` 还没还的 lease（诊断用）。
+
+        存在的理由：2026-11-23 用户实报「raccoon 一直 429」，症状是**上游完全
+        正常**（直连 1.9s）而本地闸门恒满、每个请求排队 90s 后超时。也就是
+        某个 lease 拿到手就没还回去，把每账号 2 个名额永久吃掉。没有这个
+        视图只能靠猜，所以留一份「谁占着、占多久、从哪拿的」。
+        """
+        now = time.monotonic()
+        with self._lock:
+            out: list[dict[str, Any]] = []
+            for lease in self._live:
+                age = now - lease.acquired_at
+                if age >= min_age_s:
+                    out.append({
+                        "account": lease.account_id,
+                        "age_s": round(age, 1),
+                        "origin": lease.origin,
+                    })
+            return out
+
+
+def _caller_origin() -> str:
+    """占位处的 ``文件:行``（只给诊断用，不进正常日志）。
+
+    走 ``sys._getframe`` 而不是 ``traceback.extract_stack``：后者要格式化整条
+    栈，在每次 acquire 上都做太贵；这里只要一帧。
+    """
+    try:
+        frame = sys._getframe(2)
+        return f"{frame.f_code.co_filename.rsplit('/', 1)[-1]}:{frame.f_lineno}"
+    except (AttributeError, ValueError):
+        return ""
+
 
 #: 进程级单例（与 provider 同生命周期）。
 _limiter = AccountConcurrencyLimiter.from_env()
-
-
 def limiter() -> AccountConcurrencyLimiter:
     """取进程级限流器（测试可 monkeypatch 本函数或直接换 ``_limiter``）。"""
     return _limiter
