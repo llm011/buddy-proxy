@@ -84,7 +84,19 @@ def _openai_base_for(anthropic_base: str) -> str:
 # id 用**小写**（与全站 models_config.json / Claude Code 侧配置一致），
 # 这样 forward_chat 的「自动匹配 provider.models()」能命中 zcode，
 # 不至于让 glm-* 请求错误落到 codebuddy 兜底通道。
+#
+# ``max_tokens`` 上游上限 **131072**，超了回
+# ``400 {"code":1210,"message":"max_tokens参数非法：限制数值范围[1,131072]"}``
+# （2026-11-23 实测）。客户端传更大值时要提前夹住，否则用户看到的是一个
+# 跟模型能力无关的参数报错。注意这**不是**上下文窗口（那个约 1M，见下）。
 DEFAULT_MODELS: dict[str, str] = {
+    # 5.4 只有裸名一个：``glm-5.4-flash`` / ``-flashx`` / ``-turbo`` 上游一律
+    # 回 1211「模型不存在」（2026-11-23 实测，``/models`` 列表里也只有
+    # ``glm-5.4``）。别照 5.3 的形状顺手补变体，那是凭空的。
+    #
+    # 上下文窗口是**二分实测**的：1037500 token 通过、1053125 被
+    # ``1261 Prompt exceeds max length`` 拒 → 约 1M，与 5.3 同档。
+    "glm-5.4": "GLM-5.4 (thinking, multimodal, 1M ctx)",
     "glm-5.3": "GLM-5.3 (thinking, 1M ctx)",
     "glm-5.3-flash": "GLM-5.3-Flash (thinking, multimodal, 1M ctx)",
     "glm-5.3-flashx": "GLM-5.3-FlashX (thinking, 1M ctx)",
@@ -97,6 +109,7 @@ DEFAULT_MODELS: dict[str, str] = {
 # GLM-5.3-FlashX / GLM-5.3-flashx 四种写法都解析到同一个 GLM-5.3-FlashX
 # （乱名才报 1211 模型不存在）。保留映射只为与既有约定一致、日志可读。
 MODEL_NAME_CANONICAL: dict[str, str] = {
+    "glm-5.4": "GLM-5.4",
     "glm-5.3": "GLM-5.3",
     "glm-5.3-flash": "GLM-5.3-Flash",
     "glm-5.3-flashx": "GLM-5.3-FlashX",
@@ -118,7 +131,26 @@ MODEL_NAME_CANONICAL: dict[str, str] = {
 #: OpenAI 口径（**含**缓存命中），估算前先减掉 cached 得到未命中输入。
 #: GLM-5-Turbo / GLM-4.7 上游自动切换为 GLM-5.3-Flash，按 Flash 系数抵扣；
 #: glm-5.3-flashx 套餐未开放（调用即被拒），不配系数 → 不出估算值。
+#:
+#: ``glm-5.4`` 的系数官方文档还没更新（docs 仍停在 5.3 那版，2026-11-23 查），
+#: 所以是**实测标定**的，方法：拿真实 key 发已知 token 量的请求，用
+#: ``/api/monitor/usage/quota/limit`` 的 currentValue 差值反解
+#: ``(Δ积分×10000 - 已知项) / 未知 token 数``。三个系数分开测，各自放大信号：
+#:
+#:   * output 16.0 —— 小 prompt + 长输出（3 次共 16124 输出 token，Δ=26 分）
+#:   * input  4.60 —— 30 万 token 唯一输入（避免缓存）+ 3 token 输出，Δ=138 分
+#:     （另用 52 万 token + ``max_tokens=1`` 零输出复核得 4.603）
+#:   * cached 1.10 —— 同 body 连发两次，第二次 cached=400000，Δ=44 分
+#:
+#: **精度警告**：这个计数器只记到**整数分**，单请求误差 ±0.5 分。所以要测某个
+#: 系数就把该 token 量放大到几百分，别用小请求——实测 304 输出 token 的请求
+#: 额度变化是 **0**，据此反解会算出负数。cached 那组 44 分的样本对应约
+#: ±0.01 的系数误差，够用但不算宽裕；官方更新文档后应回来核对一次。
+#:
+#: 比例与 5.3 的 (6.9, 1.7, 24.0) 同构（约 2/3），但**不能拿 2/3 顶替**：
+#: 按 2/3 算 5.4 是 (4.6, 1.13, 16.0)，cached 实测 1.10，估算会偏。
 CREDIT_COEFFS: dict[str, tuple[float, float, float]] = {
+    "glm-5.4": (4.6, 1.1, 16.0),
     "glm-5.3": (6.9, 1.7, 24.0),
     "glm-5.3-flash": (2.3, 0.56, 8.0),
     "glm-5-turbo": (2.3, 0.56, 8.0),
