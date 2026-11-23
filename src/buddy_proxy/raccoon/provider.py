@@ -62,14 +62,18 @@ from .credentials import (
     has_relogin_cred,
     list_accounts,
     load_account_cred,
+    save_account_cred,
 )
 from .login import endpoint, fetch_user_info, session_healthy
 from .upstream import (
     BALANCE_PATH,
     BILLS_PATH,
+    BIND_DEVICE_PATH,
     CATALOG_PATH,
     CHAT_PATH,
     SETTING_INFO_PATH,
+    USER_INFO_PATH,
+    bind_device_body,
     has_daily_grant_today,
     next_daily_reset_epoch,
     page_boot_requests,
@@ -318,6 +322,10 @@ class RaccoonProvider(BaseProvider):
             balance_before = await asyncio.to_thread(
                 self._balance_now, access_token)
 
+            # 确保设备已绑定（首次会打一次上游，之后走内存标记）。
+            # 未绑定设备的会话调模型 = 200108 风控的触发形态，见 _ensure_device_bound。
+            await asyncio.to_thread(_ensure_device_bound, acct.id, access_token)
+
             # 并发闸门：上游上限约 5，超了会停摆 25 分钟，必须本地卡住。
             lease = await rate_limit.limiter().acquire(acct.id)
             if lease is None:
@@ -325,7 +333,9 @@ class RaccoonProvider(BaseProvider):
                 continue
 
             upstream_body = build_chat_body(body, model=upstream_model, stream=stream)
-            headers = build_headers(access_token)
+            # 必须带设备头：绑定成功后上游按设备认会话，聊天却不声明自己属于
+            # 那台设备 = 未绑定设备在调模型，正是 200108 风控抓的形态。
+            headers = build_headers(access_token, _device_id_for(acct.id))
             url = f"{endpoint()}{CHAT_PATH}"
             try:
                 req = client.build_request(
@@ -1252,6 +1262,104 @@ def _derive_device_id(account_id: str) -> str:
     import hashlib
 
     return hashlib.sha256(f"raccoon-device:{account_id}".encode()).hexdigest()[:32]
+
+
+def _device_id_for(account_id: str) -> str:
+    """取该账号的 device_id：优先用绑定成功后上游回的 ``dev...``。
+
+    上游绑定接口会分配自己的设备 id（``dev660e...``），之后的请求应该带**它**
+    而不是我们本地派生那个哈希值——带错的 id 与「没绑定」没区别，风控照样
+    会盯上。绑定成功后由 :func:`_ensure_device_bound` 写回 cred。
+
+    读不到 cred（如账号已被删除）时退回派生值，至少不比不带设备头更差。
+    """
+    cred = load_account_cred(account_id) or {}
+    return str(cred.get("device_id") or "") or _derive_device_id(account_id)
+
+
+#: 已确认绑定过的账号（内存标记，避免每个请求都查一次 user_info）。
+_bound_ok: set[str] = set()
+
+#: 绑定失败后的重试间隔（秒）：绑不上时别每个请求都撞一次上游。
+_bind_retry_after: dict[str, float] = {}
+_BIND_RETRY_S = 600.0
+
+
+def _ensure_device_bound(account_id: str, access_token: str) -> None:
+    """确保该账号的设备已绑定；未绑定就绑一次（失败静默，不阻断转发）。
+
+    ## 为什么必须做
+
+    2026-11-23 排查「新号用一阵就被风控（200108）」的根因：绑定请求一直
+    400（字段名写成 ``device_id``，上游要 ``client_device_id``），设备从未
+    绑上，``user_info`` 永远是 ``trusted: false / reason:
+    session_without_bound_device``。所有模型调用都来自一个未绑定设备的会话，
+    累积调用量后整号被风控——与并发/频率无关（实测触发时在途并发只有 2）。
+
+    绑定成功后上游回 ``data.device_id``（``dev...``），必须写回 cred 并在
+    后续请求头里带上，否则仍被视为陌生会话。
+
+    失败不抛：绑定是「降低风控概率」的加固，不该把能用的转发搞挂。
+    """
+    if account_id in _bound_ok:
+        return
+    now = time.monotonic()
+    if now < _bind_retry_after.get(account_id, 0.0):
+        return
+    device_id = _derive_device_id(account_id)
+    try:
+        base = endpoint()
+        headers = build_headers(access_token, device_id)
+        headers["Accept"] = "application/json"
+        with httpx.Client(timeout=_TIMEOUT) as c:
+            # 先探活：已绑定就只刷心跳，省一次写操作
+            info = c.get(f"{base}{USER_INFO_PATH}", headers=headers)
+            trusted = False
+            if info.status_code < 400:
+                try:
+                    td = (info.json().get("data") or {}).get("trusted_device") or {}
+                    trusted = bool(td.get("trusted")) and not td.get("needs_bind")
+                    upstream_dev = str(td.get("device_id") or "")
+                except (ValueError, AttributeError):
+                    upstream_dev = ""
+            else:
+                upstream_dev = ""
+            if trusted:
+                if upstream_dev:
+                    _remember_device_id(account_id, upstream_dev)
+                _bound_ok.add(account_id)
+                return
+            resp = c.post(f"{base}{BIND_DEVICE_PATH}", headers=headers,
+                          json=bind_device_body(device_id))
+            if resp.status_code >= 400:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:120]}")
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {}
+            upstream_dev = str((payload.get("data") or {}).get("device_id") or "")
+            if upstream_dev:
+                _remember_device_id(account_id, upstream_dev)
+            _bound_ok.add(account_id)
+            _bind_retry_after.pop(account_id, None)
+            log.info("raccoon 账号 %s 设备已绑定（trusted），风控风险降低",
+                     account_id)
+    except Exception as exc:  # noqa: BLE001 - 加固动作，失败不阻断转发
+        _bind_retry_after[account_id] = now + _BIND_RETRY_S
+        log.warning("raccoon 账号 %s 设备绑定失败（%s），%.0fs 后重试",
+                    account_id, exc, _BIND_RETRY_S)
+
+
+def _remember_device_id(account_id: str, device_id: str) -> None:
+    """把上游分配的设备 id 写回 cred（失败只记日志）。"""
+    try:
+        cred = load_account_cred(account_id) or {}
+        if cred.get("device_id") == device_id:
+            return
+        cred["device_id"] = device_id
+        save_account_cred(cred)
+    except Exception as exc:  # noqa: BLE001 - 写盘失败不该影响转发
+        log.debug("raccoon 账号 %s 设备 id 写回失败: %s", account_id, exc)
 
 
 def _epoch_from_iso(value: str) -> float:
