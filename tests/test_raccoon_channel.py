@@ -652,16 +652,62 @@ def test_next_daily_reset_is_next_midnight_cst():
 
 
 def test_checkin_status_and_claim_carry_credits():
-    """签到状态/领取都要带 ``credits``，日历侧边栏靠它显示「加了多少」。"""
+    """签到状态/领取都要带 ``credits``，日历侧边栏靠它显示「加了多少」。
+
+    2026-11-23 改成多账号聚合后，单账号分支仍直接返回 ``"credits": credits``，
+    多账号分支则累加进 ``status["credits"]``——两条路都必须带上。
+    """
     import inspect
 
     from buddy_proxy.raccoon.provider import RaccoonProvider
 
     assert getattr(RaccoonProvider, "supports_checkin", False) is True
-    src_status = inspect.getsource(RaccoonProvider.checkin_status)
-    src_claim = inspect.getsource(RaccoonProvider.checkin_claim)
-    assert '"credits": credits' in src_status, "status 要带 credits"
-    assert '"credits": credits' in src_claim, "claim 要带 credits（日历取这个值）"
+    # 单账号直通分支在 _checkin_for_account / _claim_for_account 里
+    assert '"credits": credits' in inspect.getsource(
+        RaccoonProvider._checkin_for_account)
+    assert '"credits": credits' in inspect.getsource(
+        RaccoonProvider._claim_for_account)
+    # 多账号聚合分支：累加后写入
+    for fn in (RaccoonProvider.checkin_status, RaccoonProvider.checkin_claim):
+        src = inspect.getsource(fn)
+        assert 'status["credits"] = total_credits' in src, \
+            f"{fn.__name__} 的多账号分支要累加 credits（日历取这个值）"
+
+
+def test_checkin_dates_feed_the_calendar():
+    """签到必须回 ``checkin_dates``，否则「打卡日历」里看不到小浣熊。
+
+    2026-11-23 用户实报「打卡日历里也没有展示小浣熊的」。日历靠各通道返回的
+    ``checkin_dates`` 合并历史（见 ``BenefitsManager.snapshot``），raccoon 原来
+    一个都不给。上游没有签到历史接口，只能从流水里的 ``daily_grant`` 反推。
+    """
+    import inspect
+
+    from buddy_proxy.raccoon.provider import (
+        RaccoonProvider,
+        _daily_grant_dates,
+    )
+
+    # 单账号与多账号两条路都要带上
+    assert '"checkin_dates"' in inspect.getsource(
+        RaccoonProvider._checkin_for_account)
+    assert '"checkin_dates"' in inspect.getsource(
+        RaccoonProvider._claim_for_account)
+    assert '"checkin_dates": sorted(all_dates)' in inspect.getsource(
+        RaccoonProvider.checkin_status)
+
+    # 反推口径：只认 daily_grant，按 +08:00 取日期，去重排序
+    bills = [
+        {"biz_type": "daily_grant", "grant_at": "2026-11-23T00:00:05+08:00",
+         "points": 300},
+        {"biz_type": "daily_grant", "grant_at": "2026-11-22T00:00:03+08:00",
+         "points": 300},
+        {"biz_type": "daily_grant", "grant_at": "2026-11-23T00:00:05+08:00",
+         "points": 300},   # 重复日期只留一条
+        {"biz_type": "consume", "grant_at": "2026-11-21T10:00:00+08:00",
+         "points": -2},    # 消费流水不是签到
+    ]
+    assert _daily_grant_dates(bills) == ["2026-11-22", "2026-11-23"]
 
 # ---------------------------------------------------------------------------
 # 11. 流式必须直通（不能过 gemini 转换器）
@@ -896,3 +942,73 @@ def test_account_risk_control_is_account_level_not_model_level():
 
     # 冷却时长：30 分钟（不是模型级那种 60 秒）
     assert failover._RISK_CONTROL_COOLDOWN_S == 1800.0
+
+
+# ---------------------------------------------------------------------------
+# 7. lease 泄漏：客户端断开时必须释放并发名额
+# ---------------------------------------------------------------------------
+
+def test_replay_stream_releases_lease_when_settlement_is_cancelled():
+    """客户端断开（cancel）时 lease 必须释放——否则名额被永久吃掉。
+
+    2026-11-23 用户实报「小浣熊越来越慢，最后全是 429」的根因：
+
+    ``_ReplayStream.aclose`` 原来是「先 await 余额结算（网络 IO），再在
+    finally 里释放 lease」。客户端中途断开时 Starlette 会 cancel 这个生成器，
+    ``CancelledError`` 正好打在结算那个 await 上——而它继承 ``BaseException``，
+    ``except Exception`` 兜不住，于是跳过了 ``lease.release()``。
+
+    每断开一次漏一个名额（每账号上限 2），漏满就**永久**拿不到，全通道停摆。
+    症状极具误导性：上游完全正常（直连 1.9s），本地却排队 90s 报「并发排队
+    超时」，看起来像账号被风控。
+
+    这条测试锁「cancel 打到结算上，名额仍要还回来」。实现要点：结算必须
+    卡在一个**可被取消的 async 点**上（``asyncio.Event().wait()``）。早先
+    版本用 ``time.sleep`` 在线程池里模拟，取消时线程照跑不误、``finally``
+    仍会执行，于是测试在**有 bug 的实现上也绿**——反向验证过才发现的。
+    """
+    from buddy_proxy.raccoon.provider import _ReplayStream
+
+    limiter = AccountConcurrencyLimiter(max_concurrent=2, queue_timeout_s=0.1)
+    gate = asyncio.Event()          # 永不 set：结算就停在这里等取消
+
+    class _Resp:
+        is_closed = False
+
+        async def aclose(self):
+            self.is_closed = True
+
+    class _Provider:
+        def _balance_now(self, token):
+            return 1.0
+
+        def _settle_credit(self, *a, **k):
+            pass
+
+    async def run():
+        lease = await limiter.acquire("acct")
+        assert lease is not None
+        stream = _ReplayStream(
+            _Resp(), [], lines=None, lease=lease, provider=_Provider(),
+            access_token="tok", balance_before=1.0,
+        )
+        # 把结算的 await 换成永不完成的 gate（真实的 to_thread 无法被 cancel，
+        # 用它测不出「取消打在 await 上」这个形态）。
+        async def _blocked():
+            await gate.wait()
+
+        stream._settle_and_close = _blocked          # type: ignore[method-assign]
+        task = asyncio.create_task(stream.aclose())
+        await asyncio.sleep(0.05)                    # 让它进到 gate.wait()
+        task.cancel()                                # 客户端断开
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return limiter.inflight("acct")
+
+    left = asyncio.run(run())
+    assert left == 0, (
+        f"cancel 后仍有 {left} 个名额没还——lease 泄漏了，"
+        f"漏满 max_concurrent 后整个通道会永久 429"
+    )
