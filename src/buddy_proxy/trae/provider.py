@@ -108,11 +108,23 @@ def _is_old_generation(name: str, pool: set[str]) -> bool:
     点名 glm-5.1 / glm-5.2 / qwen-3.7-plus / minimax-m3 / kimi-k3 这批老模型
     没用——「有了 kimi-k3.1-pro 就不需要 kimi-k3」）。纯代号尾巴（gpt-6-sol
     的 sol）不进家族名，永不因此淘汰。
+
+    例外是 :data:`_GENERATION_FLOOR`：某些家族有「保留底线」，代际不低于它的
+    一律不被淘汰（见那个常量的说明）。
     """
     parsed = _parse_generation(name)
     if parsed is None:
         return False
     family, version = parsed
+    # 家族保留底线：不低于它的代际不参与淘汰。glm-5.4 上线时靠这一条保住
+    # 整个 5.3 家族（用户 2026-11-24 明确要求两代并存）。
+    #
+    # ⚠ 必须用 ``in`` 判断再取值，不能写 ``version >= _GENERATION_FLOOR.get(family, 0.0)``
+    # ——缺省 0.0 会让**所有**家族的版本都 >= 0，等于把整个代际收敛关掉
+    # （踩过：gpt-5.6 / deepseek-v4-pro 全都重新冒出来，三条测试当场红）。
+    floor = _GENERATION_FLOOR.get(family)
+    if floor is not None and version >= floor:
+        return False
     for other in pool:
         if other == name:
             continue
@@ -120,6 +132,21 @@ def _is_old_generation(name: str, pool: set[str]) -> bool:
         if op is not None and op[0] == family and op[1] > version:
             return True
     return False
+
+
+#: 家族 → **保留底线**（该代际及以上永不因代际收敛被隐藏）。
+#:
+#: 默认行为是「有新的就藏旧的」：用户 2026-10-25 点名 glm-5.1 / glm-5.2 这批
+#: 没用，收敛掉是对的。但 2026-11-24 用户要求 glm-5.4 上线后**不要顶掉 5.3**
+#: ——两个都保留。
+#:
+#: 为什么不整族豁免：收敛是按家族名判的，豁免整个 glm 家族会让 glm-5.1 /
+#: glm-5.2 也重新冒出来（用户已明确说过没用）。设底线更精准——5.3 及以上
+#: 留着，5.2 及以下照旧被 5.3 顶掉。
+#:
+#: 为什么 5.3 值得保：`glm-5.3-flash` / `-flashx` 是本机实测能出流的廉价快档，
+#: 日常小请求用它比 5.4 划算。整族藏掉等于拿一个新模型换掉三个能用的。
+_GENERATION_FLOOR: dict[str, float] = {"glm": 5.3}
 
 #: 4001 后的安静节流窗口：上游对**刚失败**的账号有快速重试惩罚（2026-10-07
 #: 实测：流式探测 4001 会把该模型「毒」~30-60s，期间**连非流式也一并 4001**，
