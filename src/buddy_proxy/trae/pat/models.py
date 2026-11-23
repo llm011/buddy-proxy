@@ -45,13 +45,16 @@ PAT_PUBLIC_MODELS: dict[str, tuple[str, str]] = {}
 PAT_MODEL_FUNCTIONS: dict[str, str] = {}
 # 模型 -> 上游频控窗口 (requests, window_s)，见 pacing；未声明的模型不节流
 PAT_MODEL_RATE_LIMITS: dict[str, tuple[int, float]] = {}
-# 模型 -> 扣哪个额度包（models_config.json 的 ``quota_pack``）。
-# 缺省 = 该模型不计入任何 entitlement 包（见模块末尾的长注释：实测公共模型
-# 走免费额度，从 0 涨起来的包一个都没动）。
+# 模型 -> 这份用量记在哪（models_config.json 的 ``quota_pack``）：
+# 日包名 / 「CN 共享余额」/ 「免费（不扣余额）」。2026-11-23 逐模型实测填充，
+# 现在没有缺省值——目录里每个模型都有归属。
 PAT_MODEL_QUOTA_PACKS: dict[str, str] = {}
 # 模型 -> 实测费率倍数（models_config.json 的 ``credit_rate``，以
-# deepseek-v4.1-flash = 1.0 为基准）。0 = 实测不扣余额；None = 走日包，
-# 余额维度不扣（花的是包里按 token 折的点）。见模块末尾实测说明。
+# **glm-5.3 = 1.0** 为基准）。三种取值语义不同，UI 上也分开渲染：
+#   数字 > 0 → 相对 glm-5.3 的倍数（同样的 prompt 花多少倍余额）
+#   0        → 实测不扣共享余额（调用前后 total_balance 没变）
+#   None     → 走日包：余额维度不扣，但花的是包里按 token 折的点，不是免费
+# 实测方法与原始读数见 models_config.json 的 credit_rate / quota_pack 注释。
 PAT_MODEL_CREDIT_RATES: dict[str, float | None] = {}
 _config_mtime: float | None = None
 
