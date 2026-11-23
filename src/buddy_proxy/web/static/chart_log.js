@@ -66,9 +66,11 @@ function renderGroups() {
     if (!rate) {
       // pack 里带着口径（「PTU 预留额度（未计费）」/「按量额度（未计费）」/
       // 「未观察到扣费」），从它反推，别在 JS 里再猜一遍 account_type。
-      const kind = !pack ? 'ptu'
-        : pack.startsWith('PTU') ? 'ptu'
-        : pack.startsWith('按量') ? 'paygo' : '';
+      // 没有 pack 就兜底成「未观察到扣费」，**不要**猜成 ptu：这个函数是通用的，
+      // 别的通道将来传 rate=0 而没有 pack 时，猜成 ptu 等于凭空编一个
+      // account_type。要精确就到数据层把口径带上（models_config.json 里已经带了）。
+      const kind = pack && pack.startsWith('PTU') ? 'ptu'
+        : pack && pack.startsWith('按量') ? 'paygo' : '';
       const k = _FREE_KINDS[kind];
       return `<span class="tag ok" title="${esc(k.tip)}">${esc(k.txt)}</span>`;
     }

@@ -2048,6 +2048,44 @@ def test_quota_pack_marks_only_models_measured_to_consume(monkeypatch):
     }
     assert {m for m, v in packs.items() if v == "未观察到扣费"} == {"gemini-3-flash"}
 
+    # 标签只是结论，**口径要能追溯**：这三个 PTU 的判定来自实测的
+    # ``account_type``。早期版本没落这个字段，于是「谁被标成 PTU」全靠人肉
+    # 记忆，上游把某模型从 ptu 挪到 paygo 也没人会发现。
+    #
+    # 注意：这条断言锁的是**我们记录的观测**，不是上游的承诺。字段值是
+    # 2026-11-24 探测的快照；上游调整后要按正文的方法重测再改配置。
+    accts = {m: cfg.get("account_type") for m, cfg in _traepat_configs().items()}
+    assert {m for m, a in accts.items() if a == "ptu"} == {
+        "gpt-5.4", "gpt-5.5-max", "gpt-5.6-terra-max",
+    }
+    assert {m for m, a in accts.items() if a == "paygo"} == {
+        "gpt-5.2", "gpt-5.6-luna-max",
+    }
+    assert accts["gemini-3-flash"] == ""
+    # 标签必须和 account_type 对得上——两边可以独立写错，这条把它们钉在一起
+    for m, acct in accts.items():
+        if acct is None:
+            continue
+        want = {"ptu": "PTU", "paygo": "按量", "": "未观察到扣费"}[acct]
+        assert packs[m].startswith(want), f"{m}: 标签 {packs[m]} 与 account_type={acct!r} 不一致"
+
+
+def _traepat_configs() -> dict[str, dict]:
+    """读 `models_config.json` 里 traepat 那几个模型的原始配置。
+
+    只返回有 ``quota_pack`` 的（即 PAT 目录内的模型）——同名模型在别的通道
+    也有条目，那些没有这些字段。
+    """
+    import json
+    from pathlib import Path
+
+    # 不能用 ``buddy_proxy.__file__``：这个包是命名空间包，``__file__`` 是 None
+    # （已实测）。从 tests/ 往上一级推仓库根，和别处读同一个配置文件的写法一致。
+    path = Path(__file__).resolve().parents[1] / "src" / "buddy_proxy" / "web" / "models_config.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {m["id"]: m for m in raw["models"]
+            if m.get("provider") == "traepat" and "quota_pack" in m}
+
 
 def _pat_model_ids() -> list[str]:
     from buddy_proxy.trae.pat import pat_model_names
