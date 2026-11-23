@@ -689,6 +689,18 @@ function _quota_account_count(items) {
   return ids.size || 1;
 }
 
+function renderQuotaLoadingCard(panel, name, tag) {
+  panel.innerHTML = `
+    <div class="chart-card" style="margin-top:14px">
+      <div class="pat-head">
+        <span class="name">${escapeHtml(name)}</span>
+        ${tag ? `<span class="tag">${escapeHtml(tag)}</span>` : ''}
+        <span class="grow"></span>
+        <span class="muted" style="font-size:12px">⟳ 额度加载中…</span>
+      </div>
+    </div>`;
+}
+
 function renderBenefits(opts) {
   if (!BENEFITS) return;
   const quiet = !!(opts && opts.quiet);

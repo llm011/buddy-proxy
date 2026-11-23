@@ -130,6 +130,7 @@ function renderQoderPanel() {
   if (!panel) return;
   const qoder = (BENEFITS.providers || []).find(p => p.id === 'qoder' && !p.disabled);
   if (!qoder) { panel.innerHTML = ''; return; }  // 通道未注册（没加 --qoder）：整块不渲染
+  if (qoder.loading) return renderQuotaLoadingCard(panel, 'Qoder', 'Qoder 订阅');
 
   // 按「Qoder #N」分组（label 形如「Qoder #1 · 订阅额度」），kimi 同款切法。
   const groups = new Map();

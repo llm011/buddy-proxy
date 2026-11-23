@@ -144,6 +144,7 @@ function renderKimiPanel() {
   if (!panel) return;
   const kimi = (BENEFITS.providers || []).find(p => p.id === 'kimi' && !p.disabled);
   if (!kimi) { panel.innerHTML = ''; return; }  // 通道未注册（没加 --kimi）：整块不渲染
+  if (kimi.loading) return renderQuotaLoadingCard(panel, 'Kimi', 'Kimi Code 订阅');
 
   // 按「Kimi #N」分组（label 形如「Kimi #1 · 5 小时窗口」），antigravity 同款切法。
   // 静态说明条（未登录引导/查询失败）没有进度条语义，不进账号分组，横贯全宽。
