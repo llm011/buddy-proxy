@@ -197,3 +197,32 @@ def test_non_fast_path_still_blocks_and_refreshes():
         assert p.quota_calls == 1, "默认路径必须真查一次"
 
     asyncio.run(run())
+
+
+def test_fast_only_fresh_failure_cache_does_not_hammer_upstream():
+    """新鲜的失败缓存**不许**每轮都重查上游。
+
+    ``_peek_or_kick`` 第一版无条件 ``_kick_refresh``，于是每次首屏轮询都会去打
+    一遍已经挂掉的上游——失败通道越慢，轮询把它打得更慢（实测 3 轮 = 3 次上游
+    请求）。失败结果有 ``FAILURE_TTL_S``（30s）短 TTL，窗口内应当只查一次，
+    判据必须与 ``_cached`` 完全一致。
+    """
+
+    async def run():
+        p = _SlowProvider(delay=0.0)
+        p._quota = {"error": "上游不可达"}
+        mgr = _manager({})
+        mgr._providers = lambda: {"fake": p}
+        mgr._cache["quota:fake"] = (time.time(), {"error": "上游不可达"})
+        for _ in range(3):
+            await mgr.snapshot(fast_only=True)
+            await asyncio.gather(*mgr._refreshing.values(), return_exceptions=True)
+        assert p.quota_calls == 0, (
+            f"30s 短 TTL 内不该重查，实际打了 {p.quota_calls} 次上游")
+        # 过期后才允许刷一次
+        mgr._cache["quota:fake"] = (
+            time.time() - bm.FAILURE_TTL_S - 1, {"error": "上游不可达"})
+        await mgr.snapshot(fast_only=True)
+        assert mgr._refreshing, "过期失败缓存应排后台刷新"
+
+    asyncio.run(run())

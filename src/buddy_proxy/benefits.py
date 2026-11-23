@@ -800,10 +800,13 @@ class BenefitsManager:
             self._kick_refresh(key, fn, *args)
             return None
         data = cached[1]
-        # 需要刷新就排后台（_kick_refresh 自带同键去重），但无论刷不刷都先回旧值
-        if _is_failure(data) or _state_flipped(data, time.time()) \
-                or time.time() - cached[0] >= (
-                    FAILURE_TTL_S if _is_failure(data) else SNAPSHOT_TTL_S):
+        # 新鲜度判据与 _cached 完全一致（新鲜就回、不新鲜才刷），只把「不新鲜」
+        # 的处理从**同步重查**换成**后台刷新**。这里不能无条件 kick——失败结果
+        # 有 30s 短 TTL，无条件重查等于每轮首屏都去打一遍已经挂掉的上游，把慢
+        # 通道拖得更慢（实测：3 轮轮询打出 3 次上游请求，原语义是 30s 内只查一次）。
+        now = time.time()
+        ttl = FAILURE_TTL_S if _is_failure(data) else SNAPSHOT_TTL_S
+        if _state_flipped(data, now) or now - cached[0] >= ttl:
             self._kick_refresh(key, fn, *args)
         return data
 
