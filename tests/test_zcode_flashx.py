@@ -211,6 +211,40 @@ def test_glm_5_4_catalog_tables_stay_in_sync():
     assert MODEL_NAME_CANONICAL["glm-5.4"] == "GLM-5.4"
 
 
+def test_glm_5_4_declares_vision_in_catalog():
+    """``models()`` 要把实测能力带给下游——5.4 只由 zcode/glm 提供，没人替它补。
+
+    ``models()`` 原本只吐 id + 描述，而 ``aggregate_models`` 对能力字段是「组里
+    有几条合并几条」：一条都没报就是**没有这个字段**，``/v1/models`` 于是把 5.4
+    报成 ``supports_images: false``。对多通道模型无所谓（别的通道会报并集），但
+    5.4 目前只有 zcode 和同源的 glm 两个通道——codebuddy 回 11102、traepat 不在
+    目录。客户端据此在本地把图剥掉再发，而它明明能看图（anthropic 端点带 base64
+    图实测 200 且答对了颜色）。
+
+    断言用「字段存在 + images 为真」而不是逐个比数值：数值由
+    ``test_glm_5_4_limits_are_measured`` 单独锁，改标定值时只动一处。
+    """
+    from buddy_proxy.providers.zcode import ZcodeProvider
+
+    entry = next(m for m in ZcodeProvider().models() if m["id"] == "glm-5.4")
+    assert {"images", "tool_call", "reasoning", "max_input", "max_output"} <= set(entry)
+    assert entry["images"] is True
+
+
+def test_glm_5_4_limits_are_measured():
+    """窗口与输出上限是标定值，改动前要重测。
+
+    1M 上下文：1,000,000 token 通过、1,100,000 报 ``1261 Prompt exceeds max
+    length``；max_tokens 131072 合法、131073 起报 ``1210 限制数值范围``。
+    这些数只是**目录元数据**，本仓库没有拿 max_output 去夹请求的代码——别指望
+    改这里能防住上游那条 1210。
+    """
+    from buddy_proxy.providers.zcode import GLM_54_MAX_INPUT, GLM_54_MAX_OUTPUT
+
+    assert GLM_54_MAX_INPUT == 1_048_576
+    assert GLM_54_MAX_OUTPUT == 131_072
+
+
 def test_glm_5_4_credit_estimate_uses_measured_coeffs():
     """5.4 的抵扣系数是实测标定的（官方文档还没更新到 5.4）。
 
