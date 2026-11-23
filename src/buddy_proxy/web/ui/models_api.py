@@ -72,6 +72,10 @@ def _provider_models(provider: Any) -> list[dict[str, Any]]:
             # 不计入任何包，模型页就不显示包名——「不显示」本身就是信息，
             # 不要为了列对齐补一个「无」。
             "quota_pack": m.get("quota_pack"),
+            # 实测费率倍数（以 deepseek-v4.1-flash = 1.0 为基准）。0 = 不扣余额；
+            # null = 走日包（余额维度不扣，花的是包里的点）。两者都是 "不花余额"，
+            # 但语义不同——UI 上别合并成一个「免费」。
+            "credit_rate": m.get("credit_rate"),
         })
     return models
 

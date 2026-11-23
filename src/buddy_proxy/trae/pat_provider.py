@@ -32,7 +32,7 @@ class TraePatProvider(TraeProvider):
     def models(self) -> Sequence[dict[str, Any]]:
         if not pat_enabled():
             return []
-        from .pat import PAT_MODEL_QUOTA_PACKS, pat_model_meta
+        from .pat import PAT_MODEL_CREDIT_RATES, PAT_MODEL_QUOTA_PACKS, pat_model_meta
         meta = pat_model_meta()
         out: list[dict[str, Any]] = []
         for m in pat_model_names():
@@ -57,6 +57,7 @@ class TraePatProvider(TraeProvider):
                 # 实测从 0 涨起来的包一个都没动（gpt-5.4 / gpt-5.5-max /
                 # gemini-3-flash 都是这样，虽然 account_type 报 ptu/paygo）。
                 "quota_pack": PAT_MODEL_QUOTA_PACKS.get(m),
+                "credit_rate": PAT_MODEL_CREDIT_RATES.get(m),
             })
         return out
 
