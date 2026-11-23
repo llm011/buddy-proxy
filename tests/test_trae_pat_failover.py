@@ -2032,12 +2032,59 @@ def test_quota_pack_marks_only_models_measured_to_consume(monkeypatch):
     assert packs["gpt-6.1-sol"] == "日包（GPT-6.1）"
     assert packs["gpt-6-astra-max"] == "日包（GPT-6）"
 
-    # 免费那 5 个最容易误标成扣余额——它们走 plus 网关，account_type 还报
-    # ptu / paygo，看着像在花钱，实测两个计数器都是零。
-    assert {m for m, v in packs.items() if v.startswith("免费")} == {
-        "gpt-5.4", "gpt-5.2", "gpt-5.5-max", "gpt-5.6-luna-max",
-        "gpt-5.6-terra-max", "gemini-3-flash",
+    # 「查不到扣费」的 6 个分三种口径——**不能合并成一个「免费」**：
+    #
+    #   PTU 预留额度   包月预置吞吐，按并发/速率限流，不计 token
+    #   按量额度       account_type 报 paygo，但额度页看不到消耗
+    #   未观察到扣费    account_type 为空，走公共网关，同样查不到
+    #
+    # 为什么措辞这么小心：实测只能说「查不到计费记录」，说明不了「上游不收钱」。
+    # 写成「免费」是在替上游下它没给过的结论。
+    assert {m for m, v in packs.items() if v.startswith("PTU")} == {
+        "gpt-5.4", "gpt-5.5-max", "gpt-5.6-terra-max",
     }
+    assert {m for m, v in packs.items() if v.startswith("按量")} == {
+        "gpt-5.2", "gpt-5.6-luna-max",
+    }
+    assert {m for m, v in packs.items() if v == "未观察到扣费"} == {"gemini-3-flash"}
+
+    # 标签只是结论，**口径要能追溯**：这三个 PTU 的判定来自实测的
+    # ``account_type``。早期版本没落这个字段，于是「谁被标成 PTU」全靠人肉
+    # 记忆，上游把某模型从 ptu 挪到 paygo 也没人会发现。
+    #
+    # 注意：这条断言锁的是**我们记录的观测**，不是上游的承诺。字段值是
+    # 2026-11-24 探测的快照；上游调整后要按正文的方法重测再改配置。
+    accts = {m: cfg.get("account_type") for m, cfg in _traepat_configs().items()}
+    assert {m for m, a in accts.items() if a == "ptu"} == {
+        "gpt-5.4", "gpt-5.5-max", "gpt-5.6-terra-max",
+    }
+    assert {m for m, a in accts.items() if a == "paygo"} == {
+        "gpt-5.2", "gpt-5.6-luna-max",
+    }
+    assert accts["gemini-3-flash"] == ""
+    # 标签必须和 account_type 对得上——两边可以独立写错，这条把它们钉在一起
+    for m, acct in accts.items():
+        if acct is None:
+            continue
+        want = {"ptu": "PTU", "paygo": "按量", "": "未观察到扣费"}[acct]
+        assert packs[m].startswith(want), f"{m}: 标签 {packs[m]} 与 account_type={acct!r} 不一致"
+
+
+def _traepat_configs() -> dict[str, dict]:
+    """读 `models_config.json` 里 traepat 那几个模型的原始配置。
+
+    只返回有 ``quota_pack`` 的（即 PAT 目录内的模型）——同名模型在别的通道
+    也有条目，那些没有这些字段。
+    """
+    import json
+    from pathlib import Path
+
+    # 不能用 ``buddy_proxy.__file__``：这个包是命名空间包，``__file__`` 是 None
+    # （已实测）。从 tests/ 往上一级推仓库根，和别处读同一个配置文件的写法一致。
+    path = Path(__file__).resolve().parents[1] / "src" / "buddy_proxy" / "web" / "models_config.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    return {m["id"]: m for m in raw["models"]
+            if m.get("provider") == "traepat" and "quota_pack" in m}
 
 
 def _pat_model_ids() -> list[str]:
@@ -2056,7 +2103,8 @@ def test_provider_exposes_quota_pack_per_model(monkeypatch):
     assert listed["glm-5.3"]["quota_pack"] == "Trae 账号余额"
     assert listed["deepseek-v4.1-flash"]["quota_pack"] == "Trae 账号余额"
     # 同在 plus 网关、account_type 报 ptu，但实测两个计数器都不动
-    assert listed["gpt-5.4"]["quota_pack"] == "免费（不扣余额）"
+    # 措辞是「PTU 预留额度（未计费）」而非「免费」——见上面那段说明
+    assert listed["gpt-5.4"]["quota_pack"] == "PTU 预留额度（未计费）"
 
 
 def test_credit_rate_table_is_complete_and_calibrated(monkeypatch):
@@ -2091,10 +2139,16 @@ def test_credit_rate_table_is_complete_and_calibrated(monkeypatch):
     #   None → 走日包（余额不动，但花包里的点）
     assert rates["gpt-5.4"] == 0
     assert rates["gpt-6.1-sol"] is None
+    # 查不到扣费的那 6 个倍率必须都是 0（它们不花余额，也就没有相对价位）
+    assert {m for m, v in rates.items() if v == 0} == {
+        "gpt-5.4", "gpt-5.5-max", "gpt-5.6-terra-max", "gpt-5.2",
+        "gpt-5.6-luna-max", "gemini-3-flash",
+    }
 
-    # 免费 / 扣日包的模型不该同时出现「>0 的倍数」
+    # 不扣余额的三档（PTU / 按量 / 未观察到）都不该有「>0 的倍数」
     assert all(v == 0 for m, v in rates.items()
-               if PAT_MODEL_QUOTA_PACKS.get(m, "").startswith("免费"))
+               if PAT_MODEL_QUOTA_PACKS.get(m, "").startswith(("PTU", "按量"))
+               or PAT_MODEL_QUOTA_PACKS.get(m) == "未观察到扣费")
 
 
 def test_dead_weekly_pool_is_skipped_but_other_weekly_is_not(monkeypatch):
