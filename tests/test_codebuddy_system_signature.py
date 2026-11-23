@@ -39,6 +39,21 @@ DSH = "You are an AI agent powered by DeepSeek Harness."
 CLAUDE = "You are Claude Code, Anthropic's official CLI for Claude."
 MASK = "[redacted: client identity]"
 
+#: Claude Code 2.1.278 二进制里同时存在、且都以「首段」形态发出的另一种 persona：
+#: 官方 CLI 那句后面接 ``running within the Claude Agent SDK``。它只比 ``CLAUDE``
+#: 多一个逗号，所以 ``CLAUDE`` 若带句号就前缀匹配不到——2026-11-23 实测正是
+#: 这条变体在打 11128。
+CLAUDE_AGENT_SDK_VARIANT = (
+    "You are Claude Code, Anthropic's official CLI for Claude, "
+    "running within the Claude Agent SDK."
+)
+
+#: Agent SDK 的**独立** persona（不是上面那条的尾巴）。2026-11-23 实测上游
+#: 返回 200，所以刻意**不**进 ``_SYSTEM_PROMPT_SIGNATURES``。
+CLAUDE_AGENT_SDK_STANDALONE = (
+    "You are a Claude agent, built on Anthropic's Claude Agent SDK."
+)
+
 
 def _body(content: str, *, role: str = "system") -> dict:
     return {"model": "m", "stream": True,
@@ -62,6 +77,65 @@ def test_bare_signature_is_masked(sig):
 def test_leading_spaces_still_masked(prefix):
     """前导空格不影响上游判定（实测 400），所以也必须中和。"""
     assert _neutralize_system_signature(prefix + DSH) == prefix + MASK
+
+
+# ---------------------------------------------------------------------------
+# Claude Code 2.x 的逗号变体（2026-11-23 实测新增）
+# ---------------------------------------------------------------------------
+
+def test_claude_comma_variant_is_masked():
+    """``...for Claude, running within the Claude Agent SDK.`` 实测 400，必须中和。
+
+    这是「只覆盖了当时实测到的那一种形态」的第三次翻车：签名表里那条带句号，
+    ``startswith`` 匹配不到逗号变体，于是变体原样发出去、稳定打 11128。
+    去掉句号后靠前缀命中；断言「变体里不再残留原句」比断言具体输出更抗重构。
+    """
+    out = _neutralize_system_signature(CLAUDE_AGENT_SDK_VARIANT)
+    assert out != CLAUDE_AGENT_SDK_VARIANT
+    assert "You are Claude Code" not in out
+    # 逗号变体只是「同一句 + 尾巴」，尾巴该原样保留（掩码只吃紧邻的一个标点）。
+    assert out == MASK + " running within the Claude Agent SDK."
+
+
+def test_claude_comma_variant_inside_body_is_masked():
+    """真实 body 里也要走通（防止只在裸字符串上正确）。"""
+    out = _neutralize_leading_system(_body(CLAUDE_AGENT_SDK_VARIANT))
+    assert out is not None
+    content = out["messages"][0]["content"]
+    assert "You are Claude Code" not in content
+
+
+def test_signature_without_trailing_period_masked():
+    """不带句号的写法（上游同样 400）也要命中。"""
+    bare = "You are Claude Code, Anthropic's official CLI for Claude"
+    assert _neutralize_system_signature(bare) == MASK
+
+
+def test_trailing_period_is_absorbed_by_mask():
+    """标准形态掩码后**精确等于** MASK，不残留原客户端的句号。
+
+    签名不带句号是为了兼容逗号变体，代价是 ``...for Claude.`` 会剩一个孤零零
+    的 ``.``。掩码吃标点后两种形态收敛到同一个输出——这条锁住那个吸收动作，
+    删掉 ``_SYSTEM_PROMPT_MASK_TAIL_PUNCT`` 会立刻红。
+    """
+    assert _neutralize_system_signature(CLAUDE) == MASK
+    assert _neutralize_system_signature(CLAUDE.rstrip(".")) == MASK
+
+
+def test_standalone_agent_sdk_persona_untouched():
+    """Agent SDK 的**独立** persona 实测 200，不能顺手加进签名表。
+
+    这条是防「过度修复」的：它跟 ``CLAUDE`` 只共享 ``Claude`` 这个词，上游
+    明确放行。加了就等于平白篡改用户 prompt，正是本文件反复强调的反面。
+    """
+    assert _neutralize_system_signature(CLAUDE_AGENT_SDK_STANDALONE) is \
+        CLAUDE_AGENT_SDK_STANDALONE
+
+
+def test_standalone_agent_sdk_persona_with_long_template_untouched():
+    """真实形态：独立 persona 后面跟着整段 Claude Code 模板，实测仍 200。"""
+    src = CLAUDE_AGENT_SDK_STANDALONE + "\n\n# Harness\nUse the tools available."
+    assert _neutralize_system_signature(src) is src
 
 
 def test_signature_with_trailing_text_masked():
