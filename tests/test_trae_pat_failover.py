@@ -858,6 +858,43 @@ def test_quota_items_distinguish_daily_model_families(monkeypatch):
     assert len(labels) == len(set(labels))
 
 
+def test_quota_items_numbered_daily_packs_stay_distinct(monkeypatch):
+    """``_gpt_6_1`` / ``_gpt_6_2`` 不能被 ``_gpt_6`` 吞掉。
+
+    上游的后缀是「家族 + 版本号」：``_gpt_6`` / ``_gpt_6_1`` / ``_gpt_6_2``
+    都以 ``_gpt_6`` 结尾，所以 ``endswith`` 必须从最具体的往后判。一旦顺序
+    写反，三个包会同时显示成「日包（GPT-6）」——UI 上是三行一模一样的额度，
+    用户没法判断哪个快用完了。
+
+    这条直接锁标签互不相同，比逐个比对文案更稳：以后再加 ``_gpt_6_3`` 时，
+    就算有人只改了映射忘了顺序，只要有两个包撞名就会红。
+    """
+    _configure_two(monkeypatch)
+    profile = pat.ensure_pat_config()[0]
+    data = {"user_entitlement_pack_list": [
+        {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_6",
+                                   "quota": {"basic_usage_limit": 58}},
+         "usage": {"basic_usage_amount": 0}},
+        {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_6_1",
+                                   "quota": {"basic_usage_limit": 80}},
+         "usage": {"basic_usage_amount": 0}},
+        {"entitlement_base_info": {"entitlement_id": "free_daily_x_gpt_6_2",
+                                   "quota": {"basic_usage_limit": 80}},
+         "usage": {"basic_usage_amount": 0}},
+    ]}
+    items = pat._quota_items(data, profile, True)
+    labels = [item["label"] for item in items]
+    assert labels == [
+        "PAT #1 · 日包（GPT-6）",
+        "PAT #1 · 日包（GPT-6.1）",
+        "PAT #1 · 日包（GPT-6.2）",
+    ]
+    # 兜底文案是「高级模型」：任何一个包落进去都说明它的后缀没被认出。
+    # 只比「互不相同」不够——把 _gpt_6_2 那条映射删掉，标签变成
+    # 「日包（高级模型）」，互不相同照样成立，而这正是要防的退化。
+    assert not [label for label in labels if "高级模型" in label]
+
+
 def test_quota_items_missing_usage_is_unknown_not_zero(monkeypatch):
     """只回了包容量、没回用量时，不能按 0 算。
 

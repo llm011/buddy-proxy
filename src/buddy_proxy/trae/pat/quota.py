@@ -161,9 +161,21 @@ def _quota_items(data: dict[str, Any], profile: PatProfile, multi: bool) -> list
             # 同一账号会同时返回多个日包（例如 GPT-5.6 与 GPT-6），不能都叫
             # “高级模型共享”，否则 UI 看起来像重复额度。只从 entitlement_id 的
             # 已知后缀提取公开模型系列，不展示账号标识或其它原始字段。
+            #
+            # 顺序要紧：``_gpt_6_2`` / ``_gpt_6_1`` 都以 ``_gpt_6`` 结尾，
+            # 先把 ``_gpt_6`` 判掉就会把新包全标成「GPT-6」。2026-11-23 实测
+            # 日包已经是 gpt_56_sol / gpt_6 / gpt_6_1 / gpt_6_2 四个，新后缀
+            # 只会继续叠加这个家族，所以这里按「精确后缀 → 兜底」写。
+            #
+            # 为什么不用正则一次性拆后缀：``entitlement_id`` 里嵌着账号 uid
+            # （``free_daily_<日期>_<uid>_gpt_6_2``），宽松的 ``(\w+)$`` 很容易
+            # 连 uid 一起匹配进展示名——那是必须脱敏的字段。宁可每次手加一个
+            # if，也不要一条能吃到 uid 的模式。
             family = ""
             if entitlement_id.endswith("_gpt_56_sol"):
                 family = "GPT-5.6 Sol"
+            elif entitlement_id.endswith("_gpt_6_2"):
+                family = "GPT-6.2"
             elif entitlement_id.endswith("_gpt_6_1"):
                 family = "GPT-6.1"
             elif entitlement_id.endswith("_gpt_6"):
