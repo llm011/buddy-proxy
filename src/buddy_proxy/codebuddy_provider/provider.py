@@ -419,6 +419,34 @@ def _is_account_error(e: HTTPException) -> bool:
 _MODEL_SCOPED_429_CODES = frozenset({6004})
 
 
+#: 「这个账号的套餐不允许用这个模型」的上游错误码。
+#:
+#: 2026-11-24 实测：``glm-5.4`` 上线后，7 个 CN 账号里 6 个回
+#:
+#:     400 {"code":11158,"msg":"model [glm-5.4] is not allowed for user type
+#:          [personal_free_user]"}
+#:
+#: 只有付费账号返回 200。这是**账号 × 模型**的授权分层，不是请求写错了：
+#: 同一个请求换个账号就能过，所以必须换号，否则一个能用的账号排在后面也永远
+#: 轮不到它——用户看到的是「模型明明在目录里却一直 400」。
+#:
+#: 为什么**不**冷却账号：这个码只否定「该账号 + 该模型」这一格，账号本身
+#: 完全健康（同账号的 glm-5.3 / deepseek 照常 200）。按账号冷却会重演 6004
+#: 那次事故（6 个号全冷 5 分钟，连别的模型都用不了）。所以走
+#: :func:`failover.mark_model_cooldown` 的复合键，只跳过这一格。
+#:
+#: 与 11128 的区别：11128 是「这条通道不接受这个客户端」（换号无用、整通道
+#: 该歇），11158 是「这个账号没有这个模型的权限」（换号正是解法）。
+_MODEL_NOT_ALLOWED_CODES = frozenset({11158})
+
+
+def _is_model_not_allowed(e: HTTPException) -> bool:
+    """这个 400 是不是「该账号的套餐不允许该模型」（换号可能好转）。"""
+    if e.status_code != 400:
+        return False
+    return _upstream_error_code(str(e.detail)) in _MODEL_NOT_ALLOWED_CODES
+
+
 def _is_model_scoped_429(e: HTTPException) -> bool:
     """这个 429 是不是「只有该模型被限流」（能换号、但不该冷却账号）。"""
     if e.status_code != 429:
@@ -1437,6 +1465,15 @@ class CodeBuddyProvider(BaseProvider):
                             failover.mark_cooldown(
                                 acct.id, quota=e.status_code == 429,
                                 reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
+                        continue
+                    # 400 + 11158「该账号套餐不支持该模型」：不是账号坏了，是这一格
+                    # 没授权。换号（别的号可能是付费账号）并只冷却 (账号, 模型)，
+                    # 否则一个能用的付费号排在后面永远轮不到，用户看到的就是
+                    # 「模型在目录里却一直 400」。
+                    if _is_model_not_allowed(e) and i < len(accounts) - 1:
+                        failover.mark_model_cooldown(
+                            acct.id, str(upstream_body.get("model") or ""),
+                            reason=f"HTTP 400 账号套餐不支持该模型: {str(e.detail)[:100]}")
                         continue
                     raise
         except HTTPException as e:
