@@ -26,7 +26,19 @@ function markStale(key) {
 }
 const LOADERS = {
   overview: () => api('/ui/api/overview').then(v => { OVERVIEW = v; LOADED.overview = true; }),
-  benefits: () => api('/ui/api/benefits').then(v => { BENEFITS = v; LOADED.benefits = true; }),
+  benefits: () => api('/ui/api/benefits?fast=1').then(v => {
+    BENEFITS = v;
+    LOADED.benefits = true;
+    const pending = (v && v.providers || []).filter(p => p && p.loading && !p.disabled);
+    for (const p of pending) {
+      api('/ui/api/benefits/provider/' + encodeURIComponent(p.id)).then(entry => {
+        if (!entry || !BENEFITS || !Array.isArray(BENEFITS.providers)) return;
+        const idx = BENEFITS.providers.findIndex(x => x.id === p.id);
+        if (idx >= 0) BENEFITS.providers[idx] = entry;
+        if (typeof renderBenefits === 'function') renderBenefits();
+      }).catch(() => {});
+    }
+  }),
   stats:    () => api('/ui/api/stats').then(v => { STATS = v; LOADED.stats = true; }),
   models:   () => api('/ui/api/models').then(v => { MODELS = v; LOADED.models = true; }),
   order:    () => api('/ui/api/model-order').then(v => { ORDER = v; LOADED.order = true; }),

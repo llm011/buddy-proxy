@@ -320,11 +320,13 @@ def _inject_dumate_credits(snap: dict[str, Any]) -> None:
 
 
 @app.get("/ui/api/benefits")
-async def ui_benefits(request: Request):
+async def ui_benefits(request: Request, fast: int = 0):
     """打卡状态 + 打卡日历 + 各通道额度（带 5 分钟缓存，避免频打上游）。
 
     通道间并发查询；缓存过期时先回旧值、后台刷新（stale-while-revalidate），
     管理页打开即渲染，不再等整串上游（首开冷缓存除外）。
+    ``fast=1`` 时，慢通道（``SLOW_PROVIDERS``）若无缓存不阻塞，先返回
+    ``loading: true`` 并后台预热，由前端拆分子请求单独拉取。
     """
     _ensure_local(request)
     state = get_state()
@@ -332,7 +334,26 @@ async def ui_benefits(request: Request):
     if manager is None:
         return {"providers": [], "calendar": [], "auto_checkin": False,
                 "checkin_time": "09:30", "checkin_enabled_providers": []}
-    return await manager.snapshot(getattr(state, "disabled_providers", set()) or set())
+    return await manager.snapshot(
+        getattr(state, "disabled_providers", set()) or set(),
+        fast_only=bool(fast),
+    )
+
+
+@app.get("/ui/api/benefits/provider/{provider_id}")
+async def ui_benefits_provider(request: Request, provider_id: str):
+    """单通道快照条目（配合 ``/ui/api/benefits?fast=1`` 渐进式加载）。"""
+    _ensure_local(request)
+    state = get_state()
+    manager = getattr(state, "benefits", None)
+    if manager is None:
+        raise HTTPException(status_code=503, detail={"error": {"message": "额度功能未初始化"}})
+    entry = await manager.provider_entry(
+        provider_id, getattr(state, "disabled_providers", set()) or set(),
+    )
+    if entry is None:
+        raise HTTPException(status_code=404, detail={"error": {"message": f"未知 provider: {provider_id}"}})
+    return entry
 
 
 @app.post("/ui/api/benefits/refresh")

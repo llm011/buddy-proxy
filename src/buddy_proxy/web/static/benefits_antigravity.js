@@ -166,8 +166,21 @@ async function refreshProviderQuota(pid, btn) {
 function renderAntigravityPanel() {
   const panel = document.getElementById('antigravity-panel');
   if (!panel) return;
-  const ag = (BENEFITS.providers || []).find(p => p.id === 'antigravity' && !p.disabled && p.quota && p.quota.supported);
+  const ag = (BENEFITS.providers || []).find(p => p.id === 'antigravity' && !p.disabled);
   if (!ag) { panel.innerHTML = ''; return; }
+  if (ag.loading) {
+    panel.innerHTML = `
+      <div class="chart-card" style="margin-top:14px">
+        <div class="pat-head">
+          <span class="name">Antigravity</span>
+          <span class="tag">多账号 · 自动切换</span>
+          <span class="grow"></span>
+          <span class="muted" style="font-size:12px">⟳ 额度加载中…</span>
+        </div>
+      </div>`;
+    return;
+  }
+  if (!ag.quota || !ag.quota.supported) { panel.innerHTML = ''; return; }
 
   // 按「AG #N」分组（label 形如「AG #1 · Gemini 组（…）」），与 trae 的 PAT #N 同款切法；
   // 单账号时 label 无前缀，整体落进一个组。query_failed 说明条不进分组，横贯全宽展示。
@@ -234,10 +247,9 @@ function renderAntigravityPanel() {
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">Antigravity</span>
-        <span class="tag">多账号 · 自动切换</span>${fold.badge}
+        <span class="tag" title="429/403 自动冷却换号（按登录顺位）">多账号 · 自动切换</span>${fold.badge}
         <span class="grow"></span>
         ${quotaAccountTotal(groups)}
-        <span class="muted" style="font-size:11px">429/403 自动冷却换号（按登录顺位）</span>
         ${fold.toggle}${providerLoadBalanceToggle('antigravity', n > 1)}${providerRefreshButton('antigravity')}
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}<div class="pat-quota-grid">${quotaHtml}</div>${fold.bodyEnd}

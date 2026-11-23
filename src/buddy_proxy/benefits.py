@@ -67,7 +67,10 @@ LOAD_BALANCE_WARM_DELAY_S = 60
 # 单次上游查询的硬超时：provider 实现各有各的 HTTP 超时，但「实现漏配/卡在
 # 网络风暴」的病态挂起不该把整个管理页拖住（实测 mimo 单键挂过 930s）。
 # 超时按失败处理走 FAILURE_TTL_S 短缓存，30s 后下一轮自然重试。
-QUERY_TIMEOUT_S = 35.0
+QUERY_TIMEOUT_S = 12.0
+# 慢通道集合：首屏 fast_only=True 时若无缓存不阻塞整页，先标记 loading=True
+# 并后台预热，由前端拆分子请求单独拉取；未来按需增删此处即可。
+SLOW_PROVIDERS: frozenset[str] = frozenset({"antigravity"})
 DEFAULT_CHECKIN_TIME = "09:30"
 # 「翻转点已过 → 提前作废快照」只在这个宽限窗口内生效。正常轮换最多让缓存
 # 早退这么多；超出说明上游给的 next_ts 已经不可信，退回按 TTL 过期。
@@ -620,7 +623,8 @@ class BenefitsManager:
     # 快照（GET /ui/api/benefits）
     # ------------------------------------------------------------------
 
-    async def snapshot(self, disabled_providers: set[str] | None = None) -> dict[str, Any]:
+    async def snapshot(self, disabled_providers: set[str] | None = None,
+                       *, fast_only: bool = False) -> dict[str, Any]:
         checkin_cfg = read_checkin_settings()
         done = self.history.ok_dates_by_provider()
         today = _today()
@@ -631,7 +635,7 @@ class BenefitsManager:
         # gather 并发后整页 = 最慢一家（gather 保序，UI 顺序不变）。同通道的
         # checkin/quota 仍串行——同一家上游，别并发打。
         provider_entries = list(await asyncio.gather(
-            *(self._provider_entry(pid, p, disabled, done, today)
+            *(self._provider_entry(pid, p, disabled, done, today, fast_only=fast_only)
               for pid, p in self._providers().items())
         ))
         # 上游直接给出的签到历史（如 CodeBuddy checkin_dates）合并进日历，
@@ -682,7 +686,8 @@ class BenefitsManager:
         }
 
     async def _provider_entry(self, pid: str, p: Any, disabled: set[str],
-                              done: dict[str, set[str]], today: str) -> dict[str, Any]:
+                              done: dict[str, set[str]], today: str,
+                              *, fast_only: bool = False) -> dict[str, Any]:
         """单通道的快照条目（snapshot 的并发单元）。"""
         supports_checkin = bool(getattr(p, "supports_checkin", False))
         entry: dict[str, Any] = {
@@ -725,11 +730,33 @@ class BenefitsManager:
         # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
         # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
         qkey = self._quota_key(pid, p)
+        if fast_only and pid in SLOW_PROVIDERS and qkey not in self._cache:
+            self._kick_refresh(qkey, p.quota)
+            entry["loading"] = True
+            return entry
         quota = await self._cached(qkey, p.quota)
         if quota is not None:
             entry["quota"] = {"supported": True, **quota}
             _feed_load_balance(pid, p, quota)
         return entry
+
+    async def provider_entry(self, provider_id: str,
+                             disabled_providers: set[str] | None = None) -> dict[str, Any] | None:
+        """单通道快照条目（供前端对 loading 通道拆分子请求按需拉取）。"""
+        p = self._providers().get(provider_id)
+        if p is None:
+            return None
+        qkey = self._quota_key(provider_id, p)
+        inflight = self._refreshing.get(qkey)
+        if inflight is not None:
+            try:
+                await inflight
+            except Exception:
+                pass
+        done = self.history.ok_dates_by_provider()
+        return await self._provider_entry(
+            provider_id, p, disabled_providers or set(), done, _today(), fast_only=False,
+        )
 
     @staticmethod
     def _quota_key(pid: str, provider: Any) -> str:

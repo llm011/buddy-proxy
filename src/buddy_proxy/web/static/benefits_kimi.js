@@ -197,7 +197,6 @@ function renderKimiPanel() {
         <span class="tag">${multi ? '多账号 · 自动切换' : 'Kimi Code 订阅'}</span>${fold.badge}
         <span class="grow"></span>
         ${quotaAccountTotal(groups)}
-        <span class="muted" style="font-size:11px">${multi ? '429/403 自动冷却换号（按导入顺位）' : '额度耗尽自动切换下一个账号'}</span>
         ${fold.toggle}${providerLoadBalanceToggle('kimi', multi)}${providerRefreshButton('kimi')}
         <button class="ghost" title="粘贴 kimi cli 导出的 token JSON" onclick="openKimiImport()">导入账号</button>
       </div>
