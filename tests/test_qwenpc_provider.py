@@ -418,3 +418,42 @@ def test_jitter_is_filtered_by_quota_after_not_by_magnitude():
     assert _is_jitter(271.4, 276.4) is True
     # 但 _spent_credit 对它不设防——这是设计取舍，不是遗漏
     assert _spent_credit(276.4, 271.4, tokens=40_089) == 5.0
+
+
+# --- 常量唯一性 -------------------------------------------------------------
+
+
+def test_sane_credit_constants_defined_exactly_once():
+    """``_MAX_SANE_CREDIT`` / ``_CREDIT_PER_1K_TOKENS_CAP`` 只能各定义一次。
+
+    2026-11-24 实测发现：`#235` 想把上界从 5.0 降到 1.0，但**只加了一行新的、
+    没删旧的**，于是源码里出现两个 ``_MAX_SANE_CREDIT``（5.0 在前、1.0 在后）。
+    Python 后定义覆盖前定义，行为恰好正确——所以测试全绿、没人发现。但读代码的
+    人会以为生效的是 5.0，改注释/改逻辑时按错的假设走。
+
+    这类「赋值重复」单测本来抓不到（行为不变），只能静态数源码里的赋值次数。
+    允许注释里提到名字（那份说明本身有价值），所以按**行首赋值**匹配。
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parents[1]
+           / "src/buddy_proxy/qwenpc/provider.py").read_text(encoding="utf-8")
+    for name in ("_MAX_SANE_CREDIT", "_CREDIT_PER_1K_TOKENS_CAP", "_JITTER_DROPS"):
+        hits = re.findall(rf"^{name}\s*=", src, flags=re.M)
+        assert len(hits) == 1, f"{name} 被定义了 {len(hits)} 次（应恰好 1 次）"
+
+
+def test_sane_credit_floor_is_one_not_five():
+    """兜底上界必须是 1.0。
+
+    历史：旧版写死 5.0，4 万 token 的请求（真实扣 15.9）被当成抖动丢掉，
+    日志里只剩 None。降到 1.0 后，大请求靠 ``_max_sane_credit`` 按 token 数
+    动态放大（实测 40k token → 49.1），小请求仍受 1.0 兜底约束。
+    """
+    from buddy_proxy.qwenpc.provider import _MAX_SANE_CREDIT, _max_sane_credit
+
+    assert _MAX_SANE_CREDIT == 1.0
+    assert _max_sane_credit(None) == 1.0, "拿不到 token 数时用兜底值"
+    # 大请求必须被放大，否则会重演「真实消耗被当抖动丢掉」
+    assert _max_sane_credit(40089) > 15.929, "4 万 token 的真实消耗 15.9 必须能通过"
