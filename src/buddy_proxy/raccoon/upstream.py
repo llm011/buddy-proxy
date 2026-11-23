@@ -68,7 +68,7 @@ MODEL_PREFIX = "sn-"
 FREE_MULTIPLIER = 0.0
 
 
-def build_headers(access_token: str) -> dict[str, str]:
+def build_headers(access_token: str, device_id: str = "") -> dict[str, str]:
     """上游请求头。
 
     **认证要同时给两种形态**（缺一个就 401）：
@@ -82,11 +82,16 @@ def build_headers(access_token: str) -> dict[str, str]:
 
     ``Origin`` / ``Referer`` / ``User-Agent`` 也带上：上游对「看起来像浏览器」
     的请求更宽容，这是成本最低的一层识别伪装（与 trae 缺 UA 吃 4011 同类）。
+
+    ``device_id`` 给定时补上浏览器那组客户端头（``X-Client-Device-ID`` 等）。
+    **模型调用必须带**：设备绑定成功后上游按设备认会话，聊天请求却不声明
+    自己属于那台设备，等于「已绑定设备 + 一个不带设备标识的陌生会话在调
+    模型」——正是 200108 风控要抓的形态（2026-11-23 实测根因）。
     """
     from .login import endpoint
 
     base = endpoint()
-    return {
+    headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -97,6 +102,26 @@ def build_headers(access_token: str) -> dict[str, str]:
         "Authorization": f"Bearer {access_token}",
         "xhx_token": access_token,
         "Cookie": f"xhx_token={access_token}",
+    }
+    if device_id:
+        headers.update(client_headers(device_id, base))
+    return headers
+
+
+def client_headers(device_id: str, base: str) -> dict[str, str]:
+    """浏览器客户端头（与 ``page_boot_requests`` 的 common 保持同一套值）。
+
+    抽成函数是为了让「聊天」与「页面启动/绑定」用**完全一致**的设备指纹：
+    两边不一致时上游会认为是两台设备，等于自己把绑定作废。
+    """
+    return {
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "X-Client-Platform": "web",
+        "X-Client-Version": "156.0.0.0",
+        "X-Client-Device-ID": device_id,
+        "X-Raccoon-Language": "zh",
+        "Origin": base,
+        "Referer": f"{base}/work/home?lang=zh",
     }
 
 
@@ -405,13 +430,9 @@ def page_boot_requests(access_token: str, device_id: str,
                        "Chrome/131.0.0.0 Safari/537.36"),
         "Cookie": f"xhx_token={access_token}",
         "xhx_token": access_token,
-        "Accept-Language": "zh-CN,zh;q=0.9",
-        "X-Client-Platform": "web",
-        "X-Client-Version": "156.0.0.0",
-        "X-Client-Device-ID": device_id,
-        "X-Raccoon-Language": "zh",
-        "Origin": base,
-        "Referer": f"{base}/work/home?lang=zh",
+        # 与聊天请求共用同一套客户端头：两边不一致上游会当两台设备，
+        # 等于自己把绑定作废（见 client_headers 的说明）。
+        **client_headers(device_id, base),
     }
     html_headers = dict(common)
     html_headers["Accept"] = "text/html"
@@ -420,8 +441,10 @@ def page_boot_requests(access_token: str, device_id: str,
         ("GET", f"{base}{AGREEMENT_PATH}", common, None),
         ("GET", f"{base}{OFFICE_SETTING_PATH}", common, None),
         ("GET", f"{base}{ONLINE_ACTIVITY_PATH}", common, None),
-        ("POST", f"{base}{BIND_DEVICE_PATH}", common, {"device_id": device_id}),
-        ("POST", f"{base}{HEARTBEAT_PATH}", common, {"device_id": device_id}),
+        ("POST", f"{base}{BIND_DEVICE_PATH}", common,
+         bind_device_body(device_id)),
+        ("POST", f"{base}{HEARTBEAT_PATH}", common,
+         {"client_device_id": device_id, "client_platform": "web"}),
         ("POST", f"{base}{METRICS_PATH}", common, {
             "common_header": {"client_agent": common["User-Agent"],
                               "machine_id": PAGE_MACHINE_ID},
@@ -429,6 +452,43 @@ def page_boot_requests(access_token: str, device_id: str,
                          "event": {"event_name": "activity"}}],
         }),
     ]
+
+
+def bind_device_body(device_id: str) -> dict[str, Any]:
+    """设备绑定的请求体（字段名与枚举值都是**上游契约**，改一个就绑不上）。
+
+    2026-11-23 排查「账号频繁被判异常调用（200108）」时挖出来的根因：
+    原来这里发的是 ``{"device_id": ...}``，而上游要的是 ``client_device_id``
+    ——绑定请求**一直返回 400**，设备从未真正绑上，``user_info`` 里始终是
+    ``trusted: false / bound: false / reason: session_without_bound_device``。
+
+    也就是说：所有模型调用都来自一个**未绑定设备的会话**。上游对这类会话
+    的容忍度很低，累积一定调用量后就会整号风控（``200108 系统检测到当前
+    账号存在异常调用``），且冷却时间越来越长。这才是「新号用一阵就被风控」
+    的原因，与并发/频率无关（实测触发时在途并发只有 2，远低于上限 5）。
+
+    字段是逐个试出来的：上游对缺参一次只报一个
+    （``param client_device_id empty`` → ``..._source`` → ``client_platform``
+    → ``client_version`` → ``device_name`` → ``os`` → ``os_version``
+    → ``application`` → ``push_permission``）。全部补齐后返回
+    ``{"code":0,"data":{"device_id":"dev..."}}``，随后 ``trusted`` 变 true。
+
+    枚举值的坑：``push_permission`` 只认 ``denied``（``default``/``granted``
+    等一律 ``invalid_push_endpoint``）；``os_version`` 必须是版本号格式
+    （``15.5``，写 ``web`` 会 ``format invalid``）。
+    """
+    return {
+        "client_device_id": device_id,
+        "client_device_id_source": "web",
+        "client_platform": "web",
+        "client_version": "156.0.0.0",
+        "device_name": "MacBook Pro",
+        "os": "macOS",
+        "os_version": "15.5",
+        "application": "web",
+        # 只认 denied：见上面的枚举说明
+        "push_permission": "denied",
+    }
 
 
 def has_daily_grant_today(bills: list[dict[str, Any]], *,

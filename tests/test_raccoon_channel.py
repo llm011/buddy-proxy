@@ -1012,3 +1012,89 @@ def test_replay_stream_releases_lease_when_settlement_is_cancelled():
         f"cancel 后仍有 {left} 个名额没还——lease 泄漏了，"
         f"漏满 max_concurrent 后整个通道会永久 429"
     )
+
+
+# ---------------------------------------------------------------------------
+# 12. 设备绑定（200108 风控的真正根因）
+# ---------------------------------------------------------------------------
+
+def test_bind_device_body_uses_upstream_field_names():
+    """绑定请求体字段名/枚举值都是上游契约，写错就绑不上（= 迟早被风控）。
+
+    2026-11-23 用户问「这个异常是由什么引发的，得定位出来、修掉，不然新号
+    还是会被风控」。挖出来的根因：原来发的是 ``{"device_id": ...}``，而上游
+    要 ``client_device_id``——绑定请求**一直 400**，设备从未绑上，``user_info``
+    永远 ``trusted: false / reason: session_without_bound_device``。所有模型
+    调用都来自未绑定设备的会话，累积后整号风控。
+
+    这条测试锁住那串逐个试出来的字段（少一个上游就回 params_empty_error）。
+    """
+    from buddy_proxy.raccoon.upstream import bind_device_body
+
+    body = bind_device_body("dev-abc")
+    required = {
+        "client_device_id", "client_device_id_source", "client_platform",
+        "client_version", "device_name", "os", "os_version", "application",
+        "push_permission",
+    }
+    missing = required - set(body)
+    assert not missing, f"绑定请求体缺字段（上游会回 params_empty_error）：{missing}"
+    assert body["client_device_id"] == "dev-abc"
+    # 枚举值的坑：只认 denied，且 os_version 必须是版本号格式
+    assert body["push_permission"] == "denied", \
+        "push_permission 只认 denied，default/granted 会 invalid_push_endpoint"
+    assert body["os_version"][0].isdigit(), \
+        "os_version 必须是版本号格式，写 'web' 会 format invalid"
+
+
+def test_chat_headers_carry_device_id():
+    """模型调用必须带设备头，否则「已绑定设备 + 陌生会话」仍被判异常。
+
+    绑定只是第一步：绑定成功后上游按设备认会话，聊天请求却不声明自己属于
+    那台设备，等于未绑定设备在调模型——风控照样触发。
+    """
+    from buddy_proxy.raccoon.upstream import build_headers
+
+    bare = build_headers("tok")
+    assert "X-Client-Device-ID" not in bare, "不给 device_id 时不带设备头（兼容旧调用）"
+
+    full = build_headers("tok", "dev-xyz")
+    assert full["X-Client-Device-ID"] == "dev-xyz"
+    for key in ("X-Client-Platform", "X-Client-Version", "X-Raccoon-Language"):
+        assert key in full, f"聊天请求缺浏览器指纹头 {key}"
+    # 认证双形态不能被设备头挤掉
+    assert full["Authorization"] == "Bearer tok"
+    assert "xhx_token=tok" in full["Cookie"]
+
+
+def test_page_boot_and_chat_share_the_same_device_fingerprint():
+    """签到（页面启动）与聊天的设备头必须一致。
+
+    两边不一致上游会当成两台设备，等于自己把绑定作废。
+    """
+    from buddy_proxy.raccoon.upstream import build_headers, page_boot_requests
+
+    chat = build_headers("tok", "dev-xyz")
+    boot = page_boot_requests("tok", "dev-xyz", "https://example.com")
+    boot_headers = boot[0][2]
+    for key in ("X-Client-Device-ID", "X-Client-Platform", "X-Client-Version",
+                "X-Raccoon-Language", "Accept-Language"):
+        assert chat.get(key) == boot_headers.get(key), \
+            f"{key} 在聊天与页面启动之间不一致（上游会当两台设备）"
+
+
+def test_ensure_device_bound_is_best_effort(monkeypatch):
+    """绑定失败不能阻断转发——它是加固动作，不是前置条件。"""
+    from buddy_proxy.raccoon import provider as prov
+
+    prov._bound_ok.clear()
+    prov._bind_retry_after.clear()
+
+    def boom(*a, **k):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(prov.httpx, "Client", boom)
+    # 不抛异常
+    prov._ensure_device_bound("acct-x", "tok")
+    assert "acct-x" not in prov._bound_ok, "失败不该标记为已绑定"
+    assert "acct-x" in prov._bind_retry_after, "失败要记重试时刻，别每个请求都撞"
