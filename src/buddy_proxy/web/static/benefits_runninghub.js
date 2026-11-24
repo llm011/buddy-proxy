@@ -512,6 +512,28 @@
           const uploadBtn = isMedia
             ? `<button type="button" class="ghost rh-upload-btn" data-idx="${idx}" data-ftype="${ftype.toLowerCase()}" style="flex:none;white-space:nowrap;">上传${ftype === 'IMAGE' ? '图片' : ftype === 'AUDIO' ? '音频' : '视频'}</button><input type="file" class="rh-upload-input" data-idx="${idx}" accept="${accept}" style="display:none;" />`
             : '';
+
+          let listOptions = null;
+          if (ftype === 'LIST' && n.fieldData) {
+            try {
+              const parsed = typeof n.fieldData === 'string' ? JSON.parse(n.fieldData) : n.fieldData;
+              if (Array.isArray(parsed) && parsed.length) {
+                listOptions = parsed.map(opt => {
+                  if (opt && typeof opt === 'object') {
+                    const ov = opt.index !== undefined ? String(opt.index) : (opt.value !== undefined ? String(opt.value) : String(opt.name || ''));
+                    const ol = opt.name !== undefined ? String(opt.name) : ov;
+                    return { value: ov, label: ol };
+                  }
+                  return { value: String(opt), label: String(opt) };
+                });
+              }
+            } catch (_) {}
+          }
+
+          const controlHtml = listOptions
+            ? `<select class="rh-wf-field" data-idx="${idx}" style="flex:1;min-width:0;">${listOptions.map(o => `<option value="${escapeHtml(o.value)}"${o.value === val ? ' selected' : ''}>${escapeHtml(o.label)}</option>`).join('')}</select>`
+            : `<input type="text" class="rh-wf-field" data-idx="${idx}" value="${escapeHtml(val)}" style="flex:1;min-width:0;" />`;
+
           return `
             <div style="display:flex;flex-direction:column;gap:4px;">
               <label style="font-size:12px;">
@@ -519,7 +541,7 @@
                 <span class="muted mono" style="font-size:11px;margin-left:6px;">#${escapeHtml(String(n.nodeId || ''))}.${escapeHtml(String(n.fieldName || ''))} (${escapeHtml(ftype)})</span>
               </label>
               <div style="display:flex;gap:6px;align-items:center;">
-                <input type="text" class="rh-wf-field" data-idx="${idx}" value="${escapeHtml(val)}" style="flex:1;min-width:0;" />
+                ${controlHtml}
                 ${uploadBtn}
               </div>
             </div>`;
