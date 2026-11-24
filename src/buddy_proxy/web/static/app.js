@@ -24,6 +24,64 @@ function markStale(key) {
   if (INFLIGHT[key]) INFLIGHT[key].stale = true;  // 在飞 → 作废其结果
   delete LOADED[key];  // 即使没有在飞请求（下次进入该页要重取），也别让旧缓存继续挡路
 }
+const PROVIDER_BENEFITS_CTRL = {};
+const PROVIDER_BENEFITS_TIMEOUT_MS = 38000;
+
+function fetchProviderBenefits(pid) {
+  if (PROVIDER_BENEFITS_CTRL[pid]) {
+    try { PROVIDER_BENEFITS_CTRL[pid].abort(); } catch (e) {}
+  }
+  const ctrl = new AbortController();
+  PROVIDER_BENEFITS_CTRL[pid] = ctrl;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    try { ctrl.abort(); } catch (e) {}
+  }, PROVIDER_BENEFITS_TIMEOUT_MS);
+
+  fetch('/ui/api/benefits/provider/' + encodeURIComponent(pid), {signal: ctrl.signal})
+    .then(async res => {
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error((data && data.detail && data.detail.error && data.detail.error.message) || `HTTP ${res.status}`);
+      return data;
+    })
+    .then(entry => {
+      clearTimeout(timer);
+      if (PROVIDER_BENEFITS_CTRL[pid] === ctrl) delete PROVIDER_BENEFITS_CTRL[pid];
+      if (!entry || !BENEFITS || !Array.isArray(BENEFITS.providers)) return;
+      const idx = BENEFITS.providers.findIndex(x => x.id === pid);
+      if (idx >= 0) BENEFITS.providers[idx] = entry;
+      if (typeof renderBenefits === 'function') renderBenefits();
+    })
+    .catch(err => {
+      clearTimeout(timer);
+      if (PROVIDER_BENEFITS_CTRL[pid] === ctrl) delete PROVIDER_BENEFITS_CTRL[pid];
+      // 被新请求主动取消时不覆盖状态
+      if (err && err.name === 'AbortError' && !timedOut) return;
+      if (!BENEFITS || !Array.isArray(BENEFITS.providers)) return;
+      const idx = BENEFITS.providers.findIndex(x => x.id === pid);
+      if (idx >= 0) {
+        BENEFITS.providers[idx] = Object.assign({}, BENEFITS.providers[idx], {
+          loading: false,
+          load_error: timedOut ? '查询超时' : (err && err.message ? err.message : '加载失败'),
+        });
+      }
+      if (typeof renderBenefits === 'function') renderBenefits();
+    });
+}
+
+function retryProviderBenefits(pid) {
+  if (!BENEFITS || !Array.isArray(BENEFITS.providers)) return;
+  const idx = BENEFITS.providers.findIndex(x => x.id === pid);
+  if (idx >= 0) {
+    const next = Object.assign({}, BENEFITS.providers[idx], {loading: true});
+    delete next.load_error;
+    BENEFITS.providers[idx] = next;
+    if (typeof renderBenefits === 'function') renderBenefits();
+  }
+  fetchProviderBenefits(pid);
+}
+
 const LOADERS = {
   overview: () => api('/ui/api/overview').then(v => { OVERVIEW = v; LOADED.overview = true; }),
   benefits: () => api('/ui/api/benefits?fast=1').then(v => {
@@ -31,12 +89,7 @@ const LOADERS = {
     LOADED.benefits = true;
     const pending = (v && v.providers || []).filter(p => p && p.loading && !p.disabled);
     for (const p of pending) {
-      api('/ui/api/benefits/provider/' + encodeURIComponent(p.id)).then(entry => {
-        if (!entry || !BENEFITS || !Array.isArray(BENEFITS.providers)) return;
-        const idx = BENEFITS.providers.findIndex(x => x.id === p.id);
-        if (idx >= 0) BENEFITS.providers[idx] = entry;
-        if (typeof renderBenefits === 'function') renderBenefits();
-      }).catch(() => {});
+      fetchProviderBenefits(p.id);
     }
   }),
   stats:    () => api('/ui/api/stats').then(v => { STATS = v; LOADED.stats = true; }),
