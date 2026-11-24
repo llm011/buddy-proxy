@@ -325,8 +325,12 @@ async def ui_benefits(request: Request, fast: int = 0):
 
     通道间并发查询；缓存过期时先回旧值、后台刷新（stale-while-revalidate），
     管理页打开即渲染，不再等整串上游（首开冷缓存除外）。
-    ``fast=1`` 时，慢通道（``SLOW_PROVIDERS``）若无缓存不阻塞，先返回
+    ``fast=1`` 时，**任何**没命中缓存的 checkin/quota 都不阻塞，先返回
     ``loading: true`` 并后台预热，由前端拆分子请求单独拉取。
+
+    为什么是「任何」而不是一份慢通道名单：名单靠人肉维护，上游哪天变慢就漏。
+    历史上吃过这个亏——codebuddy 单查 12s 却不在名单里，fast=1 照样被拖住
+    （#311）。
     """
     _ensure_local(request)
     state = get_state()

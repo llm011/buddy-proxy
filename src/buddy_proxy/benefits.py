@@ -68,9 +68,13 @@ LOAD_BALANCE_WARM_DELAY_S = 60
 # 网络风暴」的病态挂起不该把整个管理页拖住（实测 mimo 单键挂过 930s）。
 # 超时按失败处理走 FAILURE_TTL_S 短缓存，30s 后下一轮自然重试。
 QUERY_TIMEOUT_S = 12.0
-# 慢通道集合：首屏 fast_only=True 时若无缓存不阻塞整页，先标记 loading=True
-# 并后台预热，由前端拆分子请求单独拉取；未来按需增删此处即可。
-SLOW_PROVIDERS: frozenset[str] = frozenset({"antigravity"})
+# 这里曾有一份 ``SLOW_PROVIDERS``（默认只有 antigravity）供 fast_only 判定。
+# #311 把它换成了「任何未命中缓存的通道都异步预热」，常量随即失去消费方，
+# 只在文件里留了一版没人读的名单——现在删掉。
+#
+# 为什么别再把它加回来：#311 的 commit 说清了按名单跳过会漏人——当时
+# codebuddy 单查要 12s 却不在名单里，fast=1 照样被它拖住。「有没有缓存」
+# 是自适应的判据，名单靠人肉维护且必然滞后于上游变慢。
 DEFAULT_CHECKIN_TIME = "09:30"
 # 「翻转点已过 → 提前作废快照」只在这个宽限窗口内生效。正常轮换最多让缓存
 # 早退这么多；超出说明上游给的 next_ts 已经不可信，退回按 TTL 过期。
