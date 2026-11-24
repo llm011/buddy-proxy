@@ -344,6 +344,42 @@ async def ui_benefits(request: Request, fast: int = 0):
     )
 
 
+@app.get("/ui/api/benefits/zcode/reset-status")
+async def ui_zcode_reset_status(request: Request):
+    """实时拉取 ZCode Coding Plan 可用重置券状态。"""
+    _ensure_local(request)
+    from ...providers.zcode_reset import fetch_reset_status
+
+    return await fetch_reset_status()
+
+
+@app.post("/ui/api/benefits/zcode/reset-use")
+async def ui_zcode_reset_use(request: Request):
+    """核销使用一张 ZCode 重置券，并作废 zcode 额度缓存以便前端立即刷新。"""
+    _ensure_local(request)
+    from ...providers.zcode_reset import fetch_reset_status, use_reset_ticket
+
+    body = await request.json()
+    reset_type = (body.get("reset_type") or "").strip().upper()
+    idempotency_key = (body.get("idempotency_key") or "").strip() or None
+    try:
+        res = await use_reset_ticket(reset_type, idempotency_key=idempotency_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail={"error": {"message": str(exc)}})
+
+    state = get_state()
+    manager = getattr(state, "benefits", None)
+    if manager is not None and hasattr(manager, "invalidate"):
+        try:
+            manager.invalidate("zcode", quota=True)
+        except Exception:
+            pass
+    latest = await fetch_reset_status()
+    return {**res, "reset_tickets": latest}
+
+
 @app.get("/ui/api/benefits/provider/{provider_id}")
 async def ui_benefits_provider(request: Request, provider_id: str):
     """单通道快照条目（配合 ``/ui/api/benefits?fast=1`` 渐进式加载）。"""
