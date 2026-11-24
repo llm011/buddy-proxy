@@ -765,6 +765,7 @@ function renderBenefits(opts) {
   renderRaccoonPanel();
   renderCodexPanel();
   renderCopilotPanel();
+  if (typeof renderRunningHubPanel === 'function') renderRunningHubPanel();
   renderQoderPanel();
   renderQoderIntlPanel();
   renderAntigravityPanel();

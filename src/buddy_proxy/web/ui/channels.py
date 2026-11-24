@@ -1493,3 +1493,242 @@ async def ui_raccoon_accounts_relogin(request: Request):
 
     await asyncio.to_thread(failover.clear_cooldown, aid)
     return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.get("/ui/api/runninghub/accounts")
+async def ui_runninghub_accounts(request: Request):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    return {"accounts": rh_store.list_accounts(include_secret=False)}
+
+
+@app.post("/ui/api/runninghub/accounts/import")
+async def ui_runninghub_accounts_import(request: Request):
+    _ensure_local(request)
+    from ...runninghub import client as rh_client
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    api_key = str(body.get("api_key") or "").strip()
+    label = str(body.get("label") or "").strip() or None
+    if not api_key:
+        raise HTTPException(status_code=400, detail={"error": {"message": "api_key 不能为空"}})
+
+    try:
+        info = await rh_client.fetch_account_status(api_key)
+    except rh_client.RunningHubError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+
+    if not label:
+        uname = str(info.get("username") or "").strip()
+        if uname:
+            label = uname
+        else:
+            api_type = str(info.get("apiType") or "RH").strip()
+            label = f"{api_type}-{api_key[-4:]}" if len(api_key) >= 4 else api_type
+
+    rh_store.upsert_account(api_key, label=label, account_info=info)
+    return {"accounts": rh_store.list_accounts(include_secret=False)}
+
+
+@app.post("/ui/api/runninghub/accounts/refresh")
+async def ui_runninghub_accounts_refresh(request: Request):
+    _ensure_local(request)
+    from ...runninghub import client as rh_client
+    from ...runninghub import store as rh_store
+
+    body = await request.json() if (await request.body()) else {}
+    target_id = str(body.get("account_id") or "").strip()
+    for acc in rh_store.get_active_accounts():
+        aid = acc.get("account_id")
+        if target_id and aid != target_id:
+            continue
+        try:
+            info = await rh_client.fetch_account_status(acc["api_key"])
+            rh_store.update_account_info(aid, info)
+        except rh_client.RunningHubError:
+            pass
+    return {"accounts": rh_store.list_accounts(include_secret=False)}
+
+
+@app.post("/ui/api/runninghub/accounts/order")
+async def ui_runninghub_accounts_order(request: Request):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    order = body.get("order")
+    if not isinstance(order, list):
+        raise HTTPException(status_code=400, detail={"error": {"message": "order 必须是数组"}})
+    return {"accounts": rh_store.reorder_accounts([str(x) for x in order])}
+
+
+@app.post("/ui/api/runninghub/accounts/rename")
+async def ui_runninghub_accounts_rename(request: Request):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    aid = str(body.get("account_id") or "").strip()
+    label = str(body.get("label") or "").strip()
+    if not aid or not label:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 account_id 或 label"}})
+    if not rh_store.rename_account(aid, label):
+        raise HTTPException(status_code=404, detail={"error": {"message": "账号不存在"}})
+    return {"accounts": rh_store.list_accounts(include_secret=False)}
+
+
+@app.post("/ui/api/runninghub/accounts/delete")
+async def ui_runninghub_accounts_delete(request: Request):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    aid = str(body.get("account_id") or "").strip()
+    if not aid:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 account_id"}})
+    if not rh_store.delete_account(aid):
+        raise HTTPException(status_code=404, detail={"error": {"message": "账号不存在"}})
+    return {"accounts": rh_store.list_accounts(include_secret=False)}
+
+
+@app.get("/ui/api/runninghub/workflows")
+async def ui_runninghub_workflows(request: Request):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    return {"workflows": rh_store.list_workflows()}
+
+
+@app.post("/ui/api/runninghub/workflows/import")
+async def ui_runninghub_workflows_import(request: Request):
+    _ensure_local(request)
+    from ...runninghub import client as rh_client
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    webapp_id = str(body.get("webapp_id") or "").strip()
+    custom_name = str(body.get("name") or "").strip()
+    if not webapp_id:
+        raise HTTPException(status_code=400, detail={"error": {"message": "webapp_id 不能为空"}})
+
+    accounts = rh_store.get_active_accounts()
+    if not accounts:
+        raise HTTPException(status_code=400, detail={"error": {"message": "请先导入至少一个 RunningHub 账号"}})
+
+    try:
+        info = await rh_client.fetch_webapp_info(accounts[0]["api_key"], webapp_id)
+    except rh_client.RunningHubError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+
+    if custom_name:
+        info["name"] = custom_name
+    rh_store.upsert_workflow(info)
+    return {"workflows": rh_store.list_workflows()}
+
+
+@app.post("/ui/api/runninghub/workflows/delete")
+async def ui_runninghub_workflows_delete(request: Request):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    webapp_id = str(body.get("webapp_id") or "").strip()
+    if not webapp_id:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 webapp_id"}})
+    if not rh_store.delete_workflow(webapp_id):
+        raise HTTPException(status_code=404, detail={"error": {"message": "工作流不存在"}})
+    return {"workflows": rh_store.list_workflows()}
+
+
+@app.post("/ui/api/runninghub/workflows/rename")
+async def ui_runninghub_workflows_rename(request: Request):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    webapp_id = str(body.get("webapp_id") or "").strip()
+    name = str(body.get("name") or "").strip()
+    billing_type = body.get("billing_type")
+    if not webapp_id or not name:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 webapp_id 或 name"}})
+    if not rh_store.rename_workflow(
+        webapp_id,
+        name,
+        str(billing_type).strip() if billing_type is not None else None,
+    ):
+        raise HTTPException(status_code=404, detail={"error": {"message": "工作流不存在"}})
+    return {"workflows": rh_store.list_workflows()}
+
+
+@app.post("/ui/api/runninghub/workflows/run")
+async def ui_runninghub_workflows_run(request: Request):
+    _ensure_local(request)
+    from ...runninghub import client as rh_client
+    from ...runninghub import provider as rh_provider
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    webapp_id = str(body.get("webapp_id") or "").strip()
+    node_info_list = body.get("nodeInfoList")
+    if not webapp_id:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 webapp_id"}})
+    if not isinstance(node_info_list, list):
+        raise HTTPException(status_code=400, detail={"error": {"message": "nodeInfoList 必须是数组"}})
+
+    accounts = rh_store.get_active_accounts()
+    if not accounts:
+        raise HTTPException(status_code=400, detail={"error": {"message": "请先导入至少一个 RunningHub 账号"}})
+
+    api_key = accounts[0]["api_key"]
+    aid = accounts[0].get("account_id", "")
+    wf = next((w for w in rh_store.list_workflows() if str(w.get("webappId")) == webapp_id), None)
+    billing = str((wf or {}).get("billingType") or "")
+
+    try:
+        status_info = await rh_client.fetch_account_status(api_key)
+        if aid:
+            rh_store.update_account_info(aid, status_info)
+        coins = float(status_info.get("remainCoins") or 0)
+        money = float(status_info.get("remainMoney") or 0)
+        if billing == "钱包余额" and money <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"当前账号钱包余额不足 (remainMoney={money})，请先充值或切换账号"}},
+            )
+        if billing == "RH 金币" and coins <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"当前账号 RH 金币不足 (remainCoins={coins})，请先充值或切换账号"}},
+            )
+        if coins <= 0 and money <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": "当前账号 RH 金币与钱包余额均为 0，无法发起调用"}},
+            )
+
+        created = await rh_client.submit_task(
+            api_key,
+            f"ai-app/{webapp_id}",
+            {"nodeInfoList": node_info_list},
+        )
+        task_id = created["taskId"]
+        deadline = asyncio.get_running_loop().time() + 600.0
+        while True:
+            res = await rh_client.query_task(api_key, task_id)
+            status = str(res.get("status") or res.get("taskStatus") or "").upper()
+            if status == "SUCCESS":
+                outputs = [
+                    {"url": u, "type": t}
+                    for u, t in rh_provider._extract_output_urls(res)
+                ]
+                return {"taskId": task_id, "status": "SUCCESS", "outputs": outputs}
+            if status in ("FAILED", "CANCEL", "CANCELLED"):
+                reason = res.get("errorMessage") or res.get("failedReason") or status
+                raise HTTPException(status_code=502, detail={"error": {"message": f"任务失败: {reason}"}})
+            if asyncio.get_running_loop().time() >= deadline:
+                raise HTTPException(status_code=504, detail={"error": {"message": f"任务超时 (taskId={task_id})"}})
+            await asyncio.sleep(3.0)
+    except rh_client.RunningHubError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"error": {"message": str(exc)}})

@@ -13,10 +13,26 @@
 <div class="topbar">
   <div class="topbar-inner">
     <header>
-      <h1>🤝 Buddy Proxy 控制台</h1>
+      <h1 style="display:inline-flex;align-items:center;gap:10px;">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="26" height="26" fill="none" style="flex:none;">
+          <defs>
+            <linearGradient id="bp-logo-grad" x1="10" y1="10" x2="54" y2="54" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#fafafa"/>
+              <stop offset="50%" stop-color="#a5b4fc"/>
+              <stop offset="100%" stop-color="#34d399"/>
+            </linearGradient>
+          </defs>
+          <rect width="64" height="64" rx="16" fill="#0f0f13"/>
+          <rect x="2" y="2" width="60" height="60" rx="14" stroke="rgba(255,255,255,0.18)" stroke-width="3"/>
+          <path d="M32 14L48 23.5V40.5L32 50L16 40.5V23.5L32 14Z" stroke="url(#bp-logo-grad)" stroke-width="3.5" stroke-linejoin="round"/>
+          <path d="M32 14V32M32 32L48 23.5M32 32L16 23.5M32 32V50" stroke="url(#bp-logo-grad)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.85"/>
+          <circle cx="32" cy="32" r="4" fill="#fafafa"/>
+        </svg>
+        <span>Buddy Proxy</span>
+      </h1>
       <span class="pill"><span class="dot" id="status-dot"></span><span id="status-text">加载中…</span></span>
-      <span class="sub" id="listen-hint"></span>
       <span class="spacer"></span>
+      <button class="ghost" id="theme-toggle" onclick="toggleTheme()" title="切换浅色/深色主题" style="padding:4px 10px;font-size:13px;">☀️</button>
     </header>
     <nav class="tabs">
       <button class="tab active" data-tab="overview">📊 总览</button>
@@ -25,6 +41,7 @@
       <button class="tab" data-tab="order">🔀 模型顺序<span class="cnt" id="cnt-order"></span></button>
       <button class="tab" data-tab="checkin">✅ 每日签到<span class="cnt" id="cnt-checkin"></span></button>
       <button class="tab" data-tab="benefits">💳 额度<span class="cnt" id="cnt-benefits"></span></button>
+      <button class="tab" data-tab="runninghub">🎨 RunningHub</button>
     </nav>
   </div>
 </div>
@@ -101,19 +118,19 @@
 
   <section class="page" id="page-models">
     <div class="sec-head">
-      <h2>模型 <span class="sub">点击通道条/表头可折叠 · 隐藏只是不展示，停用才会拒绝调用</span></h2>
+      <h2>模型</h2>
+      <span class="sub" id="listen-hint"></span>
       <span class="spacer"></span>
       <span class="muted" style="font-size:12px" id="model-summary"></span>
-      <button class="ghost" id="hidden-models-btn" onclick="openHiddenModelsModal()">已隐藏</button>
+      <button class="ghost" id="hidden-models-btn" data-tip="隐藏只是不展示，停用才会拒绝调用" onclick="openHiddenModelsModal()">已隐藏</button>
       <button class="ghost" id="models-expand" onclick="setAllGroups(false)">全部展开</button>
       <button class="ghost" id="models-collapse" onclick="setAllGroups(true)">全部折叠</button>
     </div>
     <div class="model-search-bar">
       <div class="model-search-field">
-        <input id="model-search" type="search" placeholder="搜索通道或模型名称 / ID…" aria-label="搜索通道或模型" aria-describedby="model-search-hint" autocomplete="off" spellcheck="false">
+        <input id="model-search" type="search" placeholder="搜索通道或模型名称 / ID…" aria-label="搜索通道或模型" autocomplete="off" spellcheck="false">
         <button class="ghost" id="model-search-clear" aria-label="清空搜索" hidden>✕</button>
       </div>
-      <span class="muted" id="model-search-hint">实时筛选 · 搜索时自动展开，清空恢复原状态</span>
     </div>
     <div id="groups"><div class="empty">加载中…</div></div>
   </section>
@@ -226,6 +243,10 @@
     <!-- Trae PAT 是服务账号运维卡，与个人账号通道分开，固定收在额度页末尾。 -->
     <div id="traepat-panel"></div>
   </section>
+
+  <section class="page" id="page-runninghub">
+    <div id="runninghub-page-box"></div>
+  </section>
 </div>
 
 <div class="overlay" id="overlay">
@@ -250,6 +271,7 @@
 <script src="/ui/benefits_raccoon.js"></script>
 <script src="/ui/benefits_codex.js"></script>
 <script src="/ui/benefits_copilot.js"></script>
+<script src="/ui/benefits_runninghub.js"></script>
 <script src="/ui/benefits_panels.js"></script>
 <script src="/ui/benefits_antigravity.js"></script>
 <script src="/ui/benefits_qoder.js"></script>
