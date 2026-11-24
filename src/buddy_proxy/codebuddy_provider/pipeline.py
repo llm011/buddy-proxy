@@ -21,6 +21,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 
+from buddy_proxy.core import net as core_net
 from buddy_proxy.protocols.dsml_parser import DSMLStreamBuffer
 from buddy_proxy.core.logging_setup import now_s
 from buddy_proxy.core.state import (
@@ -214,7 +215,7 @@ async def stream_upstream(
     try:
         # 异步HTTP客户端：timeout=None 依赖TCP超时
         timeout_config = _upstream_timeout()
-        async with httpx.AsyncClient(timeout=timeout_config) as client:
+        async with core_net.async_client(timeout=timeout_config) as client:
             async with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code != 200:
                     error_body = await resp.aread()
@@ -623,7 +624,7 @@ async def collect_upstream(
 
     try:
         timeout_config = _upstream_timeout()
-        async with httpx.AsyncClient(timeout=timeout_config) as client:
+        async with core_net.async_client(timeout=timeout_config) as client:
             async with client.stream("POST", url, headers=headers, json=body) as resp:
                 if resp.status_code != 200:
                     error_body = await resp.aread()

@@ -253,7 +253,9 @@ def _patch_refresh(monkeypatch, payload, capture=None, status=200):
         if capture is not None:
             capture.append({"url": url, "headers": kw.get("headers")})
         return _FakeResp(payload, status=status)
-    monkeypatch.setattr(credentials.httpx, "post", _post)
+    # 出站已统一走 core_net.post（默认直连）；patch 点跟着换，意图不变：
+    # 拦住「刷新 token」这一发出站请求。见 core/net.py。
+    monkeypatch.setattr(credentials.core_net, "post", _post)
 
 
 def test_ensure_token_skips_refresh_when_valid(monkeypatch):
@@ -299,7 +301,9 @@ def test_ensure_token_concurrent_single_refresh(monkeypatch):
         time.sleep(0.05)  # 拉长刷新窗口，让另一线程稳定撞上「已有人在刷」
         return _FakeResp({"data": {"accessToken": "at-new", "refreshToken": "rt-new"}})
 
-    monkeypatch.setattr(credentials.httpx, "post", _post)
+    # 出站已统一走 core_net.post（默认直连）；patch 点跟着换，意图不变：
+    # 拦住「刷新 token」这一发出站请求。见 core/net.py。
+    monkeypatch.setattr(credentials.core_net, "post", _post)
     start = threading.Barrier(2)
     out: list[str] = []
     errors: list[Exception] = []

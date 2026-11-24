@@ -19,6 +19,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Iterator
 
+from buddy_proxy.core import net as core_net
 from buddy_proxy.core.browser import open_external_url
 
 
@@ -122,7 +123,7 @@ class CodeBuddyClient:
             method=method,
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
+            with core_net.urlopen(request, timeout=timeout) as response:
                 raw = response.read()
                 content_type = response.headers.get("Content-Type", "")
         except urllib.error.HTTPError as exc:
@@ -392,7 +393,7 @@ class CodeBuddyClient:
             method="POST",
         )
         try:
-            response = urllib.request.urlopen(request, timeout=180)
+            response = core_net.urlopen(request, timeout=180)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             if exc.code == 401 and self.refresh():

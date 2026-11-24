@@ -39,6 +39,7 @@ from typing import Any
 
 import httpx
 
+from buddy_proxy.core import net as core_net
 from buddy_proxy.core.account_store import (
     ACCOUNT_ID_RE,
     AccountStore,
@@ -478,7 +479,9 @@ def refresh_account_cred(cred: dict[str, Any]) -> dict[str, Any]:
         headers["X-Refresh-Token"] = rt
         headers["X-Auth-Refresh-Source"] = "plugin"
         try:
-            resp = httpx.post(
+            # 直连：走环境代理时这一发要 8.7s（直连 0.13s），刷新慢会让
+            # 「ensure_token」整条链路看起来像卡死。理由见 core/net.py。
+            resp = core_net.post(
                 f"{endpoint(str(cred.get('region') or 'cn'))}/v2/plugin/auth/token/refresh",
                 json={},
                 headers={"Accept": "application/json", **headers},
@@ -580,9 +583,11 @@ def api_post_as(account_id: str, path: str, body: Any = None, *,
         "Content-Type": "application/json",
         **auth_headers_from_cred({**cred, "token": token}),
     }
-    resp = httpx.post(f"{base}{path}",
-                      json={} if body is None else body,
-                      headers=headers, timeout=timeout)
+    # 直连：额度/签到/流水都走这里。经环境代理时每发 8.7s，6 个账号 × 2 个
+    # 接口串起来就是 100s，额度页必然超时（2026-11-24 实测）。见 core/net.py。
+    resp = core_net.post(f"{base}{path}",
+                         json={} if body is None else body,
+                         headers=headers, timeout=timeout)
     if resp.status_code != 200:
         raise AuthError(f"HTTP {resp.status_code} {path}: {resp.text[:200]}")
     try:
