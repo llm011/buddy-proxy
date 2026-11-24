@@ -67,7 +67,9 @@ LOAD_BALANCE_WARM_DELAY_S = 60
 # 单次上游查询的硬超时：provider 实现各有各的 HTTP 超时，但「实现漏配/卡在
 # 网络风暴」的病态挂起不该把整个管理页拖住（实测 mimo 单键挂过 930s）。
 # 超时按失败处理走 FAILURE_TTL_S 短缓存，30s 后下一轮自然重试。
-QUERY_TIMEOUT_S = 12.0
+# 单通道查询超时：首屏 fast=1 已改为全异步后台拉取，不再阻塞首屏响应，
+# 保留 35s 足够让账号较多的通道（如 codebuddy 10+ 账号）完整查完而不误报超时。
+QUERY_TIMEOUT_S = 35.0
 # 这里曾有一份 ``SLOW_PROVIDERS``（默认只有 antigravity）供 fast_only 判定。
 # #311 把它换成了「任何未命中缓存的通道都异步预热」，常量随即失去消费方，
 # 只在文件里留了一版没人读的名单——现在删掉。
