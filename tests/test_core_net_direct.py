@@ -79,8 +79,12 @@ def test_client_and_async_client_are_direct_by_default(monkeypatch):
 _HTTPX_CLIENT_ALLOWLIST: frozenset[str] = frozenset()
 
 
-def test_no_provider_constructs_httpx_client_directly():
-    """raccoon 通道不许再出现裸 ``httpx.Client(...)`` / ``AsyncClient(...)``。
+def test_raccoon_constructs_no_bare_httpx_client():
+    """**raccoon 通道**不许再出现裸 ``httpx.Client(...)`` / ``AsyncClient(...)``。
+
+    范围就是 raccoon，不是全仓：其它通道（qoder 6、mimo 5、antigravity 3……）
+    还有 20 处裸客户端，它们走不走代理取决于各自上游，本 PR 没有评估，所以
+    这里也不替它们下结论。名字带 ``raccoon`` 就是为了别让人误以为全局已覆盖。
 
     这条比「测某个函数返回值」更能拦住退化：只要有人新写一处裸客户端，
     那处就绕过了直连默认值，延迟静默涨回去。用 AST 找调用而不是正则——
