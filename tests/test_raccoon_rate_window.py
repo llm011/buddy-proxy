@@ -281,3 +281,79 @@ def test_forward_records_only_when_actually_sent(monkeypatch):
             {"model": "sn-glm-5-3", "stream": True, "messages": []}, "openai"))
     assert spy.sent_tokens == []
     assert w.counts("a1") == (0, 0), "没发出去不该占窗口额度"
+
+
+def test_forward_rechecks_window_after_acquire_queue(monkeypatch):
+    """acquire 排队期间窗口被填满 → 拿到 lease 后复查、放掉 lease 换号。
+
+    失败场景：一瞬间 N 个并发全在窗口还空时通过开头检查，然后都卡在
+    acquire 排队；不复查的话它们挨个走到 record+send，实际打出去 N > 上限。
+    这里让 acquire 的副作用把最后一个空位占掉，模拟「排队期间别的请求填满了」。
+    """
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    w = AccountRateWindow(per_minute=0, per_5min=3)
+    now = time.monotonic()
+    w.record("a1", now=now)
+    w.record("a1", now=now)          # 2/3：开头快路径放行（还剩 1 个空位）
+
+    class _FillingLimiter:
+        """acquire a1 时把窗口最后一个空位占掉——模拟排队期间别的请求先 record。
+        a2 不动，让它正常走完 record+send。"""
+        max_concurrent = 2
+
+        async def acquire(self, aid, **k):
+            if aid == "a1":
+                w.record(aid)
+            return SimpleNamespace(release=lambda: None)
+
+    provider = RaccoonProvider()
+    spy = _SpyClient()
+    _patch_forward_env(monkeypatch, provider, [_acct("a1"), _acct("a2")],
+                       window=w, client=spy)
+    monkeypatch.setattr(rate_limit, "limiter", lambda: _FillingLimiter())
+
+    try:
+        asyncio.run(provider.forward(
+            {"model": "sn-glm-5-3", "stream": True, "messages": []}, "openai"))
+    except Exception:  # noqa: BLE001 - spy 在 send 故意抛错，只看谁被 send
+        pass
+
+    # a1 开头通过、acquire 后复查失败 → 没打 a1，换到 a2
+    assert spy.sent_tokens and all("a2" in t for t in spy.sent_tokens), \
+        f"复查失败该换号，实际 send：{spy.sent_tokens}"
+    # a1 的窗口是预填 2 + limiter 占的 1 = 3，没有第 4 条（没 record 就没 send）
+    assert w.counts("a1")[1] == 3
+    # a2 只被真正的 record 记了 1 条
+    assert w.counts("a2")[1] == 1
+
+
+def test_forward_all_rechecks_fail_still_reports_rate_limit(monkeypatch):
+    """两个号都是 acquire 后复查失败 → 仍报「频率上限」而不是「最后错误 n/a」。
+
+    tried 此时已经是 2（复查前就加过），不能用 tried == 0 判全跳过。
+    """
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    w = AccountRateWindow(per_minute=0, per_5min=1)   # 空窗开头放行，acquire 占满即复查失败
+
+    class _FillingLimiter:
+        max_concurrent = 2
+
+        async def acquire(self, aid, **k):
+            w.record(aid)               # 占掉唯一空位
+            return SimpleNamespace(release=lambda: None)
+
+    provider = RaccoonProvider()
+    spy = _SpyClient()
+    _patch_forward_env(monkeypatch, provider, [_acct("a1"), _acct("a2")],
+                       window=w, client=spy)
+    monkeypatch.setattr(rate_limit, "limiter", lambda: _FillingLimiter())
+
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(provider.forward(
+            {"model": "sn-glm-5-3", "stream": True, "messages": []}, "openai"))
+    assert ei.value.status_code == 429
+    assert "频率上限" in ei.value.detail["error"]["message"]
+    assert spy.sent_tokens == []

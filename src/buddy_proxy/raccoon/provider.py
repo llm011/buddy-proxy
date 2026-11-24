@@ -342,6 +342,16 @@ class RaccoonProvider(BaseProvider):
                 last_status, last_detail = 429, f"账号 {acct.id} 并发排队超时"
                 continue
 
+            # 拿到 lease 后**再查一次**窗口：循环开头那次只是快路径（省掉余额/
+            # 设备绑定两次上游调用），acquire 可能排队最长 90s，期间同一账号
+            # 的其它请求早就把窗口填满了。不复查的话，一瞬间 30 个并发全在窗口
+            # 还空时通过开头检查、再挨个排队走到 record，实际打出去 30 > 28。
+            # 复查后超发最多被 max_concurrent（2）兜住，28+2=30 仍在实测阈值 33 以下。
+            if not rate_win.has_capacity(acct.id):
+                lease.release()
+                rate_limited.append(acct.id)
+                continue
+
             upstream_body = build_chat_body(body, model=upstream_model, stream=stream)
             # 必须带设备头：绑定成功后上游按设备认会话，聊天却不声明自己属于
             # 那台设备 = 未绑定设备在调模型，正是 200108 风控抓的形态。
@@ -524,7 +534,10 @@ class RaccoonProvider(BaseProvider):
             finally:
                 lease.release()
 
-        if tried == 0 and rate_limited:
+        # 到这里 last_status 仍是 0 = 没有任何请求拿到过上游响应、也没 AuthError/
+        # 超时——只可能是全部账号都被窗口跳过（开头快路径或 acquire 后复查）。
+        # 不能用 tried == 0 判：复查失败的账号 tried 已经加过了。
+        if last_status == 0 and rate_limited:
             # 全部账号都是「滑动窗口到顶」被跳过的：一个上游请求都没发。
             # 直接 429 并说清最快多久恢复——调用方（model_order）据此换通道。
             recover = min(rate_win.recovery_in(a) for a in rate_limited)
