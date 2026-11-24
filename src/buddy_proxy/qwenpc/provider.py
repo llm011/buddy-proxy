@@ -75,6 +75,20 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
     # ---- GLM 系（智谱）----
     {"id": "glm-5.3", "name": "GLM-5.3", "credits": 1.2, "images": False, "context_window": 1_000_000},
     {"id": "glm-5.3-flash", "name": "GLM-5.3-Flash", "credits": 0.2, "images": False, "context_window": 1_000_000},
+    # 2026-11-24 新增：倍率与上下文直接读网关 ``/api/desktop/chat-modes``
+    # ——``price_factor: 1.2`` / ``max_input_tokens: 1000000``
+    # （``context_config`` 只给 1M 一档且是默认档）。倍率与 GLM-5.3 恰好相同，
+    # 但它多了 ``badges: [{kind: promotion, labels: {zh: 首发上线}}]``：
+    # 那只是新上线角标，``promotion`` 里**没有** ``beforePromotionPriceFactor``，
+    # 说明 1.2 是原价、不是折扣价。别自己编一个「立减」出来。
+    #
+    # **``images`` 必须是 True，尽管目录里写着 ``is_vl: false``——那个字段是错的。**
+    # 实测 128px 纯色图：红/绿/黄/蓝四种颜色全答对（prompt 里没有任何颜色暗示），
+    # 说明它真在读图，不是蒙的。对照组同门 GLM-5.3 传同样四张图全部
+    # 400 ``invalid_request``——所以这不是「GLM 系都能读图」，是 5.4 这个型号
+    # 独有而目录没跟上。不声明 True 的代价：pi-ai 会按 input:[text] 把图片
+    # 剥掉，用户发图直接丢内容还不报错。
+    {"id": "glm-5.4", "name": "GLM-5.4", "credits": 1.2, "images": True, "context_window": 1_000_000},
     # ---- Kimi 系（月之暗面）----
     {"id": "kimi-k3.1-pro", "name": "Kimi-K3.1-Pro", "credits": 2.4, "images": True, "context_window": 1_000_000},
     # ---- MiniMax 系 ----

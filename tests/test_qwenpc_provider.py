@@ -342,6 +342,9 @@ def test_credit_rates_match_panel_and_catalog():
         "deepseek-v4-pro": (0.2, False),
         "glm-5.3": (1.2, False),
         "glm-5.3-flash": (0.2, False),
+        # glm-5.4 的 images=True 是实测结论：网关目录 is_vl 写着 false，
+        # 但红/绿/黄/蓝四种纯色图全部认对；同门 glm-5.3 传图全 400。
+        "glm-5.4": (1.2, True),
         "kimi-k3.1-pro": (2.4, True),
         "minimax-m3.1-flash": (0.2, True),
         "step-5-preview": (0.7, True),
