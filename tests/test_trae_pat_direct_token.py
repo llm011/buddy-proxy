@@ -51,3 +51,52 @@ def test_direct_cloud_ide_token_profile_skips_exchange(
             profiles[0], force_refresh=True, rejected_token="jwt-desktop-123"
         )
     assert exc_info.value.status_code == 401
+
+
+def test_import_from_ide_creates_and_updates_profile(monkeypatch, tmp_path):
+    from buddy_proxy.trae import auth_storage
+    from buddy_proxy.trae.pat.config import _PatConfigError, _load_profiles, import_from_ide
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("FOO=bar\nTRAE_PAT_BEARER_PROFILES='[{\"id\":\"p1\",\"bearer\":\"b1\"}]'\n", encoding="utf-8")
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", '[{"id":"p1","bearer":"b1"}]')
+
+    monkeypatch.setattr(auth_storage, "find_auth_data", lambda ed: {"ok": ed} if ed == "cn" else None)
+    monkeypatch.setattr(
+        auth_storage,
+        "_extract_auth_fields",
+        lambda _d: {
+            "token": "jwt-from-ide-1",
+            "userId": "lingyibin.jason",
+            "expiredAt": "2027-11-02T11:41:14+08:00",
+        },
+    )
+
+    res1 = import_from_ide(env_path=env_file)
+    assert res1["id"] == "desktop-cn"
+    assert res1["updated"] is False
+    assert res1["total"] == 2
+    profiles = _load_profiles()
+    assert [p.id for p in profiles] == ["p1", "desktop-cn"]
+    assert profiles[1].cloud_ide_token == "jwt-from-ide-1"
+    assert "jwt-from-ide-1" in env_file.read_text(encoding="utf-8")
+
+    # 再次导入应原地更新而非追加第 3 个
+    monkeypatch.setattr(
+        auth_storage,
+        "_extract_auth_fields",
+        lambda _d: {
+            "token": "jwt-from-ide-2",
+            "userId": "lingyibin.jason",
+            "expiredAt": "2027-12-01T00:00:00+08:00",
+        },
+    )
+    res2 = import_from_ide(env_path=env_file)
+    assert res2["updated"] is True
+    assert res2["total"] == 2
+    assert _load_profiles()[1].cloud_ide_token == "jwt-from-ide-2"
+
+    # 无登录态时应明确报错
+    monkeypatch.setattr(auth_storage, "find_auth_data", lambda _ed: None)
+    with pytest.raises(_PatConfigError):
+        import_from_ide(env_path=env_file)

@@ -33,6 +33,7 @@ from .config import (  # noqa: F401
     PatCredentials,
     PatProfile,
     ensure_pat_config,
+    import_from_ide,
     pat_enabled,
 )
 from .models import (  # noqa: F401

@@ -644,6 +644,23 @@ async def ui_traepat_refresh_tokens(request: Request):
     return await asyncio.to_thread(refresh_missing_tokens)
 
 
+@app.post("/ui/api/traepat/import-ide")
+async def ui_traepat_import_ide(request: Request):
+    """从本机 Trae IDE 登录态一次性导入 Cloud-IDE-JWT 到 traepat。"""
+    _ensure_local(request)
+    try:
+        from ...trae.pat import import_from_ide, refresh_missing_tokens
+        from ...trae.pat.config import _PatConfigError
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "traepat 通道不可用"}})
+    try:
+        res = await asyncio.to_thread(import_from_ide)
+    except _PatConfigError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+    await asyncio.to_thread(refresh_missing_tokens)
+    return res
+
+
 @app.get("/ui/api/dumate/status")
 async def ui_dumate_status(request: Request):
     """DuMate（百度搭子）本地代理状态（供管理页通道面板展示）。

@@ -15,6 +15,7 @@ import logging
 import os
 import pathlib
 import re
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -173,3 +174,105 @@ def _token_file() -> pathlib.Path:
     # 状态统一收敛到 ~/.buddy-proxy/；首次访问自动从 ~/.ethan/ 迁移。
     from buddy_proxy.core.paths import state_file
     return state_file("trae_pat_token.json", legacy="trae_pat_token.json")
+
+
+def _parse_expires_at(raw: Any) -> float:
+    if isinstance(raw, (int, float)) and raw > 0:
+        return float(raw)
+    if isinstance(raw, str) and raw.strip():
+        from datetime import datetime
+
+        text = raw.strip().replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(text).timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _update_env_file(env_path: pathlib.Path, serialized: str) -> None:
+    if not env_path.exists():
+        return
+    content = env_path.read_text(encoding="utf-8")
+    line = f"{_BEARER_PROFILES}='{serialized}'"
+    pattern = re.compile(
+        r"^" + re.escape(_BEARER_PROFILES) + r"=(?:'[^']*'|\"[^\"]*\"|[^\n]*)",
+        re.MULTILINE,
+    )
+    if pattern.search(content):
+        new_content = pattern.sub(lambda _m: line, content, count=1)
+    else:
+        sep = "" if (not content or content.endswith("\n")) else "\n"
+        new_content = f"{content}{sep}{line}\n"
+    env_path.write_text(new_content, encoding="utf-8")
+
+
+def import_from_ide(
+    edition: str | None = None,
+    env_path: pathlib.Path | None = None,
+) -> dict[str, Any]:
+    """从本机 Trae IDE 登录态导入 Cloud-IDE-JWT 到 TRAE_PAT_BEARER_PROFILES。"""
+    from buddy_proxy.trae.auth_storage import _extract_auth_fields, find_auth_data
+
+    editions = (edition,) if edition else ("cn", "global")
+    picked_ed = ""
+    fields: dict[str, Any] = {}
+    for ed in editions:
+        data = find_auth_data(ed)
+        if not data:
+            continue
+        extracted = _extract_auth_fields(data)
+        if str(extracted.get("token") or "").strip():
+            picked_ed = ed
+            fields = extracted
+            break
+    if not picked_ed:
+        raise _PatConfigError("未找到本机 Trae IDE 登录态，请先在 Trae 客户端登录")
+
+    token = str(fields.get("token") or "").strip()
+    uid = str(fields.get("userId") or "").strip()
+    expires_at = _parse_expires_at(fields.get("expiredAt"))
+    profile_id = f"desktop-{picked_ed}"
+
+    raw = os.environ.get(_BEARER_PROFILES, "").strip()
+    if raw:
+        try:
+            items = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 不是合法 JSON") from exc
+        if not isinstance(items, list):
+            raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 必须是非空 JSON 数组")
+    else:
+        items = []
+
+    new_entry: dict[str, Any] = {
+        "id": profile_id,
+        "cloud_ide_token": token,
+    }
+    if uid:
+        new_entry["uid"] = uid
+    if expires_at > 0:
+        new_entry["expires_at"] = expires_at
+
+    updated = False
+    for i, item in enumerate(items):
+        if isinstance(item, dict) and str(item.get("id") or "").strip() == profile_id:
+            items[i] = new_entry
+            updated = True
+            break
+    if not updated:
+        if len(items) >= _MAX_PROFILES:
+            raise _PatConfigError(f"TRAE_PAT_BEARER_PROFILES 最多允许 {_MAX_PROFILES} 个账号")
+        items.append(new_entry)
+
+    serialized = json.dumps(items, ensure_ascii=False, separators=(",", ":"))
+    os.environ[_BEARER_PROFILES] = serialized
+    _update_env_file(env_path if env_path is not None else pathlib.Path(".env"), serialized)
+    return {
+        "id": profile_id,
+        "edition": picked_ed,
+        "uid": uid,
+        "expires_at": expires_at,
+        "updated": updated,
+        "total": len(items),
+    }
