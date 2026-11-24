@@ -506,13 +506,22 @@
       ? nodes.map((n, idx) => {
           const label = n.description || `${n.nodeName || 'Node'} · ${n.fieldName || ''}`;
           const val = n.fieldValue !== undefined && n.fieldValue !== null ? String(n.fieldValue) : '';
+          const ftype = String(n.fieldType || 'TEXT').toUpperCase();
+          const isMedia = ftype === 'IMAGE' || ftype === 'AUDIO' || ftype === 'VIDEO';
+          const accept = ftype === 'IMAGE' ? 'image/*' : ftype === 'AUDIO' ? 'audio/*' : ftype === 'VIDEO' ? 'video/*' : '*/*';
+          const uploadBtn = isMedia
+            ? `<button type="button" class="ghost rh-upload-btn" data-idx="${idx}" data-ftype="${ftype.toLowerCase()}" style="flex:none;white-space:nowrap;">上传${ftype === 'IMAGE' ? '图片' : ftype === 'AUDIO' ? '音频' : '视频'}</button><input type="file" class="rh-upload-input" data-idx="${idx}" accept="${accept}" style="display:none;" />`
+            : '';
           return `
             <div style="display:flex;flex-direction:column;gap:4px;">
               <label style="font-size:12px;">
                 <strong>${escapeHtml(label)}</strong>
-                <span class="muted mono" style="font-size:11px;margin-left:6px;">#${escapeHtml(String(n.nodeId || ''))}.${escapeHtml(String(n.fieldName || ''))} (${escapeHtml(String(n.fieldType || 'TEXT'))})</span>
+                <span class="muted mono" style="font-size:11px;margin-left:6px;">#${escapeHtml(String(n.nodeId || ''))}.${escapeHtml(String(n.fieldName || ''))} (${escapeHtml(ftype)})</span>
               </label>
-              <input type="text" class="rh-wf-field" data-idx="${idx}" value="${escapeHtml(val)}" />
+              <div style="display:flex;gap:6px;align-items:center;">
+                <input type="text" class="rh-wf-field" data-idx="${idx}" value="${escapeHtml(val)}" style="flex:1;min-width:0;" />
+                ${uploadBtn}
+              </div>
             </div>`;
         }).join('')
       : '<div class="muted" style="font-size:12px;">该工作流无预设可编辑参数，可直接发起调用。</div>';
@@ -530,6 +539,43 @@
       <button id="rh-wf-run-btn">发起调用</button>
     `;
     overlayEl.classList.add('show');
+
+    bodyEl.querySelectorAll('.rh-upload-btn').forEach(btn => {
+      const idx = btn.dataset.idx;
+      const ftype = btn.dataset.ftype || 'image';
+      const fileInput = bodyEl.querySelector(`.rh-upload-input[data-idx="${idx}"]`);
+      const textInput = bodyEl.querySelector(`.rh-wf-field[data-idx="${idx}"]`);
+      if (!fileInput || !textInput) return;
+      btn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        const origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '上传中…';
+        const statusEl = document.getElementById('rh-run-status');
+        if (statusEl) statusEl.textContent = '';
+        try {
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('file_type', ftype);
+          const resp = await fetch('/ui/api/runninghub/upload', { method: 'POST', body: fd });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            throw new Error(data?.error?.message || data?.detail?.error?.message || `HTTP ${resp.status}`);
+          }
+          if (data.fileName) {
+            textInput.value = data.fileName;
+          }
+        } catch (err) {
+          if (statusEl) statusEl.textContent = `上传失败: ${err.message || err}`;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = origText;
+          fileInput.value = '';
+        }
+      });
+    });
 
     const runBtn = document.getElementById('rh-wf-run-btn');
     if (runBtn) {

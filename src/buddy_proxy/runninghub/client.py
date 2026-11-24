@@ -200,3 +200,39 @@ async def fetch_webapp_info(
         "billingType": billing_type,
         "nodeInfoList": node_info_list,
     }
+
+
+async def upload_file(
+    api_key: str,
+    filename: str,
+    content: bytes,
+    *,
+    content_type: str = "application/octet-stream",
+    file_type: str = "image",
+    timeout: float = 60.0,
+) -> str:
+    """上传本地文件（图片/音频/视频）到 RunningHub，返回服务端 fileName。"""
+    url = f"{_base_url()}/task/openapi/upload"
+    files = {"file": (filename or "upload.bin", content, content_type)}
+    form_data = {"apiKey": api_key, "fileType": file_type}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            data=form_data,
+            files=files,
+        )
+    if resp.status_code >= 400:
+        raise RunningHubError(
+            f"RunningHub 上传文件失败 (HTTP {resp.status_code})",
+            status_code=resp.status_code,
+        )
+    data = resp.json()
+    if not isinstance(data, dict) or data.get("code") not in (0, None):
+        msg = data.get("msg") if isinstance(data, dict) else "未知错误"
+        raise RunningHubError(f"RunningHub 上传文件失败: {msg}")
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    file_name = inner.get("fileName") or inner.get("file_name")
+    if not file_name:
+        raise RunningHubError("RunningHub 上传成功但未返回 fileName")
+    return str(file_name)
