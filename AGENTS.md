@@ -165,6 +165,15 @@ JS——`web/ui/page.py` 的 `_stamp_assets` 会给 `/ui` 的资源加 `?v=<mtim
 改 `index.html` 里的面板顺序时，`tests/test_benefits_panel_order.py` 会拦你：
 **新增面板必须同步那个 EXPECTED_ORDER**，否则顺序契约测试红。
 
+**量宽度之前，先确认条目真的会被渲染进那个容器**。踩过：给配额面板的周期
+标签定响应式阈值时，对着 `.grid2` 逐像素量出 `.qhead≈494px`，但带 `window`
+字段的条目其实渲染在 `.pat-quota-grid > .pat-pkg` 里、桌面下 `.qhead≈511px`
+——阈值定成 520，「周额度」四个字在任何桌面视口都显示不出来，而当时 CSS
+契约测试全绿（只校验阈值有序、色点绝对定位这类结构约定）。所以量完要在**真实
+容器**里量，并且把实测宽度写成测试里的常量（见
+`tests/test_quota_window_tag_css.py` 的 `test_desktop_account_card_shows_full_text_not_dot`），
+让容器布局一变测试就红，而不是阈值悄悄失效。
+
 ---
 
 ## 提交前自检清单
