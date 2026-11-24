@@ -689,14 +689,19 @@ function _quota_account_count(items) {
   return ids.size || 1;
 }
 
-function renderQuotaLoadingCard(panel, name, tag) {
+function renderQuotaLoadingCard(panel, name, tag, p) {
+  const err = p && p.load_error;
+  const pid = p && p.id;
+  const rightHtml = err && pid
+    ? `<span class="muted" style="font-size:12px;margin-right:8px">${escapeHtml(err)}</span><button class="ghost" onclick="retryProviderBenefits('${escapeHtml(pid)}')">↻ 重试</button>`
+    : `<span class="muted" style="font-size:12px">⟳ 额度加载中…</span>`;
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">${escapeHtml(name)}</span>
         ${tag ? `<span class="tag">${escapeHtml(tag)}</span>` : ''}
         <span class="grow"></span>
-        <span class="muted" style="font-size:12px">⟳ 额度加载中…</span>
+        ${rightHtml}
       </div>
     </div>`;
 }

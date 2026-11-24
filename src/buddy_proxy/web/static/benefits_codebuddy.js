@@ -121,7 +121,7 @@ function renderCodebuddyPanel() {
   if (!panel) return;
   const cb = (BENEFITS.providers || []).find(p => p.id === 'codebuddy');
   if (!cb) { panel.innerHTML = ''; return; }  // 通道未注册：整块不渲染
-  if (cb.loading) return renderQuotaLoadingCard(panel, 'CodeBuddy', 'CodeBuddy 订阅');
+  if (cb.loading || cb.load_error) return renderQuotaLoadingCard(panel, 'CodeBuddy', 'CodeBuddy 订阅', cb);
 
   // 按「CodeBuddy #N」分组（label 形如「CodeBuddy #1 · 订阅套餐」），qoder 同款切法。
   const groups = new Map();

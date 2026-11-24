@@ -154,7 +154,7 @@ function renderCodexPanel() {
   if (!panel) return;
   const codex = (BENEFITS.providers || []).find(p => p.id === 'codex' && !p.disabled);
   if (!codex) { panel.innerHTML = ''; return; }  // 通道未注册（没加 --codex）：整块不渲染
-  if (codex.loading) return renderQuotaLoadingCard(panel, 'Codex', 'ChatGPT 订阅');
+  if (codex.loading || codex.load_error) return renderQuotaLoadingCard(panel, 'Codex', 'ChatGPT 订阅', codex);
 
   const groups = new Map();
   const notices = [];

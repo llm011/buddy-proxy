@@ -130,7 +130,7 @@ function renderTraePanel() {
   const trae = (BENEFITS.providers || []).find(p => p.id === 'trae' && !p.disabled);
   // 通道未注册（没加 --trae）或海外的 traeintl（独立 id）：整块不渲染
   if (!trae) { panel.innerHTML = ''; return; }
-  if (trae.loading) return renderQuotaLoadingCard(panel, 'Trae', 'Trae 订阅');
+  if (trae.loading || trae.load_error) return renderQuotaLoadingCard(panel, 'Trae', 'Trae 订阅', trae);
 
   // 按「Trae #N」分组（label 形如「Trae #1 · 总额度」）。qoder 同款切法，
   // 两点差异：
