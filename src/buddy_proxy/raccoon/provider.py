@@ -821,27 +821,41 @@ class RaccoonProvider(BaseProvider):
 
         # 资源包明细：每笔发放一个包，独立到期（不给进度条——单包没有可信上限）
         #
+        # 已过期的包不渲染：它们已作废、不再计入可用余额（balance 已扣掉），
+        # 显示出来用户会以为还有额度可用（2026-11-25 用户实报「看着过期的发放
+        # 积分，不知道是不是能用」）。与上面算 granted_total 时的过期过滤同口径。
+        #
+        # 单包没有「剩余量」字段：上游 /points/v2/bills 给的是这笔**发放了多少**
+        # （points），不是「还剩多少」。之前把发放量塞进 remaining，界面显示
+        # 「剩 300 · 已用未知」——既不是真剩余，又因拿不到单包已用而恒显示
+        # 「已用未知」，双重误导。现在 remaining=None，发放量写进 note，前端
+        # 通用组件走「无数字」分支，只显示 label + 到期日 + note。
+        #
         # ``expire_ts`` 必须是 **epoch 秒**：前端 ``fmtExpireMmdd`` 按
         # ``new Date(ts * 1000)`` 算，传 ISO 字符串会渲染成
         # 「NaN-NaN-NaN 到期」（2026-11-23 用户实报）。
         if bills:
+            now = time.time()
             for bill in bills:
-                points = bill.get("points") or 0
                 expire_iso = bill.get("expire_at") or ""
                 expire_epoch = _epoch_from_iso(expire_iso)
+                if expire_epoch and expire_epoch < now:
+                    continue  # 已过期作废，不展示
+                points = round(float(bill.get("points") or 0), 1)
                 items.append({
                     "label": f"{prefix}{bill.get('event') or '积分发放'}",
                     "used": None,
                     "total": None,
-                    "remaining": round(float(points), 1),
+                    "remaining": None,
                     "percent": None,
                     "reset_ts": None,
                     "expire_ts": expire_epoch or None,
                     "unit": "credits",
-                    # note 只留一句人话；具体日期由组件按 expire_ts 渲染，
-                    # 别在 note 里重复一遍 ISO（用户实报「又长又不好看」）
-                    "note": ("无到期时间" if not expire_epoch
-                             else "到期后这部分积分作废"),
+                    # 发放量是上游给的真实数，写进 note 让用户知道「这份包有多大」；
+                    # 但不冒充剩余量——单包已用无法从上游拿到（expense 流水不带包归属）。
+                    "note": (f"发放 {points} 分，"
+                             + ("无到期时间" if not expire_epoch
+                                else "到期后这部分积分作废")),
                 })
 
         # 分池剩余量（上游真实字段，不做减法）
