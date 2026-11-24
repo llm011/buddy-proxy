@@ -122,3 +122,28 @@ def test_raccoon_imports_core_net():
     for name in ("raccoon/provider.py", "raccoon/login.py"):
         text = (_SRC / name).read_text(encoding="utf-8")
         assert "from ..core import net as core_net" in text, f"{name} 没 import core_net"
+
+
+def test_cached_client_does_not_follow_env_change(monkeypatch):
+    """已造好的客户端不跟随环境变量变化——这是 httpx 的语义，不是 bug。
+
+    钉住它是因为容易误会：``open_direct`` 那种「每次新建 opener」的封装确实
+    改完立刻生效，但 ``trust_env`` 是构造时固定到对象上的。``raccoon`` 的
+    ``_get_client`` 缓存实例，所以改开关要重启进程。
+
+    这条测试同时是文档：哪天有人想「让缓存客户端也跟随开关」，会先看到这里
+    说明为什么不能，而不是直接踩坑。
+    """
+    monkeypatch.delenv(net.PROXY_ENV, raising=False)
+    c = net.client(timeout=5)
+    try:
+        assert c.trust_env is False
+        monkeypatch.setenv(net.PROXY_ENV, "1")
+        # 同一个对象不会变——httpx 把 trust_env 固化在构造期
+        assert c.trust_env is False
+        # 但新造的一定用当前值
+        with net.client(timeout=5) as fresh:
+            assert fresh.trust_env is True
+    finally:
+        c.close()
+

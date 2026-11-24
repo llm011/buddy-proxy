@@ -61,8 +61,16 @@ PROXY_ENV = "BUDDY_UPSTREAM_USE_PROXY"
 
 
 def env_wants_proxy() -> bool:
-    """读开关。每次调用都读环境是有意的——改完环境变量立刻生效，不必等进程
-    重建客户端（一次 ``os.environ.get`` 很便宜）。"""
+    """读开关。
+
+    每次调用都读环境（一次 ``os.environ.get`` 很便宜），所以**新造**的客户端
+    一定用当前值。但要注意：``trust_env`` 是在构造时固定到 httpx 对象上的，
+    已经造好的客户端**不会**因为改了环境变量而切换——``raccoon`` 的
+    ``_get_client`` 会缓存实例，所以那里改开关仍需重启进程才生效。
+
+    （``trae/pat/net.py`` 的 ``open_direct`` 能做到「改完立刻生效」，是因为它
+    每次调用都新建 opener，没有缓存这一层。两者别混为一谈。）
+    """
     value = os.environ.get(PROXY_ENV, "").strip().lower()
     return value not in ("", "0", "false", "no")
 
