@@ -103,3 +103,78 @@ def test_default_tier_shows_full_text():
     assert re.search(r"\.wtag \.wtag-short\s*,\s*\.wtag \.wtag-dot\s*\{[^}]*display\s*:\s*none", base), (
         "默认必须隐藏单字与色点")
     assert re.search(r"\.wtag \.wtag-long\s*\{[^}]*display\s*:\s*inline", base), "默认必须显示全称"
+
+
+# ---------------------------------------------------------------------------
+# 阈值必须让「桌面上的真实容器」落到全称档
+# ---------------------------------------------------------------------------
+
+#: 带 window 字段的条目（目前只有 antigravity）渲染在 .pat-quota-grid 两列账号卡
+#: 里的 .pat-pkg 内。headless Chrome 在 1280px 视口下实测：卡宽 541px、
+#: .qhead 宽 511px。这是用户日常看到的面板，不是假想的 .grid2。
+_DESKTOP_QHEAD_PX = 511
+
+#: 全称标签在最长条目（Claude/GPT 组 + 「剩 18.9 / 1,000 · 已用 98.11%」）下
+#: 「不截断所需宽度」的实测值。阈值必须留出余量，否则全称会把重置时间挤进省略号。
+_LONG_FORM_NEEDS_PX = 463
+
+
+def _wtag_container_thresholds() -> list[int]:
+    """style.css 里所有「块内动了 .wtag」的 @container max-width 阈值，升序。"""
+    css = _css_without_comments()
+    widths = []
+    for w in re.findall(r"@container \(max-width:\s*(\d+)px\)", css):
+        w = int(w)
+        if _block_touches_wtag(css, w) and w not in widths:
+            widths.append(w)
+    return sorted(widths)
+
+
+def test_desktop_account_card_shows_full_text_not_dot():
+    """桌面账号卡（.qhead≈511px）必须落在**全称档**，不能是色点或单字。
+
+    2026-11-25 真实事故：第一版阈值（560/520）是对着 .grid2（≈494px）量的，
+    而 antigravity 的条目根本不渲染在 .grid2 里。511px 落进色点档，桌面上
+    「周额度」四个字永远显示不出来，用户只看到一个 5px 的点，反馈
+    「还是没看到周额度的进度条」——而当时所有测试都是绿的，因为没有任何一条
+    断言把「真实容器宽度」和「阈值」联系起来。
+
+    这条测试把它们钉在一起：桌面 qhead 宽必须**严格大于**最宽的那档阈值。
+    """
+    thresholds = _wtag_container_thresholds()
+    assert thresholds, "找不到周期标签的容器查询阈值"
+    widest = thresholds[-1]
+    assert _DESKTOP_QHEAD_PX > widest, (
+        f"桌面账号卡的 .qhead 实测宽 {_DESKTOP_QHEAD_PX}px，但最宽的降级阈值是 "
+        f"{widest}px —— 桌面会落进 {('单字' if len(thresholds) > 1 else '色点')}档，"
+        "「周额度」显示不出来。阈值必须小于真实容器宽度（量的时候先确认条目"
+        "真的渲染在那个容器里）")
+
+
+def test_full_text_tier_only_covers_widths_where_it_fits():
+    """全称档覆盖的宽度区间（qhead > 阈值）必须全部 ≥ 全称不截断所需宽度。
+
+    _LONG_FORM_NEEDS_PX 是实测「全称刚好不截断」所需宽度（最长条目）。
+    全称只在 qhead > 降级阈值 时显示，所以要求 **阈值 ≥ 所需宽度**：
+    这样凡是还在显示全称的地方，它都一定放得下、不会把重置时间挤进省略号。
+
+    （第一版我把不等式写反了，断言成「阈值 < 所需宽度」——那恰恰是危险的
+    方向：会允许一段「还显示全称、但已经截断」的区间存在。）
+    """
+    thresholds = _wtag_container_thresholds()
+    widest = thresholds[-1]
+    assert widest >= _LONG_FORM_NEEDS_PX, (
+        f"全称档降级阈值 {widest}px 小于全称不截断所需宽度 {_LONG_FORM_NEEDS_PX}px："
+        "会出现一段「还在显示全称、但重置时间已被挤进省略号」的区间。"
+        "把阈值提到所需宽度及以上")
+
+
+def test_thresholds_match_documented_values():
+    """阈值本身钉死：改动必须同时重跑 headless 测量并更新 style.css 的注释表。
+
+    不是为了反对改阈值——是为了让「改阈值」这个动作必须经过「重新测量」。
+    """
+    assert _wtag_container_thresholds() == [440, 470], (
+        "周期标签阈值变了。请确认已用真实容器（.pat-quota-grid > .pat-pkg，"
+        "非 .grid2）在 headless Chrome 下重跑过 380~1400px 的基线对比，"
+        "并同步更新 style.css 里的实测表")

@@ -380,32 +380,40 @@
   /* 周期标签（周额度 / 5 小时窗）三档写法，由 .qhead 的容器查询按实际宽度切换：
        全称「周额度 / 5 小时窗」 → 单字「周 / 5h」 → 色点（绝对定位，不占流内宽度）
      默认（查询不生效时）显示全称，降级方向是「多占一点」而不是「看不懂」。
-     色点颜色区分周期：周额度=warn 黄、5 小时窗=muted 灰。 */
+     色点颜色区分周期：周额度=warn 黄、5 小时窗=muted 灰。
+     .wtag-dot 带 aria-label=全称，读屏软件不受档位影响。 */
   .wtag .wtag-short, .wtag .wtag-dot { display: none; }
   .wtag .wtag-long { display: inline; }
   .wtag .wtag-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted);
                     vertical-align: middle; }
   .wtag.warn .wtag-dot { background: var(--warn); }
-  /* 阈值与「色点必须绝对定位」都来自真实 CSS 下的渲染测量（headless Chrome，
-     1px 步长扫挂载宽 400~1100；三条最长条目：Claude 1.9% / Gemini / Claude 满额
-     长数字）。指标是「基线✓但带标签✗」的 (条目×宽度) 格数，0 = 标签零代价：
+  /* ⚠ 阈值必须按**带 window 字段的条目实际所在的容器**来定。
+     目前只有 antigravity 发 window，它的条目渲染在 .pat-quota-grid（两列账号卡）
+     里的 .pat-pkg 内：桌面视口下 .qhead ≈ 511px（卡宽 541 − 内边距 30）。
 
-       全称标签            → 比基线多截断一大段（两栏 528px 下 Claude 直接截断）
-       全称 → 单字          → 仍有 20px 左右的缝（基线✓、单字✗）
-       单字 → 19px 色点     → 29 格变差（色点连 padding 仍占 ~19px 流内宽度）
-       单字 → 5px 色点无边距 → 14 格
-       单字 → 色点绝对定位   →  0 格   ← 采用。色点浮在 qlabel 左侧，不挤占文字
+     2026-11-25 踩过的坑：第一版阈值（560/520）是对着 .grid2（≈494px）量的，
+     而那是别的面板的容器。结果 511px 落进了色点档——桌面上「周额度」四个字
+     **永远显示不出来**，用户只看到一个 5px 的点，反馈「还是没看到周额度」。
+     教训：量之前先确认条目真的会被渲染进那个容器。
 
-     换算成挂载宽（= .qhead + 34px 卡片内边距）：≤594px 显示单字、≤554px 显示色点。
-     注意容器查询量的是 .qhead 而非卡片/视口，所以这两个阈值比「挂载宽」小 34。
-     .grid2 两栏时 .qhead≈494px → 落在色点档；全称只在单栏宽窗口才出现。
-     用容器查询而非视口媒体查询：同样视口下单栏/两栏可用宽度差一倍，按视口猜必错一边。 */
+     在真实容器里用 headless Chrome 量「不截断所需宽度」（三条最长条目取最大）：
+       无标签 430px  ·  全称 463px  ·  单字 441px  ·  色点 412px     （qhead 有 511px）
+     所以全称在桌面上放得下、还余 48px。最终阈值（逐 20px 扫视口 380~1400，
+     与无标签基线逐格对比，带标签比基线更早截断的格数 = 0）：
+
+       qhead > 470px   → 全称（桌面账号卡、单列宽窗口）
+       440~470px       → 单字（只剩 30px 的过渡带；再宽全称会挤掉重置时间）
+       ≤ 440px         → 色点（单字在 441px 以下开始挤占文字；色点不占流内宽度，
+                         所以从 440 起接管后带标签与基线**同寿**）
+
+     色点档必须绝对定位（不占流内宽度）：实测色点哪怕缩到 5px，只要还在文字流里，
+     就仍有十几个 (条目×宽度) 组合比无标签基线更早截断；绝对定位后为 0。 */
   .qitem .qhead { container-type: inline-size; position: relative; }
-  @container (max-width: 560px) {
+  @container (max-width: 470px) {
     .wtag .wtag-long { display: none; }
     .wtag .wtag-short { display: inline; }
   }
-  @container (max-width: 520px) {
+  @container (max-width: 440px) {
     /* 绝对定位把标签从文字流里摘出去：不占宽，就不会把重置时间挤进省略号。
        qlabel 补等量左内边距给色点让位，文字起点不变。 */
     .wtag { position: absolute; left: 0; top: 50%; transform: translateY(-50%);
