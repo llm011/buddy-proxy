@@ -297,8 +297,17 @@ class RaccoonProvider(BaseProvider):
         tried = 0
         last_status = 0
         last_detail = ""
+        # 滑动窗口到顶被跳过的账号：若最终一个都没真发出去，要报「频率上限」
+        # 而不是「所有账号均不可用（最后错误 n/a）」——后者会让人误以为上游挂了。
+        rate_limited: list[str] = []
+        rate_win = rate_limit.window()
 
         for acct in accounts:
+            # 滑动窗口：到顶就不打上游、直接换号。放在 tried += 1 之前——
+            # 没消耗任何上游时间，不该占尝试预算。
+            if not rate_win.has_capacity(acct.id):
+                rate_limited.append(acct.id)
+                continue
             if tried and time.monotonic() - started > _ATTEMPT_DEADLINE_S:
                 last_status = last_status or 504
                 last_detail = last_detail or "尝试预算用尽（上游持续无响应）"
@@ -333,11 +342,24 @@ class RaccoonProvider(BaseProvider):
                 last_status, last_detail = 429, f"账号 {acct.id} 并发排队超时"
                 continue
 
+            # 拿到 lease 后**再查一次**窗口：循环开头那次只是快路径（省掉余额/
+            # 设备绑定两次上游调用），acquire 可能排队最长 90s，期间同一账号
+            # 的其它请求早就把窗口填满了。不复查的话，一瞬间 30 个并发全在窗口
+            # 还空时通过开头检查、再挨个排队走到 record，实际打出去 30 > 28。
+            # 复查后超发最多被 max_concurrent（2）兜住，28+2=30 仍在实测阈值 33 以下。
+            if not rate_win.has_capacity(acct.id):
+                lease.release()
+                rate_limited.append(acct.id)
+                continue
+
             upstream_body = build_chat_body(body, model=upstream_model, stream=stream)
             # 必须带设备头：绑定成功后上游按设备认会话，聊天却不声明自己属于
             # 那台设备 = 未绑定设备在调模型，正是 200108 风控抓的形态。
             headers = build_headers(access_token, _device_id_for(acct.id))
             url = f"{endpoint()}{CHAT_PATH}"
+            # 登记进滑动窗口：放在 send 之前、所有可能 continue 的检查之后，
+            # 只统计真正发出去的请求（见 AccountRateWindow.record 的说明）。
+            rate_win.record(acct.id)
             try:
                 req = client.build_request(
                     "POST", url, json=upstream_body, headers=headers,
@@ -511,6 +533,27 @@ class RaccoonProvider(BaseProvider):
                 return JSONResponse(content=payload)
             finally:
                 lease.release()
+
+        # 到这里 last_status 仍是 0 = 没有任何请求拿到过上游响应、也没 AuthError/
+        # 超时——只可能是全部账号都被窗口跳过（开头快路径或 acquire 后复查）。
+        # 不能用 tried == 0 判：复查失败的账号 tried 已经加过了。
+        if last_status == 0 and rate_limited:
+            # 全部账号都是「滑动窗口到顶」被跳过的：一个上游请求都没发。
+            # 直接 429 并说清最快多久恢复——调用方（model_order）据此换通道。
+            recover = min(rate_win.recovery_in(a) for a in rate_limited)
+            n1, n5 = rate_win.counts(rate_limited[0])
+            raise HTTPException(
+                status_code=429,
+                detail={"error": {
+                    "message": (
+                        f"raccoon 所有账号均达频率上限（滑动窗口 "
+                        f"{n1}/{rate_win.per_minute}/min · "
+                        f"{n5}/{rate_win.per_5min}/5min，账号 {len(rate_limited)} 个），"
+                        f"最快 {recover:.0f}s 后恢复；未打上游"),
+                    "type": "rate_limit_error",
+                    "retry_after_s": round(recover, 1),
+                }},
+            )
 
         raise HTTPException(
             status_code=last_status if last_status in (401, 402, 429, 504) else 502,
