@@ -373,6 +373,10 @@
          color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
   .tag.ok { color: var(--ok); border-color: rgba(62,207,142,.35); }
   .tag.bad { color: var(--err); border-color: rgba(255,107,107,.35); }
+  /* 「周额度」这类周期标签：用警告色是因为它和 5 小时窗有实质区别——回满要等
+     一周而不是几小时，用户据此决定「等」还是「换号/换模型」。配色沿用
+     .tab .cnt.warn 的 rgba，保持同一套黄色。 */
+  .tag.warn { color: var(--warn); border-color: rgba(240,180,41,.4); }
   .pager { display: flex; align-items: center; gap: 6px; margin: 10px 4px 4px;
            font-size: 12px; flex-wrap: wrap; }
   .pager button { padding: 2px 9px; min-width: 28px; }

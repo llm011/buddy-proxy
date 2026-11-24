@@ -187,11 +187,15 @@ def test_quota_pool_split_ignores_missing_reset_in_fixture():
 
 
 def test_quota_splits_argon_weekly_pool(provider, tmp_path, monkeypatch):
-    """argon 的周池 resetTime 比其余 Gemini 晚一周 → 单独一条，不被 hydrogen 掩盖。
+    """resetTime 不同的模型必须拆成独立的池，不被组内 min 掩盖。
 
-    2026-11-15 实测（两个账号一致）：hydrogel/3.8/旧代共享 5 小时池（resetTime 当日），
-    gemini-4-argon 三档属另一周池（resetTime 落在一周后）。旧实现按 group 合并、
+    2026-11-15 实测（两个账号一致）：hydrogel/3.8/旧代共享一个池（resetTime 当日），
+    gemini-4-argon 三档 resetTime 落在一周后，是另一池。旧实现按 group 合并、
     组内取 min，argon 独立水位被 hydrogen 掩盖，界面只能看到一个混合数。
+
+    ⚠ 夹具保留 11-15 那次的形状（argon 晚一周）是为了覆盖「拆池」这条逻辑，
+    **不代表 argon 现在仍是独立周池**——2026-11-25 复测它的 resetTime 已与其余
+    Gemini 相同、并回了主池。池的判据始终是 resetTime 是否相等，不是模型名。
     """
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
     from buddy_proxy.antigravity import credentials as creds
@@ -225,18 +229,27 @@ def test_quota_splits_argon_weekly_pool(provider, tmp_path, monkeypatch):
 
     items = provider.quota()["items"]
     labels = [i["label"] for i in items]
-    # 两条 Gemini 池（其余模型 + Argon 周池），各自独立读数
-    assert "Gemini 组（其余 Gemini 模型 5 小时池）" in labels
-    assert "Gemini 组（Gemini 4 Argon 周池）" in labels
+    # 两条 Gemini 池（其余模型 + Argon），各自独立读数。
+    #
+    # 标签**不再写周期**（「5 小时池」「周池」都去掉了）：2026-11-25 复测发现
+    # 旧标签把周期说反了——argon 的 resetTime 已与其余 Gemini 相同（并回主池），
+    # 而 Claude/GPT 组才是周额度。周期由每条的 ``window`` 字段说，见下方断言。
+    assert "Gemini 组（其余 Gemini 模型）" in labels
+    assert "Gemini 组（Gemini 4 Argon）" in labels
     by_label = {i["label"]: i for i in items}
-    shared = by_label["Gemini 组（其余 Gemini 模型 5 小时池）"]
-    argon = by_label["Gemini 组（Gemini 4 Argon 周池）"]
+    shared = by_label["Gemini 组（其余 Gemini 模型）"]
+    argon = by_label["Gemini 组（Gemini 4 Argon）"]
     assert shared["remaining"] == 900.0
     assert argon["remaining"] == 800.0  # 之前会被 min(0.9,0.8)=800 混在一起
     assert argon["models_in_group"] == ["gemini-4-argon"]
     assert shared["models_in_group"] == ["gemini-3.8-flash", "gemini-4-hydrogen"]
     assert argon["reset_ts"] == prov._iso_to_epoch("2026-11-22T08:12:41Z")
     assert shared["reset_ts"] == prov._iso_to_epoch("2026-11-15T12:28:46Z")
+    # 周期按 resetTime 跨度判：夹具里两个时间都在 2026-11（早已过去），
+    # gap ≤ 0 → 都不可能是周窗口。这里只断言字段存在且取值合法，
+    # 真正的「周 vs 5 小时」判别由 test_quota_window_kind_* 用固定 now 精确覆盖。
+    assert shared["window"] in ("weekly", "rolling_5h", "unknown")
+    assert argon["window"] in ("weekly", "rolling_5h", "unknown")
 
 
 def test_quota_pool_labels_stay_unique_when_pools_unrecognized(provider, tmp_path, monkeypatch):
@@ -751,3 +764,146 @@ def test_frame_credit_reads_settlement():
     assert _frame_credit({"ag_credit": None}) is None
     assert _frame_credit({}) is None
     assert _frame_credit(None) is None
+
+
+# ---------------------------------------------------------------------------
+# 额度周期：周额度 vs 5 小时滚动窗口（2026-11-25 实测）
+# ---------------------------------------------------------------------------
+
+def test_quota_window_kind_weekly_vs_rolling():
+    """按 resetTime 距今的跨度判周期：≥24h 是周额度，否则 5 小时滚动窗。
+
+    阈值取 24h 是因为两个真实窗口之间没有灰区：5h 窗口最远 5h，
+    周窗口最远 7 天。用固定 ``now``，测试不随时间漂移。
+    """
+    from buddy_proxy.antigravity.provider import _quota_window_kind
+
+    now = 1_800_000_000.0
+    # 5 小时窗口：4 小时后刷新
+    assert _quota_window_kind(now + 4 * 3600, now=now)[0] == "rolling_5h"
+    # 刚好 5 小时（窗口上限）仍是滚动窗
+    assert _quota_window_kind(now + 5 * 3600, now=now)[0] == "rolling_5h"
+    # 周额度：27 小时后（slayadmos 实测形态：首次触达 + 7 天，已过 6 天）
+    assert _quota_window_kind(now + 27 * 3600, now=now)[0] == "weekly"
+    # 整整 6.5 天后
+    assert _quota_window_kind(now + 6.5 * 86400, now=now)[0] == "weekly"
+    # 刚好落在阈值上 → 算周额度（>=）
+    assert _quota_window_kind(now + 24 * 3600, now=now)[0] == "weekly"
+    # 已过重置时刻 / 没给 resetTime → 不编周期
+    assert _quota_window_kind(now - 100, now=now)[0] == "rolling_5h"
+    assert _quota_window_kind(0, now=now) == ("unknown", "上游未给出重置时间，无法判断额度周期")
+    assert _quota_window_kind(None, now=now)[0] == "unknown"
+
+
+def test_quota_window_kind_notes_name_the_real_wait():
+    """给人看的说明必须说清「要等多久」——这正是用户此前的困惑点。"""
+    from buddy_proxy.antigravity.provider import _quota_window_kind
+
+    now = 1_800_000_000.0
+    kind, note = _quota_window_kind(now + 27 * 3600, now=now)
+    assert kind == "weekly"
+    assert "周额度" in note and "7 天" in note
+    assert "不是 5 小时" in note, "必须明确否定 5 小时，否则用户以为等等就回来"
+    assert "1.1 天" in note, f"应给出具体等待时长（27h≈1.1 天），实际: {note}"
+
+    kind, note = _quota_window_kind(now + 4 * 3600, now=now)
+    assert kind == "rolling_5h"
+    assert "5 小时" in note and "4 小时" in note
+
+
+def test_quota_items_mark_claude_as_weekly_with_real_upstream_shape(provider, tmp_path, monkeypatch):
+    """端到端：用 2026-11-25 对账出的**真实上游形状**喂进去，Claude/GPT 组
+    必须被标成 ``weekly``，Gemini 组标成 ``rolling_5h``。
+
+    真实数据（账号 slayadmos，now = 2026-11-25 00:30 +08）：
+      * Claude/GPT  剩 1.9%   resetTime 2026-11-25T19:30:03Z（本地 11-26 03:30）
+      * Gemini      剩 94.9%  resetTime 2026-11-24T20:35:xxZ（本地 11-25 04:35）
+    此前两者都被标成「下一个 5 小时窗口刷新点」——Claude 那条是错的，
+    用户看着「剩 1.9%」以为等几小时就回满，实际要等到第二天。
+    """
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            "claude-opus-5-5-high": {"quotaInfo": {"remainingFraction": 0.0188608,
+                                                   "resetTime": "2026-11-25T19:30:03Z"}},
+            "claude-sonnet-5-5-high": {"quotaInfo": {"remainingFraction": 0.0188608,
+                                                     "resetTime": "2026-11-25T19:30:03Z"}},
+            "gpt-oss-120b-medium": {"quotaInfo": {"remainingFraction": 0.0188608,
+                                                  "resetTime": "2026-11-25T19:30:03Z"}},
+            "gemini-4-hydrogen-high": {"quotaInfo": {"remainingFraction": 0.94132346,
+                                                     "resetTime": "2026-11-24T20:35:00Z"}},
+            "gemini-4-argon-high": {"quotaInfo": {"remainingFraction": 0.94132346,
+                                                  "resetTime": "2026-11-24T20:35:00Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+    provider._models = [
+        {"id": "claude-opus-5-5", "group": "claude-gpt"},
+        {"id": "claude-sonnet-5-5", "group": "claude-gpt"},
+        {"id": "gpt-oss-120b", "group": "claude-gpt"},
+        {"id": "gemini-4-hydrogen", "group": "gemini"},
+        {"id": "gemini-4-argon", "group": "gemini"},
+    ]
+    # 把「现在」钉在采集这份快照的时刻：2026-11-24T16:30:00Z（本地 11-25 00:30）
+    fixed_now = prov._iso_to_epoch("2026-11-24T16:30:00Z")
+    monkeypatch.setattr(prov.time, "time", lambda: fixed_now)
+
+    by_group = {i["label"]: i for i in provider.quota()["items"]}
+    claude = by_group["Claude/GPT 组"]
+    gemini = by_group["Gemini 组"]
+
+    assert claude["window"] == "weekly", "Claude/GPT 是周额度，必须标 weekly"
+    assert "周额度" in claude["reset_note"]
+    assert "不是 5 小时" in claude["reset_note"]
+    assert claude["remaining"] == 18.9, "1.9% → 千分制 18.9"
+
+    assert gemini["window"] == "rolling_5h"
+    assert "5 小时" in gemini["reset_note"]
+    assert gemini["remaining"] == 941.3
+
+
+def test_quota_unused_claude_account_is_not_marked_weekly(provider, tmp_path, monkeypatch):
+    """没用过 Claude 的账号是满额的，resetTime 落在几小时后——这时**不能**标周额度。
+
+    这是「按跨度判、不按组名写死」的理由。实测 lingyibin：Claude 100%、
+    resetTime 05:13（4.7 小时后），它确实还没进周窗口。若按「Claude 组 = 周」
+    写死，会给一个满额的池挂上「周额度 · 约 4 小时后回满」——自相矛盾。
+    """
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            "claude-opus-5-5-high": {"quotaInfo": {"remainingFraction": 1.0,
+                                                   "resetTime": "2026-11-24T21:13:00Z"}},
+            "gpt-oss-120b-medium": {"quotaInfo": {"remainingFraction": 1.0,
+                                                  "resetTime": "2026-11-24T21:13:00Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+    provider._models = [
+        {"id": "claude-opus-5-5", "group": "claude-gpt"},
+        {"id": "gpt-oss-120b", "group": "claude-gpt"},
+    ]
+    fixed_now = prov._iso_to_epoch("2026-11-24T16:30:00Z")
+    monkeypatch.setattr(prov.time, "time", lambda: fixed_now)
+
+    (item,) = provider.quota()["items"]
+    assert item["window"] == "rolling_5h", "满额 + 几小时后刷新 = 还没进周窗口"
+    assert "周额度" not in item["reset_note"]

@@ -758,3 +758,49 @@ def test_headline_shows_used_percent_beside_the_total():
     assert '2,751' in data["summed"] and '已用 37%' in data["summed"], data["summed"]
     assert '已用 67%' in data["single"], f"652/2000 → 67%: {data['single']}"
     assert '已用' not in data["no_total"], f"total=0 不能算出比例: {data['no_total']}"
+
+
+def test_quota_item_weekly_window_tag_is_visible_in_label():
+    """周额度必须在**正文标签**里看得见，不能只藏在鼠标悬停的 title 里。
+
+    2026-11-25 用户反馈「antigravity 应该有周额度吧？界面上没看到」。其实一直
+    在——Claude/GPT 组就是周额度——只是被标成「5 小时窗口刷新点」，而那句话
+    又只在 title 里。用户看到「剩 1.9% · 11-26 03:30 重置」，不知道这是周池、
+    要等一天才回满。后端给出 ``window: 'weekly'`` 时渲染黄色「周额度」标签。
+    """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd", "remainSpan"), """
+console.log(quotaItemHtml({
+  label: 'AG #1 · Claude/GPT 组', used: 981.1, total: 1000, remaining: 18.9, percent: 98.11,
+  reset_ts: 1795635003, reset_note: '周额度：本窗口自首次使用起 7 天，约 1.1 天后回满（不是 5 小时滚动窗口，等几小时不会回来）',
+  window: 'weekly', expire_ts: null, unit: 'permille',
+}));
+""")
+    # 标签在 qlabel 内、且在池名之前（一眼先看到「这是周额度」）
+    assert '<span class="qlabel"><span class="tag warn"' in out, out
+    assert '>周额度</span>' in out, out
+    assert 'AG #1 · Claude/GPT 组' in out, out
+
+
+def test_quota_item_rolling_window_tag_is_plain_not_warn():
+    """5 小时滚动窗用普通灰标签，不用警告色——回满只要几小时，不值得警示。"""
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd", "remainSpan"), """
+console.log(quotaItemHtml({
+  label: 'AG #1 · Gemini 组', used: 48.6, total: 1000, remaining: 951.4, percent: 4.86,
+  reset_ts: 1795552525, reset_note: '5 小时滚动窗口，约 4 小时后刷新', window: 'rolling_5h',
+  expire_ts: null, unit: 'permille',
+}));
+""")
+    assert '>5 小时窗</span>' in out, out
+    assert 'class="tag warn"' not in out, f"滚动窗不该用警告色: {out}"
+
+
+def test_quota_item_without_window_field_renders_no_tag():
+    """其它通道（trae/zcode…）的条目没有 ``window`` 字段 → 不渲染周期标签。"""
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd", "remainSpan"), """
+console.log(quotaItemHtml({
+  label: '5 小时窗口', used: 10, total: 100, remaining: 90, percent: 10,
+  reset_ts: 1792692336, expire_ts: null, unit: 'count',
+}));
+""")
+    assert '<span class="qlabel">5 小时窗口' in out, f"没有 window 字段时 qlabel 后应直接跟标签: {out}"
+    assert '周额度' not in out and '5 小时窗</span>' not in out, out
