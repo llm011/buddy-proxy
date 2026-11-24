@@ -34,6 +34,7 @@ import os
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -210,3 +211,143 @@ _limiter = AccountConcurrencyLimiter.from_env()
 def limiter() -> AccountConcurrencyLimiter:
     """取进程级限流器（测试可 monkeypatch 本函数或直接换 ``_limiter``）。"""
     return _limiter
+
+
+# ---------------------------------------------------------------------------
+# 滑动窗口频率闸门：到顶就换号，不打上游
+# ---------------------------------------------------------------------------
+#
+# 与上面的并发闸门是两回事：并发闸门管「同一时刻几个在途」，这里是「一段时间
+# 内发了几个」。200108 账号风控是后者触发的——2026-11-24 实测（见 git log）：
+# 5 分钟窗口 32 次不触发、33 次触发；单分钟 18 次不触发。所以阈值设在 5 分钟
+# 窗口上，单分钟只是防突发的兜底。
+#
+# 到顶时的动作是「换号」而不是「排队」：排队只是把请求推迟，上游窗口照样在
+# 走；换号让每个号都留在阈值之下，才是真正把请求摊开。所有号都到顶才失败。
+
+#: 5 分钟窗口上限。实测 33 触发 200108，留 ~15% 余量。
+DEFAULT_RATE_PER_5MIN = 28
+
+#: 1 分钟窗口上限（防突发）。实测 13/分钟与两次风控时刻重合，18/分钟单独
+#: 不触发；取 12 偏保守——两个号合计 24/分钟，单个 agent 会话够用。
+DEFAULT_RATE_PER_MIN = 12
+
+#: 两个窗口的秒数（写死：阈值是按这两个口径标定的，改窗口等于重新标定）。
+_WIN_5MIN_S = 300.0
+_WIN_1MIN_S = 60.0
+
+
+class AccountRateWindow:
+    """按账号的滑动窗口频率计数（只计数不排队；到顶由调用方换号）。"""
+
+    def __init__(self, *, per_minute: int | None = None,
+                 per_5min: int | None = None) -> None:
+        self._per_min = (DEFAULT_RATE_PER_MIN if per_minute is None
+                         else max(0, int(per_minute)))
+        self._per_5min = (DEFAULT_RATE_PER_5MIN if per_5min is None
+                          else max(0, int(per_5min)))
+        self._events: dict[str, deque[float]] = {}
+        self._lock = threading.Lock()
+
+    @classmethod
+    def from_env(cls) -> "AccountRateWindow":
+        return cls(
+            per_minute=_env_int("RACCOON_RATE_PER_MIN", DEFAULT_RATE_PER_MIN),
+            per_5min=_env_int("RACCOON_RATE_PER_5MIN", DEFAULT_RATE_PER_5MIN),
+        )
+
+    @property
+    def per_minute(self) -> int:
+        return self._per_min
+
+    @property
+    def per_5min(self) -> int:
+        return self._per_5min
+
+    def _counts(self, dq: deque[float], now: float) -> tuple[int, int]:
+        """修剪掉出窗的旧记录，返回 ``(1 分钟内条数, 5 分钟内条数)``。
+
+        调用方须持有 ``self._lock``。先按 5 分钟剪（更长的窗口），再在剩下的
+        里数 1 分钟的——1 分钟窗口是 5 分钟的子集，不会漏。
+        """
+        cutoff5 = now - _WIN_5MIN_S
+        while dq and dq[0] <= cutoff5:
+            dq.popleft()
+        n5 = len(dq)
+        cutoff1 = now - _WIN_1MIN_S
+        n1 = sum(1 for t in dq if t > cutoff1)
+        return n1, n5
+
+    def has_capacity(self, account_id: str, *, now: float | None = None) -> bool:
+        """该账号此刻两个窗口是否都还有余量（**不**计数，供选号用）。"""
+        if self._per_min <= 0 and self._per_5min <= 0:
+            return True
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            dq = self._events.get(account_id)
+            if not dq:
+                return True
+            n1, n5 = self._counts(dq, now)
+        if self._per_5min > 0 and n5 >= self._per_5min:
+            return False
+        if self._per_min > 0 and n1 >= self._per_min:
+            return False
+        return True
+
+    def record(self, account_id: str, *, now: float | None = None) -> None:
+        """登记一次「已发出」的请求。调用方在 :meth:`has_capacity` 通过后、
+        真正 ``send`` 之前调用——放在 send 前而不是选号时，是为了不把
+        「选了号却因 token 刷新失败没发出去」的请求算进去。"""
+        if self._per_min <= 0 and self._per_5min <= 0:
+            return
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            dq = self._events.setdefault(account_id, deque())
+            self._counts(dq, now)
+            dq.append(now)
+
+    def recovery_in(self, account_id: str, *, now: float | None = None) -> float:
+        """距离该账号重新有余量还要多少秒（0 = 现在就有）。
+
+        两个窗口取最大：5 分钟窗口到顶要等最老一条出窗；1 分钟窗口到顶要等
+        1 分钟内最老的一条出 1 分钟窗。
+        """
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            dq = self._events.get(account_id)
+            if not dq:
+                return 0.0
+            n1, n5 = self._counts(dq, now)
+            wait = 0.0
+            if self._per_5min > 0 and n5 >= self._per_5min and dq:
+                wait = max(wait, dq[0] + _WIN_5MIN_S - now)
+            if self._per_min > 0 and n1 >= self._per_min:
+                cutoff1 = now - _WIN_1MIN_S
+                oldest1 = next((t for t in dq if t > cutoff1), None)
+                if oldest1 is not None:
+                    wait = max(wait, oldest1 + _WIN_1MIN_S - now)
+        return max(0.0, wait)
+
+    def counts(self, account_id: str, *, now: float | None = None) -> tuple[int, int]:
+        """当前 ``(1 分钟内, 5 分钟内)`` 计数（诊断/测试用）。"""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            dq = self._events.get(account_id)
+            if not dq:
+                return 0, 0
+            return self._counts(dq, now)
+
+    def clear(self, account_id: str | None = None) -> None:
+        """清掉计数（删账号 / 测试隔离用；``None`` 清全部）。"""
+        with self._lock:
+            if account_id is None:
+                self._events.clear()
+            else:
+                self._events.pop(account_id, None)
+
+
+#: 进程级单例（与 provider 同生命周期）。
+_window = AccountRateWindow.from_env()
+def window() -> AccountRateWindow:
+    """取进程级滑动窗口（测试可 monkeypatch 本函数或直接换 ``_window``）。"""
+    return _window
