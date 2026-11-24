@@ -579,6 +579,55 @@ def test_expire_ts_is_epoch_seconds_not_iso_string():
                                         datetime.timezone(datetime.timedelta(hours=8)))
     assert dt.year == 2026 and dt.month == 11 and dt.day == 29
 
+
+def test_expired_packs_are_not_rendered():
+    """已过期的资源包不渲染到面板——已作废、余额里已扣掉，显示出来会让用户
+    以为还有额度可用（2026-11-25 用户实报「看着过期的发放积分，不知道是不是
+    能用」）。与算 granted_total 时的过期过滤必须同口径。"""
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    provider = RaccoonProvider()
+    parsed = {"credits": 3300.0}
+    bills = [
+        {"event": "已过期的每日发放", "points": 300.0, "grant_at": "",
+         "expire_at": "2020-01-01T00:00:00+08:00"},   # 已过期
+        {"event": "有效每日发放", "points": 300.0, "grant_at": "",
+         "expire_at": "2099-12-31T23:59:59+08:00"},   # 未过期
+        {"event": "永久包", "points": 3000.0, "grant_at": "", "expire_at": ""},
+    ]
+    items = provider._items_from_balance(parsed, "", bills)
+    labels = [it["label"] for it in items]
+    assert not any("已过期的每日发放" in x for x in labels), "过期包不该渲染"
+    assert any("有效每日发放" in x for x in labels)
+    assert any("永久包" in x for x in labels)
+
+
+def test_single_pack_does_not_fake_remaining():
+    """单包不能把「发放量」塞进 remaining——上游 /points/v2/bills 给的是发放
+    了多少，不是还剩多少。之前塞进去会显示「剩 300 · 已用未知」，双重误导：
+    300 不是真剩余，单包已用又拿不到（expense 流水不带包归属）。
+
+    现在 remaining=None、发放量写进 note，前端走「无数字」分支只显示到期日。"""
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    provider = RaccoonProvider()
+    parsed = {"credits": 3300.0}
+    bills = [
+        {"event": "每日积分发放", "points": 300.0, "grant_at": "",
+         "expire_at": "2099-12-31T23:59:59+08:00"},
+        {"event": "新人注册礼包", "points": 3000.0, "grant_at": "", "expire_at": ""},
+    ]
+    items = provider._items_from_balance(parsed, "", bills)
+    # 总额行保留真剩余（= available），单包行不能有 remaining
+    head = next(it for it in items if it["label"].endswith("积分总额"))
+    assert head["remaining"] == 3300.0
+    packs = [it for it in items if it is not head]
+    assert packs, "应该有单包条目"
+    for it in packs:
+        assert it.get("remaining") is None, f"单包不能伪造剩余量：{it}"
+        # 发放量必须写进 note（用户要知道这份包有多大）
+        assert "发放" in (it.get("note") or ""), f"单包 note 应含发放量：{it}"
+
     # 无到期时间的包：expire_ts 必须是 None（组件据此不画到期）
     no_exp = next(it for it in items if "新人注册礼包" in it["label"])
     assert no_exp["expire_ts"] is None
