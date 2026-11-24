@@ -1624,6 +1624,8 @@ async def ui_runninghub_workflows_import(request: Request):
 
     if custom_name:
         info["name"] = custom_name
+    if body.get("preview"):
+        return {"workflow": info}
     rh_store.upsert_workflow(info)
     return {"workflows": rh_store.list_workflows()}
 

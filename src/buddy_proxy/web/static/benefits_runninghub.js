@@ -406,31 +406,76 @@
 
     titleEl.textContent = '导入 RunningHub 工作流 (ai-app)';
     bodyEl.innerHTML = `
-      <p style="margin:0 0 8px">输入 RunningHub AI 应用的 <span class="mono">webappId</span>（URL 末尾数字），系统会自动拉取名称与参数格式。</p>
+      <p style="margin:0 0 8px">输入 RunningHub AI 应用的 <span class="mono">webappId</span>（URL 末尾数字），可先「拉取」测试可用性与查看详情，再决定是否「保存」。</p>
       <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px">
         <input type="text" id="rh-wf-id" class="mono" placeholder="webappId，例如：2086711729156894722" />
         <input type="text" id="rh-wf-name" placeholder="自定义名称（可选，留空使用上游名称）" />
       </div>
+      <div id="rh-wf-preview" style="display:none;margin:8px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);font-size:12px;"></div>
       <div id="rh-wf-err" class="muted" style="font-size:12px;color:#ef4444"></div>
     `;
     footEl.innerHTML = `
       <button class="ghost" onclick="closeModal()">取消</button>
-      <button id="rh-wf-submit">拉取并保存</button>
+      <button class="ghost" id="rh-wf-fetch">拉取</button>
+      <button id="rh-wf-submit">保存</button>
     `;
     overlayEl.classList.add('show');
 
+    const fetchBtn = document.getElementById('rh-wf-fetch');
     const submitBtn = document.getElementById('rh-wf-submit');
-    if (submitBtn) {
-      submitBtn.addEventListener('click', async () => {
+    const errEl = document.getElementById('rh-wf-err');
+    const previewEl = document.getElementById('rh-wf-preview');
+
+    if (fetchBtn) {
+      fetchBtn.addEventListener('click', async () => {
         const wid = (document.getElementById('rh-wf-id')?.value || '').trim();
         const name = (document.getElementById('rh-wf-name')?.value || '').trim();
-        const errEl = document.getElementById('rh-wf-err');
         if (!wid) {
           if (errEl) errEl.textContent = '请输入 webappId';
           return;
         }
+        if (errEl) errEl.textContent = '';
+        fetchBtn.disabled = true;
+        fetchBtn.textContent = '拉取中…';
+        try {
+          const res = await rhFetch('/ui/api/runninghub/workflows/import', {
+            method: 'POST',
+            body: JSON.stringify({ webapp_id: wid, name: name || undefined, preview: true }),
+          });
+          const wf = res.workflow || {};
+          const nodeCount = Array.isArray(wf.nodeInfoList) ? wf.nodeInfoList.length : 0;
+          if (previewEl) {
+            previewEl.style.display = 'block';
+            previewEl.innerHTML = `
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+                <strong style="font-size:13px;">${escapeHtml(wf.name || wid)}</strong>
+                ${renderBillingTag(wf.billing_type)}
+                <span class="muted">${nodeCount} 个参数</span>
+              </div>
+              ${wf.description ? `<div class="rh-wf-desc">${sanitizeHtml(wf.description)}</div>` : '<div class="muted">暂无应用描述</div>'}
+            `;
+          }
+        } catch (err) {
+          if (previewEl) previewEl.style.display = 'none';
+          if (errEl) errEl.textContent = err.message || String(err);
+        } finally {
+          fetchBtn.disabled = false;
+          fetchBtn.textContent = '拉取';
+        }
+      });
+    }
+
+    if (submitBtn) {
+      submitBtn.addEventListener('click', async () => {
+        const wid = (document.getElementById('rh-wf-id')?.value || '').trim();
+        const name = (document.getElementById('rh-wf-name')?.value || '').trim();
+        if (!wid) {
+          if (errEl) errEl.textContent = '请输入 webappId';
+          return;
+        }
+        if (errEl) errEl.textContent = '';
         submitBtn.disabled = true;
-        submitBtn.textContent = '拉取中…';
+        submitBtn.textContent = '保存中…';
         try {
           const res = await rhFetch('/ui/api/runninghub/workflows/import', {
             method: 'POST',
@@ -443,7 +488,7 @@
           if (errEl) errEl.textContent = err.message || String(err);
         } finally {
           submitBtn.disabled = false;
-          submitBtn.textContent = '拉取并保存';
+          submitBtn.textContent = '保存';
         }
       });
     }
