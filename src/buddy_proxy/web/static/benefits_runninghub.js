@@ -10,6 +10,12 @@
       .replace(/'/g, '&#39;');
   }
 
+  function renderBillingTag(billingType) {
+    const bType = billingType || 'RH 金币 / 余额';
+    const bCls = bType === '钱包余额' ? 'tag-money' : (bType === 'RH 金币' ? 'tag-coins' : 'tag-mixed');
+    return `<span class="tag ${bCls}" data-tip="计费方式">${escapeHtml(bType)}</span>`;
+  }
+
   async function rhFetch(path, opts) {
     const resp = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
     const data = await resp.json().catch(() => ({}));
@@ -449,7 +455,7 @@
             previewEl.innerHTML = `
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
                 <strong style="font-size:13px;">${escapeHtml(wf.name || wid)}</strong>
-                ${renderBillingTag(wf.billing_type)}
+                ${renderBillingTag(wf.billingType)}
                 <span class="muted">${nodeCount} 个参数</span>
               </div>
               ${wf.description ? `<div class="rh-wf-desc">${sanitizeHtml(wf.description)}</div>` : '<div class="muted">暂无应用描述</div>'}
