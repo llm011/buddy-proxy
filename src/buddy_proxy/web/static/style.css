@@ -373,6 +373,47 @@
          color: var(--muted); border: 1px solid var(--line); white-space: nowrap; }
   .tag.ok { color: var(--ok); border-color: rgba(62,207,142,.35); }
   .tag.bad { color: var(--err); border-color: rgba(255,107,107,.35); }
+  /* 「周额度」这类周期标签：用警告色是因为它和 5 小时窗有实质区别——回满要等
+     一周而不是几小时，用户据此决定「等」还是「换号/换模型」。配色沿用
+     .tab .cnt.warn 的 rgba，保持同一套黄色。 */
+  .tag.warn { color: var(--warn); border-color: rgba(240,180,41,.4); }
+  /* 周期标签（周额度 / 5 小时窗）三档写法，由 .qhead 的容器查询按实际宽度切换：
+       全称「周额度 / 5 小时窗」 → 单字「周 / 5h」 → 色点（绝对定位，不占流内宽度）
+     默认（查询不生效时）显示全称，降级方向是「多占一点」而不是「看不懂」。
+     色点颜色区分周期：周额度=warn 黄、5 小时窗=muted 灰。 */
+  .wtag .wtag-short, .wtag .wtag-dot { display: none; }
+  .wtag .wtag-long { display: inline; }
+  .wtag .wtag-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--muted);
+                    vertical-align: middle; }
+  .wtag.warn .wtag-dot { background: var(--warn); }
+  /* 阈值与「色点必须绝对定位」都来自真实 CSS 下的渲染测量（headless Chrome，
+     1px 步长扫挂载宽 400~1100；三条最长条目：Claude 1.9% / Gemini / Claude 满额
+     长数字）。指标是「基线✓但带标签✗」的 (条目×宽度) 格数，0 = 标签零代价：
+
+       全称标签            → 比基线多截断一大段（两栏 528px 下 Claude 直接截断）
+       全称 → 单字          → 仍有 20px 左右的缝（基线✓、单字✗）
+       单字 → 19px 色点     → 29 格变差（色点连 padding 仍占 ~19px 流内宽度）
+       单字 → 5px 色点无边距 → 14 格
+       单字 → 色点绝对定位   →  0 格   ← 采用。色点浮在 qlabel 左侧，不挤占文字
+
+     换算成挂载宽（= .qhead + 34px 卡片内边距）：≤594px 显示单字、≤554px 显示色点。
+     注意容器查询量的是 .qhead 而非卡片/视口，所以这两个阈值比「挂载宽」小 34。
+     .grid2 两栏时 .qhead≈494px → 落在色点档；全称只在单栏宽窗口才出现。
+     用容器查询而非视口媒体查询：同样视口下单栏/两栏可用宽度差一倍，按视口猜必错一边。 */
+  .qitem .qhead { container-type: inline-size; position: relative; }
+  @container (max-width: 560px) {
+    .wtag .wtag-long { display: none; }
+    .wtag .wtag-short { display: inline; }
+  }
+  @container (max-width: 520px) {
+    /* 绝对定位把标签从文字流里摘出去：不占宽，就不会把重置时间挤进省略号。
+       qlabel 补等量左内边距给色点让位，文字起点不变。 */
+    .wtag { position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+            margin: 0; padding: 0 2px; border: 0; background: transparent; }
+    .wtag .wtag-short { display: none; }
+    .wtag .wtag-dot { display: inline-block; }
+    .qitem .qhead .qlabel { padding-left: 9px; }
+  }
   .pager { display: flex; align-items: center; gap: 6px; margin: 10px 4px 4px;
            font-size: 12px; flex-wrap: wrap; }
   .pager button { padding: 2px 9px; min-width: 28px; }

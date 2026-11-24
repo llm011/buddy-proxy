@@ -148,10 +148,35 @@ function quotaItemHtml(it) {
   // 满额，池重置后不会有新数据来覆盖），这里明确说明「待下一次撞码确认」，
   // 免得看起来像池没被重置或卡在 100%。
   const pending = !hasNums && it.reset_pending;
-  // reset_note：说明「这个时间点到底是什么」——如 antigravity 的 resetTime 只是
-  // 下一个 5 小时窗口的滚动刷新点，不代表整组/每周池重置。拼进 title 而不是
-  // 正文，免得窄卡更挤。
+  // reset_note：说明「这个时间点到底是什么」，拼进 title。
+  //
+  // 但周期不能**只**放在 title 里。2026-11-25 用户反馈「antigravity 应该有周额度
+  // 吧？界面上没看到」——其实一直在：Claude/GPT 组就是周额度，只是被标成了
+  // 「5 小时窗口刷新点」，而那句话又藏在鼠标悬停才出现的 title 里。用户看着
+  // 「剩 1.9% · 11-26 03:30 重置」完全不知道这是周池、要等一天才回满。
+  // 所以后端给出 ``window`` 时，周期直接做成正文里的一个小标签，一眼可见；
+  // 细节仍在 title。
   const resetNote = typeof it.reset_note === 'string' && it.reset_note ? `（${esc(it.reset_note)}）` : '';
+  // 周期标签有**三档写法**（全称 / 单字 / 色点），由 CSS 容器查询按 .qhead 的
+  // 实际宽度切换（阈值与实测表都在 style.css 的 `.wtag` 注释里）。
+  //
+  // 为什么要分档：全称标签把「不截断所需宽度」抬高了 51~61px（真实 CSS 下实测：
+  // Claude 条目 459→510px、Gemini 414→475px），而 .grid2 两栏每栏内容宽约
+  // 528px——改前两种条目都宽裕，改后 Claude 那条会截断、重置时间被省略号吃掉。
+  // 这正是 style.css 里 2026-11-01「tag 把 ⇄/8 挤成两行」那条注释警告的事。
+  // 最终方案（色点档绝对定位、不占流内宽度）经 headless Chrome 逐像素验证：
+  // 在 400~1100px 全范围内，带标签与改动前**零格变差**。
+  // 用容器查询而非视口：窄窗口单栏和宽窗口两栏的可用宽度差一倍，按视口猜必错一边。
+  const WIN_LABEL = {
+    weekly: { long: '周额度', short: '周' },
+    rolling_5h: { long: '5 小时窗', short: '5h' },
+  };
+  const win = typeof it.window === 'string' ? WIN_LABEL[it.window] : undefined;
+  const winTag = win
+    ? `<span class="tag wtag${it.window === 'weekly' ? ' warn' : ''}" title="额度周期：${esc(it.reset_note || it.window)}">` +
+      `<span class="wtag-long">${win.long}</span><span class="wtag-short">${win.short}</span>` +
+      `<span class="wtag-dot" aria-label="${esc(win.long)}"></span></span>`
+    : '';
   const reset = fmtReset && !pending
     ? (resetNote ? `<span title="${resetNote}"> · ${fmtReset} 重置</span>`
                  : ` · ${fmtReset} 重置`)
@@ -201,7 +226,7 @@ function quotaItemHtml(it) {
     ? `<div class="muted" style="font-size:11px;line-height:1.45;margin:2px 0 0">${esc(note)}</div>`
     : '';
   return `<div class="qitem"><div class="qhead">` +
-    `<span class="qlabel">${esc(it.label)}${expire}${reset}</span>` +
+    `<span class="qlabel">${winTag}${esc(it.label)}${expire}${reset}</span>` +
     `${nums}</div>${bar}${noteHtml}</div>`;
 }
 

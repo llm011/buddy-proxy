@@ -178,22 +178,99 @@ def _exact_pools(
 def _quota_pool_suffix(
     group: str, fracs: list[tuple[float, float, str]], *, multi_pool: bool
 ) -> str:
-    """池标签后缀：同组多池时才加，让用户一眼分清 argon 周池与其余 Gemini 池。
+    """池标签后缀：同组多池时才加，让用户一眼分清同组的两个池。
 
     ``multi_pool`` 为假（该组只有一个池）时返回空串，标签维持「Gemini 组」/
     「Claude/GPT 组」原样，避免既有 UI/文案/断言无谓变动。多池时按池内是否含
-    ``gemini-4-argon`` 命名——argon 是本账号下唯一独立成池的 Gemini 4 变体
-    （``resetTime`` 落在下周一，其余 Gemini 共享 5 小时窗口），名字好认；其余
-    池统称「其余 Gemini 模型」，不硬编码「5 小时池」这类会随上游变化的措辞。
+    ``gemini-4-argon`` 命名——它是曾经单列成池的 Gemini 4 变体，名字好认；其余
+    池统称「其余 Gemini 模型」，不硬编码会随上游变化的周期措辞。
+
+    **这里不再写「5 小时池」**：2026-11-25 实测 Claude/GPT 组是周额度（见
+    :func:`_quota_window_kind`），早先后缀里的「Claude/GPT 5 小时池」是错的。
+    周期由每条额度条目自己的 ``window`` / ``reset_note`` 说，标签只管区分是哪个池。
     """
     if not multi_pool:
         return ""
     bases = {_strip_effort_suffix(name) for _, _, name in fracs}
     if any("gemini-4-argon" in b for b in bases):
-        return "（Gemini 4 Argon 周池）"
+        return "（Gemini 4 Argon）"
     if group == "gemini":
-        return "（其余 Gemini 模型 5 小时池）"
-    return "（Claude/GPT 5 小时池）"
+        return "（其余 Gemini 模型）"
+    # Claude/GPT 组拆成多池时（opus 与 sonnet/gpt-oss 的 resetTime 不同），
+    # 用池里的**模型名**区分。不能回成「（Claude/GPT）」——那与标签前缀重复，
+    # 两个池都会叫「Claude/GPT 组（Claude/GPT）」而撞车，最后落到时间戳兜底，
+    # 变成「Claude/GPT 组（Claude/GPT）（11-26 03:30 重置）」，又长又没信息。
+    names = sorted(bases)
+    shown = "、".join(names[:3]) + ("…" if len(names) > 3 else "")
+    return f"（{shown}）"
+
+
+#: 判为周额度的最小跨度。实测 5h 窗口最远 5h、周窗口最远 7 天，取 24h 落在中间。
+_WEEKLY_WINDOW_MIN_GAP_S = 24 * 3600.0
+
+#: 5 小时窗口「最远可能还有多久刷新」的上限。窗口本身是 5h，但上游 resetTime
+#: 与本地时钟有秒级偏差、且采集与判定之间有延迟，留 1h 余量。
+#: 落在 (_ROLLING_5H_MAX_GAP_S, _WEEKLY_WINDOW_MIN_GAP_S) 之间的跨度**两个已知
+#: 窗口都解释不了**，不能硬套任何一个——见 :func:`_quota_window_kind` 的
+#: 「中间地带」。这个区间 2026-11-25 的实测数据里**没有出现过**（5h 窗最大
+#: 约 5h，周窗 27h+），是自审 PR #335 时 reviewer 指出的盲区。
+_ROLLING_5H_MAX_GAP_S = 6 * 3600.0
+
+
+def _quota_window_kind(reset_epoch: float, *, now: float | None = None
+                       ) -> tuple[str, str]:
+    """按 resetTime 距今的跨度判断这个池是「周额度」还是「5 小时滚动窗口」。
+
+    返回 ``(window, reset_note)``：前者是机器口径（``weekly`` / ``rolling_5h`` /
+    ``unknown``），后者是给人看的一句说明。
+
+    ## 为什么看跨度而不是看组名
+
+    上游没有「这是周池」的字段，周期信息只在 ``resetTime`` 里。2026-11-25
+    实测（3 个账号 + 历史日志逐分钟对账）：
+
+    * Gemini 组：``resetTime`` = 最近一次触达 + 5h，滚动窗口；
+    * Claude/GPT 组：``resetTime`` = **本窗口首次触达 + 7 天**。
+      slayadmos 当前周首条 Claude 调用 11-19 03:30:03 → resetTime 11-26 03:30；
+      ethanspiring 04:01:03 → 11-26 04:00。两个账号都精确吻合。
+
+    不能按组名写死「Claude 就是周额度」：**没在本周用过 Claude 的账号是满额的**，
+    这时上游给的 resetTime 跟 Gemini 一样落在几小时后（实测 lingyibin：
+    Claude 100%、resetTime 05:13）。那种情况它确实还没进周窗口，标「5 小时」
+    才对。所以只认跨度。
+
+    ## 中间地带：两个窗口都解释不了时，不硬套
+
+    跨度在 6h~24h 之间时，既超过 5 小时窗口的上限、又够不到周窗口，说明上游
+    出现了我们没见过的周期（加新档位、时钟漂移、或数据异常）。这时返回
+    ``unknown`` 并只陈述事实（「约 N 小时后刷新」）。
+
+    为什么不归到 rolling_5h：文案会是「5 小时滚动窗口，约 20 小时后刷新」——
+    一句话自相矛盾，而「文案与事实不符」正是本次要修的问题本身。
+    为什么不归到 weekly：没依据说它是 7 天窗口，可能 8 小时后就回满，让用户
+    白白省着用。认不出就说认不出，比编一个强。
+
+    ``reset_epoch`` 为 0（上游没给 resetTime）→ ``unknown``，不编周期。
+    """
+    if not reset_epoch or reset_epoch <= 0:
+        return "unknown", "上游未给出重置时间，无法判断额度周期"
+    now = time.time() if now is None else now
+    gap = reset_epoch - now
+    if gap >= _WEEKLY_WINDOW_MIN_GAP_S:
+        days = gap / 86400.0
+        when = (f"{days:.1f} 天" if days < 3 else f"{days:.0f} 天")
+        return ("weekly",
+                f"周额度：本窗口自首次使用起 7 天，约 {when}后回满"
+                "（不是 5 小时滚动窗口，等几小时不会回来）")
+    if gap > _ROLLING_5H_MAX_GAP_S:
+        # 两个已知窗口都解释不了：只陈述事实，不下结论
+        return ("unknown",
+                f"约 {gap / 3600.0:.0f} 小时后刷新（既不像 5 小时窗口、也够不到"
+                "周窗口，周期未知——可能是上游新增了档位）")
+    if gap > 0:
+        return ("rolling_5h",
+                f"5 小时滚动窗口，约 {gap / 3600.0:.0f} 小时后刷新（从最近一次使用起算）")
+    return ("rolling_5h", "5 小时滚动窗口，即将刷新")
 
 
 def _run_sync(factory):
@@ -1307,11 +1384,13 @@ class AntigravityProvider(BaseProvider):
         能查到每周池的剩余（``retrieveUserQuota`` 返回同一份数据，
         ``fetchUserStatus``/``fetchCredits``/``getUserQuota`` 均 404）。
 
-        **池的判据是 ``resetTime``**（2026-11-15 实测，两个账号一致）：
+        **池的判据是 ``resetTime``**（按秒级字面值精确相等拆池）：
 
-        * 2.5/3/3.1/3.5/3.8 + gemini-4-hydrogen 四档 → 同一 5 小时窗口；
-        * gemini-4-argon 三档 → 独立周池（``resetTime`` 落在下周一，与上面差一周）；
-        * claude / gpt-oss → 另一个 5 小时窗口。
+        * 2026-11-15 实测：gemini-4-argon 三档的 ``resetTime`` 落在下周一，
+          与其余 Gemini（5 小时窗口）差整整一周，是独立的一池；
+        * **2026-11-25 复测：argon 与其余 Gemini 的 ``resetTime`` 已完全相同**
+          （都是同一个 5 小时刷新点），上游把它并回了主池。所以这里不能写死
+          「argon 是独立池」——它只是**可能**独立，判据始终是 resetTime 是否相等。
 
         早先只按 ``group``（gemini / claude-gpt）聚合，把 argon 并进「Gemini 组」，
         组内取 min 后 argon 的独立水位被 hydrogen 掩盖——界面上的「Gemini 组」其实
@@ -1388,11 +1467,28 @@ class AntigravityProvider(BaseProvider):
             full = remaining >= 1000
             tightness = ("满额（组内各模型均为 100%）" if full
                          else f"组内最紧的是 {worst_model}")
-            # resetTime 取**该组任意一个带 resetTime 的模型**的值（resetTime 是
-            # 「下一个 5 小时窗口刷新点」这类被 UI 当标题行信息展示的东西，用它做
-            # 兜底比因为最紧那个恰好没带就让整组不显示更可靠）；再退一步取组内
+            # resetTime 取**该组任意一个带 resetTime 的模型**的值，再退一步取组内
             # 最紧模型的 resetTime，都没有才 None。
             reset = next((t for _, t, _ in fracs if t > 0), 0) or worst_reset
+            # 这个池是「5 小时滚动」还是「周额度」——**看 resetTime 距今的跨度**，
+            # 不按 group 名写死。
+            #
+            # 2026-11-25 实测（3 个账号 + 历史日志逐分钟对账）：上游没有单独的
+            # 周池字段，周额度藏在 resetTime 的跨度里——
+            #   * Gemini 组：resetTime = 最近一次触达 + 5h（滚动窗口）；
+            #   * Claude/GPT 组：resetTime = **本窗口首次触达 + 7 天**。
+            #     证据：slayadmos 当前周首条 Claude 调用 11-19 03:30:03，上游
+            #     resetTime 是 11-26 03:30；ethanspiring 04:01:03 → 11-26 04:00。
+            #     两个账号都精确吻合。此后 6 天没用，水位停在 1.9% 不动。
+            # 所以此前把所有池都标成「下一个 5 小时窗口刷新点」是错的：Claude
+            # 那条其实是「周额度还剩 1.9%，周四 03:30 才回满」，用户看着
+            # 「5 小时后重置」以为等等就回来了。
+            #
+            # 用跨度而不是 group 名判断，是因为没用过 Claude 的账号（满额）
+            # resetTime 跟 Gemini 一样落在几小时后——那种情况标成 5 小时是对的
+            # （它确实还没进周窗口）。阈值取 24h：5h 窗口最远 5h，周窗口最远 7 天，
+            # 中间没有灰区。
+            window_kind, window_note = _quota_window_kind(reset)
             items.append({
                 # 解释性文字不塞 label（曾把整句塞进来，面板窄卡里 label 挤得日期
                 # 换行、右侧「已用 0%」也断行——用户截图骂丑）。挪 note 字段给前端
@@ -1408,9 +1504,10 @@ class AntigravityProvider(BaseProvider):
                 # weekly/5h 是周期重置，不是权益到期：不给 expire_ts，
                 # 否则「5 小时后重置」会被到期横幅误报成「5 小时后到期」
                 "reset_ts": reset or None,
-                # resetTime 只是下一个 5 小时窗口的滚动刷新点——前端把它拼进
-                # reset 文案的 title，免得用户当成「整个池子到此重置」
-                "reset_note": "下一个 5 小时窗口刷新点（滚动），不代表每周池重置",
+                # 说明「这个时间点到底是什么」，前端拼进 reset 文案的 title
+                "reset_note": window_note,
+                # 给前端/排序用的机器口径：``weekly`` / ``rolling_5h`` / ``unknown``
+                "window": window_kind,
                 "expire_ts": None,
                 "unit": "permille",
             })

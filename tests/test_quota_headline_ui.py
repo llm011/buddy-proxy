@@ -758,3 +758,89 @@ def test_headline_shows_used_percent_beside_the_total():
     assert '2,751' in data["summed"] and '已用 37%' in data["summed"], data["summed"]
     assert '已用 67%' in data["single"], f"652/2000 → 67%: {data['single']}"
     assert '已用' not in data["no_total"], f"total=0 不能算出比例: {data['no_total']}"
+
+
+def test_quota_item_weekly_window_tag_is_visible_in_label():
+    """周额度必须在**正文标签**里看得见，不能只藏在鼠标悬停的 title 里。
+
+    2026-11-25 用户反馈「antigravity 应该有周额度吧？界面上没看到」。其实一直
+    在——Claude/GPT 组就是周额度——只是被标成「5 小时窗口刷新点」，而那句话
+    又只在 title 里。用户看到「剩 1.9% · 11-26 03:30 重置」，不知道这是周池、
+    要等一天才回满。后端给出 ``window: 'weekly'`` 时渲染黄色「周额度」标签。
+    """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd", "remainSpan"), """
+console.log(quotaItemHtml({
+  label: 'AG #1 · Claude/GPT 组', used: 981.1, total: 1000, remaining: 18.9, percent: 98.11,
+  reset_ts: 1795635003, reset_note: '周额度：本窗口自首次使用起 7 天，约 1.1 天后回满（不是 5 小时滚动窗口，等几小时不会回来）',
+  window: 'weekly', expire_ts: null, unit: 'permille',
+}));
+""")
+    # 标签在 qlabel 内、且在池名之前（一眼先看到「这是周额度」）
+    assert '<span class="qlabel"><span class="tag wtag warn"' in out, out
+    # 三档写法都写进 DOM，由 CSS 容器查询决定显示哪一档（JS 不猜宽度）：
+    #   全称「周额度」/ 单字「周」/ 色点（aria-label 保留全称给读屏）
+    assert '<span class="wtag-long">周额度</span>' in out, out
+    assert '<span class="wtag-short">周</span>' in out, out
+    assert '<span class="wtag-dot" aria-label="周额度"></span>' in out, out
+    assert 'AG #1 · Claude/GPT 组' in out, out
+    # 三档齐全：缺任何一档，CSS 在某个宽度下就无标签可显示
+    assert out.count('class="wtag-') == 3, out
+
+
+def test_quota_item_window_tag_has_full_note_in_title():
+    """周期说明完整挂在标签 title 上——色点/单字档文字很短，细节全靠它。"""
+    note = '周额度：本窗口自首次使用起 7 天，约 1.1 天后回满（不是 5 小时滚动窗口，等几小时不会回来）'
+    # 不用 f-string：JS 对象字面量的 ``{{`` 会被还原成单个大括号，node 直接语法错
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd", "remainSpan"),
+                  "console.log(quotaItemHtml({\n"
+                  "  label: 'AG #1 · Claude/GPT 组', used: 981.1, total: 1000, remaining: 18.9, percent: 98.11,\n"
+                  "  reset_ts: 1795635003, reset_note: '" + note + "', window: 'weekly', expire_ts: null, unit: 'permille',\n"
+                  "}));\n")
+    assert f'title="额度周期：{note}"' in out, out
+
+
+def test_quota_item_rolling_window_tag_is_plain_not_warn():
+    """5 小时滚动窗用普通灰标签，不用警告色——回满只要几小时，不值得警示。"""
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd", "remainSpan"), """
+console.log(quotaItemHtml({
+  label: 'AG #1 · Gemini 组', used: 48.6, total: 1000, remaining: 951.4, percent: 4.86,
+  reset_ts: 1795552525, reset_note: '5 小时滚动窗口，约 4 小时后刷新', window: 'rolling_5h',
+  expire_ts: null, unit: 'permille',
+}));
+""")
+    assert '<span class="wtag-long">5 小时窗</span>' in out, out
+    assert '<span class="wtag-short">5h</span>' in out, out
+    assert '<span class="tag wtag"' in out and 'class="tag wtag"' in out, out
+    assert 'class="tag wtag warn"' not in out, f"滚动窗不该用警告色: {out}"
+
+
+def test_quota_item_without_window_field_renders_no_tag():
+    """其它通道（trae/zcode…）的条目没有 ``window`` 字段 → 不渲染周期标签。"""
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd", "remainSpan"), """
+console.log(quotaItemHtml({
+  label: '5 小时窗口', used: 10, total: 100, remaining: 90, percent: 10,
+  reset_ts: 1792692336, expire_ts: null, unit: 'count',
+}));
+""")
+    assert '<span class="qlabel">5 小时窗口' in out, f"没有 window 字段时 qlabel 后应直接跟标签: {out}"
+    assert '周额度' not in out and '5 小时窗</span>' not in out, out
+
+
+def test_quota_item_unknown_window_renders_no_period_tag_but_keeps_note():
+    """周期认不出（window=unknown）时不渲染周期标签，但说明仍进 title。
+
+    后端对 6h~24h 这种两个已知窗口都解释不了的跨度返回 unknown——此时宁可
+    不显示「周额度/5 小时窗」，也不能猜一个（猜错就是这次要修的那种误导）。
+    """
+    out = _run_fn(("quotaItemHtml", "fmtExpireMmdd", "remainSpan"), """
+console.log(quotaItemHtml({
+  label: 'AG #1 · Claude/GPT 组', used: 500, total: 1000, remaining: 500, percent: 50,
+  reset_ts: 1795535003, reset_note: '约 20 小时后刷新（既不像 5 小时窗口、也够不到周窗口，周期未知）',
+  window: 'unknown', expire_ts: null, unit: 'permille',
+}));
+""")
+    assert 'class="tag warn"' not in out and '周额度' not in out, out
+    assert '>5 小时窗</span>' not in out, out
+    # 说明仍在，用户悬停能看到「周期未知」而不是被蒙在鼓里
+    assert '周期未知' in out, out
+    assert '<span class="qlabel">AG #1 · Claude/GPT 组' in out, f"无标签时 qlabel 后直接跟池名: {out}"
