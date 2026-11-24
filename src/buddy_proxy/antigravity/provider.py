@@ -196,7 +196,13 @@ def _quota_pool_suffix(
         return "（Gemini 4 Argon）"
     if group == "gemini":
         return "（其余 Gemini 模型）"
-    return "（Claude/GPT）"
+    # Claude/GPT 组拆成多池时（opus 与 sonnet/gpt-oss 的 resetTime 不同），
+    # 用池里的**模型名**区分。不能回成「（Claude/GPT）」——那与标签前缀重复，
+    # 两个池都会叫「Claude/GPT 组（Claude/GPT）」而撞车，最后落到时间戳兜底，
+    # 变成「Claude/GPT 组（Claude/GPT）（11-26 03:30 重置）」，又长又没信息。
+    names = sorted(bases)
+    shown = "、".join(names[:3]) + ("…" if len(names) > 3 else "")
+    return f"（{shown}）"
 
 
 #: 5 小时滚动窗口的上限。超过它才可能是周额度——两者之间没有灰区

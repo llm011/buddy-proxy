@@ -907,3 +907,53 @@ def test_quota_unused_claude_account_is_not_marked_weekly(provider, tmp_path, mo
     (item,) = provider.quota()["items"]
     assert item["window"] == "rolling_5h", "满额 + 几小时后刷新 = 还没进周窗口"
     assert "周额度" not in item["reset_note"]
+
+
+def test_quota_claude_group_split_uses_model_names_not_duplicate_group(provider, tmp_path, monkeypatch):
+    """Claude/GPT 组内部拆成两池时，后缀用模型名区分，不能重复组名。
+
+    自审 PR #335 时发现：我把 `_quota_pool_suffix` 的兜底从「Claude/GPT 5 小时池」
+    改成了「（Claude/GPT）」——与前缀重复。opus 与 sonnet/gpt-oss 的 resetTime
+    一旦不同就会拆池，两个池都叫「Claude/GPT 组（Claude/GPT）」，必然撞车，
+    最后落到时间戳兜底变成「…（Claude/GPT）（11-26 03:30 重置）」：
+    唯一是唯一了，但又长又没信息。
+    """
+    monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "ag.json"))
+    from buddy_proxy.antigravity import credentials as creds
+
+    creds.save_cred({"access_token": "a", "refresh_token": "r",
+                     "expiry": "2099-01-01T00:00:00+00:00", "email": "u@x.com",
+                     "project_id": "p"})
+
+    async def _fake_fetch(account_id=None):
+        return {"models": {
+            "claude-opus-5-5-high": {"quotaInfo": {"remainingFraction": 0.2,
+                                                   "resetTime": "2026-11-25T19:30:03Z"}},
+            "claude-sonnet-5-5-high": {"quotaInfo": {"remainingFraction": 0.7,
+                                                     "resetTime": "2026-11-25T21:00:00Z"}},
+            "gpt-oss-120b-medium": {"quotaInfo": {"remainingFraction": 0.7,
+                                                  "resetTime": "2026-11-25T21:00:00Z"}},
+        }}
+
+    import buddy_proxy.antigravity.provider as prov
+
+    monkeypatch.setattr(provider, "_fetch_available_models", _fake_fetch)
+    monkeypatch.setattr(prov, "_run_sync", lambda factory: prov.asyncio.run(factory()))
+    provider._models = [
+        {"id": "claude-opus-5-5", "group": "claude-gpt"},
+        {"id": "claude-sonnet-5-5", "group": "claude-gpt"},
+        {"id": "gpt-oss-120b", "group": "claude-gpt"},
+    ]
+    monkeypatch.setattr(prov.time, "time", lambda: prov._iso_to_epoch("2026-11-24T16:30:00Z"))
+
+    items = provider.quota()["items"]
+    labels = [i["label"] for i in items]
+    assert len(labels) == len(set(labels)) == 2, labels
+    assert not any("（Claude/GPT）" in lab for lab in labels), f"后缀不该重复组名: {labels}"
+    assert not any("重置）" in lab for lab in labels), f"不该落到时间戳兜底: {labels}"
+    by_label = {i["label"]: i for i in items}
+    opus = next(i for i in items if i["models_in_group"] == ["claude-opus-5-5"])
+    rest = next(i for i in items if i["models_in_group"] == ["claude-sonnet-5-5", "gpt-oss-120b"])
+    assert "claude-opus-5-5" in opus["label"]
+    assert "claude-sonnet-5-5" in rest["label"] and "gpt-oss-120b" in rest["label"]
+    assert opus["remaining"] == 200.0 and rest["remaining"] == 700.0
