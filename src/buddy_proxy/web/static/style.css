@@ -602,7 +602,8 @@
      让它们在这一段内部横向滚动，而不是撑开整行。 */
   .pat-head .pat-head-mid { flex: 1 1 auto; min-width: 0; display: flex;
                             align-items: center; gap: 8px; overflow-x: auto;
-                            scrollbar-width: thin; }
+                            scrollbar-width: none; -ms-overflow-style: none; }
+  .pat-head .pat-head-mid::-webkit-scrollbar { display: none; }
   .pat-head .pat-head-mid > * { flex-shrink: 0; }
   /* 右侧按钮组：不收缩、不换行，永远可见。 */
   .pat-head .pat-head-actions { flex: 0 0 auto; display: flex; align-items: center;
