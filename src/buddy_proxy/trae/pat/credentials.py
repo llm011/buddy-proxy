@@ -114,6 +114,29 @@ def _get_profile_credentials(
         if force_refresh and rejected_token and current and current.token != rejected_token \
                 and expires_at - now > 300:
             return current
+        if not profile.bearer:
+            # 直传 cloud_ide_token 模式（如桌面端导入）：无 bearer 可换签，
+            # 未被 401 拒绝时直接落盘并返回；被 401 拒绝则直接报错换号。
+            if force_refresh and rejected_token == profile.cloud_ide_token:
+                raise HTTPException(status_code=401, detail="PAT direct cloud_ide_token expired or rejected")
+            if current is not None and current.token == profile.cloud_ide_token:
+                return current
+            direct_exp = profile.expires_at or (now + 365 * 86400)
+
+            def store_direct(account: dict[str, Any]) -> None:
+                account.update({
+                    "cloud_ide_token": profile.cloud_ide_token,
+                    "uid": profile.uid,
+                    "expires_at": direct_exp,
+                    "refreshed_at": time.time(),
+                    "machine_id": machine_id,
+                    "device_id": device_id,
+                })
+
+            state = _mutate_account(profile.cache_key, store_direct)
+            credentials = _credentials_from_state(state)
+            assert credentials is not None
+            return credentials
         try:
             token, uid, expires_at = _ns._exchange(profile.bearer)
         except Exception as exc:
