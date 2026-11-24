@@ -136,3 +136,28 @@ def test_trae_writes_stable_id_to_log():
            / "provider.py").read_text(encoding="utf-8")
     assert 'meta["account"] = acct.id' in src
     assert 'meta["account"] = acct.alias' not in src
+
+
+def test_raccoon_registered_as_account_name_source():
+    """raccoon 落库的是稳定 id（``Raccoon-pu-<uuid>`` 派生），必须注册进解析表，
+    否则日志「通道」列只会显示 ``pu-01a20449…`` 这种 id 缩略，看不出是谁。"""
+    assert "raccoon" in queries._ACCOUNT_NAME_SOURCES
+
+
+def test_raccoon_account_name_resolves_via_failover(monkeypatch):
+    """端到端：raccoon 的 alias 链要能进日志账号名解析表。"""
+    from buddy_proxy.raccoon import failover as rfailover
+
+    monkeypatch.setattr(
+        rfailover, "accounts_status",
+        lambda: {"accounts": [
+            {"id": "Raccoon-pu-01a20449-aaaa", "alias": "主号",
+             "name": "旧昵称"},
+            {"id": "Raccoon-pu-9b3f11cc-bbbb", "alias": "",
+             "name": "备用号"},
+        ]},
+    )
+    queries._reset_account_name_cache()
+    names = queries._account_name_map()
+    assert names.get("Raccoon-pu-01a20449-aaaa") == "主号"
+    assert names.get("Raccoon-pu-9b3f11cc-bbbb") == "备用号"
