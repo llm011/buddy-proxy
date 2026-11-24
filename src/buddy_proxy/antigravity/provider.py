@@ -205,9 +205,16 @@ def _quota_pool_suffix(
     return f"（{shown}）"
 
 
-#: 5 小时滚动窗口的上限。超过它才可能是周额度——两者之间没有灰区
-#: （实测 5h 窗口最远 5h，周窗口最远 7 天），阈值取整 24h 留足余量。
+#: 判为周额度的最小跨度。实测 5h 窗口最远 5h、周窗口最远 7 天，取 24h 落在中间。
 _WEEKLY_WINDOW_MIN_GAP_S = 24 * 3600.0
+
+#: 5 小时窗口「最远可能还有多久刷新」的上限。窗口本身是 5h，但上游 resetTime
+#: 与本地时钟有秒级偏差、且采集与判定之间有延迟，留 1h 余量。
+#: 落在 (_ROLLING_5H_MAX_GAP_S, _WEEKLY_WINDOW_MIN_GAP_S) 之间的跨度**两个已知
+#: 窗口都解释不了**，不能硬套任何一个——见 :func:`_quota_window_kind` 的
+#: 「中间地带」。这个区间 2026-11-25 的实测数据里**没有出现过**（5h 窗最大
+#: 约 5h，周窗 27h+），是自审 PR #335 时 reviewer 指出的盲区。
+_ROLLING_5H_MAX_GAP_S = 6 * 3600.0
 
 
 def _quota_window_kind(reset_epoch: float, *, now: float | None = None
@@ -232,6 +239,17 @@ def _quota_window_kind(reset_epoch: float, *, now: float | None = None
     Claude 100%、resetTime 05:13）。那种情况它确实还没进周窗口，标「5 小时」
     才对。所以只认跨度。
 
+    ## 中间地带：两个窗口都解释不了时，不硬套
+
+    跨度在 6h~24h 之间时，既超过 5 小时窗口的上限、又够不到周窗口，说明上游
+    出现了我们没见过的周期（加新档位、时钟漂移、或数据异常）。这时返回
+    ``unknown`` 并只陈述事实（「约 N 小时后刷新」）。
+
+    为什么不归到 rolling_5h：文案会是「5 小时滚动窗口，约 20 小时后刷新」——
+    一句话自相矛盾，而「文案与事实不符」正是本次要修的问题本身。
+    为什么不归到 weekly：没依据说它是 7 天窗口，可能 8 小时后就回满，让用户
+    白白省着用。认不出就说认不出，比编一个强。
+
     ``reset_epoch`` 为 0（上游没给 resetTime）→ ``unknown``，不编周期。
     """
     if not reset_epoch or reset_epoch <= 0:
@@ -244,10 +262,15 @@ def _quota_window_kind(reset_epoch: float, *, now: float | None = None
         return ("weekly",
                 f"周额度：本窗口自首次使用起 7 天，约 {when}后回满"
                 "（不是 5 小时滚动窗口，等几小时不会回来）")
-    hours = max(gap, 0.0) / 3600.0
-    return ("rolling_5h",
-            f"5 小时滚动窗口，约 {hours:.0f} 小时后刷新（从最近一次使用起算）"
-            if gap > 0 else "5 小时滚动窗口，即将刷新")
+    if gap > _ROLLING_5H_MAX_GAP_S:
+        # 两个已知窗口都解释不了：只陈述事实，不下结论
+        return ("unknown",
+                f"约 {gap / 3600.0:.0f} 小时后刷新（既不像 5 小时窗口、也够不到"
+                "周窗口，周期未知——可能是上游新增了档位）")
+    if gap > 0:
+        return ("rolling_5h",
+                f"5 小时滚动窗口，约 {gap / 3600.0:.0f} 小时后刷新（从最近一次使用起算）")
+    return ("rolling_5h", "5 小时滚动窗口，即将刷新")
 
 
 def _run_sync(factory):

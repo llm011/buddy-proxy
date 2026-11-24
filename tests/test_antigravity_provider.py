@@ -957,3 +957,38 @@ def test_quota_claude_group_split_uses_model_names_not_duplicate_group(provider,
     assert "claude-opus-5-5" in opus["label"]
     assert "claude-sonnet-5-5" in rest["label"] and "gpt-oss-120b" in rest["label"]
     assert opus["remaining"] == 200.0 and rest["remaining"] == 700.0
+
+
+def test_quota_window_kind_dead_zone_does_not_contradict_itself():
+    """6h~24h 的跨度两个已知窗口都解释不了 → 不硬套任何一个。
+
+    自审 PR #335 时 reviewer 指出的盲区：原先 5.5h~24h 全判 rolling_5h，文案会是
+    「5 小时滚动窗口，约 20 小时后刷新」——一句话自相矛盾。这个区间在
+    2026-11-25 的实测里没出现过，但上游加新档位 / 时钟漂移就会撞上。
+    认不出就说认不出。
+    """
+    from buddy_proxy.antigravity.provider import (
+        _ROLLING_5H_MAX_GAP_S,
+        _WEEKLY_WINDOW_MIN_GAP_S,
+        _quota_window_kind,
+    )
+
+    now = 1_800_000_000.0
+    # 阈值自检：余量档必须严格小于周额度档，否则中间地带为空、本测试形同虚设
+    assert 5 * 3600 < _ROLLING_5H_MAX_GAP_S < _WEEKLY_WINDOW_MIN_GAP_S
+
+    for hours in (8, 12, 20, 23.9):
+        kind, note = _quota_window_kind(now + hours * 3600, now=now)
+        assert kind == "unknown", f"gap={hours}h 应判 unknown，实际 {kind}"
+        # 只陈述事实：说「约 N 小时后刷新」，不下周期结论
+        assert f"约 {hours:.0f} 小时后" in note, note
+        # 关键：不能出现「5 小时窗口…N 小时后刷新」这种自相矛盾
+        assert "5 小时滚动窗口" not in note, f"自相矛盾的文案: {note}"
+        assert "周额度" not in note, f"没依据说是周窗口: {note}"
+        assert "周期未知" in note, note
+
+    # 余量以内仍是 5h 窗（时钟偏差不该把正常的 5h 窗误判成未知）
+    assert _quota_window_kind(now + 5 * 3600, now=now)[0] == "rolling_5h"
+    assert _quota_window_kind(now + _ROLLING_5H_MAX_GAP_S, now=now)[0] == "rolling_5h"
+    # 刚过余量 → 立刻变 unknown
+    assert _quota_window_kind(now + _ROLLING_5H_MAX_GAP_S + 1, now=now)[0] == "unknown"
