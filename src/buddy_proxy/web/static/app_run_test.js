@@ -59,4 +59,28 @@ switchTab(initTab);
 // LOAD_BALANCE_ON，后到会让第一帧画成「全关」再跳出勾选（30s 轮询还会
 // 冲掉这个抖动）。失败不阻塞首屏——loadLoadBalanceState 自己吞异常。
 loadLoadBalanceState().finally(() => loadAll());
-setInterval(() => loadAll(false, true), 30000);
+
+// 自动刷新倒计时：与 30s 轮询绑定，让日志页「刷新」按钮明确显示距下次刷新的秒数；
+// 手动点击刷新时重置计时，避免刚手动刷完紧接着又触发一次轮询。
+const AUTO_REFRESH_SEC = 30;
+let refreshCountdown = AUTO_REFRESH_SEC;
+function updateRefreshCountdownLabel() {
+  const btn = document.getElementById('global-refresh');
+  if (btn) btn.textContent = `↻ 刷新 (${refreshCountdown}s)`;
+}
+const globalRefreshBtn = document.getElementById('global-refresh');
+if (globalRefreshBtn) {
+  globalRefreshBtn.addEventListener('click', () => {
+    refreshCountdown = AUTO_REFRESH_SEC;
+    updateRefreshCountdownLabel();
+  });
+}
+updateRefreshCountdownLabel();
+setInterval(() => {
+  refreshCountdown -= 1;
+  if (refreshCountdown <= 0) {
+    refreshCountdown = AUTO_REFRESH_SEC;
+    loadAll(false, true);
+  }
+  updateRefreshCountdownLabel();
+}, 1000);
