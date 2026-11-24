@@ -760,12 +760,22 @@ class BenefitsManager:
         if p is None:
             return None
         qkey = self._quota_key(provider_id, p)
-        inflight = self._refreshing.get(qkey)
-        if inflight is not None:
-            try:
-                await inflight
-            except Exception:
-                pass
+        # checkin 与 quota 两条后台刷新都要等：fast=1 把两者都 kick 到后台了，
+        # 而下面的 _provider_entry 走的是 fast_only=False。少等任何一个，那个
+        # 键就会落回 _cached 的同步重查——延迟没消失，只是从首屏挪到了子请求，
+        # 而且上游被打两次（后台一次 + 同步一次）。
+        # （2026-11-24 review 实测：只等 qkey 时，checkin 睡 2s 的假通道让
+        # provider_entry 走了 2.24s、checkin_status 被调 2 次。）
+        inflight_keys = [qkey]
+        if bool(getattr(p, "supports_checkin", False)):
+            inflight_keys.append(f"checkin:{provider_id}")
+        for key in inflight_keys:
+            inflight = self._refreshing.get(key)
+            if inflight is not None:
+                try:
+                    await inflight
+                except Exception:
+                    pass
         done = self.history.ok_dates_by_provider()
         return await self._provider_entry(
             provider_id, p, disabled_providers or set(), done, _today(), fast_only=False,
@@ -822,6 +832,14 @@ class BenefitsManager:
         落空：明明数到零了，按钮却还是灰的）；后者的旧值只是一条错误消息，
         「先回旧值」毫无价值，同步重查才兑现「短 TTL、30s 后自愈」的语义
         （``test_failure_result_uses_short_ttl`` 钉着这条）。
+
+        ⚠️ 说清楚「自愈」的真实含义：这里是**固定 30s 后再撞一次**，没有
+        退避。上游持续不可达时（2026-11-24 本机代理故障就是这样），用户停在
+        页面上每触发一次快照，就是一发等到 ``QUERY_TIMEOUT_S`` 的同步重查。
+        ``fast=1`` 已经不走这条路（见 :meth:`_stale_failure`），但普通快照
+        ——签到页、各面板刷新后的收尾、``↻`` 强刷——仍然会。上游恢复后第一次
+        重查就成功，这是它「自愈」的部分；上游没恢复时它不会自己收敛，这是
+        它没有退避的部分。想要指数退避得在这里加连续失败计数，未做。
         """
         now = time.time()
         cached = self._cache.get(key)

@@ -297,3 +297,54 @@ def test_non_fast_snapshot_still_retries_expired_failure_synchronously(monkeypat
     e1, e2 = asyncio.run(run())
     assert e1.get("loading") is None, "普通快照不该标 loading"
     assert e2["quota"]["level"] == "ok", "普通快照在失败缓存过期后应同步拿到新结果"
+
+
+class _FakeCheckinProvider(_FakeProvider):
+    """支持签到的假通道：checkin 慢且失败，quota 正常。"""
+
+    supports_checkin = True
+
+    def __init__(self, pid="fake", *, checkin_delay=0.0):
+        super().__init__(pid)
+        self.checkin_delay = checkin_delay
+        self.checkin_calls = 0
+
+    def checkin_status(self):
+        self.checkin_calls += 1
+        if self.checkin_delay:
+            time.sleep(self.checkin_delay)
+        raise RuntimeError("checkin timeout")
+
+
+def test_provider_entry_waits_for_checkin_refresh_too(monkeypatch):
+    """拆分子请求必须把 checkin 的后台刷新也等掉，不能自己再同步打一次。
+
+    回归对象（2026-11-24 review PR #333 时实测）：``provider_entry`` 原来只
+    ``await`` 了 quota 的 inflight。fast=1 把 checkin 也 kick 到后台之后，前端
+    一看到顶层 ``loading`` 就打子请求，那条路 ``fast_only=False``，checkin 分支
+    落回 ``_cached`` 的同步重查——延迟没消失，只是从首屏挪到了子请求，上游
+    还被打了两次。
+
+    这条锁两个指标：子请求不再多打 checkin，且不等那个慢调用第二次。
+    """
+    monkeypatch.setattr(bm, "SNAPSHOT_TTL_S", 300.0, raising=False)
+    monkeypatch.setattr(bm, "FAILURE_TTL_S", 30.0, raising=False)
+
+    pid = "codebuddy"
+    p = _FakeCheckinProvider(pid, checkin_delay=0.6)
+    mgr = _manager({pid: p})
+    mgr._providers = lambda: {pid: p}
+
+    async def run():
+        first = await mgr.snapshot(set(), fast_only=True)
+        e1 = next(e for e in first["providers"] if e["id"] == pid)
+        assert e1.get("loading") is True, "fast=1 首屏必须立刻返回"
+        assert p.checkin_calls == 1, "此时后台刷新刚发出，应该只有 1 次"
+        # 前端此刻就会打子请求；它要等后台那次完成，而不是自己再打一次
+        await mgr.provider_entry(pid)
+        return p.checkin_calls
+
+    calls = asyncio.run(run())
+    assert calls == 1, (
+        f"checkin_status 被打了 {calls} 次——子请求没有等 inflight，自己又同步查了一遍"
+    )
