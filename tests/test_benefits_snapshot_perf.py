@@ -201,15 +201,19 @@ def test_no_slow_providers_allowlist_survives_anywhere():
 def test_fast_only_marks_loading_for_any_cold_channel_not_a_named_list(monkeypatch):
     """fast=1 的跳过条件是「缓存未命中」，与通道名无关。
 
-    回归对象：#310 时代只有 ``SLOW_PROVIDERS`` 里的通道才被跳过，于是
-    codebuddy（单查实测 12s、不在名单里）在 fast=1 首屏照样同步等满超时，
-    整页 24s 才出。这条用例拿一个**从未出现在任何名单里**的通道，断言它冷缓存
-    时也被标记 loading。
+    回归对象：#310 时代只有 ``SLOW_PROVIDERS`` 里的通道（默认 ``antigravity``）
+    才被跳过。这条用例的通道叫 ``codebuddy``——那个实测单查 12s、却**不在名单
+    里**的真实受害者，正是 #311 要修的场景。
+
+    **这条用例在 #310 的实现下会失败、在 #311 下通过**（名字不在名单里 →
+    #310 里不会被跳过 → 同步等满上游延迟 → ``loading`` 不是 True）。写清这点
+    很重要：否则将来有人看到它一直绿，会以为名单本来就是多余的，而不是
+    「名单被一个更强的判据取代了」。判据是「缓存命中与否」，自适应，不靠维护。
     """
     monkeypatch.setattr(bm, "SNAPSHOT_TTL_S", 300.0, raising=False)
     monkeypatch.setattr(bm, "FAILURE_TTL_S", 30.0, raising=False)
 
-    pid = "nobody-put-me-on-a-list"
+    pid = "codebuddy"
     never_listed = _FakeProvider(pid, delay=0.0, results={"used": 1, "total": 2})
     mgr = _manager({pid: never_listed})
 
