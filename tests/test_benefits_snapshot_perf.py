@@ -174,3 +174,52 @@ def test_stale_while_revalidate_skips_failure_results(monkeypatch):
         assert not mgr._refreshing, "失败路径不该留后台任务"
 
     asyncio.run(run())
+
+
+def test_no_slow_providers_allowlist_survives_anywhere():
+    """``SLOW_PROVIDERS`` 必须保持删除状态。
+
+    #310 引入了「慢通道名单」（默认只含 antigravity），#311 换成「任何未命中
+    缓存的通道都异步预热」——名单失去消费方，但常量在文件里又躺了两个月。
+
+    为什么用测试钉住而不是靠 code review 发现：**死常量的坏处不是浪费一行内存，
+    而是它看起来像一个生效的开关。** 下一个人想让某通道走渐进加载时，会先去改
+    这份名单（它就在 fast_only 相关注释旁边），改完测不出来有效果、也测不出来
+    没效果——它的存在本身就是误导。
+
+    真需要控制渐进加载的粒度，用 `_cache` 命中与否（自适应），别再引入名单。
+    """
+    from buddy_proxy import benefits as b
+
+    assert not hasattr(b, "SLOW_PROVIDERS"), (
+        "SLOW_PROVIDERS 又被加回来了。它没有消费方——#311 已改为按缓存命中判断。"
+        "若确实需要按通道控制，请先实现消费方并让 _provider_entry 读它，"
+        "再删掉这条测试。"
+    )
+
+
+def test_fast_only_marks_loading_for_any_cold_channel_not_a_named_list(monkeypatch):
+    """fast=1 的跳过条件是「缓存未命中」，与通道名无关。
+
+    回归对象：#310 时代只有 ``SLOW_PROVIDERS`` 里的通道（默认 ``antigravity``）
+    才被跳过。这条用例的通道叫 ``codebuddy``——那个实测单查 12s、却**不在名单
+    里**的真实受害者，正是 #311 要修的场景。
+
+    **这条用例在 #310 的实现下会失败、在 #311 下通过**（名字不在名单里 →
+    #310 里不会被跳过 → 同步等满上游延迟 → ``loading`` 不是 True）。写清这点
+    很重要：否则将来有人看到它一直绿，会以为名单本来就是多余的，而不是
+    「名单被一个更强的判据取代了」。判据是「缓存命中与否」，自适应，不靠维护。
+    """
+    monkeypatch.setattr(bm, "SNAPSHOT_TTL_S", 300.0, raising=False)
+    monkeypatch.setattr(bm, "FAILURE_TTL_S", 30.0, raising=False)
+
+    pid = "codebuddy"
+    never_listed = _FakeProvider(pid, delay=0.0, results={"used": 1, "total": 2})
+    mgr = _manager({pid: never_listed})
+
+    snap = asyncio.run(mgr.snapshot(set(), fast_only=True))
+    entry = next(e for e in snap["providers"] if e["id"] == pid)
+
+    assert entry.get("loading") is True, (
+        "冷缓存的通道在 fast=1 下必须标 loading 并后台预热，不能同步等上游"
+    )
