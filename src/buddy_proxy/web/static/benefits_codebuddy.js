@@ -176,7 +176,7 @@ function renderCodebuddyPanel() {
         <span class="pat-head-actions">${providerLoadBalanceToggle('codebuddy', multi)}${fold.toggle}${providerRefreshButton('codebuddy')}</span>
       </div>
       ${fold.bodyStart}${noticeHtml ? `<div style="margin:6px 0">${noticeHtml}</div>` : ''}${groups.size ? `<div class="pat-quota-grid">${quotaHtml}</div>`
-        : '<div class="empty" style="padding:12px 0">暂无账号额度数据（未登录：跑 <span class="mono">buddy login codebuddy</span>）</div>'}${fold.bodyEnd}
+        : `<div class="empty" style="padding:12px 0">${cb.quota && cb.quota.error ? `额度查询失败：${esc(cb.quota.error)}` : '暂无账号额度数据（未登录：跑 <span class="mono">buddy login codebuddy</span>）'}</div>`}${fold.bodyEnd}
     </div>`;
   loadCodebuddyAccounts();
 }
