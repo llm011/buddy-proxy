@@ -421,11 +421,19 @@
       <div id="rh-wf-err" class="muted" style="font-size:12px;color:#ef4444"></div>
     `;
     footEl.innerHTML = `
+      <div style="flex:1;display:flex;gap:8px;">
+        <button class="ghost" id="rh-wf-fetch">🔍 拉取</button>
+      </div>
       <button class="ghost" onclick="closeModal()">取消</button>
-      <button class="ghost" id="rh-wf-fetch">拉取</button>
-      <button id="rh-wf-submit">保存</button>
+      <button id="rh-wf-submit" class="primary">保存</button>
     `;
     overlayEl.classList.add('show');
+
+    // 打开弹窗后聚焦到 webappId 输入框，方便直接粘贴。
+    requestAnimationFrame(() => {
+      const idInput = document.getElementById('rh-wf-id');
+      if (idInput) { idInput.focus(); idInput.select(); }
+    });
 
     const fetchBtn = document.getElementById('rh-wf-fetch');
     const submitBtn = document.getElementById('rh-wf-submit');
@@ -449,16 +457,33 @@
             body: JSON.stringify({ webapp_id: wid, name: name || undefined, preview: true }),
           });
           const wf = res.workflow || {};
-          const nodeCount = Array.isArray(wf.nodeInfoList) ? wf.nodeInfoList.length : 0;
+          const nodes = Array.isArray(wf.nodeInfoList) ? wf.nodeInfoList : [];
+          const nodeCount = nodes.length;
+          const paramsHtml = nodes.length
+            ? `<div style="margin-top:8px;">
+                 <div class="muted" style="font-size:11px;margin-bottom:4px;">参数（${nodeCount}）：</div>
+                 <div style="display:flex;flex-wrap:wrap;gap:4px;">
+                   ${nodes.map(n => {
+                     const label = n.description || n.fieldName || n.nodeName || 'param';
+                     const ftype = String(n.fieldType || 'TEXT').toUpperCase();
+                     const val = n.fieldValue !== undefined && n.fieldValue !== null
+                       ? String(n.fieldValue)
+                       : '';
+                     const tip = val ? `data-tip="${escapeHtml(val)}"` : '';
+                     return `<span class="tag" ${tip}>${escapeHtml(label)} <span class="muted" style="font-size:10px;">(${escapeHtml(ftype)})</span></span>`;
+                   }).join('')}
+                 </div>
+               </div>`
+            : '';
           if (previewEl) {
             previewEl.style.display = 'block';
             previewEl.innerHTML = `
-              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <strong style="font-size:13px;">${escapeHtml(wf.name || wid)}</strong>
                 ${renderBillingTag(wf.billingType)}
-                <span class="muted">${nodeCount} 个参数</span>
               </div>
-              ${wf.description ? `<div class="rh-wf-desc">${sanitizeHtml(wf.description)}</div>` : '<div class="muted">暂无应用描述</div>'}
+              ${wf.description ? `<div class="rh-wf-desc" style="margin-top:4px;">${sanitizeHtml(wf.description)}</div>` : '<div class="muted" style="margin-top:4px;">暂无应用描述</div>'}
+              ${paramsHtml}
             `;
           }
         } catch (err) {
@@ -466,7 +491,7 @@
           if (errEl) errEl.textContent = err.message || String(err);
         } finally {
           fetchBtn.disabled = false;
-          fetchBtn.textContent = '拉取';
+          fetchBtn.textContent = '🔍 拉取';
         }
       });
     }
