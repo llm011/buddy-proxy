@@ -44,32 +44,21 @@ function renderGroups() {
   // 实测费率倍数（以 glm-5.3 = 1.0 为基准）。三种取值语义不同，
   // 不能合并：
   //   数字 > 0 → 相对 deepseek 的倍数，同样的 prompt 贵多少倍
-  //   0        → 实测不扣余额（免费）
+  //   0        → 查不到扣费（不渲染标签，口径见 📦）
   //   null     → 走日包：余额维度不扣，但花的是包里按 token 折的点，不是免费
-  // 「查不到扣费」的模型**不能一律标免费**——上游从没说过它们不收钱。
-  // 实测只能证明「余额和日包两个计数器都不动」，不能证明「免费」。
-  // 所以按 account_type 分三种口径，各给各的 tooltip：
-  //   ptu   包月预置吞吐，按并发/速率限流，第 5 个之后的 token 不计费
-  //   paygo 按量，但额度页看不到消耗（上游不报）
-  //   ''    走公共网关，同样查不到
-  const _FREE_KINDS = {
-    'ptu': { txt: 'PTU 预留', tip: 'account_type=ptu：包月预置吞吐配额，按并发/速率限流，不按 token 计费。额度页的日包计数器不统计它，所以查不到消耗——这不等于「免费」，只是上游没给这个口径。' },
-    'paygo': { txt: '按量未计', tip: 'account_type=paygo：按量计费通道，但上游不在额度页报它的消耗（实测余额与日包都不动）。真实账单可能在别处，这里只能说「查不到」。' },
-    '': { txt: '未观察到扣费', tip: '实测调用前后余额和日包都没变，上游也未给出计费口径。按「查不到扣费」处理，不写「免费」——上游没这么说。' },
-  };
-  function _creditRateTag(rate, pack) {
-    if (rate === null || rate === undefined) return '';
-    if (!rate) {
-      // pack 里带着口径（「PTU 预留额度（未计费）」/「按量额度（未计费）」/
-      // 「未观察到扣费」），从它反推，别在 JS 里再猜一遍 account_type。
-      // 没有 pack 就兜底成「未观察到扣费」，**不要**猜成 ptu：这个函数是通用的，
-      // 别的通道将来传 rate=0 而没有 pack 时，猜成 ptu 等于凭空编一个
-      // account_type。要精确就到数据层把口径带上（models_config.json 里已经带了）。
-      const kind = pack && pack.startsWith('PTU') ? 'ptu'
-        : pack && pack.startsWith('按量') ? 'paygo' : '';
-      const k = _FREE_KINDS[kind];
-      return `<span class="tag ok" title="${esc(k.tip)}">${esc(k.txt)}</span>`;
-    }
+  // 「查不到扣费」的那 6 个**不再额外出标签**。
+  //
+  // 原来这里会按 account_type 再渲染一个「PTU 预留」/「按量未计」，而旁边
+  // 📦 那个标签已经写着「PTU 预留额度（未计费）」——同一句话在一行里出现两次，
+  // 读起来就是「标签重复」。
+  //
+  // 我一开始想让两者分工（📦 说"记在哪"、这个说"按什么口径"），但信息其实
+  // 完全重合：pack 名字里已经带了 ptu/paygo 的区分。所以这里**什么都不渲染**，
+  // 口径统一由 📦 标签的 tooltip 交代。
+  function _creditRateTag(rate) {
+    // 0 / null / undefined 都不出标签：0 的口径由 📦 交代（见上），null 是
+    // 「走日包、余额维度不扣」，两者都不该在这里再冒一个标签出来。
+    if (!rate) return '';
     const txt = rate === 1 ? '×1（基准）' : `×${rate}`;
     return `<span class="tag" title="费率倍数：以 GLM-5.3 为 1.0，同样的 prompt 花 ${rate} 倍余额（实测，非官方标价）">${esc(txt)}</span>`;
   }
@@ -143,7 +132,7 @@ function renderGroups() {
             ${schTag}
             ${ordTag}</td>
         <td class="muted"${dim}>${esc(m.name || '')}</td>
-        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.quota_pack ? `<span class="tag ok" title="这份用量记在哪：该模型每次调用都记在这里，记满了即止（实测归因，非估算）">📦 ${esc(m.quota_pack)}</span>` : ''}${_creditRateTag(m.credit_rate, m.quota_pack)}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
+        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.quota_pack ? `<span class="tag ok" title="这份用量记在哪：该模型每次调用都记在这里，记满了即止（实测归因，非估算）">📦 ${esc(m.quota_pack)}</span>` : ''}${_creditRateTag(m.credit_rate)}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
         <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.recent_count && st.recent_avg_ms != null ? fmtMs(st.recent_avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">
