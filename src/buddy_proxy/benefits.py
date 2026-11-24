@@ -707,7 +707,8 @@ class BenefitsManager:
         }
         if supports_checkin:
             ckey = f"checkin:{pid}"
-            if fast_only and ckey not in self._cache:
+            # 「冷缓存」要连「过期的失败缓存」一起算，理由见 _stale_failure。
+            if fast_only and self._stale_failure(ckey):
                 self._kick_refresh(ckey, p.checkin_status)
                 entry["loading"] = True
             else:
@@ -741,7 +742,8 @@ class BenefitsManager:
         # 缓存键可带 provider 的「缓存代」：账号列表会变的通道（antigravity）
         # 声明 quota_epoch()，账号一变键就变，旧快照不再顶满 TTL
         qkey = self._quota_key(pid, p)
-        if fast_only and qkey not in self._cache:
+        # 同上：过期的失败缓存也算冷缓存，否则 fast=1 会被同步重查拖到超时。
+        if fast_only and self._stale_failure(qkey):
             self._kick_refresh(qkey, p.quota)
             entry["loading"] = True
             return entry
@@ -758,12 +760,22 @@ class BenefitsManager:
         if p is None:
             return None
         qkey = self._quota_key(provider_id, p)
-        inflight = self._refreshing.get(qkey)
-        if inflight is not None:
-            try:
-                await inflight
-            except Exception:
-                pass
+        # checkin 与 quota 两条后台刷新都要等：fast=1 把两者都 kick 到后台了，
+        # 而下面的 _provider_entry 走的是 fast_only=False。少等任何一个，那个
+        # 键就会落回 _cached 的同步重查——延迟没消失，只是从首屏挪到了子请求，
+        # 而且上游被打两次（后台一次 + 同步一次）。
+        # （2026-11-24 review 实测：只等 qkey 时，checkin 睡 2s 的假通道让
+        # provider_entry 走了 2.24s、checkin_status 被调 2 次。）
+        inflight_keys = [qkey]
+        if bool(getattr(p, "supports_checkin", False)):
+            inflight_keys.append(f"checkin:{provider_id}")
+        for key in inflight_keys:
+            inflight = self._refreshing.get(key)
+            if inflight is not None:
+                try:
+                    await inflight
+                except Exception:
+                    pass
         done = self.history.ok_dates_by_provider()
         return await self._provider_entry(
             provider_id, p, disabled_providers or set(), done, _today(), fast_only=False,
@@ -779,6 +791,21 @@ class BenefitsManager:
         """
         epoch_fn = getattr(provider, "quota_epoch", None)
         return f"quota:{pid}" + (f":{epoch_fn()}" if callable(epoch_fn) else "")
+
+    def _stale_failure(self, key: str) -> bool:
+        """该键是否是「已过期的失败缓存」——``fast=1`` 必须把它当冷缓存处理。
+
+        为什么单列一个判定：``fast_only`` 原来只看 ``key not in self._cache``，
+        而失败结果**是**在缓存里的（只是 TTL 只有 30s）。于是 ``fast=1`` 遇到
+        过期失败会绕过异步分支、落到 ``_cached`` 里的同步重查，整页被拖到
+        ``QUERY_TIMEOUT_S``（2026-11-24 实测 ``?fast=1`` 稳定 35.0s，正好等于
+        超时值；codebuddy / codebuddyintl 两家 ``loading: True`` 却还是等满）。
+        """
+        cached = self._cache.get(key)
+        if not cached:
+            return True
+        ts, data = cached
+        return _is_failure(data) and time.time() - ts >= FAILURE_TTL_S
 
     async def _cached(self, key: str, fn: Callable, *args):
         """TTL 缓存的 to_thread 调用；上游抛错时返回错误结构而不是 500。
@@ -805,6 +832,14 @@ class BenefitsManager:
         落空：明明数到零了，按钮却还是灰的）；后者的旧值只是一条错误消息，
         「先回旧值」毫无价值，同步重查才兑现「短 TTL、30s 后自愈」的语义
         （``test_failure_result_uses_short_ttl`` 钉着这条）。
+
+        ⚠️ 说清楚「自愈」的真实含义：这里是**固定 30s 后再撞一次**，没有
+        退避。上游持续不可达时（2026-11-24 本机代理故障就是这样），用户停在
+        页面上每触发一次快照，就是一发等到 ``QUERY_TIMEOUT_S`` 的同步重查。
+        ``fast=1`` 已经不走这条路（见 :meth:`_stale_failure`），但普通快照
+        ——签到页、各面板刷新后的收尾、``↻`` 强刷——仍然会。上游恢复后第一次
+        重查就成功，这是它「自愈」的部分；上游没恢复时它不会自己收敛，这是
+        它没有退避的部分。想要指数退避得在这里加连续失败计数，未做。
         """
         now = time.time()
         cached = self._cache.get(key)
