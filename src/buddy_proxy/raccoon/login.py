@@ -40,6 +40,7 @@ from typing import Any
 
 import httpx
 
+from ..core import net as core_net
 from ..core.aes_pure import aes_cbc_encrypt
 from . import credentials as creds
 from .credentials import AuthError, save_account_cred
@@ -252,7 +253,9 @@ def unseal_password(blob: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _client() -> httpx.Client:
-    return httpx.Client(timeout=_TIMEOUT, follow_redirects=True)
+    # 默认直连：本机环境代理会让 xiaohuanxiong.com 每个请求多 8.6s，
+    # 见 core/net.py 的实测记录。
+    return core_net.client(timeout=_TIMEOUT, follow_redirects=True)
 
 
 def _base_headers() -> dict[str, str]:

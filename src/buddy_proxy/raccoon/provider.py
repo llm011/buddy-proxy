@@ -51,6 +51,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..providers.base import BaseProvider
+from ..core import net as core_net
 from ..core.account_store import quota_epoch_from
 from ..core import load_balance as lb_mod
 from ..core.metrics import ACCOUNT_META
@@ -231,7 +232,7 @@ class RaccoonProvider(BaseProvider):
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+            self._client = core_net.async_client(timeout=_TIMEOUT)
         return self._client
 
     # ---- 模型解析 ----------------------------------------------------
@@ -838,7 +839,7 @@ class RaccoonProvider(BaseProvider):
         headers = build_headers(access_token)
         headers["Accept"] = "application/json"
         try:
-            with httpx.Client(timeout=_TIMEOUT) as c:
+            with core_net.client(timeout=_TIMEOUT) as c:
                 resp = c.get(f"{endpoint()}{path}", headers=headers, params=params)
         except httpx.HTTPError as exc:
             log.warning("raccoon %s 请求失败: %s", path, exc)
@@ -1145,7 +1146,7 @@ class RaccoonProvider(BaseProvider):
         for method, url, headers, body in page_boot_requests(
                 access_token, device_id, base):
             try:
-                with httpx.Client(timeout=_TIMEOUT) as c:
+                with core_net.client(timeout=_TIMEOUT) as c:
                     if method == "GET":
                         c.get(url, headers=headers)
                     else:
@@ -1311,7 +1312,7 @@ def _ensure_device_bound(account_id: str, access_token: str) -> None:
         base = endpoint()
         headers = build_headers(access_token, device_id)
         headers["Accept"] = "application/json"
-        with httpx.Client(timeout=_TIMEOUT) as c:
+        with core_net.client(timeout=_TIMEOUT) as c:
             # 先探活：已绑定就只刷心跳，省一次写操作
             info = c.get(f"{base}{USER_INFO_PATH}", headers=headers)
             trusted = False
