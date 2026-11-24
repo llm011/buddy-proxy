@@ -275,8 +275,10 @@ def test_refresh_hits_intl_endpoint(monkeypatch):
         import httpx as _hx
         return _hx.Response(200, json=payload)
 
-    import httpx
-    monkeypatch.setattr(httpx, "post", fake_post)
+    # 出站统一走 core_net.post（默认直连），patch 点跟着换。它内部自建 client，
+    # 所以不能像原来那样 patch httpx.post——那样拦不到。
+    from buddy_proxy.core import net as core_net
+    monkeypatch.setattr(core_net, "post", fake_post)
     fresh = creds.refresh_account_cred(creds.load_account_cred(ref.id))
     assert calls["url"].startswith("https://www.codebuddy.ai"), calls["url"]
     assert fresh["token"] == "at-new"

@@ -63,6 +63,7 @@ mimo 5、antigravity 3，codex/copilot/kimi/kiro/qwenpc/gemini 各 1），它们
 from __future__ import annotations
 
 import os
+import urllib.request
 from typing import Any
 
 import httpx
@@ -109,3 +110,44 @@ def client(**kwargs: Any) -> httpx.Client:
 def async_client(**kwargs: Any) -> httpx.AsyncClient:
     """异步客户端，默认直连。"""
     return httpx.AsyncClient(**client_kwargs(**kwargs))
+
+
+def post(url: str, **kwargs: Any) -> httpx.Response:
+    """``httpx.post`` 的直连版：一次性请求，用完即关。
+
+    给那些「打一发就走」的管理类调用用（刷新 token、查额度）。每次新建连接
+    比复用客户端慢一点点（多一次 TLS 握手，实测 ~0.1s），但换来「不用管
+    连接池生命周期」——调用点不用记得 close，也不会因为忘了关而漏连接。
+    高频的转发主链路请用 :func:`client` / :func:`async_client` 复用。
+    """
+    with client(**kwargs.pop("_client_kwargs", {})) as c:
+        return c.post(url, **kwargs)
+
+
+def get(url: str, **kwargs: Any) -> httpx.Response:
+    """``httpx.get`` 的直连版，语义同 :func:`post`。"""
+    with client(**kwargs.pop("_client_kwargs", {})) as c:
+        return c.get(url, **kwargs)
+
+
+# ---- urllib 这条路 ----------------------------------------------------------
+
+#: 不走任何代理的 opener。``ProxyHandler({})`` 是「代理表为空」，不是「禁用
+#: 代理机制」——urllib 见到它就是直连。
+_DIRECT_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def urlopen(request: urllib.request.Request, timeout: float | None = None):
+    """``urllib.request.urlopen`` 的直连版，签名与返回值一致。
+
+    为什么要有这个：仓库里出站请求一半走 httpx、一半走 urllib（2026-11-24
+    扫描：90 处裸调用里 40 处是 urllib）。只收口 httpx 的话，另一半照样会把
+    请求塞进环境代理——同一个坑，换了个库而已。两条路都得有直连入口。
+
+    与 :func:`client` 不同，这里**每次调用都读环境变量**、不做任何缓存，所以
+    改 ``BUDDY_UPSTREAM_USE_PROXY`` 对它立刻生效——opener 是无状态的，新建
+    不要钱。
+    """
+    if env_wants_proxy():
+        return urllib.request.urlopen(request, timeout=timeout)
+    return _DIRECT_OPENER.open(request, timeout=timeout)
