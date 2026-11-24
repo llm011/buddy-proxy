@@ -58,11 +58,7 @@ function renderGroups() {
     '': { txt: '未观察到扣费', tip: '实测调用前后余额和日包都没变，上游也未给出计费口径。按「查不到扣费」处理，不写「免费」——上游没这么说。' },
   };
   function _creditRateTag(rate, pack) {
-    if (rate === null || rate === undefined) {
-      return rate === null
-        ? '<span class="tag" title="走日包：不扣共享余额，花的是日包里的额度点（按 token 折算，实测）">🎫 扣日包</span>'
-        : '';
-    }
+    if (rate === null || rate === undefined) return '';
     if (!rate) {
       // pack 里带着口径（「PTU 预留额度（未计费）」/「按量额度（未计费）」/
       // 「未观察到扣费」），从它反推，别在 JS 里再猜一遍 account_type。
