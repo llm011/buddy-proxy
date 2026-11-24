@@ -312,7 +312,7 @@
   table { width: 100%; border-collapse: separate; border-spacing: 0; }
   th { text-align: left; font-weight: 600; font-size: 12px; letter-spacing: .02em;
        padding: 9px 10px; white-space: nowrap; }
-  td { padding: 8px 10px; border-bottom: 1px solid rgba(38,47,60,.55); vertical-align: middle; }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
   tr:last-child td { border-bottom: none; }
   tr:hover td { background: rgba(79,140,255,.04); }
   /* 请求日志「通道」列的账号名：alias 是用户自由文本（rename 允许 64 字符），
@@ -331,7 +331,7 @@
                 display: flex; align-items: center; gap: 10px; padding: 11px 16px;
                 background: var(--card2); border-bottom: 1px solid var(--line);
                 border-radius: 12px 12px 0 0; cursor: pointer; user-select: none; }
-  .group-head:hover { background: #1d2531; }
+  .group-head:hover { background: var(--bg); }
   /* 名字允许收缩折行前先截断（ellipsis），别把后面的 tag/状态/计数挤折行——
      窄屏或长通道名（如「Trae PAT (服务账号直连)」）时整行元素会溢出/错位。 */
   .group-head .name { font-weight: 600; flex: 0 1 auto; min-width: 0;
@@ -345,8 +345,8 @@
   .group.collapsed table { display: none; }
   /* 分组表头（列头）：吸在应用顶栏下方，本表滚完即让位给下一组 */
   .group thead th { position: sticky; top: calc(var(--top-h, 0px) + var(--grp-h, 47px));
-                    z-index: 11; cursor: pointer; background: #12161d; color: #d3dae3;
-                    border-bottom: 1px solid #2d3846; }
+                    z-index: 11; cursor: pointer; background: var(--card2); color: var(--muted);
+                    border-bottom: 1px solid var(--line); }
   .group thead th:hover { color: var(--accent); }
   /* 下方留白与 .group 的 margin-bottom 同值（14px）：否则「全部展开/折叠」
      这些右对齐按钮会紧贴下面第一张卡片，看着像粘在一起。 */
