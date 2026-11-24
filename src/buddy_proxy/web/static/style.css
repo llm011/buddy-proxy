@@ -2,11 +2,14 @@
     --bg: #09090b; --card: #141418; --card2: #1c1c22; --line: rgba(255, 255, 255, 0.16);
     --text: #f4f4f5; --muted: #a1a1aa; --accent: #fafafa; --ok: #34d399;
     --warn: #fbbf24; --err: #f87171;
+    /* 图表用别名：SVG 属性不支持嵌套 var 时的兜底，保持与 --text/--line 同步 */
+    --fg: #f4f4f5; --border: rgba(255, 255, 255, 0.16);
   }
   [data-theme="light"] {
     --bg: #f4f5f7; --card: #ffffff; --card2: #f9fafb; --line: #e2e5ea;
     --text: #111827; --muted: #6b7280; --accent: #111827; --ok: #059669;
     --warn: #d97706; --err: #dc2626;
+    --fg: #111827; --border: #e2e5ea;
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
@@ -795,6 +798,12 @@
   /* 悬浮框里分组之间的细线（如模型 → 各通道明细），避免不同层级的信息糊在一起 */
   #chart-tip .t-sep, #cal-tip .t-sep { height: 1px; background: rgba(255,255,255,.1);
                                       margin: 5px 0; }
+  /* 亮色主题下悬浮框背景要变浅，否则 var(--text) 深色字在深色底上看不见 */
+  [data-theme="light"] #cal-tip, [data-theme="light"] #chart-tip {
+    background: var(--card); border-color: var(--line); color: var(--text);
+    box-shadow: 0 6px 18px rgba(0,0,0,.18); }
+  [data-theme="light"] #chart-tip .t-sep, [data-theme="light"] #cal-tip .t-sep {
+    background: rgba(17,24,39,.1); }
   .hitzone { cursor: crosshair; }
   .hitzone:hover { fill: rgba(255,255,255,.05); }
   /* ── 请求日志页头部：各模型使用占比饼图 ──

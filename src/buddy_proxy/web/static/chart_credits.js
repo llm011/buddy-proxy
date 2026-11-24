@@ -79,8 +79,8 @@ function renderCreditsDaily() {
   for (let i = 0; i <= 4; i++) {
     const y = base - (base - padT) * i / 4;
     const v = max * i / 4;
-    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="#262f3c" stroke-width="1"/>` +
-           `<text x="${padL-6}" y="${y+4}" fill="#8b96a5" font-size="10" text-anchor="end">${v < 10 ? v.toFixed(1) : Math.round(v)}</text>`;
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="var(--border)" stroke-width="1"/>` +
+           `<text x="${padL-6}" y="${y+4}" fill="var(--muted)" font-size="10" text-anchor="end">${v < 10 ? v.toFixed(1) : Math.round(v)}</text>`;
   }
   days.forEach((d, i) => {
     const x = padL + i * slot + (slot - bw) / 2;
@@ -97,8 +97,8 @@ function renderCreditsDaily() {
       }
     }
     const total = valOf(d);
-    if (total) svg += `<text x="${x + bw/2}" y="${Math.max(padT + 7, y - 3)}" fill="#dbe4ee" font-size="9.5" text-anchor="middle">${fmtCredit(total)}</text>`;
-    svg += `<text x="${x + bw/2}" y="${H - 6}" fill="#8b96a5" font-size="9.5" text-anchor="middle">${d.slice(5)}</text>`;
+    if (total) svg += `<text x="${x + bw/2}" y="${Math.max(10, y - 4)}" fill="var(--fg)" font-size="9.5" font-weight="600" text-anchor="middle">${fmtCredit(total)}</text>`;
+    svg += `<text x="${x + bw/2}" y="${H - 6}" fill="var(--muted)" font-size="9.5" text-anchor="middle">${d.slice(5)}</text>`;
   });
   days.forEach((d, i) => {
     svg += `<rect class="hitzone" data-i="${i}" x="${padL + i * slot}" y="${padT}" width="${slot}" height="${base - padT}" fill="transparent"/>`;

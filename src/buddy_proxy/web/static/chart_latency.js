@@ -41,8 +41,8 @@ function renderLatency() {
   let svg = `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto">`;
   for (let i = 0; i <= 4; i++) {
     const y = base - (base - padT) * i / 4;
-    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="#262f3c" stroke-width="1"/>` +
-           `<text x="${padL-6}" y="${y+4}" fill="#8b96a5" font-size="11" text-anchor="end">${fmtMs(Math.round(max * i / 4))}</text>`;
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="var(--border)" stroke-width="1"/>` +
+           `<text x="${padL-6}" y="${y+4}" fill="var(--muted)" font-size="11" text-anchor="end">${fmtMs(Math.round(max * i / 4))}</text>`;
   }
   providers.forEach((p, i) => {
     const x0 = padL + i * slot;
@@ -64,9 +64,9 @@ function renderLatency() {
       const y = base - h;
       svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${mcolor.get(name)}" rx="2"/>`;
       if (n === 1 || m === slowest)
-        svg += `<text x="${x + bw/2}" y="${Math.max(padT + 8, y - 3)}" fill="#dbe4ee" font-size="10.5" text-anchor="middle">${fmtMs(m.avg_ms)}</text>`;
+        svg += `<text x="${x + bw/2}" y="${Math.max(10, y - 4)}" fill="var(--fg)" font-size="10.5" font-weight="600" text-anchor="middle">${fmtMs(m.avg_ms)}</text>`;
     });
-    svg += `<text x="${x0 + slot/2}" y="${H - 6}" fill="#8b96a5" font-size="11.5" text-anchor="middle">${esc(p)}</text>`;
+    svg += `<text x="${x0 + slot/2}" y="${H - 6}" fill="var(--muted)" font-size="11.5" text-anchor="middle">${esc(p)}</text>`;
     // 整列悬停热区：移入即显示该通道下各模型耗时明细
     svg += `<rect class="hitzone" data-p="${esc(p)}" x="${x0}" y="${padT}" width="${slot}" height="${base - padT}" fill="transparent"/>`;
   });
