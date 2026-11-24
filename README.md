@@ -1,4 +1,4 @@
-# buddy-proxy
+# <img src="src/buddy_proxy/web/static/favicon.svg" width="28" height="28" align="absmiddle" /> buddy-proxy
 
 > A local multi-provider model gateway: it turns the subscription quotas of AI IDEs / coding clients (CodeBuddy, Trae, Qoder, Gemini, Antigravity…) into standard **OpenAI Chat Completions**, **Responses**, and **Anthropic Messages** protocols — so you can plug those models into Codex CLI, Claude Code / CC Switch, OpenCode, Grok, Oh My Pi and any OpenAI-compatible client. One endpoint, routed by model name.
 

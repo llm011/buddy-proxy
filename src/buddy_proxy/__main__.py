@@ -667,6 +667,11 @@ def main():
     else:
         print("[kiro] Disabled (pass --kiro or KIRO_ENABLED=1 to enable)")
 
+    from buddy_proxy.runninghub.provider import RunningHubProvider
+
+    runninghub = RunningHubProvider()
+    providers[runninghub.id] = runninghub
+
     if args.trae:
         from buddy_proxy.trae.provider import TraeProvider
 

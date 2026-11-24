@@ -295,6 +295,8 @@ function render() {
     if (BENEFITS) renderCheckin();
   } else if (tab === 'benefits') {
     if (BENEFITS) renderBenefits();
+  } else if (tab === 'runninghub') {
+    if (typeof renderRunningHubPanel === 'function') renderRunningHubPanel();
   } else if (tab === 'log') {
     if (STATS) renderRecent();
   }
@@ -312,7 +314,52 @@ function refreshStickyVars() {
 window.addEventListener('resize', refreshStickyVars);
 
 // ---- 页签 ----
-const TABS = ['overview', 'log', 'models', 'order', 'checkin', 'benefits'];
+const TABS = ['overview', 'log', 'models', 'order', 'checkin', 'benefits', 'runninghub'];
+
+(function initTheme() {
+  const saved = localStorage.getItem('bp_theme') || 'light';
+  document.documentElement.setAttribute('data-theme', saved);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = saved === 'light' ? '🌙' : '☀️';
+})();
+
+window.toggleTheme = function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  const next = cur === 'light' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('bp_theme', next);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = next === 'light' ? '🌙' : '☀️';
+};
+
+(function initGlobalTooltip() {
+  const tip = document.createElement('div');
+  tip.id = 'bp-tooltip';
+  document.body.appendChild(tip);
+
+  document.addEventListener('mouseover', (e) => {
+    const target = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (!target) return;
+    const text = target.getAttribute('data-tip');
+    if (!text) return;
+    tip.textContent = text;
+    tip.classList.add('show');
+    const r = target.getBoundingClientRect();
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    let left = r.left + r.width / 2 - tw / 2;
+    left = Math.max(8, Math.min(left, window.innerWidth - tw - 8));
+    let top = r.top - th - 6;
+    if (top < 8) top = r.bottom + 6;
+    tip.style.left = left + 'px';
+    tip.style.top = top + 'px';
+  });
+
+  document.addEventListener('mouseout', (e) => {
+    const target = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (target) tip.classList.remove('show');
+  });
+})();
 // 范围选择器仅在总览/请求日志页有意义
 const RANGE_TABS = new Set(['overview', 'log']);
 function switchTab(name) {
