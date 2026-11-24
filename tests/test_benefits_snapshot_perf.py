@@ -223,3 +223,77 @@ def test_fast_only_marks_loading_for_any_cold_channel_not_a_named_list(monkeypat
     assert entry.get("loading") is True, (
         "冷缓存的通道在 fast=1 下必须标 loading 并后台预热，不能同步等上游"
     )
+
+
+def test_fast_only_treats_expired_failure_as_cold(monkeypatch):
+    """fast=1 遇到「已过期的失败缓存」必须当冷缓存：标 loading、后台重查。
+
+    回归对象（2026-11-24 实测）：``fast_only`` 原来只判 ``key not in _cache``。
+    失败结果**在**缓存里（只是 TTL 30s），于是一过期就绕过异步分支、落进
+    ``_cached`` 的同步重查，整页被拖到 ``QUERY_TIMEOUT_S``——``?fast=1`` 稳定
+    35.0s，codebuddy / codebuddyintl 标着 ``loading`` 却还是等满。
+
+    这条用例在修复前会失败：第二次 ``snapshot(fast_only=True)`` 会同步等
+    3s 才返回，而它本该立刻返回并标 ``loading``。
+    """
+    monkeypatch.setattr(bm, "SNAPSHOT_TTL_S", 300.0, raising=False)
+    monkeypatch.setattr(bm, "FAILURE_TTL_S", 0.05, raising=False)
+
+    pid = "codebuddy"
+    # 第一次失败（超时类异常）→ 进缓存；之后每次真查都要 3s
+    p = _FakeProvider(pid, delay=3.0, results=[RuntimeError("upstream timeout")])
+    mgr = _manager({pid: p})
+    mgr._providers = lambda: {pid: p}
+
+    async def run():
+        first = await mgr.snapshot(set(), fast_only=True)
+        e1 = next(e for e in first["providers"] if e["id"] == pid)
+        # 冷缓存：异步预热，不等
+        assert e1.get("loading") is True
+        # 等后台那次失败落缓存
+        await asyncio.sleep(0.01)
+        for t in list(mgr._refreshing.values()):
+            await t
+        # 让失败缓存过期
+        await asyncio.sleep(0.06)
+        t0 = time.monotonic()
+        second = await mgr.snapshot(set(), fast_only=True)
+        elapsed = time.monotonic() - t0
+        e2 = next(e for e in second["providers"] if e["id"] == pid)
+        return elapsed, e2
+
+    elapsed, e2 = asyncio.run(run())
+    assert e2.get("loading") is True, (
+        "过期的失败缓存必须被 fast=1 当冷缓存处理（标 loading + 后台重查），"
+        "不能同步重查把整页拖到 QUERY_TIMEOUT_S"
+    )
+    assert elapsed < 0.5, f"fast=1 被同步重查拖住了：{elapsed:.2f}s（应 <0.5s）"
+
+
+def test_non_fast_snapshot_still_retries_expired_failure_synchronously(monkeypatch):
+    """不带 fast=1 的普通快照：过期失败仍同步重查——行为不能被顺手改掉。
+
+    这是「短 TTL、30s 后自愈」语义的另一半（``test_failure_result_uses_short_ttl``
+    钉的是 TTL 本身，这条钉的是「过期后真去查」）。修复只该影响 ``fast=1``。
+    """
+    monkeypatch.setattr(bm, "SNAPSHOT_TTL_S", 300.0, raising=False)
+    monkeypatch.setattr(bm, "FAILURE_TTL_S", 0.05, raising=False)
+
+    pid = "fake"
+    # 先失败一次，然后给一个好结果
+    p = _FakeProvider(pid, delay=0.0,
+                      results=[RuntimeError("boom"), {"items": [], "level": "ok"}])
+    mgr = _manager({pid: p})
+    mgr._providers = lambda: {pid: p}
+
+    async def run():
+        first = await mgr.snapshot(set())
+        e1 = next(e for e in first["providers"] if e["id"] == pid)
+        await asyncio.sleep(0.06)
+        second = await mgr.snapshot(set())
+        e2 = next(e for e in second["providers"] if e["id"] == pid)
+        return e1, e2
+
+    e1, e2 = asyncio.run(run())
+    assert e1.get("loading") is None, "普通快照不该标 loading"
+    assert e2["quota"]["level"] == "ok", "普通快照在失败缓存过期后应同步拿到新结果"
