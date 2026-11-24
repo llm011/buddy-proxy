@@ -745,6 +745,9 @@ function renderBenefits(opts) {
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
         <span style="font-weight:600">${esc(p.name)}</span>
         ${q.level ? `<span class="tag">${esc(q.level)}</span>` : ''}${fold.badge}
+        ${p.id === 'zcode' && q.reset_tickets && q.reset_tickets.supported && q.reset_tickets.total_count > 0
+          ? `<button type="button" class="tag" style="cursor:pointer;border:1px solid var(--accent,#3ecf8e);color:var(--accent,#3ecf8e);background:transparent" onclick="openZcodeResetModal()" title="查看并使用 ZCode 重置券">🎫 ${q.reset_tickets.total_count} 张重置券</button>`
+          : ''}
         ${headSum}<span style="flex:1"></span>${fold.toggle}${providerLoadBalanceToggle(p.id, accN > 1)}${providerRefreshButton(p.id)}
       </div>${fold.bodyStart}${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}${fold.bodyEnd}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
@@ -859,4 +862,114 @@ function loadAllAccounts() {
     jobs.push(Promise.resolve().then(ACCT_LOADERS[pid]).catch(() => {}));
   }
   return Promise.all(jobs).finally(() => { ACCT_NO_RERENDER = false; });
+}
+
+// ---------------------------------------------------------------------------
+// ZCode 重置券详情弹窗与核销
+// ---------------------------------------------------------------------------
+function _formatResetExpire(ms) {
+  if (!ms || typeof ms !== 'number') return '未知';
+  const diff = ms - Date.now();
+  if (diff <= 0) return '已过期';
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, '0');
+  const dateStr = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const days = Math.floor(diff / 86400000);
+  const hours = Math.floor((diff % 86400000) / 3600000);
+  const leftStr = days > 0 ? `剩余 ${days} 天 ${hours} 小时` : `剩余 ${Math.max(1, hours)} 小时`;
+  return `${dateStr}（${leftStr}）`;
+}
+
+function _getZcodeResetTickets() {
+  const p = (BENEFITS && BENEFITS.providers || []).find(x => x.id === 'zcode');
+  return (p && p.quota && p.quota.reset_tickets) || null;
+}
+
+function closeZcodeResetModal() {
+  const el = document.getElementById('zcode-reset-modal');
+  if (el) el.remove();
+}
+
+function _renderZcodeResetModalBody(rt, msgHtml) {
+  const fhCount = (rt && rt.five_hour_count) || 0;
+  const wkCount = (rt && rt.week_count) || 0;
+  const row = (label, rtype, count, expireAt) => `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--border,rgba(128,128,128,0.25));border-radius:8px;margin-bottom:10px">
+      <div>
+        <div style="font-weight:600;margin-bottom:4px">${label} <span class="tag">${count} 张可用</span></div>
+        <div style="font-size:12px;opacity:0.75">${count > 0 ? '最早过期：' + _formatResetExpire(expireAt) : '当前无可用重置券'}</div>
+      </div>
+      <button type="button" class="btn" id="zcode-use-${rtype}"
+        ${count > 0 ? '' : 'disabled'}
+        onclick="useZcodeResetTicket('${rtype}')">使用重置券</button>
+    </div>`;
+  return `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+      <div style="font-size:16px;font-weight:600">🎫 ZCode 额度重置券</div>
+      <button type="button" class="btn" style="padding:2px 8px" onclick="closeZcodeResetModal()">✕</button>
+    </div>
+    <div style="font-size:12px;opacity:0.75;margin-bottom:12px">
+      使用后对应周期的已用额度将立即恢复至 100%，优先消耗最早过期的重置券。
+    </div>
+    ${row('5 小时额度重置券', 'FIVE_HOUR', fhCount, rt && rt.five_hour_earliest_expire_at)}
+    ${row('每周额度重置券', 'WEEK', wkCount, rt && rt.week_earliest_expire_at)}
+    ${msgHtml ? `<div id="zcode-reset-msg" style="font-size:12px;margin-top:8px">${msgHtml}</div>` : '<div id="zcode-reset-msg" style="font-size:12px;margin-top:8px"></div>'}
+  `;
+}
+
+function openZcodeResetModal() {
+  closeZcodeResetModal();
+  const rt = _getZcodeResetTickets();
+  if (!rt || !rt.supported) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'zcode-reset-modal';
+  wrap.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.55);display:flex;align-items:center;justify-content:center;padding:16px';
+  wrap.onclick = e => { if (e.target === wrap) closeZcodeResetModal(); };
+  const card = document.createElement('div');
+  card.className = 'chart-card';
+  card.style.cssText = 'width:100%;max-width:440px;padding:18px;box-shadow:0 12px 32px rgba(0,0,0,0.35)';
+  card.innerHTML = _renderZcodeResetModalBody(rt, '');
+  wrap.appendChild(card);
+  document.body.appendChild(wrap);
+}
+
+async function useZcodeResetTicket(resetType) {
+  const label = resetType === 'FIVE_HOUR' ? '5 小时额度' : '每周额度';
+  if (!window.confirm(`确认立即使用 1 张【${label}】重置券？\n使用后对应额度将恢复至 100%，不可撤销。`)) {
+    return;
+  }
+  const btn = document.getElementById(`zcode-use-${resetType}`);
+  const msgEl = document.getElementById('zcode-reset-msg');
+  if (btn) { btn.disabled = true; btn.textContent = '使用中...'; }
+  if (msgEl) { msgEl.textContent = ''; }
+  const idem = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  try {
+    const resp = await fetch('/ui/api/benefits/zcode/reset-use', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reset_type: resetType, idempotency_key: idem }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) {
+      const errMsg = (data.detail && data.detail.error && data.detail.error.message) || data.message || `HTTP ${resp.status}`;
+      throw new Error(errMsg);
+    }
+    const p = (BENEFITS && BENEFITS.providers || []).find(x => x.id === 'zcode');
+    if (p && p.quota && data.reset_tickets) {
+      p.quota.reset_tickets = data.reset_tickets;
+    }
+    const modalCard = document.querySelector('#zcode-reset-modal .chart-card');
+    if (modalCard && data.reset_tickets) {
+      modalCard.innerHTML = _renderZcodeResetModalBody(
+        data.reset_tickets,
+        `<span style="color:#3ecf8e">✓ 已成功使用 1 张${label}重置券，正在刷新额度...</span>`,
+      );
+    }
+    if (typeof refreshProvider === 'function') {
+      await refreshProvider('zcode');
+    }
+  } catch (err) {
+    if (btn) { btn.disabled = false; btn.textContent = '使用重置券'; }
+    if (msgEl) { msgEl.innerHTML = `<span style="color:#f87171">使用失败：${esc(String(err.message || err))}</span>`; }
+  }
 }

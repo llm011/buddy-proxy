@@ -657,7 +657,13 @@ class ZcodeProvider(BaseProvider):
         if not payload.get("success"):
             raise RuntimeError(payload.get("msg") or "quota query failed")
         data = payload.get("data") or {}
-        return {"items": _quota_items(data), "level": data.get("level")}
+        result: dict[str, Any] = {"items": _quota_items(data), "level": data.get("level")}
+        # 仅 zcode 主通道拉取本机 ZCode CLI 重置券；glm 子类独立计费，不串用。
+        if self.id == "zcode":
+            from .zcode_reset import fetch_reset_status_sync
+
+            result["reset_tickets"] = fetch_reset_status_sync()
+        return result
 
 
 # ---------------------------------------------------------------------------
