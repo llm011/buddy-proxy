@@ -49,6 +49,7 @@ function renderTraepatPanel() {
           <span class="pat-keeper" id="pat-keeper"></span>
         </span>
         <span class="pat-head-actions">${fold.toggle}${providerRefreshButton('traepat')}
+        <button class="secondary" onclick="importTraepatFromIde(this)">从 IDE 导入</button>
         <button class="primary" onclick="refreshTraepatTokens(this)">补签 Token</button></span>
       </div>
       ${fold.bodyStart}<div class="pat-quota-grid">${quotaHtml}</div>
@@ -124,4 +125,17 @@ async function refreshTraepatTokens(btn) {
     await loadTraepatAccounts();
   } catch (e) { toast('Token 补签失败：' + e.message, true); }
   if (btn) { btn.disabled = false; btn.textContent = old || '补签 Token'; }
+}
+
+async function importTraepatFromIde(btn) {
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '导入中…'; }
+  try {
+    const r = await api('/ui/api/traepat/import-ide', {method: 'POST'});
+    const action = r.updated ? '已更新' : '已导入';
+    const who = r.uid || r.id || 'desktop';
+    toast(`✓ ${action} IDE 账号 ${who}（共 ${r.total} 个）`);
+    await loadTraepatAccounts();
+  } catch (e) { toast('从 IDE 导入失败：' + e.message, true); }
+  if (btn) { btn.disabled = false; btn.textContent = old || '从 IDE 导入'; }
 }
