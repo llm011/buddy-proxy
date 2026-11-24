@@ -50,11 +50,15 @@ class PatProfile:
     bearer: str
     priority: int
     index: int
+    cloud_ide_token: str = ""
+    uid: str = ""
+    expires_at: float = 0.0
 
     @property
     def cache_key(self) -> str:
-        # id 可调整展示或排序；凭据归属必须绑定 bearer，避免配置重排后串用 token。
-        digest = hashlib.sha256(self.bearer.encode()).hexdigest()[:20]
+        # id 可调整展示或排序；凭据归属必须绑定 bearer（或直传 token），避免配置重排后串用。
+        secret = self.bearer if self.bearer else f"direct:{self.cloud_ide_token}"
+        digest = hashlib.sha256(secret.encode()).hexdigest()[:20]
         return f"profile-{digest}"
 
 
@@ -89,26 +93,44 @@ def _load_profiles() -> tuple[PatProfile, ...]:
             raise _PatConfigError(f"TRAE_PAT_BEARER_PROFILES 最多允许 {_MAX_PROFILES} 个账号")
         profiles: list[PatProfile] = []
         ids: set[str] = set()
-        bearers: set[str] = set()
-        allowed = {"bearer", "id", "priority"}
+        secrets: set[str] = set()
+        allowed = {"bearer", "cloud_ide_token", "uid", "expires_at", "id", "priority"}
         for index, item in enumerate(parsed):
-            if not isinstance(item, dict) or "bearer" not in item or not set(item) <= allowed:
+            if not isinstance(item, dict) or not set(item) <= allowed:
+                raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 项字段无效")
+            has_bearer = "bearer" in item and bool(item.get("bearer"))
+            has_direct = "cloud_ide_token" in item and bool(item.get("cloud_ide_token"))
+            if not has_bearer and not has_direct:
                 raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 项字段无效")
             account_id = item.get("id", f"profile-{index}")
-            bearer = item.get("bearer")
+            bearer = item.get("bearer", "") or ""
+            direct_token = item.get("cloud_ide_token", "") or ""
+            uid = str(item.get("uid") or "")
+            raw_exp = item.get("expires_at", 0.0)
+            try:
+                expires_at = float(raw_exp or 0.0)
+            except (TypeError, ValueError):
+                raise _PatConfigError("TRAE_PAT_BEARER_PROFILES expires_at 无效") from None
             priority = item.get("priority", index)
             if not isinstance(account_id, str) or not _PROFILE_ID_RE.fullmatch(account_id):
                 raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 含非法 id")
-            if (not isinstance(bearer, str) or not bearer or bearer != bearer.strip()
-                    or len(bearer) > 8192 or any(ord(char) < 32 or ord(char) == 127 for char in bearer)):
+            if has_bearer and (not isinstance(bearer, str) or bearer != bearer.strip()
+                               or len(bearer) > 8192 or any(ord(char) < 32 or ord(char) == 127 for char in bearer)):
                 raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 含非法 bearer")
+            if has_direct and (not isinstance(direct_token, str) or direct_token != direct_token.strip()
+                               or len(direct_token) > 8192 or any(ord(char) < 32 or ord(char) == 127 for char in direct_token)):
+                raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 含非法 cloud_ide_token")
             if isinstance(priority, bool) or not isinstance(priority, int) or not 0 <= priority <= 1000:
                 raise _PatConfigError("TRAE_PAT_BEARER_PROFILES priority 必须是 0..1000 的整数")
-            if account_id in ids or bearer in bearers:
+            secret_key = f"b:{bearer}" if has_bearer else f"d:{direct_token}"
+            if account_id in ids or secret_key in secrets:
                 raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 含重复账号")
             ids.add(account_id)
-            bearers.add(bearer)
-            profiles.append(PatProfile(account_id, bearer, priority, index))
+            secrets.add(secret_key)
+            profiles.append(PatProfile(
+                account_id, bearer, priority, index,
+                cloud_ide_token=direct_token, uid=uid, expires_at=expires_at,
+            ))
         return tuple(sorted(profiles, key=lambda profile: (profile.priority, profile.index)))
 
     bearer = os.environ.get(_BEARER, "").strip()
