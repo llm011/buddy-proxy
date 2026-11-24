@@ -548,15 +548,24 @@
           if (ftype === 'LIST' && n.fieldData) {
             try {
               const parsed = typeof n.fieldData === 'string' ? JSON.parse(n.fieldData) : n.fieldData;
-              if (Array.isArray(parsed) && parsed.length) {
-                listOptions = parsed.map(opt => {
+              // 上游 fieldData 实际有三种形状，都要兼容：
+              //   1. [["a","b","c"], {default:"a"}]   ← 最常见，首元素是选项值数组
+              //   2. ["a","b","c"]                     ← 纯字符串数组
+              //   3. [{index:1,value:"a",name:"A"},…]  ← 对象数组
+              let raw = parsed;
+              if (Array.isArray(parsed) && parsed.length && Array.isArray(parsed[0])) {
+                raw = parsed[0];
+              }
+              if (Array.isArray(raw) && raw.length) {
+                listOptions = raw.map(opt => {
                   if (opt && typeof opt === 'object') {
-                    const ov = opt.index !== undefined ? String(opt.index) : (opt.value !== undefined ? String(opt.value) : String(opt.name || ''));
+                    const ov = opt.index !== undefined ? String(opt.index)
+                      : (opt.value !== undefined ? String(opt.value) : String(opt.name || ''));
                     const ol = opt.name !== undefined ? String(opt.name) : ov;
                     return { value: ov, label: ol };
                   }
                   return { value: String(opt), label: String(opt) };
-                });
+                }).filter(o => o.value);
               }
             } catch (_) {}
           }
