@@ -62,7 +62,7 @@ loadLoadBalanceState().finally(() => loadAll());
 
 // 自动刷新倒计时：与 30s 轮询绑定，让日志页「刷新」按钮明确显示距下次刷新的秒数；
 // 手动点击刷新时重置计时，避免刚手动刷完紧接着又触发一次轮询。
-const AUTO_REFRESH_SEC = 30;
+const AUTO_REFRESH_SEC = 5;
 let refreshCountdown = AUTO_REFRESH_SEC;
 function updateRefreshCountdownLabel() {
   const btn = document.getElementById('global-refresh');
