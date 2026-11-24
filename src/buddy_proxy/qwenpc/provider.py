@@ -552,6 +552,10 @@ class QwenpcProvider(BaseProvider):
             usage = {}
             payload["usage"] = usage
         usage["credit"] = round(spent, 6)
+        # 标明这是本地推算（余额前后相减），上游没给单次扣费字段。
+        # observability 读到它就把这行记成 credit_estimated=True → 面板带 ≈。
+        # 不标的话，它会被当成接口实扣、与 kiro/qoder 的真实字段长得一样。
+        usage["credit_derived"] = True
 
     async def _passthrough(self, client: httpx.AsyncClient,
                            resp: httpx.Response, *,
@@ -599,11 +603,26 @@ class QwenpcProvider(BaseProvider):
 
 
 #: 从流式 chunk 里抠 ``total_tokens``（用于算合理消耗上界）。
-_USAGE_TOKENS_RE = re.compile(r'"total_tokens"\s*:\s*(\d+)')
+#:
+#: **必须是 bytes 模式。** ``_passthrough`` 遍历的是 ``resp.aiter_bytes()``，
+#: 每个 chunk 都是 ``bytes``；拿 ``str`` 模式去 ``search(bytes)`` 直接抛
+#: ``TypeError: cannot use a string pattern on a bytes-like object``。
+#:
+#: 2026-11-12 的 fdf378f 加这一行时写成了 str 模式，于是 qwenpc **所有模型的
+#: 流式请求**只要上游发 usage 帧就 500（实测 glm-5.4 流式 7/7 全挂、非流式
+#: 15/15 正常），潜伏 12 天才被用户撞到。之所以没人发现：``_passthrough``
+#: 当时一行测试都没有，而「发个请求看 200」的冒烟只验非流式。
+#: :func:`tests.test_qwenpc_provider.test_passthrough_handles_bytes_chunks`
+#: 直接喂真 bytes 复现这条路径，改成 str 模式当场红。
+_USAGE_TOKENS_RE = re.compile(rb'"total_tokens"\s*:\s*(\d+)')
 
 
 def _credit_chunk(credit: float) -> bytes:
-    """补发的 usage 帧（OpenAI 流式规范：usage chunk 的 choices 为空）。"""
+    """补发的 usage 帧（OpenAI 流式规范：usage chunk 的 choices 为空）。
+
+    ``credit_derived`` 同 :meth:`QwenpcProvider._fill_credit`：标记这是余额差
+    推算值，面板据此带 ≈。
+    """
     payload = {"object": "chat.completion.chunk", "choices": [],
-               "usage": {"credit": credit}}
+               "usage": {"credit": credit, "credit_derived": True}}
     return ('data: ' + json.dumps(payload, ensure_ascii=False) + '\n\n').encode()

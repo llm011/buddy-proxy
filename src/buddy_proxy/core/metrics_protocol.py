@@ -122,12 +122,21 @@ def normalize_usage(u: dict[str, Any]) -> dict[str, Any]:
                        and not has_input_details)
     if anthropic_shape or cache_write:
         prompt += cached + cache_write
-    return {
+    # ``credit_derived``：usage 里的 credit 是**本地推算**的、不是上游接口返回的
+    # 单次扣费（如 qwenpc 的「请求前后余额相减」）。上游自己不会发这个字段，
+    # 只有我们的 provider 在写回 usage 时置位。按约定「不是接口返回的积分一律
+    # 带 ≈」，observability 读到它就把 credit_estimated 标 True——否则 provider
+    # 往 usage 里塞数就等于绕过了估算标记，面板上会和 kiro/qoder 的接口实扣
+    # 长得一模一样。只认字面 ``True``，别让 "false"/1 这类脏值误判。
+    out = {
         "prompt_tokens": prompt,
         "completion_tokens": int(u.get("completion_tokens") or u.get("output_tokens") or 0),
         "cached_tokens": cached,
         "credit": float(credit) if credit is not None else None,
     }
+    if credit is not None and u.get("credit_derived") is True:
+        out["credit_derived"] = True
+    return out
 
 
 class SSEUsageExtractor:
@@ -172,6 +181,14 @@ class SSEUsageExtractor:
             if not isinstance(u, dict):
                 continue
             for k, v in normalize_usage(u).items():
+                # ``credit_derived`` 是布尔标记不是数值：按「或」合并。
+                # 走下面的 ``max(cur, v or 0)`` 会出两种错——先前帧带 True、
+                # 后一帧没有时，``v or 0`` 让缺失值变 0 倒没事；但反过来
+                # （先无后有、且 cur 恰为 False/None）max 会拿 0 当结果，
+                # 标记就被静默抹掉，面板上余额差会冒充接口实扣。
+                if k == "credit_derived":
+                    self.usage[k] = bool(self.usage.get(k)) or bool(v)
+                    continue
                 # Anthropic 的 output_tokens 逐事件累计，取 max 即最终值
                 cur = self.usage.get(k)
                 self.usage[k] = v if cur is None else max(cur, v or 0)

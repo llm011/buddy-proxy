@@ -688,9 +688,16 @@ def test_follow_columns_put_ttft_before_duration():
 
 
 def test_follow_line_marks_estimated_credit():
-    """估算值标 ``★``，别和上游实扣混成同一个数；没有数据补 ``—``。"""
+    """非接口返回的消耗标 ``≈``（前缀，与 Web 端同符号）；接口实扣不加；没有数据补 ``—``。
+
+    历史：这里原先断言后缀 ``★``。★ 和 Web 的 ≈ 不是同一个符号，且像在夸
+    「这个数很准」——意思正好反了（它恰恰不是精确值）。2026-11-24 统一成 ≈。
+    """
     est = cli_logs._follow_line(_rec(credit=1.5, credit_estimated=True), Palette(False))
-    assert "1.50★" in est.split()
+    assert "≈1.50" in est.split()
+    # 接口实扣（kiro/qoder 形态）：credit_estimated=False → 不能带 ≈
+    exact = cli_logs._follow_line(_rec(credit=1.5, credit_estimated=False), Palette(False))
+    assert "1.50" in exact.split() and not any(t.startswith("≈") for t in exact.split())
     none = cli_logs._follow_line(_rec(credit=None), Palette(False))
     assert "—" in none.split()
 

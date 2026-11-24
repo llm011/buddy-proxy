@@ -816,7 +816,8 @@ def test_credit_uses_balance_delta_not_multiplier():
     frame: dict = {}
     provider._settle_credit(frame, 3300.0, 3298.0)
     assert frame["ag_credit"] == 2.0
-    assert frame["ag_credit_exact"] is True
+    # 这是「余额相减」推出来的，不是接口返回的单次扣费 → **不能**自标精确
+    assert frame.get("ag_credit_exact") is not True
 
     # 余额没动 / 反而涨了 → 不写（面板记 —，不拿 0 冒充免费）
     for before, after in ((3300.0, 3300.0), (3300.0, 3301.0)):
@@ -842,11 +843,17 @@ def test_no_multiplier_based_credit_remains():
         "按倍率算积分的 _request_credit 必须删掉——它与真实账单不符")
 
 
-def test_credit_marked_exact_not_estimated():
-    """写进 frame 时要标 ``ag_credit_exact``：这是精确规则，不是估算。
+def test_credit_not_marked_exact():
+    """余额差**不能**标 ``ag_credit_exact``：它不是接口返回的单次扣费。
 
-    不标的话 observability 会把它当 antigravity 那种水位落差估算，面板上
-    多一个「估算」标记——而小浣熊的倍率是上游明文规则。
+    历史：这里原先断言 ``ag_credit_exact = True``，理由写的是「小浣熊的倍率
+    是上游明文规则」——那个理由早就不成立了（按倍率算积分的实现已被证伪并
+    删掉，见上一个测试）。现在的口径是请求前后余额相减，上游没有任何接口
+    告诉我们「本条扣了几分」，并发时差值还会互相污染。
+
+    2026-11-24 用户定规矩：**不是接口返回的，日志里的积分一律带 ≈**。所以
+    不标 exact，让 observability 记成 ``credit_estimated=True``，面板显示「≈N」，
+    与 kiro/qoder 那种接口实扣的字段区分开。
     """
     import inspect
 
@@ -854,7 +861,25 @@ def test_credit_marked_exact_not_estimated():
 
     src = inspect.getsource(RaccoonProvider._settle_credit)
     assert 'frame["ag_credit"] = delta' in src
-    assert 'frame["ag_credit_exact"] = True' in src
+    assert 'frame["ag_credit_exact"] = True' not in src, (
+        "余额差不是接口实扣，不能自标精确——否则面板上和 kiro/qoder 的真实字段长得一样")
+
+
+def test_raccoon_frame_credit_is_rendered_as_estimated():
+    """端到端：raccoon 的 frame 结算值经 observability 必须被标成估算。"""
+    from buddy_proxy.codebuddy_provider.observability import _credit_or_estimate, _frame_credit
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    frame = {}
+    RaccoonProvider()._settle_credit(frame, 3300.0, 3298.0)
+    settled = _frame_credit(frame)
+    assert settled == 2.0
+    # observability 的分支：settled 非 None → credit = settled，
+    # credit_estimated = not ag_credit_exact  →  True
+    assert not bool(frame.get("ag_credit_exact"))
+    # 没有接口 credit 时估算路径返回 None，不干扰上面的判断
+    assert _credit_or_estimate("raccoon", "sn-x", {"credit": None, "prompt_tokens": 0,
+                                                   "completion_tokens": 0}) == (None, False)
 
 def test_anthropic_stream_emits_content_blocks():
     """anthropic 出口必须真的产出 content_block，不能只有 start/stop。

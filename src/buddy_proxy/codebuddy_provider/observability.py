@@ -62,7 +62,9 @@ def _credit_or_estimate(provider_id: str, model_id: str, norm: dict[str, Any],
     返回 (credit, credit_estimated)；估算失败/无 token 数据时为 (None, False)。
     """
     if norm.get("credit") is not None:
-        return norm["credit"], False
+        # ``credit_derived``：usage 里的 credit 是 provider 本地推算的（如 qwenpc
+        # 的余额前后相减），不是上游接口返回的单次扣费 → 带 ≈，不冒充实扣。
+        return norm["credit"], bool(norm.get("credit_derived") is True)
     est = estimate_credit(provider_id, model_id,
                           norm.get("prompt_tokens"), norm.get("completion_tokens"),
                           norm.get("cached_tokens"), account=account)

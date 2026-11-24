@@ -353,6 +353,28 @@ async function renderRecent() {
     // 放在这一列没有意义——同一模型每一行都一样，还容易被误读成「这次花了
     // 0.11 积分」。现在拿不到真实消耗就留空（—），倍率只在「模型顺序」页展示。
     const creditTxt = r.credit != null ? fmtCredit(r.credit) : null;
+    // 「≈」的解释必须**按通道说它真实的算法**。
+    //
+    // 原先只有一段写死给 trae/zcode 的文案；2026-11-24 起 raccoon / qwenpc 的
+    // 余额差也带 ≈ 了，若还挂「按官方账单校准的输入/输出单价」就完全对不上——
+    // 用户悬停看到的解释是别的通道的算法，比不解释更误导。
+    const estTitle = (() => {
+      switch (r.provider) {
+        case 'raccoon':
+          return '非上游实扣：小浣熊没有任何接口返回单次扣分，这里用「请求前后余额相减」推算；同账号有并发时差值会互相污染（每账号并发闸门默认 2，偏差有界）。账单流水见上游「桌面端 LLM 对话消耗」。';
+        case 'qwenpc':
+          return '非上游实扣：千问办公不提供单次计费字段，这里用「请求前后剩余额度相减」推算（已过滤上游的读数抖动；对账实测与非流式真实扣费一致）。';
+        case 'antigravity':
+          return '非上游实扣：按额度池剩余比例的水位落差换算，不是逐请求账单。';
+        case 'zcode':
+        case 'glm':
+          return '本地估算，非上游实扣：按 GLM Coding Plan 官方抵扣系数×token（含时段折扣）。';
+        case 'trae':
+          return '本地估算，非上游实扣：已实测模型按官方账单校准的输入/输出单价×token（随倍率面板调价自动缩放；会话首请求实测偏高约 2~3 倍），未实测模型按倍率粗估。';
+        default:
+          return '本地估算，非上游实扣。';
+      }
+    })();
     // 多账号通道：括号内展示账号名。日志落库的是稳定 id，后端在 /ui/api/logs
     // 按各通道当前 alias 链解析成 account_name（改名后历史行跟着变）。解析不到
     // （trae 旧行存的当时 alias、或已删号）原样显示：UUID 形态截前 6 位、其余
@@ -371,7 +393,7 @@ async function renderRecent() {
       <td class="num mono" title="${esc(tokTitle)}">${tok}${reuseBadge}</td>
       <td class="num mono">${creditTxt == null ? '<span class="muted" title="该上游未提供单次积分消耗">—</span>'
         : r.credit_estimated
-          ? `<b style="color:var(--ok)" title="本地估算，非上游实扣：trae 已实测模型按官方账单校准的输入/输出单价×token（随倍率面板调价自动缩放；会话首请求实测偏高约 2~3 倍），未实测模型按倍率粗估；zcode 按 GLM Coding Plan 官方抵扣系数（含时段折扣）">≈${creditTxt}</b>`
+          ? `<b style="color:var(--ok)" title="${esc(estTitle)}">≈${creditTxt}</b>`
           : r.credit_source === 'dumate_usage_records'
           ? `<b style="color:var(--ok)" title="账号真实消耗流水：dumate 的 chat 响应不带单次积分，这里按时间戳把账号逐笔消耗账单（records/usage）认领到本行（最近邻 ≤5s）——是真实扣减、不是估算；时间戳对不上的行显示 —">${creditTxt}</b>`
           : `<b style="color:var(--ok)" title="上游实扣积分（原始值 ${esc(r.credit)}）">${creditTxt}</b>`}</td>

@@ -353,12 +353,20 @@ def _ttft_text(r: dict[str, Any]) -> str:
 
 
 def _credit_text(r: dict[str, Any]) -> str:
-    """积分列：无数据 ``—``；估算值带 ``★``——和实扣混在一列里，不标出来就会
-    被当成上游的真实账单。
+    """积分列：无数据 ``—``；非接口返回的消耗带 ``≈``，**前缀**而不是后缀。
+
+    和实扣混在一列里，不标出来就会被当成上游的真实账单。
+
+    2026-11-24 之前用的是后缀 ``★``：一是和 Web 端的 ``≈`` 不是同一个符号，
+    同一行数据两个界面两种记法；二是 ``★`` 像在夸「这个数很准」，意思正好反了。
+    改成前缀 ``≈``——「约等于」是人对「不是精确值」最直觉的读法，且与 Web 一致。
+
+    哪些算「非接口返回」由 ``credit_estimated`` 决定（公式估算、余额差、
+    水位落差都算）；它只在 True 时加符号，接口实扣（kiro/qoder/codebuddy）不加。
     """
     text = humanize_number(r.get("credit"))
     if text != "—" and r.get("credit_estimated"):
-        text += "★"
+        text = "≈" + text
     return text
 
 

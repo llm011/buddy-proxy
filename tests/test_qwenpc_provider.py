@@ -460,3 +460,157 @@ def test_sane_credit_floor_is_one_not_five():
     assert _max_sane_credit(None) == 1.0, "拿不到 token 数时用兜底值"
     # 大请求必须被放大，否则会重演「真实消耗被当抖动丢掉」
     assert _max_sane_credit(40089) > 15.929, "4 万 token 的真实消耗 15.9 必须能通过"
+
+
+# ---------------------------------------------------------------------------
+# 流式透传：chunk 是 bytes，正则必须是 bytes 模式
+# ---------------------------------------------------------------------------
+
+class _FakeResp:
+    """最小的 httpx.Response 替身：只实现 ``aiter_bytes`` / ``aclose``。"""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.closed = False
+
+    async def aiter_bytes(self):
+        for c in self._chunks:
+            yield c
+
+    async def aclose(self):
+        self.closed = True
+
+
+def test_passthrough_handles_bytes_chunks(monkeypatch):
+    """流式 chunk 是 bytes，``_USAGE_TOKENS_RE`` 必须能直接 search 它。
+
+    2026-11-12~24 线上事故：正则写成了 str 模式，上游一发 usage 帧就抛
+    ``TypeError: cannot use a string pattern on a bytes-like object``，
+    qwenpc **所有模型**的流式请求 500（实测 glm-5.4 流式 7/7 挂、非流式全好）。
+    这里喂真实的 bytes（usage 被**拆在两个 chunk**里，模拟 TCP 分片），
+    旧代码当场红。
+
+    用 ``asyncio.run`` 而非 ``pytest.mark.asyncio``：仓库没装 pytest-asyncio，
+    与 test_raccoon_channel 的写法保持一致。
+    """
+    import asyncio
+
+    from buddy_proxy.qwenpc import provider as mod
+
+    async def _no_quota(_before):
+        return None
+
+    monkeypatch.setattr(mod, "_quota_after", _no_quota)
+    resp = _FakeResp([
+        b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n',
+        b'data: {"choices":[],"usage":{"prompt_tokens":17,"completion_tok',
+        b'ens":3,"total_tokens":20}}\n\n',
+        b'data: [DONE]\n\n',
+    ])
+
+    async def run():
+        return [c async for c in
+                mod.QwenpcProvider()._passthrough(None, resp, before=1.0)]
+
+    out = asyncio.run(run())
+
+    # 1) 没抛异常；4 个原始 chunk（含 usage 帧被拆成的两个半截）全部原样透传，
+    #    拼回来是 3 个完整的 data: 帧——注意别按 chunk 数去数 data:，分片会让
+    #    两个 chunk 才凑成一个帧（我第一版断言就是这么数错的）。
+    assert len(out) == 4
+    assert all(isinstance(c, bytes) for c in out)
+    joined = b"".join(out)
+    assert joined.count(b"data: ") == 3
+    assert b'"total_tokens":20' in joined, "usage 帧的两个半截必须都透传、不丢字节"
+    # 2) 跨 chunk 分片的 total_tokens 也能读出来——bytes 模式才不炸
+    assert mod._USAGE_TOKENS_RE.search(b'"total_tokens":20}') is not None
+    # 3) 上游流被关掉，不漏连接
+    assert resp.closed is True
+
+
+# ---------------------------------------------------------------------------
+# credit_derived：余额差推算的 credit 必须被标成「估算」（面板带 ≈）
+# ---------------------------------------------------------------------------
+
+def test_normalize_usage_passes_credit_derived_only_when_true():
+    """``credit_derived`` 只有字面 True 才透传——它是本地推算的标记，不是上游字段。"""
+    from buddy_proxy.core.metrics_protocol import normalize_usage
+
+    base = {"prompt_tokens": 1, "completion_tokens": 1, "credit": 0.5}
+    assert normalize_usage({**base, "credit_derived": True}).get("credit_derived") is True
+    # 没标 / 标成脏值 → 不透传，按接口实扣处理
+    assert "credit_derived" not in normalize_usage(dict(base))
+    assert "credit_derived" not in normalize_usage({**base, "credit_derived": "false"})
+    assert "credit_derived" not in normalize_usage({**base, "credit_derived": 1})
+    # 没有 credit 时标记无意义，不透传
+    assert "credit_derived" not in normalize_usage(
+        {"prompt_tokens": 1, "credit_derived": True})
+
+
+def test_credit_or_estimate_marks_derived_credit_as_estimated():
+    """provider 往 usage 里塞推算值时，observability 必须记成估算。
+
+    这是「不是接口返回的积分一律带 ≈」在代码里的落点：provider 标了
+    ``credit_derived`` 的 credit 不能冒充上游实扣。
+    """
+    from buddy_proxy.codebuddy_provider.observability import _credit_or_estimate
+
+    norm = {"prompt_tokens": 10, "completion_tokens": 2, "cached_tokens": 0,
+            "credit": 0.0031, "credit_derived": True}
+    credit, estimated = _credit_or_estimate("qwenpc", "glm-5.4", norm)
+    assert credit == 0.0031
+    assert estimated is True, "余额差推算的 credit 必须标估算（面板带 ≈）"
+
+    # 对照：接口真返回的 credit（kiro/qoder 形态）不带标记 → 精确
+    exact = {"prompt_tokens": 10, "completion_tokens": 2, "credit": 0.0031}
+    assert _credit_or_estimate("qoder", "x", exact) == (0.0031, False)
+
+
+def test_sse_usage_extractor_merges_credit_derived_as_flag():
+    """SSE 多帧合并时 ``credit_derived`` 按「或」合并，不能被 max 抹掉。
+
+    qwenpc 流式：上游先发自己的 usage 帧（无标记），我们收尾再补一帧带
+    ``credit_derived`` 的。按数值 ``max(cur, v or 0)`` 合并会让后到的 True
+    被吞掉（cur 为 False/None 时 max 退化为 0），面板就冒充实扣了。
+    """
+    from buddy_proxy.core.metrics_protocol import SSEUsageExtractor
+
+    ex = SSEUsageExtractor()
+    ex.feed(b'data: {"choices":[{"delta":{"content":"a"}}],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}\n\n')
+    assert ex.usage.get("credit_derived") is not True
+    ex.feed(b'data: {"choices":[],"usage":{"credit":0.0031,"credit_derived":true}}\n\n')
+    assert ex.usage.get("credit_derived") is True, "后到的 credit_derived 标记不能被合并逻辑抹掉"
+    assert ex.usage.get("credit") == 0.0031
+
+    # 反向：先带标记、后到无标记 → 标记必须保留
+    ex2 = SSEUsageExtractor()
+    ex2.feed(b'data: {"choices":[],"usage":{"credit":0.0031,"credit_derived":true}}\n\n')
+    ex2.feed(b'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1}}\n\n')
+    assert ex2.usage.get("credit_derived") is True
+
+
+def test_qwenpc_usage_credit_is_derived():
+    """qwenpc 写进 usage 的 credit 必须同时带 ``credit_derived``（非流式 + 流式）。"""
+    from buddy_proxy.qwenpc import provider as mod
+
+    # 流式补帧
+    import json as _json
+    frame = _json.loads(mod._credit_chunk(0.0031).decode()[len("data: "):])
+    assert frame["usage"]["credit_derived"] is True
+
+    # 非流式：走 _fill_credit 的写回路径
+    class _P(mod.QwenpcProvider):
+        pass
+
+    async def _fake_after(_before):
+        return 10.0 - 0.0031
+
+    import asyncio
+    mod._quota_after = _fake_after
+    try:
+        payload = {"usage": {"prompt_tokens": 20, "completion_tokens": 3}}
+        asyncio.run(_P()._fill_credit(payload, before=10.0))
+    finally:
+        del mod._quota_after
+    assert payload["usage"]["credit"] == 0.0031
+    assert payload["usage"]["credit_derived"] is True
