@@ -1624,6 +1624,8 @@ async def ui_runninghub_workflows_import(request: Request):
 
     if custom_name:
         info["name"] = custom_name
+    if body.get("preview"):
+        return {"workflow": info}
     rh_store.upsert_workflow(info)
     return {"workflows": rh_store.list_workflows()}
 
@@ -1730,5 +1732,39 @@ async def ui_runninghub_workflows_run(request: Request):
             if asyncio.get_running_loop().time() >= deadline:
                 raise HTTPException(status_code=504, detail={"error": {"message": f"任务超时 (taskId={task_id})"}})
             await asyncio.sleep(3.0)
+    except rh_client.RunningHubError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"error": {"message": str(exc)}})
+
+
+@app.post("/ui/api/runninghub/upload")
+async def ui_runninghub_upload(request: Request):
+    _ensure_local(request)
+    from ...runninghub import client as rh_client
+    from ...runninghub import store as rh_store
+
+    accounts = rh_store.get_active_accounts()
+    if not accounts:
+        raise HTTPException(status_code=400, detail={"error": {"message": "请先导入至少一个 RunningHub 账号"}})
+
+    form = await request.form()
+    upload = form.get("file")
+    if upload is None or not hasattr(upload, "read"):
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少上传文件 file"}})
+    file_type = str(form.get("file_type") or "image").strip().lower()
+    content = await upload.read()
+    if not content:
+        raise HTTPException(status_code=400, detail={"error": {"message": "上传文件为空"}})
+    if len(content) > 30 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail={"error": {"message": "文件大小不能超过 30MB"}})
+
+    try:
+        file_name = await rh_client.upload_file(
+            accounts[0]["api_key"],
+            getattr(upload, "filename", "upload.bin") or "upload.bin",
+            content,
+            content_type=getattr(upload, "content_type", "application/octet-stream") or "application/octet-stream",
+            file_type=file_type,
+        )
+        return {"fileName": file_name}
     except rh_client.RunningHubError as exc:
         raise HTTPException(status_code=exc.status_code, detail={"error": {"message": str(exc)}})

@@ -406,31 +406,76 @@
 
     titleEl.textContent = '导入 RunningHub 工作流 (ai-app)';
     bodyEl.innerHTML = `
-      <p style="margin:0 0 8px">输入 RunningHub AI 应用的 <span class="mono">webappId</span>（URL 末尾数字），系统会自动拉取名称与参数格式。</p>
+      <p style="margin:0 0 8px">输入 RunningHub AI 应用的 <span class="mono">webappId</span>（URL 末尾数字），可先「拉取」测试可用性与查看详情，再决定是否「保存」。</p>
       <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px">
         <input type="text" id="rh-wf-id" class="mono" placeholder="webappId，例如：2086711729156894722" />
         <input type="text" id="rh-wf-name" placeholder="自定义名称（可选，留空使用上游名称）" />
       </div>
+      <div id="rh-wf-preview" style="display:none;margin:8px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);font-size:12px;"></div>
       <div id="rh-wf-err" class="muted" style="font-size:12px;color:#ef4444"></div>
     `;
     footEl.innerHTML = `
       <button class="ghost" onclick="closeModal()">取消</button>
-      <button id="rh-wf-submit">拉取并保存</button>
+      <button class="ghost" id="rh-wf-fetch">拉取</button>
+      <button id="rh-wf-submit">保存</button>
     `;
     overlayEl.classList.add('show');
 
+    const fetchBtn = document.getElementById('rh-wf-fetch');
     const submitBtn = document.getElementById('rh-wf-submit');
-    if (submitBtn) {
-      submitBtn.addEventListener('click', async () => {
+    const errEl = document.getElementById('rh-wf-err');
+    const previewEl = document.getElementById('rh-wf-preview');
+
+    if (fetchBtn) {
+      fetchBtn.addEventListener('click', async () => {
         const wid = (document.getElementById('rh-wf-id')?.value || '').trim();
         const name = (document.getElementById('rh-wf-name')?.value || '').trim();
-        const errEl = document.getElementById('rh-wf-err');
         if (!wid) {
           if (errEl) errEl.textContent = '请输入 webappId';
           return;
         }
+        if (errEl) errEl.textContent = '';
+        fetchBtn.disabled = true;
+        fetchBtn.textContent = '拉取中…';
+        try {
+          const res = await rhFetch('/ui/api/runninghub/workflows/import', {
+            method: 'POST',
+            body: JSON.stringify({ webapp_id: wid, name: name || undefined, preview: true }),
+          });
+          const wf = res.workflow || {};
+          const nodeCount = Array.isArray(wf.nodeInfoList) ? wf.nodeInfoList.length : 0;
+          if (previewEl) {
+            previewEl.style.display = 'block';
+            previewEl.innerHTML = `
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+                <strong style="font-size:13px;">${escapeHtml(wf.name || wid)}</strong>
+                ${renderBillingTag(wf.billing_type)}
+                <span class="muted">${nodeCount} 个参数</span>
+              </div>
+              ${wf.description ? `<div class="rh-wf-desc">${sanitizeHtml(wf.description)}</div>` : '<div class="muted">暂无应用描述</div>'}
+            `;
+          }
+        } catch (err) {
+          if (previewEl) previewEl.style.display = 'none';
+          if (errEl) errEl.textContent = err.message || String(err);
+        } finally {
+          fetchBtn.disabled = false;
+          fetchBtn.textContent = '拉取';
+        }
+      });
+    }
+
+    if (submitBtn) {
+      submitBtn.addEventListener('click', async () => {
+        const wid = (document.getElementById('rh-wf-id')?.value || '').trim();
+        const name = (document.getElementById('rh-wf-name')?.value || '').trim();
+        if (!wid) {
+          if (errEl) errEl.textContent = '请输入 webappId';
+          return;
+        }
+        if (errEl) errEl.textContent = '';
         submitBtn.disabled = true;
-        submitBtn.textContent = '拉取中…';
+        submitBtn.textContent = '保存中…';
         try {
           const res = await rhFetch('/ui/api/runninghub/workflows/import', {
             method: 'POST',
@@ -443,7 +488,7 @@
           if (errEl) errEl.textContent = err.message || String(err);
         } finally {
           submitBtn.disabled = false;
-          submitBtn.textContent = '拉取并保存';
+          submitBtn.textContent = '保存';
         }
       });
     }
@@ -461,13 +506,44 @@
       ? nodes.map((n, idx) => {
           const label = n.description || `${n.nodeName || 'Node'} · ${n.fieldName || ''}`;
           const val = n.fieldValue !== undefined && n.fieldValue !== null ? String(n.fieldValue) : '';
+          const ftype = String(n.fieldType || 'TEXT').toUpperCase();
+          const isMedia = ftype === 'IMAGE' || ftype === 'AUDIO' || ftype === 'VIDEO';
+          const accept = ftype === 'IMAGE' ? 'image/*' : ftype === 'AUDIO' ? 'audio/*' : ftype === 'VIDEO' ? 'video/*' : '*/*';
+          const uploadBtn = isMedia
+            ? `<button type="button" class="ghost rh-upload-btn" data-idx="${idx}" data-ftype="${ftype.toLowerCase()}" style="flex:none;white-space:nowrap;">上传${ftype === 'IMAGE' ? '图片' : ftype === 'AUDIO' ? '音频' : '视频'}</button><input type="file" class="rh-upload-input" data-idx="${idx}" accept="${accept}" style="display:none;" />`
+            : '';
+
+          let listOptions = null;
+          if (ftype === 'LIST' && n.fieldData) {
+            try {
+              const parsed = typeof n.fieldData === 'string' ? JSON.parse(n.fieldData) : n.fieldData;
+              if (Array.isArray(parsed) && parsed.length) {
+                listOptions = parsed.map(opt => {
+                  if (opt && typeof opt === 'object') {
+                    const ov = opt.index !== undefined ? String(opt.index) : (opt.value !== undefined ? String(opt.value) : String(opt.name || ''));
+                    const ol = opt.name !== undefined ? String(opt.name) : ov;
+                    return { value: ov, label: ol };
+                  }
+                  return { value: String(opt), label: String(opt) };
+                });
+              }
+            } catch (_) {}
+          }
+
+          const controlHtml = listOptions
+            ? `<select class="rh-wf-field" data-idx="${idx}" style="flex:1;min-width:0;">${listOptions.map(o => `<option value="${escapeHtml(o.value)}"${o.value === val ? ' selected' : ''}>${escapeHtml(o.label)}</option>`).join('')}</select>`
+            : `<input type="text" class="rh-wf-field" data-idx="${idx}" value="${escapeHtml(val)}" style="flex:1;min-width:0;" />`;
+
           return `
             <div style="display:flex;flex-direction:column;gap:4px;">
               <label style="font-size:12px;">
                 <strong>${escapeHtml(label)}</strong>
-                <span class="muted mono" style="font-size:11px;margin-left:6px;">#${escapeHtml(String(n.nodeId || ''))}.${escapeHtml(String(n.fieldName || ''))} (${escapeHtml(String(n.fieldType || 'TEXT'))})</span>
+                <span class="muted mono" style="font-size:11px;margin-left:6px;">#${escapeHtml(String(n.nodeId || ''))}.${escapeHtml(String(n.fieldName || ''))} (${escapeHtml(ftype)})</span>
               </label>
-              <input type="text" class="rh-wf-field" data-idx="${idx}" value="${escapeHtml(val)}" />
+              <div style="display:flex;gap:6px;align-items:center;">
+                ${controlHtml}
+                ${uploadBtn}
+              </div>
             </div>`;
         }).join('')
       : '<div class="muted" style="font-size:12px;">该工作流无预设可编辑参数，可直接发起调用。</div>';
@@ -485,6 +561,43 @@
       <button id="rh-wf-run-btn">发起调用</button>
     `;
     overlayEl.classList.add('show');
+
+    bodyEl.querySelectorAll('.rh-upload-btn').forEach(btn => {
+      const idx = btn.dataset.idx;
+      const ftype = btn.dataset.ftype || 'image';
+      const fileInput = bodyEl.querySelector(`.rh-upload-input[data-idx="${idx}"]`);
+      const textInput = bodyEl.querySelector(`.rh-wf-field[data-idx="${idx}"]`);
+      if (!fileInput || !textInput) return;
+      btn.addEventListener('click', () => fileInput.click());
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        const origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '上传中…';
+        const statusEl = document.getElementById('rh-run-status');
+        if (statusEl) statusEl.textContent = '';
+        try {
+          const fd = new FormData();
+          fd.append('file', file);
+          fd.append('file_type', ftype);
+          const resp = await fetch('/ui/api/runninghub/upload', { method: 'POST', body: fd });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) {
+            throw new Error(data?.error?.message || data?.detail?.error?.message || `HTTP ${resp.status}`);
+          }
+          if (data.fileName) {
+            textInput.value = data.fileName;
+          }
+        } catch (err) {
+          if (statusEl) statusEl.textContent = `上传失败: ${err.message || err}`;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = origText;
+          fileInput.value = '';
+        }
+      });
+    });
 
     const runBtn = document.getElementById('rh-wf-run-btn');
     if (runBtn) {
