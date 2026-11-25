@@ -46,6 +46,7 @@ class TraePatProvider(TraeProvider):
                 "name": info.get("name") or m,
                 "credits": info.get("credits"),
                 "max_input": info.get("max_input"),
+                **({"max_output": info["max_output"]} if "max_output" in info else {}),
                 "reasoning": bool(info.get("reasoning")),
                 # 图片能力来自 models_config.json 的 images 字段（与 CodeBuddy
                 # 通道同口径）。未声明即按不支持处理，避免 /v1/models 漏报

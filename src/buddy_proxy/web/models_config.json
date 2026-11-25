@@ -643,6 +643,32 @@
       "rate_limit": {"requests": 6, "window_s": 75}
     },
     {
+      "id": "gpt-6.2-sol",
+      "quota_pack": "扣费归属待验证",
+      "name": "GPT-6.2-Sol",
+      "vendor": "openai",
+      "provider": "traepat",
+      "gateway": "plus",
+      "upstream_model": "gpt-6.2-sol__dev",
+      "config_name": "gpt-6.2-sol",
+      "function": "chat_v3",
+      "max_input": 404000,
+      "max_output": 32000
+    },
+    {
+      "id": "gpt-6.2-sol-max",
+      "quota_pack": "扣费归属待验证",
+      "name": "GPT-6.2-Sol Max",
+      "vendor": "openai",
+      "provider": "traepat",
+      "gateway": "plus",
+      "upstream_model": "gpt-6.2-sol__max",
+      "config_name": "gpt-6.2-sol",
+      "function": "chat_v3",
+      "max_input": 1000000,
+      "max_output": 64000
+    },
+    {
       "id": "gemini-3-flash",
       "account_type": "",
       "quota_pack": "未观察到扣费",
