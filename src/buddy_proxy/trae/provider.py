@@ -553,7 +553,7 @@ class TraeProvider(BaseProvider):
         点（见 max_mode.py 模块 docstring 的强耦合不变量）：开关注入 max 档、
         关闭或不支持则不注入。别名先按 MODEL_MAP 解析到内部名。
         """
-        internal = map_model_for(self._region.key, model).lower()
+        internal = _internal_model_key(self._region.key, model)
         _window, inject = max_mode_mod.effective_window(
             self._region.key, internal,
             discovered=self._discovered.get(internal),
@@ -1160,7 +1160,8 @@ class TraeProvider(BaseProvider):
         # 剔除对本模型「套餐权益不足」(1005) 的账号（见 _mark_entitlement_skip）。
         # 至少保留一个：全被跳过时宁可重试（TTL 可能已过期 / 套餐可能已升级），
         # 也不落进下面「无可用账号」的 429/401 误报。
-        entitlement_model = map_model_for(self._region.key, requested_model).lower()
+        # requested_model 可能为 None（见 _internal_model_key），统一走 helper 兜底。
+        entitlement_model = _internal_model_key(self._region.key, requested_model)
         if len(accounts) > 1:
             eligible = [a for a in accounts
                         if not _entitlement_skipped(a.id, entitlement_model)]
@@ -1937,6 +1938,17 @@ def _sse_error_exception(data: dict[str, Any]) -> HTTPException:
 def _is_entitlement_error(e: HTTPException) -> bool:
     """该异常是否为 1005 权益类（换号、但不整账号冷却）。"""
     return getattr(e, "trae_sse_code", None) == _ENTITLEMENT_SSE_CODE
+
+
+def _internal_model_key(region_key: str, requested: Any) -> str:
+    """外部模型名 → 内部键（MODEL_MAP 解析后小写），供选号/Max 决策统一使用。
+
+    ``requested`` 可能为 None：``forward`` 里是 ``body.get("model", "auto")``，``.get``
+    的默认值只在**键缺失**时生效，客户端显式发 ``"model": null`` 就会拿到 None；
+    而 ``map_model_for`` 对 None 原样透传，直接 ``.lower()`` 会 AttributeError。
+    这里统一 ``str(x or "")`` 兜底，所有需要「内部模型键」的地方都走它，别各写一份。
+    """
+    return map_model_for(region_key, str(requested or "")).lower()
 
 
 def _mark_entitlement_skip(account_id: str, model: str) -> None:

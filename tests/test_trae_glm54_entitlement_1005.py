@@ -236,3 +236,33 @@ def test_last_account_1005_is_reraised_not_swallowed():
         asyncio.run(run())
     assert ei.value.status_code == 403
     assert prov._is_entitlement_error(ei.value) is True
+
+
+def test_empty_requested_model_does_not_crash_in_selection():
+    """回归（review 发现）：requested_model 为 None 时整条 forward 不能 AttributeError。
+
+    ``forward`` 里是 ``body.get("model", "auto")``，``.get`` 默认值只在键缺失时生效，
+    客户端显式发 ``"model": null`` 就会拿到 None；``map_model_for`` 对 None 原样透传，
+    再 ``.lower()`` 会在**选号之前**（_max_inject / 选号过滤两处）炸掉整个 forward。
+    统一走 ``_internal_model_key`` 兜底。
+    """
+    _seed("u1")
+    p = TraeProvider()
+
+    async def fake_forward_once(*a, **k):
+        return _ok()
+
+    async def run():
+        with mock.patch.object(TraeProvider, "_forward_once", side_effect=fake_forward_once):
+            return await p.forward({"model": None, "messages": [{"role": "user", "content": "hi"}]},
+                                   "openai")
+    resp = asyncio.run(run())  # 不抛 AttributeError 即通过
+    assert resp.status_code == 200
+
+
+def test_internal_model_key_handles_none_empty_and_alias():
+    """helper 本身：None / 空串不炸，大小写别名归一到内部小写键。"""
+    assert prov._internal_model_key("cn", None) == ""
+    assert prov._internal_model_key("cn", "") == ""
+    assert prov._internal_model_key("cn", "GLM-5.4") == "glm-5.4"
+    assert prov._internal_model_key("cn", "glm-5.4") == "glm-5.4"
