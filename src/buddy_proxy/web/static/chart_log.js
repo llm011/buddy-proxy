@@ -133,6 +133,10 @@ function renderGroups() {
         ? '候选上游顺序：' + ord.targets.join(' → ')
           + (ordMarks.length ? '；冷却中：' + ordMarks.map(k => k.target).join(', ') : '')
         : '';
+      // 新目录可能尚未做扣费验证；不能让旧的固定 tooltip 把待验条目说成实测。
+      const quotaTitle = String(m.quota_pack || '').includes('待验证')
+        ? '仅核实上游目录启用，未做生成及扣费验证；实际扣费归属待验证'
+        : '这份用量记在哪：该模型每次调用都记在这里，记满了即止（实测归因，非估算）';
       const ordTag = ord
         ? `<span class="tag ${ordMarks.length ? 'bad' : 'ok'}" title="${esc(ordTitle)}">⇄ ${ord.targets.length}${ordMarks.length ? ` <span style="cursor:pointer" title="冷却中，点击清除" onclick='clearOrderMarks(${jsq(g.id)},${jsq(m.id)})'>⏸${ordMarks.length}</span>` : ''}</span>`
         : '';
@@ -144,7 +148,7 @@ function renderGroups() {
             ${schTag}
             ${ordTag}</td>
         <td class="muted"${dim}>${esc(m.name || '')}</td>
-        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.quota_pack ? `<span class="tag ok" title="这份用量记在哪：该模型每次调用都记在这里，记满了即止（实测归因，非估算）">📦 ${esc(m.quota_pack)}</span>` : ''}${_creditRateTag(m.credit_rate)}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
+        <td${dim}>${m.credits != null ? `<span class="tag">${esc(m.credits)}</span>` : ''}${m.support ? `<span class="tag" title="受账号限制，仅支持：${esc((m.support.accounts || []).join('、'))}（转发时自动跳过不支持的账号）">部分账号</span>` : ''}${m.tier ? `<span class="tag">${esc(m.tier)}</span>` : ''}${m.quota_pack ? `<span class="tag ok" title="${esc(quotaTitle)}">📦 ${esc(m.quota_pack)}</span>` : ''}${_creditRateTag(m.credit_rate)}${m.reasoning ? '<span class="tag">reasoning</span>' : ''}</td>
         <td class="num mono muted"${dim}>${st.count || '—'}</td>
         <td class="num mono muted"${dim}${_recentMsTitle(st)}>${st.recent_count && st.recent_avg_ms != null ? fmtMs(st.recent_avg_ms) : '—'}</td>
         <td class="num" style="white-space:nowrap">

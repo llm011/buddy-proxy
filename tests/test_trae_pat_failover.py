@@ -2010,6 +2010,8 @@ def test_quota_pool_is_reused_not_recreated(monkeypatch):
 def test_quota_pack_marks_only_models_measured_to_consume(monkeypatch):
     """每个模型都标出「这份用量记在哪」，不留空。
 
+    GPT-6.2 是后补的目录证据，归属明确标待验证，不属于下述实测批次。
+
     2026-11-23 用同一账号逐模型发同一条 42 字 prompt，前后各拉一次快照做差，
     40 个 traepat 模型全部落到三档里，没有模棱两可的：
 
@@ -2108,7 +2110,7 @@ def test_provider_exposes_quota_pack_per_model(monkeypatch):
 
 
 def test_credit_rate_table_is_complete_and_calibrated(monkeypatch):
-    """费率表：每个 traepat 模型都有取值，且以 glm-5.3 = 1.0 为锚。
+    """已实测模型有费率；目录待验模型缺键，且以 glm-5.3 = 1.0 为锚。
 
     2026-11-23 实测方法：同一条 ~300 字 prompt 逐模型发一次，前后各拉一次
     ``balance_summary.total_balance`` 做差；低费模型连发 5 次取均值，压掉
@@ -2121,7 +2123,10 @@ def test_credit_rate_table_is_complete_and_calibrated(monkeypatch):
     from buddy_proxy.trae.pat import PAT_MODEL_CREDIT_RATES, PAT_MODEL_QUOTA_PACKS
 
     rates = PAT_MODEL_CREDIT_RATES
-    assert set(rates) == set(_pat_model_ids()), "有模型没标费率，或有费率没模型"
+    # GPT-6.2 仅核过无生成的目录请求：缺键代表待验，不能填 0 / null 冒充实测。
+    unverified = {"gpt-6.2-sol", "gpt-6.2-sol-max"}
+    assert set(rates) == set(_pat_model_ids()) - unverified, "实测费率与已验证目录不一致"
+    assert all(PAT_MODEL_QUOTA_PACKS[m] == "扣费归属待验证" for m in unverified)
 
     # 锚点：基准模型必须是 1.0，改基准等于整张表失去意义。
     # 选 glm-5.3 而不是最便宜的 deepseek：以最便宜那条为 1 会让贵模型显示成

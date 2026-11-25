@@ -132,6 +132,28 @@ globalThis.snapshot = () => {{
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
+def test_unverified_quota_tooltip_does_not_claim_measured_billing():
+    data = _run_search_js(r"""
+MODELS.groups = [{id: 'traepat', name: 'PAT', models: [
+  {id: 'gpt-6.2-sol', quota_pack: '扣费归属待验证', credit_rate: null},
+  {id: 'gpt-6.2-sol-max', quota_pack: '扣费归属待验证'},
+  {id: 'gpt-6.1-sol', quota_pack: '日包（GPT-6.1）', credit_rate: null},
+  {id: 'glm-5.3', quota_pack: 'Trae 账号余额', credit_rate: 1}
+]}];
+renderGroups();
+console.log(JSON.stringify(getEl('groups').innerHTML.match(/<tr>[\s\S]*?<\/tr>/g).slice(1)));
+""")
+    for row in data[:2]:
+        assert "未做生成及扣费验证" in row
+        assert "实测归因" not in row
+        assert "费率倍数" not in row
+        assert "日包" not in row
+    assert "实测归因" in data[2]
+    assert "费率倍数" not in data[2]  # null 日包不会额外冒费率标签。
+    assert "实测归因" in data[3]
+    assert "×1（基准）" in data[3]
+
+
 def test_provider_match_keeps_whole_group_and_clear_restores():
     """通道名命中 → 整组保留；清空后回到全量视图。"""
     data = _run_search_js("""
