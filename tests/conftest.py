@@ -42,6 +42,10 @@ def _isolate_gemini_state_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTIGRAVITY_STATE_DIR", str(tmp_path / "antigravity"))
     monkeypatch.setenv("ANTIGRAVITY_OAUTH_JSON", str(tmp_path / "antigravity_oauth.json"))
     monkeypatch.setenv("KIMI_STATE_DIR", str(tmp_path / "kimi"))
+    # raccoon 多账号状态（index.json + 每账号 cred）同理；另含 cooldowns.json——
+    # 风控冷却跨重启持久化的落盘文件。不隔离的话 mark_cooldown 测试会把冷却
+    # 写进真实目录，线上正在风控冷却的账号就被测试「赦免」了。
+    monkeypatch.setenv("RACCOON_STATE_DIR", str(tmp_path / "raccoon"))
     monkeypatch.setenv("QODER_STATE_DIR", str(tmp_path / "qoder"))
     monkeypatch.setenv("QODER_AUTH_FILE", str(tmp_path / "qoder_auth.json"))
     # trae work 多账号状态（`TRAE_WORK_STATE_DIR`，index.json + 每账号 cred

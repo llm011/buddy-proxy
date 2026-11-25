@@ -13,17 +13,32 @@ antigravity / kimi / qoder / trae 的「坏账号冷却、按顺位主备降级�
 与 ``core/cooldown.py``（**模型级**换档冷却）区分：本模块管**账号**健康状态，
 那个管 **provider/model 目标**的换档失败。
 
-刻意**不落盘**：同 ``core/cooldown.py`` 的理由——冷却只是「此刻的健康状态」，
+**默认不落盘**：同 ``core/cooldown.py`` 的理由——冷却只是「此刻的健康状态」，
 重启后重探一次的代价远小于带着不信任启动。
 
-本模块是**叶子**：只 import 标准库，任何地方 import 都不会循环导入。
+**唯一的例外**是上游风控这类长冷却（``persist=True`` 显式开启）：重探不是免费的，
+重探本身就是「异常调用」。2026-11-26 01:50:41 重启后 raccoon 39 次请求 0 次
+成功、+3 秒内 10 条风控冷却——冷却随进程消失，5 个号带着「已被标记」的状态全部
+重打上游，同一秒重新判风控、重新冷却 30 分钟，重启等于主动延长封禁。所以只在
+通道显式开启、且冷却时长超过 ``persist_min_seconds`` 时落盘，短冷却的内存语义
+不变（见 :func:`load_persisted` / :func:`persist_snapshot`）。
+
+本模块是**叶子**：只 import 标准库，任何地方 import 都不会循环导入
+（``tests/test_module_boundaries.py`` 固化这条——落盘也不许例外，所以
+:func:`persist_snapshot` 自带一份最小的原子写，不借 ``account_store``）。
 """
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import threading
 import time
+from pathlib import Path
 from typing import Any, Callable, Sequence
+
+_log = logging.getLogger(__name__)
 
 #: 403 / 401 强刷后仍被拒：账号级问题，短冷却快速重探。
 DEFAULT_ACCOUNT_COOLDOWN_S = 60.0
@@ -32,6 +47,87 @@ DEFAULT_QUOTA_COOLDOWN_S = 300.0
 #: Retry-After 的合理区间（钳到 1s~7d 防御离谱值）。
 RETRY_AFTER_MIN_S = 1.0
 RETRY_AFTER_MAX_S = 7 * 86400.0
+
+#: 落盘文件格式版本。读不懂（版本号更高）就当没有，别按旧形状乱恢复。
+_PERSIST_VERSION = 1
+
+
+def persist_snapshot(path: Path | None, snapshot: dict[str, tuple[float, str]]) -> None:
+    """把冷却快照原子写到 ``path``（0600）。``path`` 为 None 时什么都不做。
+
+    快照里的剩余秒在这里换算成**绝对到期时刻**（墙钟）再落盘：进程重启可能隔
+    几秒也可能隔几分钟，恢复时要按实际经过的时间扣减，不能重置回满时长。
+    落盘是旁路：任何失败只记日志、绝不抛——磁盘满/只读不能把 ``mark`` 搞挂。
+    """
+    if path is None:
+        return
+    now = time.time()
+    entries = {aid: [round(now + left, 3), kind]
+               for aid, (left, kind) in snapshot.items() if left > 0}
+    # 空快照且文件还不存在：不写。clear_all 在测试夹具里每条用例都调，没有
+    # 任何未过期冷却时凭空造一个空文件是白写盘。文件**已存在**时必须回写
+    # （清掉最后一条长冷却后不回写，重启它就复活了）——由调用方先查 exists。
+    if not entries and not path.exists():
+        return
+    try:
+        _atomic_write_json(path, {"version": _PERSIST_VERSION, "entries": entries})
+    except Exception as exc:  # noqa: BLE001 - 见 docstring：旁路，绝不影响主链路
+        _log.warning("冷却快照落盘失败（忽略，不影响内存状态）%s: %s", path, exc)
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    """0600 原子写（临时文件 + rename）。
+
+    与 ``account_store.atomic_write_json`` 同款，但**刻意不 import 它**：本模块
+    是叶子（只依赖标准库），借它会形成 ``core -> core`` 的反向依赖、成为循环
+    导入的起点。这里的区别只有一处——冷却快照不含凭据，但同目录放的是账号
+    token，统一按 0600 处理、不给同机其它用户可读的窗口。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+        tmp.replace(path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def load_persisted(path: Path | None) -> dict[str, tuple[float, str]]:
+    """读回 ``{account_id: (剩余秒, 类别)}``；文件缺失/损坏/版本不识别都返回 ``{}``。
+
+    逐条校验形状并**丢弃已过期的条目**：过期冷却恢复进内存没有意义（``left``
+    本来就会判 0），还会让 ``report()`` 之类的聚合视图被陈旧条目污染。
+    """
+    if path is None:
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != _PERSIST_VERSION:
+        return {}
+    raw = data.get("entries")
+    if not isinstance(raw, dict):
+        return {}
+    now = time.time()
+    out: dict[str, tuple[float, str]] = {}
+    for aid, pair in raw.items():
+        if not isinstance(aid, str) or not isinstance(pair, list) or len(pair) != 2:
+            continue
+        until, kind = pair
+        if not isinstance(until, (int, float)) or isinstance(until, bool) \
+                or not isinstance(kind, str) or not kind:
+            continue
+        left = float(until) - now
+        if left > 0:
+            out[aid] = (left, kind)
+    return out
 
 
 class CooldownTracker:
@@ -47,9 +143,24 @@ class CooldownTracker:
         account_cooldown_s: float = DEFAULT_ACCOUNT_COOLDOWN_S,
         quota_cooldown_s: float = DEFAULT_QUOTA_COOLDOWN_S,
         extra_kinds: dict[str, float] | None = None,
+        persist_path: "Path | Callable[[], Path] | None" = None,
+        persist: bool = False,
+        persist_min_seconds: float = 300.0,
     ) -> None:
         """``extra_kinds``：通道特有档位（如 antigravity 的 blacklist→6h），
-        键是类别名，值是默认时长（秒）。``mark_cooldown`` 的 ``kind=`` 可用。"""
+        键是类别名，值是默认时长（秒）。``mark_cooldown`` 的 ``kind=`` 可用。
+
+        ``persist_path`` + ``persist=True``：开启跨重启持久化（见模块 docstring
+        的「唯一的例外」）。``persist_min_seconds``：只有冷却时长超过它的才
+        落盘——短冷却重启清零无害（重探免费），少写一次盘。构造时若文件里有
+        未过期条目，直接恢复进内存。
+
+        ``persist_path`` 可以是 ``Callable[[], Path]``：每次落盘/读取时才解析
+        路径。**各通道的模块级 tracker 都在 import 时构造**，若那时就把路径
+        定死，之后环境变量（``*_STATE_DIR``）再变它也不跟——测试夹具想隔离
+        状态目录也隔不掉，冷却会写进真实目录（测试一跑，线上正在风控冷却的
+        账号就被「赦免」了）。
+        """
         self._durations: dict[str, float] = {
             "account": account_cooldown_s,
             "quota": quota_cooldown_s,
@@ -58,6 +169,42 @@ class CooldownTracker:
             self._durations.update(extra_kinds)
         self._cooldowns: dict[str, tuple[float, str]] = {}  # id -> (until, kind)
         self._lock = threading.Lock()
+        self._persist_path = persist_path if persist else None
+        self._persist_min_seconds = float(persist_min_seconds)
+        if self._persist_path is not None:
+            for aid, (left, kind) in load_persisted(self._resolve_path()).items():
+                self._cooldowns[aid] = (time.time() + left, kind)
+
+    def _resolve_path(self) -> Path | None:
+        """解析落盘路径（``Callable`` 则调用它；解析失败返回 None = 这次不落盘）。"""
+        src = self._persist_path
+        if src is None:
+            return None
+        try:
+            return src() if callable(src) else src
+        except Exception:  # noqa: BLE001 - 旁路：解析不出路径就跳过这次落盘
+            return None
+
+    @property
+    def persist_path(self) -> Path | None:
+        """当前解析出的落盘路径（未开启持久化为 None）。测试/诊断用。"""
+        return self._resolve_path()
+
+    def _persist(self) -> None:
+        """把当前未过期的冷却落盘（未开启时是空操作）。
+
+        调用方需已更新完状态；这里自己取锁拿快照，别在持锁时调用（会死锁）。
+        **整段包在 try 里**：``persist_snapshot`` 内部只保护了写文件那一步，
+        取快照 / 路径处理若抛异常会漏到 ``mark``——落盘是旁路，任何失败都
+        不能影响内存状态与主链路（测试 ``test_persist_failure_never_breaks_mark``）。
+        """
+        path = self._resolve_path()
+        if path is None:
+            return
+        try:
+            persist_snapshot(path, self.snapshot())
+        except Exception as exc:  # noqa: BLE001 - 旁路：绝不影响 mark/clear
+            _log.warning("冷却快照落盘失败（忽略，不影响内存状态）%s: %s", path, exc)
 
     # -- 基本操作 -----------------------------------------------------------
 
@@ -87,17 +234,21 @@ class CooldownTracker:
             self._cooldowns[account_id] = (time.time() + seconds, kind)
         if reason and log is not None:
             log.warning("账号 %s 冷却 %s（%s）", account_id, self.fmt_left(seconds), reason)
+        if seconds >= self._persist_min_seconds:
+            self._persist()
         return seconds
 
     def clear(self, account_id: str) -> None:
         """清掉该账号的冷却标记（删除账号后调用，防内存残留）。"""
         with self._lock:
             self._cooldowns.pop(account_id, None)
+        self._persist()
 
     def clear_all(self) -> None:
         """清掉全部冷却标记（测试隔离用）。"""
         with self._lock:
             self._cooldowns.clear()
+        self._persist()
 
     def left(self, account_id: str) -> tuple[float, str]:
         """剩余冷却秒数与类别（0, "" 表示没在冷却）。"""

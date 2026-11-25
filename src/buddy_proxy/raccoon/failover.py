@@ -12,13 +12,22 @@
   密码时优先自动重登（见 ``login.relogin_account``），没有才冷却并提示用户。
 
 永远从优先级最高的可用账号开始（导入顺序即优先级），坏账号靠冷却被临时
-摘出候选。冷却只放内存，进程重启清零的代价只是每账号重探一次。
+摘出候选。
+
+**冷却落盘（本通道是唯一开启的）**：``core/account_failover`` 默认不落盘——
+60s / 5min 的短冷却重启清零无害，重探一次的代价远小于带着不信任启动。但 raccoon
+的**风控冷却**（200108，30 分钟）不成立：重探不是免费的，重探本身就是「异常
+调用」。2026-11-26 01:50:41 实测：5 个号全在冷却中 → 重启 → 冷却随进程消失
+→ 新进程 +3 秒内全部重打上游 → 同一秒重新判风控、重新冷却 30 分钟，该区间
+39 次请求 0 次成功。重启等于主动延长封禁。所以只对超过阈值的冷却落盘
+（见 ``_new_tracker``），短冷却仍是纯内存。
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from ..core.account_failover import CooldownTracker, diagnose_available
@@ -27,16 +36,70 @@ from .credentials import (
     has_relogin_cred,
     list_accounts,
     load_account_cred,
+    raccoon_state_dir,
     token_expiry_epoch,
 )
 
 log = logging.getLogger(__name__)
 
-#: 「账号 × 模型」复合冷却键的分隔符（账号 id 不含 \x00）。
+#: 模型级冷却键的分隔符（账号 id 不含 \x00）。
 _MODEL_KEY_SEP = "\x00"
 
+#: 冷却快照文件名（落在 raccoon 自己的状态目录，与凭据同目录）。
+_COOLDOWN_FILE = "cooldowns.json"
+
+#: 只有冷却时长不低于它才落盘。取值覆盖 raccoon 全部的长冷却档位：风控 30min
+#: （_RISK_CONTROL_COOLDOWN_S）、需重登 1h（_RELOGIN_COOLDOWN_S）；而 60s 的
+#: 账号级 / 模型级短冷却在阈值之下，保持纯内存——重启重探它们是免费的。
+_PERSIST_MIN_SECONDS = 300.0
+
+
+def _cooldown_path() -> Path:
+    return raccoon_state_dir() / _COOLDOWN_FILE
+
+
+def _new_tracker() -> CooldownTracker:
+    """构造带持久化的 tracker，并对账掉已删账号的键。
+
+    **对账**（持久化后才需要）：旧进程的快照里可能有用户后来删掉的账号。进程
+    重启本来会把它清掉，落盘后它会跨重启一直活着；而 ``clear(账号id)`` 清不掉
+    模型级复合键（键是 ``账号\\x00模型`` 拼出来的，不等于账号 id）。这里按当前
+    真实账号列表过一遍：不是任何现存账号的键、也不是任何现存账号的复合键，剔除
+    并回写。账号列表读不出来（None/异常）时**不动**快照——宁可多留一条幽灵冷却
+    （最多让一个不存在的账号「被跳过」，无害），也不能把活账号的冷却误删。
+    """
+    # 传**函数**而不是路径：本模块的 tracker 在 import 时构造，那时把路径定死
+    # 的话，之后环境变量（RACCOON_STATE_DIR）再变它也不跟——测试夹具想隔离
+    # 状态目录隔不掉，冷却会写进真实目录。
+    tracker = CooldownTracker(
+        persist_path=_cooldown_path,
+        persist=True,
+        persist_min_seconds=_PERSIST_MIN_SECONDS,
+    )
+    try:
+        alive = {str(a.id) for a in (list_accounts() or ())}
+    except Exception:  # noqa: BLE001 - 见 docstring：读不到账号列表就不对账
+        return tracker
+    if not alive:
+        return tracker
+    stale = [k for k, (left, _kind) in tracker.snapshot().items()
+             if left > 0 and not _key_belongs(k, alive)]
+    if stale:
+        for key in stale:
+            tracker.clear(key)
+    return tracker
+
+
+def _key_belongs(key: str, alive: set[str]) -> bool:
+    """冷却键是否属于现存账号：账号 id 本身，或 ``账号id\\x00模型`` 复合键。"""
+    if key in alive:
+        return True
+    acct, sep, _model = key.partition(_MODEL_KEY_SEP)
+    return bool(sep) and acct in alive
+
+
 #: 模块级冷却状态机（账号级，收敛自各通道的 copy-paste 实现）。
-_tracker = CooldownTracker()
+_tracker = _new_tracker()
 
 #: 活引用 tracker 内部 dict（测试直接清空用）。
 _cooldowns = _tracker._cooldowns
@@ -126,8 +189,19 @@ def mark_relogin_needed(account_id: str, reason: str = "") -> float:
 
 
 def clear_cooldown(account_id: str) -> None:
-    """清掉该账号的冷却标记（删除账号后调用，防内存残留）。"""
+    """清掉该账号的冷却标记（删除账号后调用，防内存残留）。
+
+    必须连「账号\\x00模型」复合键一起清：``mark_model_cooldown`` 的键是拼接出来
+    的，不等于账号 id，只 ``clear(账号id)`` 清不掉它。持久化前漏掉无所谓（进程
+    重启清空）；落盘后复合键会一直活着——账号删了、它的模型级冷却还在盘上，
+    重启后被恢复成谁也对不上的幽灵条目。删除账号当下就得清干净，不能等重启时
+    的对账（那只是兜底）。
+    """
     _tracker.clear(account_id)
+    prefix = f"{account_id}{_MODEL_KEY_SEP}"
+    for key in [k for k, (left, _kind) in _tracker.snapshot().items()
+                if left > 0 and k.startswith(prefix)]:
+        _tracker.clear(key)
 
 
 def cooldown_left(account_id: str) -> tuple[float, str]:

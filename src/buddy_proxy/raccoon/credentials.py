@@ -160,8 +160,31 @@ def list_accounts() -> list[AccountRef]:
 
     唯一的账号枚举入口：索引自愈（cred 文件被删/损坏的条目剔除——删文件即
     退出该账号）挂在这里，forward/quota/UI 走同一个口。
+
+    被自愈剔除的账号，它的冷却也当场清掉（含「账号\x00模型」复合键）。
+    管理页删账号走 ``failover.clear_cooldown``，手工删 cred 文件走这里的
+    自愈——两个入口之前不一致，后者会在 ``cooldowns.json`` 留下幽灵条目，
+    直到下次重启的对账才清掉。
+
+    做法：**自愈前**先读一次索引快照（``_STORE.entries_locked()`` 要求持有
+    guard 锁，这里自己拿），与自愈后的结果对比，差集就是刚消失的账号。
+    注意不能在自愈**之后**再读索引——那时索引已经被改写成自愈后的样子，
+    永远对比不出差异。
+
+    热路径（每次转发都调）：正常情况索引与存活一致，差集为空，除了多一次
+    内存读索引之外不做任何事；真的有账号消失才去清冷却。
     """
+    with _STORE.guard():
+        before = {str(e.get("id") or "") for e in _STORE.entries_locked()}
     entries = _STORE.list_entries(required_field=_CRED_REQUIRED_FIELD, logger=log)
+    alive = {str(entry.get("id") or "") for entry in entries}
+    gone = before - alive
+    if gone:
+        # 延迟 import：failover 在模块级 import 本模块，顶层互相 import 会循环
+        from . import failover
+
+        for account_id in gone:
+            failover.clear_cooldown(account_id)
     return [_account_ref(entry) for entry in entries]
 
 
