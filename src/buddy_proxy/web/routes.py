@@ -23,7 +23,11 @@ from buddy_proxy.core.state import (
 )
 from buddy_proxy.core import load_balance as lb_mod
 from buddy_proxy.core import settings as settings_mod
-from buddy_proxy.web.model_list import load_models_from_local_config, model_to_codex_format
+from buddy_proxy.web.model_list import (
+    dsh_capability_fields,
+    load_models_from_local_config,
+    model_to_codex_format,
+)
 from buddy_proxy.web.model_aggregate import aggregate_models
 from buddy_proxy.codebuddy_provider import (
     CLIENT_TAG,
@@ -229,6 +233,11 @@ async def list_models():
             "display_name": m.get("name") or m.get("id", "unknown"),
             "credits": m.get("credits"),
             "tags": m.get("tags", []),
+            # DSH（dsh-llm-deepseek）只读这个标准 data 数组解析能力：必须声明
+            # api_capabilities.anthropic_messages / context_window / max_output_tokens，
+            # 否则模型被判 unusable、或压缩器把整个窗口当输出预留导致 context
+            # compaction failed（reserves N completion tokens of its N-token window）。
+            **dsh_capability_fields(m),
             # 能力：与 models 扩展数组同口径（model_to_codex_format 为唯一来源）
             "input_modalities": ["text", "image"] if m.get("images") else ["text"],
             "supports_images": bool(m.get("images")),
