@@ -31,9 +31,9 @@ from buddy_proxy.trae.intl_provider import TraeIntlProvider
 # 单元：effective_window 决策矩阵
 # ---------------------------------------------------------------------------
 def test_static_window_enabled_returns_max_and_inject():
-    """开关开 + 静态兜底收录 → 声明 max 窗口、注入 is_max_mode。"""
+    """开关开 + 静态兜底收录 → 声明 max 窗口（经实测上限封顶）、注入 is_max_mode。"""
     win, inject = max_mode_mod.effective_window("cn", "glm-5.4", enabled=True)
-    assert win == 1_000_000
+    assert win == max_mode_mod.MEASURED_MAX_WINDOW
     assert inject is True
 
 
@@ -66,7 +66,7 @@ def test_discovered_max_mode_true_injects():
     discovered = {"max_mode": True, "context_window": 200_000, "max_window": 1_000_000}
     win, inject = max_mode_mod.effective_window(
         "cn", "x", discovered=discovered, enabled=True)
-    assert win == 1_000_000
+    assert win == max_mode_mod.MEASURED_MAX_WINDOW
     assert inject is True
 
 
@@ -253,11 +253,12 @@ def test_window_declaration_matches_inject_decision(capture_env, monkeypatch):
             if inject:
                 assert declared is not None and declared > 0, (
                     f"{mid}: 要注入 Max 但没声明窗口")
-                # 声明的窗口必须是 max 档（> dev）：对 glm-5.4 即 1M
+                # 声明的窗口必须是 max 档（经 MEASURED_MAX_WINDOW 封顶；2026-11-26
+                # 实测目录的 1M 是虚报，封顶见 max_mode.py）
                 static = max_mode_mod.static_windows(p._region.key, mid)
                 if static is not None:
-                    assert declared == static[1], (
-                        f"{mid}: 注入时声明的窗口应等于 max 档 {static[1]}，"
+                    assert declared == min(static[1], max_mode_mod.MEASURED_MAX_WINDOW), (
+                        f"{mid}: 注入时声明的窗口应等于封顶后的 max 档，"
                         f"实际 {declared}")
             else:
                 # 不注入时，若有静态兜底，声明的必须是 dev 档（不能是 max）
@@ -311,10 +312,12 @@ def test_invariant_holds_with_discovered_override(monkeypatch):
                     d = disc.get(mid) or {}
                     if d.get("max_window") and d["max_window"] > d.get("context_window", 0):
                         if inject:
-                            assert declared == d["max_window"], (
-                                f"{region} {mid}: 注入应声明 max {d['max_window']}，"
+                            assert declared == min(d["max_window"],
+                                                  max_mode_mod.MEASURED_MAX_WINDOW), (
+                                f"{region} {mid}: 注入应声明封顶后的 max，"
                                 f"实际 {declared}")
                         else:
-                            assert declared == d["context_window"], (
-                                f"{region} {mid}: 不注入应声明 dev "
+                            assert declared == min(d["context_window"],
+                                                  max_mode_mod.MEASURED_MAX_WINDOW), (
+                                f"{region} {mid}: 不注入应声明封顶后的 dev "
                                 f"{d['context_window']}，实际 {declared}")

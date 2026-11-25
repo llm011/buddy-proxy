@@ -1162,6 +1162,13 @@ class TraeProvider(BaseProvider):
         # 也不落进下面「无可用账号」的 429/401 误报。
         # requested_model 可能为 None（见 _internal_model_key），统一走 helper 兜底。
         entitlement_model = _internal_model_key(self._region.key, requested_model)
+        # 本模型近期全员 4026（上下文太大）：TTL 内不再 fan-out，直接抛让客户端压缩。
+        # 放在选号过滤之前——跳过表全满时过滤会回退全量，每个请求都白打 N 次。
+        if _model_overflow_recently(entitlement_model):
+            raise _attach_sse_code(
+                HTTPException(status_code=403, detail=(
+                    "Trae 错误: 本模型近期所有账号均上下文超限（4026），"
+                    "请压缩上下文后重试")), _CONTEXT_OVERFLOW_SSE_CODE)
         if len(accounts) > 1:
             eligible = [a for a in accounts
                         if not _entitlement_skipped(a.id, entitlement_model)]
@@ -1211,11 +1218,14 @@ class TraeProvider(BaseProvider):
                     # 冷却——下一轮请求还会先打它、再白吃一次同样的失败才轮到
                     # 别人。其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
                     if self._is_account_error(e):
-                        if _is_entitlement_error(e):
-                            # 1005 是「账号+模型」级权益不足：换号有意义，但只记
+                        if _is_entitlement_error(e) or _is_context_overflow(e):
+                            # 1005 / 4026 都是「账号+模型」级：换号有意义，但只记
                             # 本模型跳过、**不**整账号冷却——该账号对其他模型仍可
-                            # 服务（免费号不能用 glm-5.4，glm-5.3 照常）。
-                            _mark_entitlement_skip(acct.id, entitlement_model)
+                            # 服务（免费号不能用 glm-5.4，glm-5.3 照常；4026 则是
+                            # 这次上下文太长，短请求照样能过）。
+                            _mark_entitlement_skip(
+                                acct.id, entitlement_model,
+                                ttl=_CONTEXT_OVERFLOW_SKIP_TTL_S if _is_context_overflow(e) else None)
                         else:
                             failover.mark_cooldown(
                                 acct.id, quota=e.status_code == 429,
@@ -1229,6 +1239,11 @@ class TraeProvider(BaseProvider):
             # 走到这是「最后一个账号也失败」或「非账号级错误透传」。anthropic 协议
             # 的错误体用标准形状（Claude Code 等 SDK 靠它渲染错误）；openai 协议
             # 维持「抛 HTTPException → 外层 exception handler 转 JSON」不变。
+            # 上下文超限（4026）打到**最后一个账号还在拒**：本模型此刻对所有账号
+            # 都太长，记模型级短标记——TTL 内后续请求直接抛，不再挨个 fan-out
+            # （上下文太大时每个账号都注定 4026，重复打只是白付往返）。
+            if _is_context_overflow(e):
+                _mark_model_overflow(entitlement_model)
             if protocol == "anthropic":
                 return JSONResponse(
                     status_code=e.status_code,
@@ -1940,6 +1955,51 @@ def _is_entitlement_error(e: HTTPException) -> bool:
     return getattr(e, "trae_sse_code", None) == _ENTITLEMENT_SSE_CODE
 
 
+#: 4026「上下文超限」与 1005 同款处置（换号、不整号冷却），但跳过 TTL 更短：
+#: 它反映的是「这次请求太长」而非账号权益，DSH 压缩后几十秒内就会重试短请求。
+_CONTEXT_OVERFLOW_SSE_CODE = 4026
+_CONTEXT_OVERFLOW_SKIP_TTL_S = 120.0
+
+
+def _is_context_overflow(e: HTTPException) -> bool:
+    """该异常是否为 4026 上下文超限（换号、但不整账号冷却）。"""
+    return getattr(e, "trae_sse_code", None) == _CONTEXT_OVERFLOW_SSE_CODE
+
+
+#: 「本模型近期全员 4026」的标记：模型内部键 → 单调钟到期时刻。
+#:
+#: 上下文太大时**每个**账号都会 4026（4026 最常见的场景）。此时跳过表全满，
+#: 选号的「全被跳过则保留全部」兜底会让每个请求都把 N 个账号挨个重打一遍
+#: （review 实测：两轮请求 18 次上游，9 账号 × 2），每次都注定失败。全员
+#: 都拒之后记一个模型级短标记，TTL 内直接抛 4026 让客户端去压缩。
+#: 用单调钟（monotonic）：免疫墙钟跳变，且这里只关心「多久之前」。
+_MODEL_OVERFLOW_TTL_S = 60.0
+_model_overflow_mark: dict[str, float] = {}
+_model_overflow_lock = threading.Lock()
+
+
+def _mark_model_overflow(model: str, *, ttl: float = _MODEL_OVERFLOW_TTL_S) -> None:
+    key = str(model or "").strip().lower()
+    if not key:
+        return
+    with _model_overflow_lock:
+        _model_overflow_mark[key] = time.monotonic() + ttl
+
+
+def _model_overflow_recently(model: str) -> bool:
+    key = str(model or "").strip().lower()
+    if not key:
+        return False
+    with _model_overflow_lock:
+        until = _model_overflow_mark.get(key)
+        if until is None:
+            return False
+        if time.monotonic() >= until:
+            _model_overflow_mark.pop(key, None)
+            return False
+        return True
+
+
 def _internal_model_key(region_key: str, requested: Any) -> str:
     """外部模型名 → 内部键（MODEL_MAP 解析后小写），供选号/Max 决策统一使用。
 
@@ -1951,11 +2011,16 @@ def _internal_model_key(region_key: str, requested: Any) -> str:
     return map_model_for(region_key, str(requested or "")).lower()
 
 
-def _mark_entitlement_skip(account_id: str, model: str) -> None:
-    """记「该账号对本模型套餐权益不足」，TTL 内选号时跳过它。"""
+def _mark_entitlement_skip(account_id: str, model: str,
+                           ttl: float | None = None) -> None:
+    """记「该账号对本模型不可用」，TTL 内选号时跳过它。
+
+    ``ttl`` 缺省用权益类的 600s；4026 传更短的 TTL（上下文超限只说明这次
+    请求太长，DSH 压缩后很快就会重试短请求，不该让账号白等 10 分钟）。
+    """
     key = (str(account_id), str(model or "").strip().lower())
     with _entitlement_skip_lock:
-        _entitlement_skip[key] = time.time() + _ENTITLEMENT_SKIP_TTL_S
+        _entitlement_skip[key] = time.time() + (ttl or _ENTITLEMENT_SKIP_TTL_S)
 
 
 def _entitlement_skipped(account_id: str, model: str) -> bool:

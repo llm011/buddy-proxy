@@ -24,6 +24,22 @@ traework2api / TraeWorkAssistant 实测，2026-11-25 复核）即走 Max 档。
 扣费说明：上游按实际输入 token 计费，不按窗口保底——开 Max 只抬天花板，不
 会凭空多扣到 1M。客户端（如 DSH）若设了更紧的硬压缩上限（如 256k），实际
 输入与扣费都被它锁死，开 Max 只是让这 256k 能完整通过 dev 墙。
+
+## 目录的 1M 是虚报，声明必须经 MEASURED_MAX_WINDOW 封顶（2026-11-26 实测）
+
+上面「Max 档 = 1M」是**目录自己写的**，逐账号实测并不成立：
+
+- ``is_max_mode`` 开/关对真实上限**毫无影响**：同一账号、同一 ~223k token 请求，
+  ``max=False`` 与 ``max=True`` 在每个临界点上同过同拒；
+- 真实上限**按账号浮动**：~257k token 的请求，用户401998 始终能过，Ethan1 先
+  4026 后又能过（上游按负载分档），另两个号固定 4026；deepseek-v4.1-flash 实测
+  到 385k 仍成功。
+
+所以注入照旧（不注入万一哪天真生效反而亏），但**对外声明的窗口封顶在实测
+最大成功值**：DSH 按声明值决定何时压缩、context_guard 按它预检截断，声明 1M
+等于这两道保护全部失效——这正是 4026 的根因。遇到窗口更大的账号最多是「少
+声明」（守卫截早一点），不会报错；撞 4026 时另有兜底（归账号级、换号重试、
+按 (账号, 模型) 短跳过，见 provider._is_context_overflow）。
 """
 
 from __future__ import annotations
@@ -123,6 +139,19 @@ def supports_max_mode(region_key: str, model: str) -> bool:
     return static_windows(region_key, model) is not None
 
 
+#: 对外声明的窗口上限（实测）。目录与静态表把 Max 档写成 1M，但 2026-11-26
+#: 逐账号实测：glm-5.4 部分账号 ~230k 就 4026，deepseek-v4.1-flash 实测到 385k；
+#: 且 ``is_max_mode`` 开/关对上限**毫无影响**（临界点上同过同拒），真实上限
+#: 按账号浮动。声明虚高的代价是下游（DSH 压缩时机、context_guard 预检）都按
+#: 1M 算，等于没有保护。取实测见过的最大成功值（385k）向下取整到 384k 封顶；
+#: 真遇到窗口更大的账号，最多是「少声明」——守卫按 384k 截断，不会报错。
+MEASURED_MAX_WINDOW = 384_000
+
+
+def _cap(window: int) -> int:
+    return min(window, MEASURED_MAX_WINDOW)
+
+
 def effective_window(
     region_key: str,
     model: str,
@@ -153,9 +182,9 @@ def effective_window(
         dev_w = info.get("context_window")
         max_w = info.get("max_window")
         if disc_max_mode and isinstance(max_w, int) and max_w > 0 and enabled:
-            return (max_w, True)
+            return (_cap(max_w), True)
         if isinstance(dev_w, int) and dev_w > 0:
-            return (dev_w, False)
+            return (_cap(dev_w), False)
         return (None, False)
 
     # 2. 静态兜底
@@ -163,7 +192,7 @@ def effective_window(
     if static is not None:
         dev_w, max_w = static
         if enabled and isinstance(max_w, int) and max_w > dev_w:
-            return (max_w, True)
-        return (dev_w, False)
+            return (_cap(max_w), True)
+        return (_cap(dev_w), False)
 
     return (None, False)
