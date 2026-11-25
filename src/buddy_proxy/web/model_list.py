@@ -153,6 +153,67 @@ def load_models_from_local_config() -> list[dict[str, Any]]:
         return build_model_list_static()
 
 
+#: DSH ``dsh-compaction-basic`` 默认预留的 headroom tokens（65536），外加安全余量。
+#: 对外声明的 ``max_output_tokens`` 必须严格小于 ``context_window`` 减去这个值，
+#: 否则 DSH 压缩预算 ``messageBudget - headroom`` ≤ 0 → 抛 ``leaving no message budget``。
+_DSH_OUTPUT_HEADROOM = 65536 + 4096
+
+#: 模型未声明 ``max_output`` 时的默认输出预留（token）。取 DSH 连接默认
+#: ``DEFAULT_MAX_TOKENS = 256000`` 的一半，既给足生成长文本的空间，又确保对
+#: 272000 小窗口模型仍 ``< context_window - headroom``（256000 < 272000-69632=202368 不成立，
+#: 会被下方钳制）。钳制逻辑在 dsh_capability_fields 里兜底。
+_DSH_DEFAULT_MAX_OUTPUT = 128000
+
+
+def dsh_capability_fields(m: dict[str, Any]) -> dict[str, Any]:
+    """构造 DSH ``dsh-llm-deepseek`` 解析 ``/v1/models`` 所需的能力契约字段。
+
+    DSH ``listing.ts`` 只读标准 ``data`` 数组，每个 entry 必须有：
+
+    - ``api_capabilities.anthropic_messages``（对象）：缺了直接判 ``usable:false``，
+      整条模型被丢弃，回退到连接默认窗口与输出上限；
+    - ``context_window``（正整数）：输入窗口；
+    - ``max_output_tokens``（正整数）：输出预留。
+
+    ``max_output_tokens`` 是压缩崩溃的关键：DSH 压缩器按
+    ``messageBudget = contextWindow - reservedCompletionTokens`` 算消息预算，
+    ``reservedCompletionTokens`` 取这里声明的 ``max_output_tokens``；缺了就回退
+    到连接默认 256000（或 route 推断成窗口本身），导致
+    ``reservedCompletionTokens >= contextWindow`` → 预算 ≤ 0 → 抛
+    ``compaction-basic: ... reserves N completion tokens of its N-token context window,
+    leaving no message budget``。
+
+    所以本函数保证：``max_output_tokens`` 一定是正整数，且严格小于
+    ``context_window - _DSH_OUTPUT_HEADROOM``（给 DSH 默认 headroom 65536 留余量），
+    配置误写过大也会被钳制到安全区。
+    """
+    cw = m.get("context_window")
+    if not isinstance(cw, int) or isinstance(cw, bool) or cw <= 0:
+        cw = m.get("max_input")
+    if not isinstance(cw, int) or isinstance(cw, bool) or cw <= 0:
+        # 兜底：拿不到窗口时按 200k 声明（取交集保守值），宁小不大。
+        cw = 200000
+
+    mo = m.get("max_output")
+    if not isinstance(mo, int) or isinstance(mo, bool) or mo <= 0:
+        mo = _DSH_DEFAULT_MAX_OUTPUT
+    # 钳制：必须严格小于窗口减去 headroom 余量，否则 DSH 压缩预算 ≤ 0 崩溃。
+    safe_max = cw - _DSH_OUTPUT_HEADROOM
+    if safe_max < 8192:
+        # 极端小窗口（< 77824）：留 8k 输出保底，其余给消息。
+        safe_max = max(8192, cw - 16384)
+    if mo > safe_max:
+        mo = safe_max
+    if mo < 1:
+        mo = 1
+
+    return {
+        "api_capabilities": {"anthropic_messages": {}},
+        "context_window": cw,
+        "max_output_tokens": mo,
+    }
+
+
 def model_to_codex_format(m: dict[str, Any]) -> dict[str, Any]:
     """将简化模型对象转换为完整的 Codex ModelInfo 格式"""
     return {
