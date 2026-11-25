@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -145,8 +146,67 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
             pairs.append((key, value))
     flush()
     for key, value in pairs:
-        if key and key not in os.environ:
+        if not key:
+            continue
+        if key not in os.environ:
             os.environ[key] = value
+            continue
+        # 已有值不覆盖是默认规则（shell 显式 export 应该赢过文件）。但有一类
+        # 事故不能沉默：环境里那个值是**坏的**（比如被截断成 "["），而 .env 里
+        # 是好的——坏值会一路赢下去，直到运行期某个 json.loads 才炸。
+        # 2026-11-25 就是这么挂的：shell 里残留 TRAE_PAT_BEARER_PROFILES="["，
+        # .env 里的 10 个账号全被挡住，报错只说「不是合法 JSON」，没人看得出
+        # 问题出在 shell 而不是文件。这里只在「环境值坏 + 文件值好」时反超，
+        # 两边都坏或都好都维持原有语义。
+        existing = os.environ[key]
+        if existing == value or _usable(existing, file_value=value):
+            continue
+        _log.warning(
+            "%s: 环境变量里的值不可用（长度 %d），改用 .env 里的（长度 %d）",
+            key, len(existing), len(value),
+        )
+        os.environ[key] = value
+
+
+def _usable(env_value: str, *, file_value: str) -> bool:
+    """环境里的值是否可以压住 ``.env`` 里的同名配置。
+
+    默认是「可以」（显式 export 优先于文件）。唯一反超的情况：**文件里是一份
+    可用的结构化配置，而环境里的那份不是**。
+
+    「不是」包括全部解析不出结构化结果的形态：半截括号 ``"["``、空壳
+    ``[]`` / ``{}`` / ``null``、以及普通字符串 ``disabled``。为什么连普通字符串
+    也要反超——它在 PAT 这条链路上只会让 ``_load_profiles`` 的 ``json.loads``
+    失败、通道 503，和半截括号是同一个结局；而它又是最难查的一类残留（看着
+    像正常值）。既然两种都要失败，不如静默用文件里那份能跑的配置并告警。
+
+    只有文件里也没东西可反超时才维持原语义（环境赢）：比如文件里同样是普通
+    路径/开关，或者压根没配。
+
+    2026-11-25 事故：shell 里残留 ``TRAE_PAT_BEARER_PROFILES="["``，.env 里
+    10 个账号正常，坏值一路赢到运行期 ``json.loads`` 才炸，报错只说
+    「不是合法 JSON」，用户只会去翻没毛病的 .env。
+    """
+    if not _structured_ok(file_value):
+        # 文件里不是可用结构化配置：没东西可反超，维持原语义。
+        return True
+    return _structured_ok(env_value)
+
+
+def _structured_ok(value: str) -> bool:
+    """值是否是一份「真的配上了东西」的结构化配置。
+
+    普通字符串、路径、开关一律返回 False——对需要结构化配置的键来说，它们
+    等价于没配（下游 ``json.loads`` 必然失败）。
+    """
+    text = value.strip()
+    if text[:1] not in ("[", "{"):
+        return False
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return not (parsed is None or (isinstance(parsed, (list, dict)) and not parsed))
 
 
 async def _qoder_model_refresh_loop(provider) -> None:

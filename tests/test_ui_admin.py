@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import time
@@ -2302,6 +2303,138 @@ def test_load_dotenv_multiline_json_with_brace_in_string(tmp_path, monkeypatch):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+
+
+def test_load_dotenv_overrides_malformed_env_json(tmp_path, monkeypatch, caplog):
+    """环境里残留坏 JSON、.env 里是好的 → 用 .env 的，并告警。
+
+    2026-11-25 事故：shell 里残留 ``TRAE_PAT_BEARER_PROFILES="["``，.env 里
+    10 个账号配置正常。``_load_dotenv`` 的「已有值不覆盖」让坏值一路赢到运行期，
+    ``json.loads`` 才炸，报错只说「不是合法 JSON」——用户会去翻 .env，而 .env
+    根本没毛病。坏值不能沉默地压住好值。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TRAE_PAT_BEARER_PROFILES=[{"id":"a","bearer":"good"}]\n', encoding="utf-8")
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", "[")  # 半截括号：典型残留
+
+    with caplog.at_level(logging.WARNING):
+        m._load_dotenv(env_file)
+
+    value = os.environ["TRAE_PAT_BEARER_PROFILES"]
+    assert json.loads(value) == [{"id": "a", "bearer": "good"}], ".env 的好值必须赢"
+    assert any("不可用" in r.getMessage() for r in caplog.records)
+
+
+def test_load_dotenv_keeps_valid_env_value(tmp_path, monkeypatch):
+    """两边都合法时保持原语义：环境变量赢（显式 export 优先于文件）。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TRAE_PAT_BEARER_PROFILES=[{"id":"file","bearer":"from-file"}]\n', encoding="utf-8")
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", '[{"id":"shell","bearer":"from-shell"}]')
+
+    m._load_dotenv(env_file)
+
+    assert json.loads(os.environ["TRAE_PAT_BEARER_PROFILES"])[0]["id"] == "shell"
+
+
+def test_load_dotenv_keeps_env_when_file_value_also_broken(tmp_path, monkeypatch):
+    """两边都坏时不折腾：维持「环境变量赢」，让下游报错原样暴露。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text("TRAE_PAT_BEARER_PROFILES=[\n", encoding="utf-8")
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", "{")
+
+    m._load_dotenv(env_file)
+
+    assert os.environ["TRAE_PAT_BEARER_PROFILES"] == "{"
+
+
+def test_load_dotenv_non_json_values_unaffected(tmp_path, monkeypatch):
+    """非 JSON 形态的值（路径/开关）不参与「坏值」判定，仍按环境变量优先。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text("SOME_PATH=/from/file\nSOME_FLAG=1\n", encoding="utf-8")
+    monkeypatch.setenv("SOME_PATH", "/from/shell")
+
+    m._load_dotenv(env_file)
+
+    assert os.environ["SOME_PATH"] == "/from/shell"
+    assert os.environ["SOME_FLAG"] == "1"
+
+
+def test_load_dotenv_overrides_empty_container_env_value(tmp_path, monkeypatch, caplog):
+    """环境里是 ``[]``/``{}`` 这类「合法但等于没配」的值 → 也要让 .env 赢。
+
+    只判 ``json.loads`` 能过是不够的：``[]`` 语法合法，但 PAT 要求非空数组，
+    环境里残留一个 ``[]`` 同样会把 .env 里 10 个账号压住、通道 503——同一个
+    bug 换个壳。以 ``[``/``{`` 开头的空容器一律视同坏值。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TRAE_PAT_BEARER_PROFILES=[{"id":"a","bearer":"good"}]\n', encoding="utf-8")
+    for empty in ("[]", "{}"):
+        monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", empty)
+        with caplog.at_level(logging.WARNING):
+            m._load_dotenv(env_file)
+        assert json.loads(os.environ["TRAE_PAT_BEARER_PROFILES"]) == [
+            {"id": "a", "bearer": "good"}], f"环境值 {empty!r} 不该压住文件里的配置"
+
+
+def test_load_dotenv_empty_container_still_wins_when_file_also_empty(tmp_path, monkeypatch):
+    """两边都是空容器时不折腾：维持「环境变量赢」。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text("TRAE_PAT_BEARER_PROFILES=[]\n", encoding="utf-8")
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", "{}")
+
+    m._load_dotenv(env_file)
+
+    assert os.environ["TRAE_PAT_BEARER_PROFILES"] == "{}"
+
+
+def test_load_dotenv_overrides_non_json_env_value_when_file_is_json(tmp_path, monkeypatch, caplog):
+    """环境里是普通字符串（如误设成 ``disabled``）、文件里是正经数组 → 文件赢。
+
+    review 提的点：``disabled`` 这类值在 PAT 链路上一样让 ``json.loads`` 失败、
+    通道 503，和半截括号同一个结局，但它是最难查的一类残留（看着像正常值）。
+    既然两种都会失败，不如静默用文件里能跑的那份 + 告警。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TRAE_PAT_BEARER_PROFILES=[{"id":"a","bearer":"good"}]\n', encoding="utf-8")
+    for bad in ("disabled", "not-json-path", ""):
+        monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", bad)
+        with caplog.at_level(logging.WARNING):
+            m._load_dotenv(env_file)
+        assert json.loads(os.environ["TRAE_PAT_BEARER_PROFILES"]) == [
+            {"id": "a", "bearer": "good"}], f"环境值 {bad!r} 不该压住文件里的配置"
+
+
+def test_load_dotenv_keeps_env_string_when_file_not_json(tmp_path, monkeypatch):
+    """文件里不是结构化配置时没东西可反超：环境值原样保留。
+
+    普通配置（路径、开关）本来就是字符串，不能被「结构化配置」的规则误伤。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("SOME_PATH=/from/file\n", encoding="utf-8")
+    monkeypatch.setenv("SOME_PATH", "disabled")
+
+    m._load_dotenv(env_file)
+
+    assert os.environ["SOME_PATH"] == "disabled"
+
+
+def test_pat_config_error_points_at_env_shadowing(monkeypatch):
+    """坏 JSON 的报错要带上值长度和「可能是环境变量挡住 .env」的提示。
+
+    没有这个提示，用户只能看到「不是合法 JSON」，而 .env 明明是对的。
+    """
+    from buddy_proxy.trae.pat import config as pat_config
+
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", "[")
+    with pytest.raises(pat_config._PatConfigError) as exc_info:
+        pat_config._load_profiles()
+    msg = str(exc_info.value)
+    assert "长度 1" in msg
+    assert "环境" in msg and ".env" in msg
 
 def test_settings_write_is_atomic_and_private(tmp_path, monkeypatch):
     """设置落盘用原子替换，且最终文件保持仅当前用户可读。"""
