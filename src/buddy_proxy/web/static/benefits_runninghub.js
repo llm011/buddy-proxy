@@ -20,8 +20,13 @@
     const resp = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts || {}));
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
-      const msg = (data && data.detail && data.detail.error && data.detail.error.message) || data.message || ('HTTP ' + resp.status);
-      throw new Error(msg);
+      const detail = data && data.detail;
+      const msg = (detail && detail.error && detail.error.message) || data.message || ('HTTP ' + resp.status);
+      const err = new Error(msg);
+      // 把整个 detail 挂上：有些接口（workflows/run）出错时会顺带返回最新列表，
+      // 调用方据此刷新 UI，不用再多发一次请求。
+      err.detail = detail;
+      throw err;
     }
     return data;
   }
@@ -359,7 +364,7 @@
       btn.addEventListener('click', () => {
         const wid = btn.getAttribute('data-rh-wf-run');
         const wf = workflows.find((w) => String(w.webappId) === String(wid));
-        if (wf) openRunWorkflowModal(wf);
+        if (wf) openRunWorkflowModal(wf, panel);
       });
     });
 
@@ -525,7 +530,7 @@
     }
   }
 
-  function openRunWorkflowModal(wf) {
+  function openRunWorkflowModal(wf, panel) {
     const titleEl = document.getElementById('modal-title');
     const bodyEl = document.getElementById('modal-body');
     const footEl = document.getElementById('modal-foot');
@@ -669,6 +674,10 @@
           }
         } catch (err) {
           if (statusEl) statusEl.innerHTML = `<span style="color:#ef4444">${escapeHtml(err.message || String(err))}</span>`;
+          // 提交被上游以「余额不足」拒掉时，后端已把该工作流的真实计费类型写回本地
+          // 并随错误带回最新列表——刷新卡片，让标签立刻从「RH 金币 / 余额」变成「钱包余额」。
+          const updated = err && err.detail && Array.isArray(err.detail.workflows) ? err.detail.workflows : null;
+          if (updated && panel) renderWorkflows(panel, updated);
         } finally {
           runBtn.disabled = false;
           runBtn.textContent = '发起调用';

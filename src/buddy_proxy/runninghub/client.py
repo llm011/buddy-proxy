@@ -180,6 +180,12 @@ async def fetch_webapp_info(
     if not isinstance(node_info_list, list):
         node_info_list = []
 
+    # 注意：2026-11-25 实测 apiCallDemo 的响应里**没有** chargeType / consumeType /
+    # payType / thirdParty 任何一个字段（顶层只有 descriptionEn/curl/accessEncrypted/
+    # webappName/description/statisticsInfo/nodeInfoList/covers/tags），所以下面这段
+    # 推断目前永远落到「RH 金币 / 余额」。保留它是因为上游哪天补字段就能直接生效，
+    # 但**不能**把它当成可靠的计费来源——真正可靠的信号是运行时上游回的
+    # NOT_ENOUGH_BALANCE（见 classify_billing_error），由 run 端点学完写回本地。
     charge_raw = str(
         inner.get("chargeType")
         or inner.get("consumeType")
@@ -200,6 +206,35 @@ async def fetch_webapp_info(
         "billingType": billing_type,
         "nodeInfoList": node_info_list,
     }
+
+
+#: 上游「余额不足」类错误的标识。416 = TASK_CREATE_FAILED_BY_NOT_ENOUGH_WALLET
+#: （官方错误码表），NOT_ENOUGH_BALANCE 是 ai-app/run 实际回的 msg——两者都是
+#: **钱包余额**不够，不是 RH 金币不够。
+_WALLET_INSUFFICIENT_MARKERS = (
+    "NOT_ENOUGH_BALANCE", "NOT_ENOUGH_WALLET", "NOT_ENOUGH_MONEY",
+    "INSUFFICIENT_BALANCE", "INSUFFICIENT_WALLET",
+)
+#: 「金币不足」类错误的标识（对称地也学一下，虽然目前没实测到）。
+_COINS_INSUFFICIENT_MARKERS = (
+    "NOT_ENOUGH_COINS", "NOT_ENOUGH_COIN", "INSUFFICIENT_COINS",
+    "INSUFFICIENT_COIN",
+)
+
+
+def classify_billing_error(code: int | str | None, message: str) -> str | None:
+    """从上游提交失败的错误里判断该工作流**实际**扣哪种资产。
+
+    返回 ``"钱包余额"`` / ``"RH 金币"``，判不出返回 ``None``。这是计费类型
+    唯一可靠的来源——apiCallDemo 不给字段，只有真跑一次被拒才知道。
+    """
+    text = str(message or "").upper()
+    code_str = str(code) if code is not None else ""
+    if code_str == "416" or any(m in text for m in _WALLET_INSUFFICIENT_MARKERS):
+        return "钱包余额"
+    if any(m in text for m in _COINS_INSUFFICIENT_MARKERS):
+        return "RH 金币"
+    return None
 
 
 async def upload_file(

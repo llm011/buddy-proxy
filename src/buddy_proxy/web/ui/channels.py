@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import pathlib
 import time
@@ -18,6 +19,8 @@ from fastapi import HTTPException, Request
 from buddy_proxy.core.state import app, get_state
 
 from .common import _ensure_local
+
+log = logging.getLogger(__name__)
 
 
 @app.get("/ui/api/qoder/auth")
@@ -1688,35 +1691,66 @@ async def ui_runninghub_workflows_run(request: Request):
     wf = next((w for w in rh_store.list_workflows() if str(w.get("webappId")) == webapp_id), None)
     billing = str((wf or {}).get("billingType") or "")
 
+    # ---- 预检：余额不够就别打上游（上游会直接拒，还多一次失败记录） ----
     try:
         status_info = await rh_client.fetch_account_status(api_key)
-        if aid:
-            rh_store.update_account_info(aid, status_info)
-        coins = float(status_info.get("remainCoins") or 0)
-        money = float(status_info.get("remainMoney") or 0)
-        if billing == "钱包余额" and money <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": {"message": f"当前账号钱包余额不足 (remainMoney={money})，请先充值或切换账号"}},
-            )
-        if billing == "RH 金币" and coins <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": {"message": f"当前账号 RH 金币不足 (remainCoins={coins})，请先充值或切换账号"}},
-            )
-        if coins <= 0 and money <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail={"error": {"message": "当前账号 RH 金币与钱包余额均为 0，无法发起调用"}},
-            )
+    except rh_client.RunningHubError as exc:
+        raise HTTPException(status_code=exc.status_code, detail={"error": {"message": str(exc)}})
+    if aid:
+        rh_store.update_account_info(aid, status_info)
+    # remainMoney 实测可能是 null（不是 "0"）：float(None or 0) 兜成 0，否则 TypeError。
+    coins = float(status_info.get("remainCoins") or 0)
+    money = float(status_info.get("remainMoney") or 0)
+    if billing == "钱包余额" and money <= 0:
+        raise HTTPException(
+            status_code=402,
+            detail={"error": {"message": f"该工作流扣钱包余额，但当前账号 remainMoney={money}；请先充值钱包或切换账号（金币 {coins:.0f} 不能用于此工作流）"}},
+        )
+    if billing == "RH 金币" and coins <= 0:
+        raise HTTPException(
+            status_code=402,
+            detail={"error": {"message": f"该工作流扣 RH 金币，但当前账号 remainCoins={coins}；请先获取金币或切换账号"}},
+        )
+    if coins <= 0 and money <= 0:
+        raise HTTPException(
+            status_code=402,
+            detail={"error": {"message": "当前账号 RH 金币与钱包余额均为 0，无法发起调用"}},
+        )
 
+    # ---- 提交：这一步是**学计费类型**的唯一机会 ----
+    # apiCallDemo 不返回计费字段，导入时只能标「RH 金币 / 余额」（未知）。真跑一次
+    # 被上游以「余额不足」拒掉，才知道它到底扣哪种——学完写回本地，下次预检就能
+    # 在打上游前拦住，报错也能说清是哪种资产不够。
+    try:
         created = await rh_client.submit_task(
             api_key,
             f"ai-app/{webapp_id}",
             {"nodeInfoList": node_info_list},
         )
-        task_id = created["taskId"]
-        deadline = asyncio.get_running_loop().time() + 600.0
+    except rh_client.RunningHubError as exc:
+        learned = rh_client.classify_billing_error(exc.code, str(exc))
+        # 上游错误体截断落日志（不含 apiKey；submit 的 msg 是上游文案）
+        log.warning("runninghub 工作流 %s 提交失败 code=%s: %s",
+                    webapp_id, exc.code, str(exc)[:200])
+        if learned and wf and billing != learned:
+            rh_store.rename_workflow(webapp_id, str(wf.get("name") or webapp_id), learned)
+            hint = ("该工作流实际扣**钱包余额**（上游 NOT_ENOUGH_BALANCE），已自动改标；"
+                    if learned == "钱包余额" else
+                    "该工作流实际扣**RH 金币**（上游提示金币不足），已自动改标；")
+            hint += (f"当前 remainMoney={money}、remainCoins={coins:.0f}。"
+                     + ("请充值钱包或切换账号。" if learned == "钱包余额" else "请获取金币或切换账号。"))
+        else:
+            hint = ""
+        raise HTTPException(
+            status_code=402 if learned else exc.status_code,
+            detail={"error": {"message": f"{exc}{('；' + hint) if hint else ''}"},
+                    # 带回最新列表，前端据此刷新卡片的计费标签
+                    "workflows": rh_store.list_workflows()},
+        )
+
+    task_id = created["taskId"]
+    deadline = asyncio.get_running_loop().time() + 600.0
+    try:
         while True:
             res = await rh_client.query_task(api_key, task_id)
             status = str(res.get("status") or res.get("taskStatus") or "").upper()

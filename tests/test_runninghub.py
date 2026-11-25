@@ -18,7 +18,99 @@ from buddy_proxy.runninghub.provider import RunningHubProvider
 def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     p = tmp_path / "runninghub_accounts.json"
     monkeypatch.setenv("RUNNINGHUB_ACCOUNTS_PATH", str(p))
+    monkeypatch.setenv("RUNNINGHUB_WORKFLOWS_PATH", str(tmp_path / "runninghub_workflows.json"))
     return p
+
+
+# ---------------------------------------------------------------------------
+# 计费类型：apiCallDemo 不给字段，只能从上游运行时错误里学
+# ---------------------------------------------------------------------------
+
+def test_classify_billing_error_maps_upstream_codes():
+    """416 / NOT_ENOUGH_BALANCE = 钱包余额；NOT_ENOUGH_COINS = 金币；其余判不出。
+
+    2026-11-25 实报：工作流标「RH 金币 / 余额」（未知），账号金币 994、钱包 null，
+    跑起来上游回 NOT_ENOUGH_BALANCE。官方错误码表里 416 是
+    TASK_CREATE_FAILED_BY_NOT_ENOUGH_WALLET——「钱包」不是「金币」。
+    """
+    from buddy_proxy.runninghub.client import classify_billing_error
+
+    assert classify_billing_error(416, "") == "钱包余额"
+    assert classify_billing_error(None, "RunningHub 提交任务失败: NOT_ENOUGH_BALANCE") == "钱包余额"
+    assert classify_billing_error("416", "TASK_CREATE_FAILED_BY_NOT_ENOUGH_WALLET") == "钱包余额"
+    assert classify_billing_error(None, "NOT_ENOUGH_COINS") == "RH 金币"
+    assert classify_billing_error(500, "some other error") is None
+    assert classify_billing_error(None, "") is None
+
+
+def _wf_store_with(billing: str) -> dict:
+    return store.upsert_workflow({
+        "webappId": "2046794551444119554", "name": "Omnipotent G",
+        "description": "", "billingType": billing, "nodeInfoList": [],
+    })
+
+
+def test_run_learns_wallet_billing_from_upstream_reject(monkeypatch: pytest.MonkeyPatch):
+    """标「未知」的工作流被上游以余额不足拒掉 → 改标「钱包余额」、402、带回最新列表。
+
+    这是计费类型**唯一**可靠的来源：apiCallDemo 没有计费字段，导入时只能标未知；
+    真跑一次被拒才知道。学完写回本地，下次预检能在打上游前拦住。
+    """
+    from unittest.mock import AsyncMock
+
+    from buddy_proxy import __main__ as m
+    from buddy_proxy.runninghub import client as rh_client
+    from fastapi.testclient import TestClient
+
+    store.upsert_account("rh-secret-token-123456", label="t")
+    _wf_store_with("RH 金币 / 余额")
+
+    submit = AsyncMock(side_effect=rh_client.RunningHubError(
+        "RunningHub 提交任务失败: NOT_ENOUGH_BALANCE", status_code=400, code=7))
+    monkeypatch.setattr(rh_client, "fetch_account_status", AsyncMock(return_value={
+        # 实测形态：金币有、钱包是 null（不是 "0"）
+        "remainCoins": "994", "remainMoney": None, "apiType": "SHARED",
+    }))
+    monkeypatch.setattr(rh_client, "submit_task", submit)
+    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+
+    r = TestClient(m.app).post("/ui/api/runninghub/workflows/run", json={
+        "webapp_id": "2046794551444119554", "nodeInfoList": []})
+
+    assert r.status_code == 402, r.text
+    msg = r.json()["detail"]["error"]["message"]
+    assert "钱包余额" in msg and "remainMoney" in msg
+    # 本地标签已改写
+    learned = store.list_workflows()[0]["billingType"]
+    assert learned == "钱包余额"
+    # 错误体顺带带回最新列表，前端据此刷新卡片
+    assert r.json()["detail"]["workflows"][0]["billingType"] == "钱包余额"
+
+
+def test_run_preflight_blocks_wallet_workflow_without_hitting_upstream(monkeypatch: pytest.MonkeyPatch):
+    """已标「钱包余额」+ 钱包为 null/0 → 预检 402，**一次上游都不打**。"""
+    from unittest.mock import AsyncMock
+
+    from buddy_proxy import __main__ as m
+    from buddy_proxy.runninghub import client as rh_client
+    from fastapi.testclient import TestClient
+
+    store.upsert_account("rh-secret-token-123456", label="t")
+    _wf_store_with("钱包余额")
+
+    submit = AsyncMock(return_value={"taskId": "x"})
+    monkeypatch.setattr(rh_client, "fetch_account_status", AsyncMock(return_value={
+        "remainCoins": "994", "remainMoney": None,
+    }))
+    monkeypatch.setattr(rh_client, "submit_task", submit)
+    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+
+    r = TestClient(m.app).post("/ui/api/runninghub/workflows/run", json={
+        "webapp_id": "2046794551444119554", "nodeInfoList": []})
+
+    assert r.status_code == 402
+    assert "金币 994 不能用于此工作流" in r.json()["detail"]["error"]["message"]
+    submit.assert_not_called()
 
 
 def test_store_crud_and_permissions(isolated_store: Path):
