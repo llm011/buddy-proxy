@@ -12,6 +12,7 @@ raccoon 5 个账号全部在 30 分钟风控冷却中 → 服务重启 → 冷�
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -138,3 +139,63 @@ def test_clear_cooldown_also_clears_model_composite_keys(tmp_path, monkeypatch):
     assert failover.model_cooldown_left("pu-b", model)[0] > 0, "别的账号不受影响"
     # 盘上也不能残留（否则重启后复合键复活）
     assert set(af.load_persisted(tmp_path / "cooldowns.json")) == {f"pu-b\x00{model}"}
+
+
+def test_manual_cred_deletion_purges_cooldown_without_restart(tmp_path, monkeypatch):
+    """手工删 cred 文件（文档：删文件即退出账号）也要清冷却，不必等重启对账。
+
+    管理页删账号走 ``failover.clear_cooldown``；手工删文件走 ``list_accounts()``
+    的自愈剔除。两个入口之前不一致：后者会在 cooldowns.json 留下幽灵条目，
+    直到下次重启才被对账清掉。``list_accounts()`` 是唯一的账号枚举入口，
+    在它里面顺手清，两个入口就一致了。
+
+    用真实的 ``_STORE`` 走完整路径（索引 + cred 文件 + 自愈），不 mock——
+    这条要验的恰恰是「自愈前后对比」的时序。
+    """
+    monkeypatch.setenv("RACCOON_STATE_DIR", str(tmp_path))
+    aid = "pu-manual"
+    model = "sn-deepseek-v4-1-flash-1017"
+    (tmp_path / "index.json").write_text(json.dumps(
+        {"version": 1, "accounts": [{"id": aid, "priority": 1, "added_at": 1}]}),
+        encoding="utf-8")
+    cred_path = tmp_path / f"{aid}.json"
+    cred_path.write_text(json.dumps(
+        {"uid": aid, "access_token": "at", "refresh_token": "rt",
+         "expires_at": int(time.time()) + 3600}), encoding="utf-8")
+
+    _swap_tracker(monkeypatch)
+    failover.mark_cooldown(aid, retry_after="1800")
+    failover.mark_model_cooldown(aid, model)
+    snapshot = tmp_path / "cooldowns.json"
+    assert set(af.load_persisted(snapshot)) == {aid, f"{aid}\x00{model}"}
+
+    # 用户手工删 cred 文件 → list_accounts() 自愈 → 冷却当场清
+    cred_path.unlink()
+    from buddy_proxy.raccoon import credentials as creds
+
+    assert [a.id for a in creds.list_accounts()] == []
+    assert af.load_persisted(snapshot) == {}, "账号已退出，冷却（含复合键）当场清，不等重启"
+
+
+def test_list_accounts_hot_path_untouched_when_nothing_gone(tmp_path, monkeypatch):
+    """热路径保护：没有账号消失时不能去碰冷却（每次转发都调 list_accounts）。"""
+    monkeypatch.setenv("RACCOON_STATE_DIR", str(tmp_path))
+    aid = "pu-alive"
+    (tmp_path / "index.json").write_text(json.dumps(
+        {"version": 1, "accounts": [{"id": aid, "priority": 1, "added_at": 1}]}),
+        encoding="utf-8")
+    (tmp_path / f"{aid}.json").write_text(json.dumps(
+        {"uid": aid, "access_token": "at", "refresh_token": "rt",
+         "expires_at": int(time.time()) + 3600}), encoding="utf-8")
+
+    _swap_tracker(monkeypatch)
+    failover.mark_cooldown(aid, retry_after="1800")
+    calls: list[str] = []
+    monkeypatch.setattr(failover, "clear_cooldown",
+                        lambda a: calls.append(a), raising=False)
+
+    from buddy_proxy.raccoon import credentials as creds
+
+    assert [a.id for a in creds.list_accounts()] == [aid]
+    assert calls == [], "没有账号消失就不该动冷却"
+    assert failover.cooldown_left(aid)[0] > 0, "活账号的冷却原样保留"
