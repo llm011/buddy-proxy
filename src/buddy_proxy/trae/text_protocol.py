@@ -217,7 +217,10 @@ def _extract_prompt(
     return out
 
 
-def _build_chat_body(messages: list[dict[str, Any]], model: str, stream: bool) -> dict[str, Any]:
+def _build_chat_body(
+    messages: list[dict[str, Any]], model: str, stream: bool,
+    *, max_mode: bool = False,
+) -> dict[str, Any]:
     session_id = str(uuid.uuid4())
     body: dict[str, Any] = {
         "messages": messages,
@@ -227,6 +230,10 @@ def _build_chat_body(messages: list[dict[str, Any]], model: str, stream: bool) -
         "request_id": session_id,
         "session_id": session_id,
     }
+    # Max 模式请求级开关（见 max_mode.py）：仅对支持的模型、全局开关开启时注入。
+    # 字段名 is_max_mode 由上游契约决定（2026-11-25 复核社区实现）。
+    if max_mode:
+        body["is_max_mode"] = True
     # ``config_name`` 是 Work 通道要求 model/config_name 成对的老约定，但**不是
     # 所有模型都吃**。2026-11-24 实测 glm-5.4 在两条 function 上都一样：
     #

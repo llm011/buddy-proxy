@@ -82,16 +82,22 @@ class TraeIntlProvider(TraeProvider):
         底表里的 glm-5.2 在发现 glm-5.3 后从列表消失（点名仍可调，只是不
         列出来）；黑名单（kimi-k2.5 等「太老」点名件）任何时候不出。
         """
+        from . import max_mode as max_mode_mod
+
         base = list(super().models())
         base_ids = {str(m.get("id") or "") for m in base}
+        max_enabled = max_mode_mod.max_mode_enabled()
         for name, entry in sorted(self._discovered.items()):
+            window, _inject = max_mode_mod.effective_window(
+                self._region.key, name.lower(), discovered=entry, enabled=max_enabled)
             if name in base_ids:
                 # 已在静态底表（如 gpt-6.1-sol）：底表没有 context_window，
                 # 目录发现的值合并进去——丢了这个字段，模型页上下文列就空了
-                # （test_discovered_entry_shape 钉的正是这个形状）
+                # （test_discovered_entry_shape 钉的正是这个形状）。窗口按 Max
+                # 模式决策合成（开→max，关→dev），与转发注入的 is_max_mode 一致。
                 m = next(x for x in base if str(x.get("id") or "") == name)
-                if m.get("context_window") is None and entry.get("context_window") is not None:
-                    m["context_window"] = entry["context_window"]
+                if m.get("context_window") is None and window is not None:
+                    m["context_window"] = window
                 continue
             base.append({
                 "id": name,
@@ -101,7 +107,7 @@ class TraeIntlProvider(TraeProvider):
                 # 海外是次数制没有积分倍率；图片能力未实测不声明（同静态表口径）
                 "credits": None,
                 "images": False,
-                "context_window": entry.get("context_window"),
+                "context_window": window,
                 "description": "Trae 海外版模型（目录发现）",
             })
         pool = {str(m.get("id") or "") for m in base}
@@ -148,6 +154,10 @@ class TraeIntlProvider(TraeProvider):
                 union.setdefault(str(e.get("name") or ""), {
                     "name": e.get("name"),
                     "context_window": e.get("context_window"),
+                    # max_mode / max_window 供 max_mode.effective_window 合成
+                    # 对外声明的窗口（见 max_mode.py）。
+                    "max_mode": e.get("max_mode"),
+                    "max_window": e.get("max_window"),
                 })
         if succeeded == 0:
             raise RuntimeError("traeintl 模型目录刷新失败：全部账号均未成功")

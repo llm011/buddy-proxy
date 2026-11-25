@@ -79,6 +79,18 @@ function renderGroups() {
   // 不改数据源；COLLAPSED 完全不参与搜索态的折叠判断。
   const searching = MODEL_QUERY.trim() !== '';
   const all = MODELS.groups || [];
+  // Trae Max 模式开关：仅当目录里有 trae/traeintl/traepat 通道时显示。
+  // 防御性判 style：node 测试的 mock DOM element 不带 style 属性，直接写会抛
+  // TypeError（renderGroups 在测试里被直接调用）。真实浏览器 element 恒有 style。
+  const maxWrap = document.getElementById('trae-max-mode-wrap');
+  if (maxWrap && maxWrap.style) {
+    const hasTrae = all.some(g => g && /^trae/.test(g.id || ''));
+    maxWrap.style.display = hasTrae ? '' : 'none';
+    if (hasTrae) {
+      const cb = document.getElementById('trae-max-mode');
+      if (cb) cb.checked = window.TRAE_MAX_MODE !== false;  // 缺省 true
+    }
+  }
   const groups = searching ? filteredModelGroups(all, MODEL_QUERY) : all;
   const shownModels = groups.reduce((n, g) => n + g.models.length, 0);
   const dm = MODELS.default_model || '';

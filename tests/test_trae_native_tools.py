@@ -141,10 +141,11 @@ def native_env(monkeypatch):
     native_calls: list[dict] = []
     legacy_calls: list[dict] = []
 
-    def fake_native(native_msgs, model, stream, tools):
+    def fake_native(native_msgs, model, stream, tools, **kwargs):
         idx = len(native_calls)
         native_calls.append({"messages": native_msgs, "model": model,
-                             "stream": stream, "tools": tools})
+                             "stream": stream, "tools": tools,
+                             "max_mode": kwargs.get("max_mode", False)})
         if getattr(state, "_native_fail_first", 0) > idx:
             return SSE_NATIVE_REJECTED
         if stream and getattr(state, "_native_reject_stream", False):
@@ -153,8 +154,10 @@ def native_env(monkeypatch):
             return state._native_sse
         return SSE_NATIVE_TOOL_CALL
 
-    def fake_legacy(messages, model, stream, base_url=None):
-        legacy_calls.append({"messages": messages, "model": model, "stream": stream})
+    def fake_legacy(messages, model, stream, base_url=None, **kwargs):
+        legacy_calls.append({"messages": messages, "model": model,
+                             "stream": stream,
+                             "max_mode": kwargs.get("max_mode", False)})
         if stream and getattr(state, "_legacy_reject_streaming", False):
             return SSE_NATIVE_REJECTED
         return getattr(state, "_legacy_sse", None) or SSE_LEGACY_TOOL_CALL
@@ -171,7 +174,7 @@ def native_env(monkeypatch):
     # （非流式缓冲 → 4001 节流重试 → 文本协议）。需要测真流式的用例把
     # state._incremental_events 设成事件列表，或设 _incremental_reject=True
     # 模拟零产出 4001。
-    def fake_stream_events(native_msgs, model, tools, stop=None):
+    def fake_stream_events(native_msgs, model, tools, stop=None, **kwargs):
         if getattr(state, "_incremental_events", None) is None and not getattr(
                 state, "_incremental_reject", False):
             return None

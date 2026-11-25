@@ -98,8 +98,9 @@ def trae_env(monkeypatch):
 
     calls: list[dict] = []
 
-    def fake_send(messages, model, stream, base_url=None):
-        calls.append({"messages": messages, "model": model, "stream": stream})
+    def fake_send(messages, model, stream, base_url=None, **kwargs):
+        calls.append({"messages": messages, "model": model, "stream": stream,
+                      "max_mode": kwargs.get("max_mode", False)})
         if getattr(state, "_upstream_sse", None):
             return state._upstream_sse
         return SSE_TOOL_CALL if state._tool_mode else SSE_PLAIN

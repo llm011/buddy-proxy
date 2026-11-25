@@ -164,6 +164,7 @@ def _native_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _build_native_body(
     native_msgs: list[dict[str, Any]], trae_model: str, stream: bool,
     tools: list[dict[str, Any]] | None,
+    *, max_mode: bool = False,
 ) -> dict[str, Any]:
     session_id = str(uuid.uuid4())
     body = {
@@ -174,6 +175,9 @@ def _build_native_body(
         "request_id": session_id,
         "session_id": session_id,
     }
+    # Max 模式请求级开关（见 max_mode.py）：仅对支持的模型、全局开关开启时注入。
+    if max_mode:
+        body["is_max_mode"] = True
     # ``config_name`` 是 Work 通道（traework2api）要求 model/config_name 成对的老约定，
     # 但**不是所有模型都吃它**——2026-11-24 实测 glm-5.4：
     #
@@ -231,12 +235,16 @@ def _read_all_bounded(response, max_s: float = TRAE_NONSTREAM_MAX_S) -> str:
 def _send_native_chat(
     native_msgs: list[dict[str, Any]], model: str, stream: bool,
     tools: list[dict[str, Any]] | None,
+    *, max_mode: bool = False,
 ) -> str:
     """原生通道发送：Work 凭证优先，回退 IDE 凭证；返回原始 SSE/错误文本。
 
     HTTP 400（Go schema 拒绝的另一种壳）原样返回文本，交给调用方
     _native_rejected 判定回落，不在这里抛——文本协议兜底是对 4001 的
     正确响应，抛异常会跳过兜底。
+
+    ``max_mode``：是否在请求体注入 ``is_max_mode``（由 provider 决策后下传，
+    与 models() 声明的窗口一致，见 max_mode.py）。
     """
     # PAT provider 在 TraePatProvider._send_native_request 中显式分流；这里始终是
     # 个人 Work/IDE 通道。不能只按模型名判断，否则两套目录重叠时会串账号。
@@ -247,7 +255,7 @@ def _send_native_chat(
     work = _load_work_cred()
     region = resolve_trae_region(work.get("region") if work else None)
     trae_model = map_model_for(region.key, model)
-    body = _build_native_body(native_msgs, trae_model, stream, tools)
+    body = _build_native_body(native_msgs, trae_model, stream, tools, max_mode=max_mode)
     if work and work.get("access_token"):
         headers = _work_headers(work)
     else:
@@ -316,6 +324,7 @@ def _stream_native_chat_events(
     model: str,
     tools: list[dict[str, Any]] | None,
     stop: Any = None,
+    *, max_mode: bool = False,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     """原生通道真流式：逐个产生上游 SSE 事件，不缓冲整轮响应。
 
@@ -332,12 +341,12 @@ def _stream_native_chat_events(
     循环无需改动。
 
     ``stop`` 为 ``threading.Event``：置位后立刻停止读取（客户端断开时由外层
-    set，读线程得以释放 socket）。
+    set，读线程得以释放 socket）。``max_mode`` 同 :func:`_send_native_chat`。
     """
     work = _load_work_cred()
     region = resolve_trae_region(work.get("region") if work else None)
     trae_model = map_model_for(region.key, model)
-    body = _build_native_body(native_msgs, trae_model, True, tools)
+    body = _build_native_body(native_msgs, trae_model, True, tools, max_mode=max_mode)
     if work and work.get("access_token"):
         headers = _work_headers(work)
     else:

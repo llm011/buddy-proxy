@@ -122,6 +122,10 @@
       <span class="sub" id="listen-hint"></span>
       <span class="spacer"></span>
       <span class="muted" style="font-size:12px" id="model-summary"></span>
+      <label id="trae-max-mode-wrap" class="muted" style="font-size:12px;display:none"
+             data-tip="开启后支持的 Trae 模型走 Max 大窗口（1M），并向上游注入 is_max_mode；关闭回退默认窗口。实时生效。">
+        <input type="checkbox" id="trae-max-mode" onchange="toggleTraeMaxMode(this.checked)"> Trae Max 模式
+      </label>
       <button class="ghost" id="hidden-models-btn" data-tip="隐藏只是不展示，停用才会拒绝调用" onclick="openHiddenModelsModal()">已隐藏</button>
       <button class="ghost" id="models-expand" onclick="setAllGroups(false)">全部展开</button>
       <button class="ghost" id="models-collapse" onclick="setAllGroups(true)">全部折叠</button>

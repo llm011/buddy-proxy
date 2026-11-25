@@ -159,6 +159,8 @@ def _patch_catalog(monkeypatch, rows):
 def test_refresh_copies_rate_and_adds_new_names(monkeypatch, trae_env):
     from buddy_proxy.trae.provider import TraeProvider
 
+    # 关 Max 开关：本条钉目录字段拷贝（dev 窗口原样进列表），开着会取 max 档。
+    monkeypatch.setattr("buddy_proxy.trae.max_mode.max_mode_enabled", lambda: False)
     _patch_catalog(monkeypatch, [
         _entry("Kimi-K3", 1.83, display="Kimi-K3", ctx=200000),
         _entry("Kimi-K3.1-Pro", 1.2, display="Kimi-K3.1-Pro", ctx=200000),

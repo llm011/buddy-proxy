@@ -31,16 +31,20 @@ def send_trae_chat(
     model: str,
     stream: bool,
     base_url: str = BASE_URL_CN,
+    *, max_mode: bool = False,
 ) -> str:
     """直连 Trae API，返回原始 SSE 文本。
 
     3 级端点回退。认证失败抛 HTTPException(401)，其余抛 RuntimeError。
     若使用 Work 凭证（~/.ethan/trae_work.json），自动走 Work 通道
     （function=solo_work_lite + api.trae.com.cn）。
+
+    ``max_mode``：是否在请求体注入 ``is_max_mode``（由 provider 决策后下传，
+    与 models() 声明的窗口一致，见 max_mode.py）。
     """
     work = _load_work_cred()
     if work and work.get("access_token"):
-        return _send_trae_work_chat(messages, model, stream, work)
+        return _send_trae_work_chat(messages, model, stream, work, max_mode=max_mode)
 
     token, user_id = _auth()
     # legacy 单账号分支（TRAE_TOKEN / 本机登录态）没有账号级 region 字段，
@@ -48,7 +52,7 @@ def send_trae_chat(
     # 名拿去查 CN 的 GLM 映射表（查不到会原样透传，但分级/倍率会全错）。
     region = resolve_trae_region_by_chat_base(base_url)
     trae_model = map_model_for(region.key, model)
-    body = _build_chat_body(messages, trae_model, stream)
+    body = _build_chat_body(messages, trae_model, stream, max_mode=max_mode)
     headers = _build_headers(token, user_id)
 
     last_error: Exception | None = None
@@ -101,6 +105,7 @@ def _send_trae_work_chat(
     model: str,
     stream: bool,
     work: dict[str, Any],
+    *, max_mode: bool = False,
 ) -> str:
     """Trae Work 通道：function=solo_work_lite + 完整 SOLO headers。
 
@@ -113,11 +118,13 @@ def _send_trae_work_chat(
     两区账号不通用，failover 已保证这里拿到的是同区账号，所以直接用它的 region
     就是对的——不需要调用方再传一次，也就不会出现「provider 说海外、请求打到
     CN」这类两处分叉。
+
+    ``max_mode`` 同 :func:`send_trae_chat`：在 body 顶层注入 ``is_max_mode``。
     """
     region = resolve_trae_region(work.get("region"))
     trae_model = map_model_for(region.key, model)
     body = _build_chat_body(_intl_content_blocks(messages) if region.key == "global" else messages,
-                            trae_model, stream)
+                            trae_model, stream, max_mode=max_mode)
     # 绝大多数模型走 solo_work_lite；少数在该 function 下 4001，需改走
     # chat_v3（实测）。覆盖表**按区域取**：两区的 function 绑定互不通用
     # （CN glm-5.1 / 海外 gpt-5.6 系是各自的 chat_v3 名单）。
