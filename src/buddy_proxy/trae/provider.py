@@ -1211,11 +1211,14 @@ class TraeProvider(BaseProvider):
                     # 冷却——下一轮请求还会先打它、再白吃一次同样的失败才轮到
                     # 别人。其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
                     if self._is_account_error(e):
-                        if _is_entitlement_error(e):
-                            # 1005 是「账号+模型」级权益不足：换号有意义，但只记
+                        if _is_entitlement_error(e) or _is_context_overflow(e):
+                            # 1005 / 4026 都是「账号+模型」级：换号有意义，但只记
                             # 本模型跳过、**不**整账号冷却——该账号对其他模型仍可
-                            # 服务（免费号不能用 glm-5.4，glm-5.3 照常）。
-                            _mark_entitlement_skip(acct.id, entitlement_model)
+                            # 服务（免费号不能用 glm-5.4，glm-5.3 照常；4026 则是
+                            # 这次上下文太长，短请求照样能过）。
+                            _mark_entitlement_skip(
+                                acct.id, entitlement_model,
+                                ttl=_CONTEXT_OVERFLOW_SKIP_TTL_S if _is_context_overflow(e) else None)
                         else:
                             failover.mark_cooldown(
                                 acct.id, quota=e.status_code == 429,
@@ -1940,6 +1943,17 @@ def _is_entitlement_error(e: HTTPException) -> bool:
     return getattr(e, "trae_sse_code", None) == _ENTITLEMENT_SSE_CODE
 
 
+#: 4026「上下文超限」与 1005 同款处置（换号、不整号冷却），但跳过 TTL 更短：
+#: 它反映的是「这次请求太长」而非账号权益，DSH 压缩后几十秒内就会重试短请求。
+_CONTEXT_OVERFLOW_SSE_CODE = 4026
+_CONTEXT_OVERFLOW_SKIP_TTL_S = 120.0
+
+
+def _is_context_overflow(e: HTTPException) -> bool:
+    """该异常是否为 4026 上下文超限（换号、但不整账号冷却）。"""
+    return getattr(e, "trae_sse_code", None) == _CONTEXT_OVERFLOW_SSE_CODE
+
+
 def _internal_model_key(region_key: str, requested: Any) -> str:
     """外部模型名 → 内部键（MODEL_MAP 解析后小写），供选号/Max 决策统一使用。
 
@@ -1951,11 +1965,16 @@ def _internal_model_key(region_key: str, requested: Any) -> str:
     return map_model_for(region_key, str(requested or "")).lower()
 
 
-def _mark_entitlement_skip(account_id: str, model: str) -> None:
-    """记「该账号对本模型套餐权益不足」，TTL 内选号时跳过它。"""
+def _mark_entitlement_skip(account_id: str, model: str,
+                           ttl: float | None = None) -> None:
+    """记「该账号对本模型不可用」，TTL 内选号时跳过它。
+
+    ``ttl`` 缺省用权益类的 600s；4026 传更短的 TTL（上下文超限只说明这次
+    请求太长，DSH 压缩后很快就会重试短请求，不该让账号白等 10 分钟）。
+    """
     key = (str(account_id), str(model or "").strip().lower())
     with _entitlement_skip_lock:
-        _entitlement_skip[key] = time.time() + _ENTITLEMENT_SKIP_TTL_S
+        _entitlement_skip[key] = time.time() + (ttl or _ENTITLEMENT_SKIP_TTL_S)
 
 
 def _entitlement_skipped(account_id: str, model: str) -> bool:
