@@ -2390,6 +2390,38 @@ def test_load_dotenv_empty_container_still_wins_when_file_also_empty(tmp_path, m
     assert os.environ["TRAE_PAT_BEARER_PROFILES"] == "{}"
 
 
+def test_load_dotenv_overrides_non_json_env_value_when_file_is_json(tmp_path, monkeypatch, caplog):
+    """环境里是普通字符串（如误设成 ``disabled``）、文件里是正经数组 → 文件赢。
+
+    review 提的点：``disabled`` 这类值在 PAT 链路上一样让 ``json.loads`` 失败、
+    通道 503，和半截括号同一个结局，但它是最难查的一类残留（看着像正常值）。
+    既然两种都会失败，不如静默用文件里能跑的那份 + 告警。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TRAE_PAT_BEARER_PROFILES=[{"id":"a","bearer":"good"}]\n', encoding="utf-8")
+    for bad in ("disabled", "not-json-path", ""):
+        monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", bad)
+        with caplog.at_level(logging.WARNING):
+            m._load_dotenv(env_file)
+        assert json.loads(os.environ["TRAE_PAT_BEARER_PROFILES"]) == [
+            {"id": "a", "bearer": "good"}], f"环境值 {bad!r} 不该压住文件里的配置"
+
+
+def test_load_dotenv_keeps_env_string_when_file_not_json(tmp_path, monkeypatch):
+    """文件里不是结构化配置时没东西可反超：环境值原样保留。
+
+    普通配置（路径、开关）本来就是字符串，不能被「结构化配置」的规则误伤。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text("SOME_PATH=/from/file\n", encoding="utf-8")
+    monkeypatch.setenv("SOME_PATH", "disabled")
+
+    m._load_dotenv(env_file)
+
+    assert os.environ["SOME_PATH"] == "disabled"
+
+
 def test_pat_config_error_points_at_env_shadowing(monkeypatch):
     """坏 JSON 的报错要带上值长度和「可能是环境变量挡住 .env」的提示。
 
