@@ -763,7 +763,12 @@
   .modal { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
            width: min(620px, calc(100vw - 40px)); max-height: 80vh; overflow: auto; padding: 20px 22px; }
   .modal h3 { margin: 0 0 12px; font-size: 15px; }
-  .modal-foot { margin-top: 16px; display: flex; justify-content: flex-end; gap: 8px; }
+  .modal-foot { margin-top: 16px; display: flex; flex-wrap: nowrap; justify-content: flex-end;
+                 gap: 8px; align-items: center; }
+  /* 分页条子项不允许被 flex 挤压、按钮文字不换行：否则 620px 弹窗里页码按钮被
+     压成多行堆叠、「关闭」被压到一字宽竖排（消耗记录弹窗 11629 条时复现）。 */
+  .modal-foot > * { flex-shrink: 0; }
+  .modal-foot button { white-space: nowrap; }
   .modal-foot:empty { display: none; }
   /* 「新增模型顺序」的模型选择列表：按归属通道分组，组内只写模型名 */
   .order-new-list { max-height: 44vh; overflow: auto; margin-top: 2px; }
