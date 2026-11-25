@@ -41,13 +41,18 @@ _TRAE_ERROR_HINTS: dict[int, str] = {
 # 两份各管各的账号体系。
 _ACCOUNT_QUOTA_SSE_CODES = frozenset({4008, 4011, 4021, 4031})
 _ACCOUNT_AUTH_SSE_CODES = frozenset({1001, 4010})
+#: 1005「套餐权益不足」是**账号+模型**级：免费号不能用 glm-5.4，但 glm-5.3 照常
+#: 可服务。换号有意义（付费号可能有权益），所以归 403 让 failover 换号；但它**不能**
+#: 走 failover.mark_cooldown 的整账号冷却（会误伤该账号对其他模型的服务），forward
+#: 循环据 ``trae_sse_code`` 识别后改记 (账号, 模型) 级跳过，见 provider._mark_entitlement_skip。
+_ACCOUNT_ENTITLEMENT_SSE_CODES = frozenset({1005})
 
 
 def _sse_error_status(code: Any) -> int:
-    """上游 SSE 错误码 → 账号级 HTTP 状态码（failover 循环只认 401/429）。
+    """上游 SSE 错误码 → 账号级 HTTP 状态码（failover 循环只认 401/403/429）。
 
-    额度类归 429（冷却带 quota 标记）、鉴权类归 401，其余 502 原样透传
-    ——502 不算账号级错误，failover 不换号。解析不出码也按 502。
+    额度类归 429（冷却带 quota 标记）、鉴权类归 401、权益类（1005）归 403，
+    其余 502 原样透传——502 不算账号级错误，failover 不换号。解析不出码也按 502。
     """
     try:
         c = int(code)
@@ -57,6 +62,8 @@ def _sse_error_status(code: Any) -> int:
         return 429
     if c in _ACCOUNT_AUTH_SSE_CODES:
         return 401
+    if c in _ACCOUNT_ENTITLEMENT_SSE_CODES:
+        return 403
     return 502
 
 

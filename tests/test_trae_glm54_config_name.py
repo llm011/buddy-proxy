@@ -1,31 +1,30 @@
-"""glm-5.4 在 trae native 通道必须**省略** config_name。
+"""glm-5.4 在 trae 通道必须**携带** config_name。
 
-## 背景
+## 背景（2026-11-26 纠正）
 
-2026-11-24 用户指出 trae 的 Ethan1 是付费账号，「应该有 glm-5.4」。核实后确实
-四个 CN 账号（含付费）全都能用——但网关一直报 1005「套餐权益不足」。
-
-## 真因（二分实测）
-
-同一个 Ethan1 账号，只改请求体一个字段：
+本文件此前锁的是相反的行为（省略 config_name），那是一个**只看「是否出流」**
+得出的误判。真相是：
 
 | config_name | 结果 |
 |---|---|
-| `"glm-5.4"` | `event:error code 1005`（extra.plan=2）|
-| `"GLM-5.4"` | `event:error code 4001 param is invalid` |
-| **省略** | 正常出流 |
+| **省略** | HTTP 200 正常出流，**但网关认不出 glm-5.4，静默回落到默认模型 Seed-2.1-Turbo**：官方账单记成 Seed、按 Seed 计费、分词器指纹也是 Seed 的（同一 prompt 90 tokens，真 GLM 是 54） |
+| `"glm-5.4"` | 路由到**真 GLM-5.4**。套餐含该模型的账号（付费 Ethan1）200；不含的（免费号）回 1005 套餐权益不足 |
 
-而 glm-5.3 / glm-5.3-flash 带 config_name 照常 200。
+所以省略 config_name 的代价是**所有账号**（含付费）都被偷换成 Seed——这正是用户
+在官方消耗明细里看到「一直调 glm-5.4 却全是 Seed-2.1-Turbo」的根因。1005 不是
+字段问题，是账号权益问题，由 forward 的 failover 按「账号+模型」跳过
+（见 ``test_trae_glm54_entitlement_1005.py``），绝不靠去掉字段来「修好」。
 
-也就是说 5.4 走的是新路由，不认这个历史字段；给了它上游就把请求当成另一个
-模型判成「套餐不支持」。这个坑极难从现象反推：1005 的官方文案是「套餐权益
-不足」，看起来完全像账号权限问题，而实际**四个账号全中、且去掉字段立刻 200**。
+## 验证口径（别再只看是否出流）
 
-## 为什么按模型名单而不是一律不带
+- 同一 prompt 比对 ``prompt_tokens``（真 GLM 54 / Seed 90）；
+- 或查官方消耗明细（``/ui/api/trae/usage-logs``）里记的模型名与积分。
 
-`config_name` 是 Work 通道（traework2api）要求 model/config_name 成对的老约定，
-glm-5.3 系列等既有模型都靠它。一律去掉等于拿老模型做实验。所以只对实测不吃
-这个字段的模型省略。
+## 为什么保留 ``_omits_config_name`` 机制
+
+它现在为空，但保留是为了：真遇到「带 config_name → 4001、去掉就好转」且**用上述
+口径确认后端没被换**的模型时，仍有按模型省略的入口。两条路径（native
+``_build_native_body`` / 文本协议 ``_build_chat_body``）必须共用同一份名单。
 """
 
 from __future__ import annotations
@@ -41,25 +40,42 @@ def _msgs():
     return [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
 
 
-def test_glm54_body_omits_config_name():
-    """核心断言：glm-5.4 的请求体里不能有 config_name。"""
+def test_glm54_body_carries_config_name():
+    """核心断言：glm-5.4 的请求体必须带 config_name，否则被静默换成 Seed。"""
     body = _build_native_body(_msgs(), "glm-5.4", False, None)
-    assert "config_name" not in body, (
-        "带了它上游会回 1005（套餐不支持），四个 CN 账号全中")
-    assert body["model"] == "glm-5.4", "model 字段本身照常带"
+    assert body["config_name"] == "glm-5.4", (
+        "不带它网关认不出 glm-5.4，会静默回落到 Seed-2.1-Turbo（账单/计费/分词器全是 Seed）")
+    assert body["model"] == "glm-5.4"
+
+
+def test_glm54_production_combo_config_name_and_max_mode():
+    """用户默认要 Max：native 生产路径要同时带 config_name + is_max_mode。
+
+    2026-11-26 实测（付费号）：chat_v3 + config_name + is_max_mode → prompt_tokens=54，
+    即真 GLM-5.4 且 Max 生效。缺任一字段都不是这个组合。
+    """
+    body = _build_native_body(_msgs(), "glm-5.4", True, None, max_mode=True)
+    assert body["config_name"] == "glm-5.4"
+    assert body.get("is_max_mode") is True
 
 
 def test_glm53_still_carries_config_name():
-    """既有模型不受影响：glm-5.3 系列靠这个字段，不能跟着去掉。"""
+    """既有模型不受影响：glm-5.3 系列靠这个字段，必须继续带。"""
     for model in ("glm-5.3", "glm-5.3-flash", "glm-5.3-flashx"):
         body = _build_native_body(_msgs(), model, False, None)
         assert body["config_name"] == model, f"{model} 必须继续带 config_name"
 
 
-def test_config_name_omission_is_case_insensitive():
-    """上游模型名大小写不统一（MODEL_MAP 会还原），判断要跟着不敏感。"""
+def test_omission_helper_false_for_glm54_all_spellings():
+    """glm-5.4 任何大小写写法都**不再**被省略（大小写不敏感的判定本身保留）。"""
     for spelling in ("glm-5.4", "GLM-5.4", "Glm-5.4", " glm-5.4 "):
-        assert _omits_config_name(spelling) is True
+        assert _omits_config_name(spelling) is False, f"{spelling!r} 不该再被省略"
+
+
+def test_omission_set_is_empty():
+    """省略名单当前为空——glm-5.4 已移出。往里加模型前必须用分词器指纹/账单验证。"""
+    assert "glm-5.4" not in _NATIVE_NO_CONFIG_NAME
+    assert len(_NATIVE_NO_CONFIG_NAME) == 0
 
 
 def test_unknown_model_keeps_config_name():
@@ -69,33 +85,27 @@ def test_unknown_model_keeps_config_name():
     assert body["config_name"] == "some-new-model"
 
 
-def test_glm54_registered_in_omission_set():
-    assert "glm-5.4" in _NATIVE_NO_CONFIG_NAME
-
-
 def test_tools_payload_unaffected():
-    """省略 config_name 不影响 tools 注入（两件事互不相关）。"""
+    """带 config_name 不影响 tools 注入（两件事互不相关）。"""
     tools = [{"type": "function",
               "function": {"name": "bash", "description": "run",
                            "parameters": {"type": "object", "properties": {}}}}]
     body = _build_native_body(_msgs(), "glm-5.4", False, tools)
-    assert "config_name" not in body
+    assert body["config_name"] == "glm-5.4"
     assert body.get("tools"), "tools 必须照常带上"
 
 
-def test_text_protocol_fallback_also_omits_config_name():
-    """文本协议兜底路径（inline_chat）同样不能带 config_name。
+def test_text_protocol_also_carries_config_name():
+    """文本协议路径（native 4001 后的回落）同样必须带 config_name。
 
-    review 时发现：native 通道 4001 后会回落到文本协议，而那条路径的
-    ``_build_chat_body`` 也在写 config_name。只修 native 的话，回落路径会
-    继续报 4001——实测 glm-5.4 在 inline_chat 上带 config_name 就是 4001，
-    去掉才出流。两处必须共用同一份名单。
+    两条路径共用 ``_omits_config_name``：只改一处会让回落路径继续被换成 Seed。
+    实测 solo_work_lite / chat_v3 带 config_name 都拿到真 GLM（54）。
     """
     from buddy_proxy.trae.text_protocol import _build_chat_body
 
     msgs = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
     body54 = _build_chat_body(msgs, "glm-5.4", False)
-    assert "config_name" not in body54, "回落路径也要省略"
+    assert body54["config_name"] == "glm-5.4", "回落路径也要带"
     assert body54["model"] == "glm-5.4"
 
     # 既有模型不受影响
