@@ -564,7 +564,7 @@ def test_pat_uses_pat_hook_even_when_native_tools_disabled(monkeypatch):
     calls: list[tuple[str, bool]] = []
     provider = TraePatProvider()
 
-    def pat_hook(native_msgs, model, stream, tools):
+    def pat_hook(native_msgs, model, stream, tools, **kwargs):
         calls.append((model, stream))
         assert native_msgs[0]["content"][0]["text"] == "hello"
         return _OK

@@ -347,16 +347,29 @@ class AntigravityProvider(BaseProvider):
     # ---- BaseProvider 接口 ----
 
     def models(self) -> Sequence[dict[str, Any]]:
-        return [
-            {
+        # context_window 必须暴露：聚合层 /v1/models 的窗口声明取 failover 链
+        # 里各通道的窗口，context_guard 转发前按它预检截断。此前只回 id/描述，
+        # 窗口恒为 None → 守卫完全跳过 → 超窗时上游直接 400 原样透传，客户端
+        # 表现为「用着用着到一定上下文突然不能用」（2026-11-25 实测定位）。
+        # models.json 用 context（输入窗口）/ max_output，统一成对外口径。
+        out: list[dict[str, Any]] = []
+        for m in self._models:
+            entry: dict[str, Any] = {
                 "id": m["id"],
                 "object": "model",
                 "created": 0,
                 "owned_by": self.id,
                 "description": str(m.get("description") or m["id"]),
             }
-            for m in self._models
-        ]
+            ctx = m.get("context")
+            if isinstance(ctx, int) and ctx > 0:
+                entry["context_window"] = ctx
+                entry["max_input"] = ctx
+            mo = m.get("max_output")
+            if isinstance(mo, int) and mo > 0:
+                entry["max_output"] = mo
+            out.append(entry)
+        return out
 
     async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
         """逐全量账号拉取上游目录，成功结果取并集并原子替换实例目录。

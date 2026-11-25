@@ -235,6 +235,9 @@ def test_never_listed_models_always_hidden(fake_fetch, monkeypatch):
 def test_discovered_entry_shape(fake_fetch, monkeypatch):
     from buddy_proxy.trae.intl_provider import TraeIntlProvider
 
+    # 关 Max 开关：本条钉的是目录字段拷贝形状（dev 窗口原样进 discovered），
+    # 与 Max 模式无关；开着会让 context_window 变成 max 档。Max 行为有专门用例。
+    monkeypatch.setattr("buddy_proxy.trae.max_mode.max_mode_enabled", lambda: False)
     _save_globals(monkeypatch, [_global_cred("u1", "U1")])
     fake_fetch({"u1": [_catalog("gpt-6.1-sol", ctx=272000)]})
     p = TraeIntlProvider()

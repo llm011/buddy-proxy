@@ -132,6 +132,7 @@ def fetch_cn_catalog(cred: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         ctx = entry.get("context_window_tokens")
         dev_ctx = ctx.get("dev") if isinstance(ctx, dict) else None
+        max_ctx = ctx.get("max") if isinstance(ctx, dict) else None
         entries.append({
             "name": name,
             # 对外 id 统一小写（与 MODEL_IDS / model_order 口径一致）；上游
@@ -139,7 +140,12 @@ def fetch_cn_catalog(cred: dict[str, Any]) -> list[dict[str, Any]]:
             "id": name.lower(),
             "display_name": display.get("display_name") or name,
             "rate": _rate_of(entry),
+            # context_window 保持 dev（默认档窗口）；max_window 是 Max 档窗口，
+            # max_mode 标该模型支不支持 Max。三者由 max_mode.effective_window
+            # 合成最终对外声明的窗口（见 max_mode.py 模块 docstring）。
             "context_window": dev_ctx if isinstance(dev_ctx, int) else None,
+            "max_window": max_ctx if isinstance(max_ctx, int) else None,
+            "max_mode": bool(display.get("max_mode")),
             "multimodal": bool(display.get("multimodal")),
         })
     if not entries:

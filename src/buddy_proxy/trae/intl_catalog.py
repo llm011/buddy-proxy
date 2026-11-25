@@ -41,6 +41,19 @@ _INTERNAL_CONFIG_NAMES = frozenset({
 })
 
 
+def _as_obj(value: Any) -> dict[str, Any]:
+    """``display_config`` 有时是 JSON 字符串、有时已是对象（与 CN 侧同口径）。"""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def fetch_intl_catalog(cred: dict[str, Any]) -> list[dict[str, Any]]:
     """用单个海外账号的 work 凭证拉取模型目录。
 
@@ -95,9 +108,15 @@ def fetch_intl_catalog(cred: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         ctx = entry.get("context_window_tokens")
         dev_ctx = ctx.get("dev") if isinstance(ctx, dict) else None
+        max_ctx = ctx.get("max") if isinstance(ctx, dict) else None
+        display = _as_obj(entry.get("display_config"))
         entries.append({
             "name": name,
+            # 同 CN：context_window 是 dev 默认档；max_window / max_mode 供
+            # max_mode.effective_window 合成对外声明的窗口（见 max_mode.py）。
             "context_window": dev_ctx if isinstance(dev_ctx, int) else None,
+            "max_window": max_ctx if isinstance(max_ctx, int) else None,
+            "max_mode": bool(display.get("max_mode")),
         })
     if not entries:
         # 目录为空大概率是上游改了响应形状（正常时至少 20+ 条），按失败处理

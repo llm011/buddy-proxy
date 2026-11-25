@@ -35,6 +35,9 @@ async def ui_settings_get(request: Request):
         # 前端拿去在开关旁边显示一行小字，让用户知道「开了均衡，但这个模型
         # 不会跟着轮转」。数据来自 core.load_balance（静态实测表 + 线上观测）。
         "load_balance_excluded": _load_balance_excluded(state),
+        # Trae Max 模式全局开关（默认开）：关闭后所有支持的模型回退 dev 窗口，
+        # 且不向上游注入 is_max_mode（见 buddy_proxy/trae/max_mode.py）。
+        "trae_max_mode": settings_mod.load_settings().get("trae_max_mode", True),
         "path": str(settings_mod.settings_path()),
     }
 
@@ -74,6 +77,8 @@ async def ui_settings_post(request: Request):
         update["default_provider"] = pid
     if "auto_checkin" in body:
         update["auto_checkin"] = bool(body["auto_checkin"])
+    if "trae_max_mode" in body:
+        update["trae_max_mode"] = bool(body["trae_max_mode"])
     if "checkin_time" in body:
         raw_time = str(body["checkin_time"] or "").strip()
         if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", raw_time):

@@ -59,7 +59,7 @@ def test_401_fails_over_to_next_account():
     calls: list[str] = []
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         acct = _CURRENT_WORK_ACCOUNT.get()
         calls.append(acct)
         if acct == accounts[0].id:
@@ -87,7 +87,7 @@ def test_403_fails_over_to_next_account():
     calls: list[str] = []
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         acct = _CURRENT_WORK_ACCOUNT.get()
         calls.append(acct)
         if acct == accounts[0].id:
@@ -134,7 +134,7 @@ def test_last_account_error_reraised():
     calls: list[str] = []
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         acct = _CURRENT_WORK_ACCOUNT.get()
         calls.append(acct)
         if acct == accounts[0].id:
@@ -157,7 +157,7 @@ def test_non_account_error_passthrough_no_failover():
     calls: list[str] = []
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         calls.append(_CURRENT_WORK_ACCOUNT.get())
         raise HTTPException(status_code=502, detail="channel down")
 
@@ -183,7 +183,7 @@ def test_anthropic_nonstream_error_fails_over():
     calls: list[str] = []
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         acct = _CURRENT_WORK_ACCOUNT.get()
         calls.append(acct)
         if acct == accounts[0].id:
@@ -325,7 +325,7 @@ def test_forward_4008_account_fails_over_to_funded_account():
     calls: list[str] = []
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         acct = _CURRENT_WORK_ACCOUNT.get()
         calls.append(acct)
         if acct == accounts[0].id:
@@ -361,7 +361,7 @@ def test_forward_reports_used_account_to_metrics():
     p = TraeProvider()
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         return _ok_response()
 
     meta: dict = {}
@@ -387,7 +387,7 @@ def test_failover_reports_final_account_to_metrics():
     p = TraeProvider()
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         acct = _CURRENT_WORK_ACCOUNT.get()
         if acct == accounts[0].id:
             raise HTTPException(status_code=401, detail="auth expired")
@@ -414,7 +414,7 @@ def test_forward_without_account_meta_holder_still_works():
     p = TraeProvider()
 
     async def fake_forward_once(body, protocol, original, requested_model,
-                                prompt, messages, tools, native, stream, agent_mode):
+                                prompt, messages, tools, native, stream, agent_mode, max_inject= False):
         return _ok_response()
 
     async def run():

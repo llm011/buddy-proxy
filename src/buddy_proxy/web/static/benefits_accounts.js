@@ -349,11 +349,33 @@ async function loadLoadBalanceState() {
     SESSION_ROTATION_ON = r.session_rotation || [];
     DISABLED_ACCOUNTS = r.disabled_accounts || [];
     LOAD_BALANCE_EXCLUDED = r.load_balance_excluded || {};
+    // Trae Max 模式开关值（缺省 true）；显示与否由模型页渲染按通道决定。
+    window.TRAE_MAX_MODE = r.trae_max_mode !== false;
+    const cb = document.getElementById('trae-max-mode');
+    if (cb) cb.checked = window.TRAE_MAX_MODE;
   } catch (e) {
     LOAD_BALANCE_ON = [];
     SESSION_ROTATION_ON = [];
     DISABLED_ACCOUNTS = [];
     LOAD_BALANCE_EXCLUDED = {};
+  }
+}
+
+/** 切换 Trae Max 模式全局开关（写 settings.json，热生效）。 */
+async function toggleTraeMaxMode(on) {
+  const cb = document.getElementById('trae-max-mode');
+  if (cb) cb.disabled = true;
+  try {
+    await api('/ui/api/settings', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({trae_max_mode: !!on})});
+    toast(on ? '已开启 Trae Max 模式（支持的模型走大窗口并注入 is_max_mode）'
+             : '已关闭 Trae Max 模式（回退默认窗口，不注入 is_max_mode）');
+  } catch (e) {
+    toast('保存失败: ' + e.message, true);
+    if (cb) cb.checked = !on;  // 回滚
+  } finally {
+    if (cb) cb.disabled = false;
   }
 }
 

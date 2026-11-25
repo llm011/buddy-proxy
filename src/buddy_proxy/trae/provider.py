@@ -31,6 +31,7 @@ from .config import (
     _NATIVE_TOOLS_ENABLED,
     _debug_dump,
     credit_multiplier,
+    map_model_for,
     model_tables,
     resolve_trae_region,
 )
@@ -44,6 +45,7 @@ from .credentials import (
     set_current_work_account,
 )
 from .leak_guard import _StreamLeakCleaner, _sanitize_agent_leak
+from . import max_mode as max_mode_mod
 from .native_tools import (
     _NativeStreamRejected,
     _NativeToolAccumulator,
@@ -302,9 +304,16 @@ class TraeProvider(BaseProvider):
         model_map, model_ids, _, supports_images = model_tables(self._region.key)
         result = []
         seen = set()
+        # Max 模式全局开关现读一次：管理页热改后下一次 /v1/models 即生效。
+        max_enabled = max_mode_mod.max_mode_enabled()
 
         def _entry(mid: str, **extra: Any) -> dict[str, Any]:
             info = self._discovered.get(mid) or {}
+            # 别名（MODEL_MAP external -> internal）跟随内部名的 Max 能力与窗口：
+            # 先解析到内部名（小写）再查 effective_window。
+            internal = map_model_for(self._region.key, mid).lower()
+            window, _inject = max_mode_mod.effective_window(
+                self._region.key, internal, discovered=info, enabled=max_enabled)
             out = {
                 "id": mid,
                 "object": "model",
@@ -324,8 +333,11 @@ class TraeProvider(BaseProvider):
             display = info.get("display_name")
             if display and display.lower() != mid.lower():
                 out["name"] = display
-            if info.get("context_window") is not None:
-                out["context_window"] = info["context_window"]
+            # 对外声明的上下文窗口由 Max 模式决策统一给出（开→max 窗，关→dev 窗，
+            # 不支持→不声明）；守卫按此窗口预检，必须与转发注入的 is_max_mode 一致
+            # （见 max_mode.py 模块 docstring 的强耦合不变量）。
+            if window is not None:
+                out["context_window"] = window
             out.update(extra)
             return out
 
@@ -433,6 +445,10 @@ class TraeProvider(BaseProvider):
             discovered[mid] = {
                 "display_name": e.get("display_name"),
                 "context_window": e.get("context_window"),
+                # max_mode / max_window：Max 模式真值（见 max_mode.py）。
+                # 目录没下发（上游形状变化）时为 None，models() 退化到静态兜底。
+                "max_mode": e.get("max_mode"),
+                "max_window": e.get("max_window"),
                 "multimodal": e.get("multimodal"),
                 "upstream": upstream_by_id.get(mid),
             }
@@ -513,9 +529,14 @@ class TraeProvider(BaseProvider):
         model: str,
         stream: bool,
         tools: list[dict[str, Any]] | None,
+        *, max_mode: bool = False,
     ) -> str:
-        """Provider 级发送钩子；PAT 子类覆盖后不会因重叠模型串到个人账号。"""
-        return _send_native_chat(native_msgs, model, stream, tools)
+        """Provider 级发送钩子；PAT 子类覆盖后不会因重叠模型串到个人账号。
+
+        ``max_mode`` 由 forward/collect 决策后下传（与 models() 声明窗口一致，
+        见 max_mode.py）；PAT 覆盖忽略它（服务账号通道独立计费口径）。
+        """
+        return _send_native_chat(native_msgs, model, stream, tools, max_mode=max_mode)
 
     def _keeps_native_error(self, model: str) -> bool:
         """PAT 子类覆写为 True，避免把其真实错误回落到个人文本通道。"""
@@ -525,12 +546,27 @@ class TraeProvider(BaseProvider):
         """是否使用原生传输；PAT 子类始终启用以隔离账号体系。"""
         return _NATIVE_TOOLS_ENABLED
 
+    def _max_inject(self, model: str) -> bool:
+        """本次请求是否应向上游注入 ``is_max_mode``。
+
+        与 ``models()`` 声明窗口共用 :func:`max_mode.effective_window` 同一决策
+        点（见 max_mode.py 模块 docstring 的强耦合不变量）：开关注入 max 档、
+        关闭或不支持则不注入。别名先按 MODEL_MAP 解析到内部名。
+        """
+        internal = map_model_for(self._region.key, model).lower()
+        _window, inject = max_mode_mod.effective_window(
+            self._region.key, internal,
+            discovered=self._discovered.get(internal),
+        )
+        return inject
+
     def _stream_native_events(
         self,
         native_msgs: list[dict[str, Any]],
         model: str,
         tools: list[dict[str, Any]] | None,
         stop: threading.Event,
+        *, max_mode: bool = False,
     ):
         """原生通道的增量事件源（真流式）。
 
@@ -540,9 +576,11 @@ class TraeProvider(BaseProvider):
         整段缓冲让客户端 TTFT 等于总耗时——metrics 里 ``TTFT/总耗时`` 中位数
         trae 0.998、codebuddy 0.308。改成增量后首字能立刻下发。
 
-        PAT 子类仍覆盖本方法走自己的账号体系（``pat.stream_pat_native``）。
+        PAT 子类仍覆盖本方法走自己的账号体系（``pat.stream_pat_native``），
+        忽略 ``max_mode``。
         """
-        return _stream_native_chat_events(native_msgs, model, tools, stop=stop)
+        return _stream_native_chat_events(native_msgs, model, tools, stop=stop,
+                                          max_mode=max_mode)
 
     # ---- 打卡 / 额度（/ui 管理页消费，均经 asyncio.to_thread 调用） ----
 
@@ -1091,6 +1129,11 @@ class TraeProvider(BaseProvider):
             {"messages": _native_messages(messages), "tools": tools}
             if native_mode else None
         )
+        # Max 模式：本请求是否向上游注入 is_max_mode。在 forward 顶部算一次
+        # （failover 换号时模型不变，决策也不变），统一下传给 _stream/_collect
+        # 里所有上游发送调用——保证窗口声明（models()）与实际注入一致，
+        # 见 max_mode.py 模块 docstring 的强耦合不变量。
+        max_inject = self._max_inject(requested_model)
 
         # ---- 多账号 failover：按顺位试可用 work 账号，账号级错误冷却换号 ----
         # PAT 子类（TraePatProvider）覆写了发送路径且有自己的账号体系，不该被卷
@@ -1100,7 +1143,7 @@ class TraeProvider(BaseProvider):
             try:
                 return await self._forward_once(
                     body, protocol, original, requested_model, prompt,
-                    messages, tools, native, stream, agent_mode,
+                    messages, tools, native, stream, agent_mode, max_inject,
                 )
             finally:
                 set_current_work_account(None)
@@ -1148,7 +1191,7 @@ class TraeProvider(BaseProvider):
                 try:
                     return await self._forward_once(
                         body, protocol, original, requested_model, prompt,
-                        messages, tools, native, stream, agent_mode,
+                        messages, tools, native, stream, agent_mode, max_inject,
                     )
                 except HTTPException as e:
                     last_exc = e
@@ -1203,7 +1246,7 @@ class TraeProvider(BaseProvider):
         self, body: dict[str, Any], protocol: str, original: dict[str, Any] | None,
         requested_model: str, prompt: Any, messages: list[dict[str, Any]],
         tools: list[dict[str, Any]], native: dict[str, Any] | None,
-        stream: bool, agent_mode: bool,
+        stream: bool, agent_mode: bool, max_inject: bool,
     ) -> StreamingResponse | JSONResponse:
         """单账号实际转发（forward 的 failover 循环体）。"""
         if stream:
@@ -1215,7 +1258,8 @@ class TraeProvider(BaseProvider):
                 include_usage = True
             raw_gen = self._stream(prompt, requested_model,
                                    sanitize=not agent_mode, tools=tools or None,
-                                   include_usage=include_usage, native=native)
+                                   include_usage=include_usage, native=native,
+                                   max_inject=max_inject)
             # 首事件闸门：预驱动**原始** _stream 到第一个非心跳事件再决定放行
             # 还是换号。trae 的 _stream 在等上游时会先吐「: heartbeat」保活——
             # 那是给下游超时看的，此刻 StreamingResponse 还没建、客户端一个字节
@@ -1244,7 +1288,7 @@ class TraeProvider(BaseProvider):
         # 若在这里吞成返回值，撞错的账号不会被冷却、也不会换下一个账号。
         collected = await asyncio.to_thread(
             self._collect, prompt, requested_model, not agent_mode, tools or None,
-            native,
+            native, max_inject,
         )
         if protocol == "anthropic":
             collected = chat_completion_to_anthropic_message(collected, original)
@@ -1255,8 +1299,15 @@ class TraeProvider(BaseProvider):
         tools: list[dict[str, Any]] | None = None,
         include_usage: bool = False,
         native: dict[str, Any] | None = None,
+        max_inject: bool = False,
     ) -> AsyncIterator[str]:
-        """把 Trae SSE 转成 OpenAI chat.completion.chunk 流。"""
+        """把 Trae SSE 转成 OpenAI chat.completion.chunk 流。
+
+        ``max_inject``：本次是否向上游注入 ``is_max_mode``（forward 决策后下传，
+        与 models() 声明窗口一致，见 max_mode.py）。读线程内所有上游发送调用
+        （native 增量 / native 非流式回落 / 文本协议兜底）都带同一值，保证
+        failover 回落时窗口口径不漂移。
+        """
         request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
         created = int(time.time())
         usage: dict[str, Any] | None = None
@@ -1321,7 +1372,8 @@ class TraeProvider(BaseProvider):
                             None if (not self._keeps_native_error(model)
                                      and _stream_rejected_recently(model))
                             else self._stream_native_events(
-                                native["messages"], model, native["tools"], _stop)
+                                native["messages"], model, native["tools"], _stop,
+                                max_mode=max_inject)
                         )
                         if event_source is not None:
                             try:
@@ -1358,11 +1410,11 @@ class TraeProvider(BaseProvider):
                             _pace_after_reject(model)
                             raw_text = self._send_native_request(
                                 native["messages"], model, stream=False,
-                                tools=native["tools"])
+                                tools=native["tools"], max_mode=max_inject)
                         else:
                             raw_text = self._send_native_request(
                                 native["messages"], model, stream=True,
-                                tools=native["tools"])
+                                tools=native["tools"], max_mode=max_inject)
                         used = True
                         if _native_rejected(raw_text) and not self._keeps_native_error(model):
                             # 上游会整体拒绝 chat_v3 流式请求（2026-10-07 实测：同
@@ -1386,7 +1438,7 @@ class TraeProvider(BaseProvider):
                                 _pace_after_reject(model)
                                 raw_text = self._send_native_request(
                                     native["messages"], model, stream=False,
-                                    tools=native["tools"])
+                                    tools=native["tools"], max_mode=max_inject)
                             if _native_rejected(raw_text):
                                 # 非流式也被拒（落在惩罚窗内）：安静等到窗外原路
                                 # 再试——文本协议对 GPT-6 系已死，能用非流式救回就
@@ -1398,7 +1450,7 @@ class TraeProvider(BaseProvider):
                                 _pace_after_reject(model)
                                 raw_text = self._send_native_request(
                                     native["messages"], model, stream=False,
-                                    tools=native["tools"])
+                                    tools=native["tools"], max_mode=max_inject)
                             if _native_rejected(raw_text):
                                 log.warning(
                                     "trae native nonstream rejected twice (4001), "
@@ -1407,7 +1459,7 @@ class TraeProvider(BaseProvider):
                                 _pace_after_reject(model)
                                 raw_text = send_trae_chat(
                                     messages, model, stream=False,
-                                    base_url=self._base_url)
+                                    base_url=self._base_url, max_mode=max_inject)
                                 used = False
                             else:
                                 used = True
@@ -1417,7 +1469,7 @@ class TraeProvider(BaseProvider):
                     else:
                         _ev_q.put(("raw", (send_trae_chat(
                             messages, model, stream=True,
-                            base_url=self._base_url), False)))
+                            base_url=self._base_url, max_mode=max_inject), False)))
                 except BaseException as e:  # noqa: BLE001 — 原样转主线程抛出
                     _ev_q.put(("error", e))
 
@@ -1617,8 +1669,13 @@ class TraeProvider(BaseProvider):
         self, messages: list[dict[str, Any]], model: str, sanitize: bool = True,
         tools: list[dict[str, Any]] | None = None,
         native: dict[str, Any] | None = None,
+        max_inject: bool = False,
     ) -> dict[str, Any]:
-        """非流式：聚合 Trae SSE 成完整响应。"""
+        """非流式：聚合 Trae SSE 成完整响应。
+
+        ``max_inject`` 同 :meth:`_stream`：本次是否注入 ``is_max_mode``，forward
+        决策后下传，贯穿 native 重试与文本协议兜底。
+        """
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
         usage_real: dict[str, Any] | None = None
@@ -1628,7 +1685,8 @@ class TraeProvider(BaseProvider):
                 # 同 _stream：最近有过 4001 就先安静等到窗外，别在惩罚窗内开火
                 _pace_after_reject(model)
             raw = self._send_native_request(
-                native["messages"], model, stream=False, tools=native["tools"])
+                native["messages"], model, stream=False, tools=native["tools"],
+                max_mode=max_inject)
             used_native = True
             if _native_rejected(raw) and not self._keeps_native_error(model):
                 log.warning(
@@ -1639,7 +1697,8 @@ class TraeProvider(BaseProvider):
                 _note_reject(model)
                 _pace_after_reject(model)
                 raw = self._send_native_request(
-                    native["messages"], model, stream=False, tools=native["tools"])
+                    native["messages"], model, stream=False, tools=native["tools"],
+                    max_mode=max_inject)
             if _native_rejected(raw) and not self._keeps_native_error(model):
                 log.warning(
                     "trae native nonstream rejected twice (4001), "
@@ -1647,13 +1706,13 @@ class TraeProvider(BaseProvider):
                 _note_reject(model)
                 _pace_after_reject(model)
                 raw = send_trae_chat(messages, model, stream=False,
-                                     base_url=self._base_url)
+                                     base_url=self._base_url, max_mode=max_inject)
                 used_native = False
             if used_native:
                 _note_native_ok(model)
         else:
             raw = send_trae_chat(messages, model, stream=False,
-                                 base_url=self._base_url)
+                                 base_url=self._base_url, max_mode=max_inject)
             used_native = False
         acc = _NativeToolAccumulator() if used_native else None
         for event, data in _parse_sse(raw):

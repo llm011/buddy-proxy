@@ -76,17 +76,19 @@ class TraePatProvider(TraeProvider):
         from .pat import start_token_keeper
         start_token_keeper()
 
-    def _send_native_request(self, native_msgs, model, stream, tools):
+    def _send_native_request(self, native_msgs, model, stream, tools, **kwargs):
         from .pat import send_pat_native
         # 请求级账号 holder：调用方线程带请求上下文副本（读线程经 copy_context、
-        # _collect 经 asyncio.to_thread），未设置（直连调用/测试）时为 None
+        # _collect 经 asyncio.to_thread），未设置（直连调用/测试）时为 None。
+        # ``max_mode`` 等 kwargs 被忽略：PAT 通道独立计费口径，不注入个人通道的
+        # Max 开关（PAT models_config 自带 max_input，窗口守卫走它）。
         return send_pat_native(native_msgs, model, stream, tools,
                                meta=ACCOUNT_META.get())
 
     def _keeps_native_error(self, model: str) -> bool:
         return True
 
-    def _stream_native_events(self, native_msgs, model, tools, stop):
+    def _stream_native_events(self, native_msgs, model, tools, stop, **kwargs):
         from .pat import stream_pat_native
         return stream_pat_native(native_msgs, model, tools, stop=stop,
                                  meta=ACCOUNT_META.get())
