@@ -40,6 +40,7 @@ from buddy_proxy.core.state import (
 )
 from buddy_proxy.core import settings as settings_mod
 from buddy_proxy.core import cooldown as cooldown_mod
+from buddy_proxy.core import context_guard
 from buddy_proxy.core.errors import is_local_dns_failure
 
 from .observability import _instrument
@@ -327,6 +328,27 @@ def _resolve_auto(state: Any, requested_model: str) -> Any:
     return None
 
 
+async def _maybe_truncate_for_window(
+    provider: Any, provider_id: str, model: str, body: dict[str, Any],
+) -> dict[str, Any]:
+    """按目标通道的真实上下文窗口预检，超了就截断 body 的 messages 副本。
+
+    只在本候选的 body 副本上动手——原 body 不动，failover 下一个更大窗口的
+    通道仍能拿到完整上下文（zcode 给全量 1M，落到 trae 才截到 116k）。
+    拿不到窗口 / 无可截内容时原样返回，绝不引入新失败（见 ``context_guard`` 模块
+    docstring）。截断会落一条 diagnostic，便于 /ui 图表排查「这行为什么被截过」。
+    """
+    window = await context_guard.get_window(provider, model)
+    if not window:
+        return body
+    new_body, dropped = context_guard.truncate_body_for_window(body, window)
+    if dropped:
+        diagnostic("context_truncated", provider=provider_id, model=model,
+                   window=window, dropped_messages=dropped,
+                   est_tokens=context_guard.estimate_body_tokens(new_body))
+    return new_body
+
+
 async def _dispatch_once(
     state: Any,
     provider_id: str,
@@ -337,7 +359,8 @@ async def _dispatch_once(
 ) -> StreamingResponse | JSONResponse:
     """把一次请求派发到**已解析**的 ``(provider_id, model)``。
 
-    只做单次派发：解析 provider 对象 → 停用/时段闸门 → ``ensure_auth`` → ``_instrument``。
+    只做单次派发：解析 provider 对象 → 停用/时段闸门 → 窗口预检截断 →
+    ``ensure_auth`` → ``_instrument``。
     **不**读 ``model_order``、不排序、不做换档——那些都在 :func:`forward_chat` 外层。
     **不吞任何异常**（``HTTPException`` 原样上抛），由调用方决定是否换下一档。
 
@@ -355,6 +378,8 @@ async def _dispatch_once(
     if provider_id == "codebuddy" or provider_id not in providers:
         # 默认 CodeBuddy 通道（不在 providers 里），对称封装，与其它 provider 一致
         _reject_if_disabled(state, "codebuddy", model)
+        body = await _maybe_truncate_for_window(
+            _default_codebuddy, "codebuddy", model, body)
         resp = await _instrument(
             state, _default_codebuddy.forward(body, protocol, original),
             provider_id="codebuddy", model_id=model, protocol=protocol,
@@ -373,6 +398,7 @@ async def _dispatch_once(
     _reject_if_disabled(state, provider.id, gate_model)
     diagnostic("provider_route", provider=provider.id, model=model, protocol=protocol)
     provider.ensure_auth()
+    body = await _maybe_truncate_for_window(provider, provider_id, model, body)
     resp = await _instrument(
         state, provider.forward(body, protocol, original),
         provider_id=provider.id, model_id=model, protocol=protocol,
