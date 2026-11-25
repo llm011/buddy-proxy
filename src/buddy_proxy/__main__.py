@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import pathlib
@@ -145,8 +146,42 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
             pairs.append((key, value))
     flush()
     for key, value in pairs:
-        if key and key not in os.environ:
+        if not key:
+            continue
+        if key not in os.environ:
             os.environ[key] = value
+            continue
+        # 已有值不覆盖是默认规则（shell 显式 export 应该赢过文件）。但有一类
+        # 事故不能沉默：环境里那个值是**坏的**（比如被截断成 "["），而 .env 里
+        # 是好的——坏值会一路赢下去，直到运行期某个 json.loads 才炸。
+        # 2026-11-25 就是这么挂的：shell 里残留 TRAE_PAT_BEARER_PROFILES="["，
+        # .env 里的 10 个账号全被挡住，报错只说「不是合法 JSON」，没人看得出
+        # 问题出在 shell 而不是文件。这里只在「环境值坏 + 文件值好」时反超，
+        # 两边都坏或都好都维持原有语义。
+        existing = os.environ[key]
+        if existing == value or _looks_well_formed(existing) or not _looks_well_formed(value):
+            continue
+        _log.warning(
+            "%s: 环境变量里的值不是合法 JSON（长度 %d），改用 .env 里的（长度 %d）",
+            key, len(existing), len(value),
+        )
+        os.environ[key] = value
+
+
+def _looks_well_formed(value: str) -> bool:
+    """判断一个「看起来像 JSON」的配置值是否真的能解析。
+
+    非 JSON 形态的值（普通字符串、路径、开关）一律视为没问题——本函数只用来
+    区分「结构化配置被弄坏了」，不是通用校验器。
+    """
+    text = value.strip()
+    if not text or text[0] not in "[{":
+        return True
+    try:
+        json.loads(text)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 async def _qoder_model_refresh_loop(provider) -> None:

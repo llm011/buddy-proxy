@@ -33,6 +33,11 @@ def _fake_source(monkeypatch, rows, counter=None):
     mod = SimpleNamespace(accounts_status=accounts_status)
     monkeypatch.setitem(sys.modules, "buddy_proxy.fakeprov.failover", mod)
     monkeypatch.setattr(queries, "_ACCOUNT_NAME_SOURCES", ("fakeprov",))
+    # PAT 段在 _account_name_map 里是**无条件**读取的（不走 _ACCOUNT_NAME_SOURCES），
+    # 而它读的是 TRAE_PAT_BEARER_PROFILES 环境变量。开发机上配了 10 个真实账号时，
+    # 这些名字会混进断言里，测试就红了——必须显式清空，测试才对环境无依赖。
+    from buddy_proxy.trae import pat as pat_mod
+    monkeypatch.setattr(pat_mod, "accounts_status", lambda **_: {"accounts": []})
 
 
 def test_account_name_map_resolves_alias_chain(monkeypatch):
@@ -61,6 +66,9 @@ def test_account_name_map_swallows_broken_channel(monkeypatch):
     boom = SimpleNamespace(accounts_status=lambda: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setitem(sys.modules, "buddy_proxy.fakeprov.failover", boom)
     monkeypatch.setattr(queries, "_ACCOUNT_NAME_SOURCES", ("fakeprov",))
+    # 同上：PAT 段无条件读环境变量，必须隔离，否则本机配了账号时这条必然红。
+    from buddy_proxy.trae import pat as pat_mod
+    monkeypatch.setattr(pat_mod, "accounts_status", lambda **_: {"accounts": []})
     assert queries._account_name_map() == {}
 
 

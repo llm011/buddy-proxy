@@ -87,7 +87,13 @@ def _load_profiles() -> tuple[PatProfile, ...]:
         try:
             parsed = json.loads(raw)
         except (TypeError, json.JSONDecodeError) as exc:
-            raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 不是合法 JSON") from exc
+            # 带上「值有多长、从哪来」，否则用户看到「不是合法 JSON」只会去翻
+            # .env——而 2026-11-25 那次真正的问题在 shell 里残留的坏值把 .env
+            # 挡住了。长度 0/1 基本就是空值或半截括号，能直接指路。
+            raise _PatConfigError(
+                f"TRAE_PAT_BEARER_PROFILES 不是合法 JSON（当前值长度 {len(raw or '')}；"
+                "若 .env 里配置正常，检查 shell/服务环境里是否残留同名变量把它挡住了）"
+            ) from exc
         if not isinstance(parsed, list) or not parsed:
             raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 必须是非空 JSON 数组")
         if len(parsed) > _MAX_PROFILES:
@@ -239,7 +245,10 @@ def import_from_ide(
         try:
             items = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 不是合法 JSON") from exc
+            raise _PatConfigError(
+                f"TRAE_PAT_BEARER_PROFILES 不是合法 JSON（当前值长度 {len(raw)}；"
+                "若 .env 里配置正常，检查 shell/服务环境里是否残留同名变量把它挡住了）"
+            ) from exc
         if not isinstance(items, list):
             raise _PatConfigError("TRAE_PAT_BEARER_PROFILES 必须是非空 JSON 数组")
     else:
