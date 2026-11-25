@@ -26,7 +26,7 @@ function renderDaily() {
     const y = base - (base - padT) * i / 4;
     const v = max * i / 4;
     const lbl = (Number.isInteger(v) && v < 10) || v >= 10 ? Math.round(v) : v.toFixed(1);
-    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="var(--border)" stroke-width="1"/>` +
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-4}" y2="${y}" stroke="var(--line)" stroke-width="1"/>` +
            `<text x="${padL-6}" y="${y+4}" fill="var(--muted)" font-size="10" text-anchor="end">${lbl}</text>`;
   }
   daily.forEach((d, i) => {
@@ -37,7 +37,7 @@ function renderDaily() {
         const h = n * scale;
         const y = base - h;
         svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${pcolor(filt)}" rx="2"/>` +
-               `<text x="${x + bw/2}" y="${Math.max(10, y - 4)}" fill="var(--fg)" font-size="10" font-weight="600" text-anchor="middle">${n}</text>`;
+               `<text x="${x + bw/2}" y="${Math.max(10, y - 4)}" fill="var(--text)" font-size="10" font-weight="600" text-anchor="middle">${n}</text>`;
       }
     } else {
       // 堆叠：自下而上逐通道画段
@@ -49,7 +49,7 @@ function renderDaily() {
         svg += `<rect x="${x}" y="${y}" width="${bw}" height="${h}" fill="${pcolor(p)}" rx="2"/>`;
       }
       if (d.total) {
-        svg += `<text x="${x + bw/2}" y="${Math.max(10, y - 4)}" fill="var(--fg)" font-size="10" font-weight="600" text-anchor="middle">${d.total}</text>`;
+        svg += `<text x="${x + bw/2}" y="${Math.max(10, y - 4)}" fill="var(--text)" font-size="10" font-weight="600" text-anchor="middle">${d.total}</text>`;
       }
     }
     if (valOf(d)) svg += `<text x="${x + bw/2}" y="${H - 6}" fill="var(--muted)" font-size="9.5" text-anchor="middle">${d.date.slice(5)}</text>`;

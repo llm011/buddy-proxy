@@ -894,7 +894,7 @@ function _renderZcodeResetModalBody(rt, msgHtml) {
   const fhCount = (rt && rt.five_hour_count) || 0;
   const wkCount = (rt && rt.week_count) || 0;
   const row = (label, rtype, count, expireAt) => `
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--border,rgba(128,128,128,0.25));border-radius:8px;margin-bottom:10px">
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--line,rgba(128,128,128,0.25));border-radius:8px;margin-bottom:10px">
       <div style="flex:1;min-width:0">
         <div style="font-weight:600;margin-bottom:4px">${label} <span class="tag">${count} 张可用</span></div>
         <div style="font-size:12px;opacity:0.75">${count > 0 ? '最早过期：' + _formatResetExpire(expireAt) : '当前无可用重置券'}</div>
