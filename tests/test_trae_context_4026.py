@@ -121,3 +121,91 @@ def test_discovered_max_window_is_capped_too():
     win, _ = max_mode_mod.effective_window(
         "cn", "glm-5.4", discovered=discovered, enabled=True)
     assert win == max_mode_mod.MEASURED_MAX_WINDOW
+
+
+def test_all_accounts_overflowed_tries_each_once_and_reraises(_clear_state):
+    """上下文太大时**所有**账号都会 4026——这是 4026 最常见的场景。
+
+    选号的「全被跳过则至少留一个」兜底只保证不误报「无可用账号」，不能变成
+    每轮把 N 个账号挨个重打：这里锁定每轮每个账号**只试一次**，并如实抛出
+    4026 让 DSH 去压缩。本机真实账号会混进 list_accounts，这里隔离掉。
+    """
+    accounts = [save_account_cred(_cred(u)) for u in ("t1", "t2", "t3")]
+    ids = {a.id for a in accounts}
+    isolated = [a for a in prov.failover.list_accounts() if a.id in ids]
+    p = TraeProvider()
+
+    def make():
+        calls: list[str] = []
+
+        async def fake_forward_once(*a, **k):
+            calls.append(_CURRENT_WORK_ACCOUNT.get())
+            raise _ctx_exc()
+
+        async def run():
+            with mock.patch.object(prov.failover, "list_accounts", return_value=isolated), \
+                 mock.patch.object(TraeProvider, "_forward_once", side_effect=fake_forward_once):
+                return await p.forward(
+                    {"model": "glm-5.4", "messages": [{"role": "user", "content": "hi"}]},
+                    "openai")
+        return run, calls
+
+    for round_no in (1, 2):
+        run, calls = make()
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(run())
+        assert prov._is_context_overflow(ei.value) is True, "全部 4026 时要如实抛出"
+        assert sorted(calls) == sorted(ids), (
+            f"第 {round_no} 轮：每个账号只试一次，实际 {calls}")
+    assert all(prov._entitlement_skipped(a, "glm-5.4") for a in ids)
+
+
+def test_overflow_skip_expires_quickly(_clear_state):
+    """4026 的跳过 TTL 是 120s（短于 1005 的 600s）：DSH 压缩后很快重试短请求。"""
+    accounts = [save_account_cred(_cred(u)) for u in ("u1",)]
+    prov._mark_entitlement_skip(accounts[0].id, "glm-5.4",
+                                ttl=prov._CONTEXT_OVERFLOW_SKIP_TTL_S)
+    left = prov._entitlement_skip[(accounts[0].id, "glm-5.4")] - time.time()
+    assert 100 < left <= prov._CONTEXT_OVERFLOW_SKIP_TTL_S
+    assert prov._CONTEXT_OVERFLOW_SKIP_TTL_S < prov._ENTITLEMENT_SKIP_TTL_S
+
+
+def test_stream_gate_turns_real_4026_frame_into_rotation(_clear_state):
+    """流式路径：上游 ``event:error`` 帧 → _stream 的 error_chunk → 闸门识别换号。
+
+    这是 DSH 实际走的路径（stream=true）。帧形态取自 2026-11-26 实抓。
+    """
+    frame = ('data: {"error": {"message": "Trae 错误: We\'re sorry, your context '
+             'length has exceeded the maximum limit. (code: 4026)", '
+             '"type": "upstream_error", "code": 4026}}')
+    exc = prov._account_error_from_frame(frame)
+    assert exc is not None, "闸门必须把它当账号级错误，不能放行成假成功"
+    assert exc.status_code == 403
+    assert prov._is_context_overflow(exc) is True
+
+
+def test_stream_4026_rotates_to_next_account(_clear_state):
+    accounts = [save_account_cred(_cred(u)) for u in ("s1", "s2")]
+    p = TraeProvider()
+    calls: list[str] = []
+
+    def fake_stream(*a, **k):
+        acct = _CURRENT_WORK_ACCOUNT.get()
+        calls.append(acct)
+        frame = ('data: {"error": {"message": "ctx too long", '
+                 '"type": "upstream_error", "code": 4026}}')
+        if acct == accounts[0].id:
+            return iter([frame])
+        return iter(['data: {"choices": [{"delta": {"content": "ok"}}]}\n\n',
+                     "data: [DONE]\n\n"])
+
+    async def run():
+        with mock.patch.object(TraeProvider, "_stream", side_effect=fake_stream):
+            return await p.forward(
+                {"model": "glm-5.4", "stream": True,
+                 "messages": [{"role": "user", "content": "hi"}]}, "openai")
+
+    resp = asyncio.run(run())
+    assert calls == [accounts[0].id, accounts[1].id], "流式 4026 也必须换号"
+    assert resp.status_code == 200
+    assert failover.cooldown_left(accounts[0].id)[0] == 0, "不整账号冷却"
