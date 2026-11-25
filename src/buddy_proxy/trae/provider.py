@@ -553,7 +553,7 @@ class TraeProvider(BaseProvider):
         点（见 max_mode.py 模块 docstring 的强耦合不变量）：开关注入 max 档、
         关闭或不支持则不注入。别名先按 MODEL_MAP 解析到内部名。
         """
-        internal = map_model_for(self._region.key, model).lower()
+        internal = _internal_model_key(self._region.key, model)
         _window, inject = max_mode_mod.effective_window(
             self._region.key, internal,
             discovered=self._discovered.get(internal),
@@ -1157,6 +1157,16 @@ class TraeProvider(BaseProvider):
         # 负载均衡（额度页开关）：只改「先试谁」，region/冷却过滤已完成。
         accounts = lb_mod.reorder(_lb_state(), self.id, accounts,
                                   model=str(requested_model or "") or None)
+        # 剔除对本模型「套餐权益不足」(1005) 的账号（见 _mark_entitlement_skip）。
+        # 至少保留一个：全被跳过时宁可重试（TTL 可能已过期 / 套餐可能已升级），
+        # 也不落进下面「无可用账号」的 429/401 误报。
+        # requested_model 可能为 None（见 _internal_model_key），统一走 helper 兜底。
+        entitlement_model = _internal_model_key(self._region.key, requested_model)
+        if len(accounts) > 1:
+            eligible = [a for a in accounts
+                        if not _entitlement_skipped(a.id, entitlement_model)]
+            if eligible:
+                accounts = eligible
         if not accounts:
             other = failover.available_accounts()
             if other:
@@ -1201,9 +1211,15 @@ class TraeProvider(BaseProvider):
                     # 冷却——下一轮请求还会先打它、再白吃一次同样的失败才轮到
                     # 别人。其余错误（502 通道级/业务 4xx）换号无意义，直接透传。
                     if self._is_account_error(e):
-                        failover.mark_cooldown(
-                            acct.id, quota=e.status_code == 429,
-                            reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
+                        if _is_entitlement_error(e):
+                            # 1005 是「账号+模型」级权益不足：换号有意义，但只记
+                            # 本模型跳过、**不**整账号冷却——该账号对其他模型仍可
+                            # 服务（免费号不能用 glm-5.4，glm-5.3 照常）。
+                            _mark_entitlement_skip(acct.id, entitlement_model)
+                        else:
+                            failover.mark_cooldown(
+                                acct.id, quota=e.status_code == 429,
+                                reason=f"HTTP {e.status_code}: {str(e.detail)[:120]}")
                         if i < len(accounts) - 1:
                             continue
                     raise
@@ -1718,14 +1734,12 @@ class TraeProvider(BaseProvider):
         for event, data in _parse_sse(raw):
             if event == "error":
                 # 状态码按**上游码分类**（额度 4008/4011/4021/4031 → 429、
-                # 鉴权 1001/4010 → 401），不能一律 502——forward 的 failover
-                # 循环只认 401/429 为账号级错误，额度是账号级的，A 号撞 4008
-                # 时 B 号可能还有，一律 502 会让 failover 直接透传不换号
-                # （2026-10-06 实测：双账号一空一满，测试按钮直接报 4008）。
-                raise HTTPException(
-                    status_code=_sse_error_status((data or {}).get("code")),
-                    detail=_trae_error_text(data),
-                )
+                # 鉴权 1001/4010 → 401、权益 1005 → 403），不能一律 502——forward
+                # 的 failover 循环只认 401/403/429 为账号级错误，额度是账号级的，
+                # A 号撞 4008 时 B 号可能还有，一律 502 会让 failover 直接透传不
+                # 换号（2026-10-06 实测：双账号一空一满，测试按钮直接报 4008）。
+                # 原始码挂到异常上：1005 要按「账号+模型」跳过而非整账号冷却。
+                raise _sse_error_exception(data)
             if event == "token_usage":
                 u = data or {}
                 try:
@@ -1892,6 +1906,70 @@ def _gate_first_event(gen: Any) -> "_GatedStream | BaseException":
 #: ``TraeProvider._is_account_error`` 一致）。
 _ACCOUNT_ERROR_CODES = (401, 403, 429)
 
+#: 1005「套餐权益不足」是**账号+模型**级：免费号不能用 glm-5.4，但 glm-5.3 照常可
+#: 服务。换号有意义（付费号可能有权益），所以 ``_sse_error_status`` 把它归 403 让
+#: failover 换号；但它**不能**走 ``failover.mark_cooldown`` 的整账号冷却——那会把该
+#: 账号对其他模型的服务一起误伤。这里按 (account_id, 模型) 记跳过，TTL 到期重试
+#: （套餐可能升级）。键用 MODEL_MAP 解析后的内部名，别名请求也能命中同一条跳过。
+_ENTITLEMENT_SSE_CODE = 1005
+_ENTITLEMENT_SKIP_TTL_S = 600.0
+_entitlement_skip: dict[tuple[str, str], float] = {}
+_entitlement_skip_lock = threading.Lock()
+
+
+def _attach_sse_code(exc: HTTPException, code: Any) -> HTTPException:
+    """把上游 SSE 原始码挂到异常上（forward 据 ``trae_sse_code`` 识别 1005 权益类）。"""
+    try:
+        exc.trae_sse_code = int(code)  # type: ignore[attr-defined]
+    except (TypeError, ValueError):
+        pass
+    return exc
+
+
+def _sse_error_exception(data: dict[str, Any]) -> HTTPException:
+    """上游 SSE 错误事件 → HTTPException（状态按 ``_sse_error_status``，保留原始码）。"""
+    code = (data or {}).get("code")
+    return _attach_sse_code(
+        HTTPException(status_code=_sse_error_status(code), detail=_trae_error_text(data)),
+        code,
+    )
+
+
+def _is_entitlement_error(e: HTTPException) -> bool:
+    """该异常是否为 1005 权益类（换号、但不整账号冷却）。"""
+    return getattr(e, "trae_sse_code", None) == _ENTITLEMENT_SSE_CODE
+
+
+def _internal_model_key(region_key: str, requested: Any) -> str:
+    """外部模型名 → 内部键（MODEL_MAP 解析后小写），供选号/Max 决策统一使用。
+
+    ``requested`` 可能为 None：``forward`` 里是 ``body.get("model", "auto")``，``.get``
+    的默认值只在**键缺失**时生效，客户端显式发 ``"model": null`` 就会拿到 None；
+    而 ``map_model_for`` 对 None 原样透传，直接 ``.lower()`` 会 AttributeError。
+    这里统一 ``str(x or "")`` 兜底，所有需要「内部模型键」的地方都走它，别各写一份。
+    """
+    return map_model_for(region_key, str(requested or "")).lower()
+
+
+def _mark_entitlement_skip(account_id: str, model: str) -> None:
+    """记「该账号对本模型套餐权益不足」，TTL 内选号时跳过它。"""
+    key = (str(account_id), str(model or "").strip().lower())
+    with _entitlement_skip_lock:
+        _entitlement_skip[key] = time.time() + _ENTITLEMENT_SKIP_TTL_S
+
+
+def _entitlement_skipped(account_id: str, model: str) -> bool:
+    """该账号是否因 1005 被记为本模型不可用（过期条目顺手清掉）。"""
+    key = (str(account_id), str(model or "").strip().lower())
+    with _entitlement_skip_lock:
+        until = _entitlement_skip.get(key)
+        if until is None:
+            return False
+        if time.time() >= until:
+            _entitlement_skip.pop(key, None)
+            return False
+        return True
+
 
 def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":
     """从单个 SSE 帧里识别账号级错误，还原成 HTTPException（None = 放行）。
@@ -1921,16 +1999,18 @@ def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":
         code = int(err.get("code"))
     except (TypeError, ValueError):
         return None
+    detail = str(err.get("message") or "trae upstream error")
     # 两种 code 形态都认：HTTP 形态（``_stream`` 把自己的 HTTPException
     # yield 成 error chunk 时传的是 e.status_code）与上游 SSE 码形态
     # （``event:error`` 帧原样透传的 4008/4011 等）。后者此前不认——额度
     # 错误放行成假成功，闸门形同虚设（2026-10-06 双账号实测撞上）。
     if code in _ACCOUNT_ERROR_CODES:
-        return HTTPException(status_code=code, detail=str(err.get("message") or "trae upstream error"))
+        return HTTPException(status_code=code, detail=detail)
     status = _sse_error_status(code)
     if status == 502:
         return None
-    return HTTPException(status_code=status, detail=str(err.get("message") or "trae upstream error"))
+    # 保留上游原始码：1005 权益类在 forward 里按「账号+模型」跳过，不整账号冷却。
+    return _attach_sse_code(HTTPException(status_code=status, detail=detail), code)
 
 
 def _replay_prefixed(buffered: list[str], gen: Any) -> Any:

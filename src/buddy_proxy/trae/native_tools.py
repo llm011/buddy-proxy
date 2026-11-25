@@ -178,19 +178,20 @@ def _build_native_body(
     # Max 模式请求级开关（见 max_mode.py）：仅对支持的模型、全局开关开启时注入。
     if max_mode:
         body["is_max_mode"] = True
-    # ``config_name`` 是 Work 通道（traework2api）要求 model/config_name 成对的老约定，
-    # 但**不是所有模型都吃它**——2026-11-24 实测 glm-5.4：
+    # ``config_name`` 是 Work 通道（traework2api）要求 model/config_name 成对的老约定。
     #
-    #   带 config_name="glm-5.4"  → SSE event:error code 1005（extra.plan=2）
-    #   带 config_name="GLM-5.4"  → SSE event:error code 4001 param is invalid
-    #   不带 config_name          → 正常出流
+    # 【2026-11-26 纠正：glm-5.4 必须带 config_name，此前把它排除是错的】
+    # 11-24 的结论「带 config_name → 1005，不带 → 正常出流」是在**只看是否出流**的
+    # 口径下得出的——它漏掉了关键事实：不带 config_name 时网关**认不出 glm-5.4**，
+    # 静默回落到默认模型 Seed-2.1-Turbo（账单记成 Seed、按 Seed 计费、分词器指纹
+    # 也是 Seed 的：同一 prompt 90 tokens vs 真 GLM 的 54），等于所有账号都被偷换。
+    # 带上 config_name 才路由到真 GLM-5.4；此时 1005 只在**套餐不含该模型**的账号
+    # 上出现（免费号），付费号 200 且是真 GLM——这是账号权益问题，不是字段问题，
+    # 由 forward 的 failover 按「账号+模型」跳过（provider._mark_entitlement_skip），
+    # 绝不靠去掉字段来「修好」。
     #
-    # 而 glm-5.3 / glm-5.3-flash 带它照常 200。也就是说 5.4 是新路由，不认这个
-    # 历史字段，给了反而被当成「另一个模型」判成套餐不支持（1005）。
-    #
-    # 这个坑极难从现象反推：1005 的官方文案是「套餐权益不足」，看起来像账号权限
-    # 问题——但四个 CN 账号（含付费的 Ethan1）全都会中，且**同一个账号**去掉这个
-    # 字段就立刻 200。所以按模型决定带不带，而不是一律带。
+    # 验证方法（别再只看是否出流）：同一 prompt 比对 prompt_tokens，或查官方消耗
+    # 明细里记的模型名——见 trae/config.py 的 MODEL_IDS 注释。
     if not _omits_config_name(trae_model):
         body["config_name"] = trae_model
     tools_payload = _native_tools_payload(tools)
@@ -200,9 +201,11 @@ def _build_native_body(
     return body
 
 
-#: 不吃 ``config_name`` 字段的模型（小写比对）。新增模型若实测 1005/4001 且
-#: 去掉该字段就好转，加到这里——别改成「一律不带」，那是拿老模型做实验。
-_NATIVE_NO_CONFIG_NAME: frozenset[str] = frozenset({"glm-5.4"})
+#: 不吃 ``config_name`` 字段的模型（小写比对）。**当前为空**——glm-5.4 曾在这里，
+#: 2026-11-26 证实那是误判（见 _build_native_body 注释）：不带它会被静默换成
+#: Seed。新增模型若怀疑不吃 config_name，必须用**分词器指纹 / 官方账单模型名**验证
+#: 后端真身，不能只看「是否出流」；确认 4001 且去掉就好转再加进来。
+_NATIVE_NO_CONFIG_NAME: frozenset[str] = frozenset()
 
 
 def _omits_config_name(trae_model: str) -> bool:
