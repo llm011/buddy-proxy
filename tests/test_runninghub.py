@@ -6,7 +6,7 @@ import asyncio
 import json
 import stat
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import pytest
 
@@ -50,7 +50,8 @@ def _wf_store_with(billing: str) -> dict:
     })
 
 
-def test_run_learns_wallet_billing_from_upstream_reject(monkeypatch: pytest.MonkeyPatch):
+def test_run_learns_wallet_billing_from_upstream_reject(isolated_store: Path,
+                                                        monkeypatch: pytest.MonkeyPatch):
     """标「未知」的工作流被上游以余额不足拒掉 → 改标「钱包余额」、402、带回最新列表。
 
     这是计费类型**唯一**可靠的来源：apiCallDemo 没有计费字段，导入时只能标未知；
@@ -80,14 +81,21 @@ def test_run_learns_wallet_billing_from_upstream_reject(monkeypatch: pytest.Monk
     assert r.status_code == 402, r.text
     msg = r.json()["detail"]["error"]["message"]
     assert "钱包余额" in msg and "remainMoney" in msg
-    # 本地标签已改写
-    learned = store.list_workflows()[0]["billingType"]
-    assert learned == "钱包余额"
+    # 本地标签已改写，且记下了是哪种账号判出来的（拒绝是 per-account 的）
+    learned = store.list_workflows()
+    assert len(learned) == 1, "必须用隔离 store：写进真实 ~/.buddy-proxy 会覆盖用户的工作流"
+    learned = learned[0]
+    assert learned["billingType"] == "钱包余额"
+    assert learned["billingLearnedFrom"] == {"apiType": "SHARED", "accountId": ANY}
+    assert len(learned["nodeInfoList"]) == 0, "学计费类型只改标签，不能动参数列表"
     # 错误体顺带带回最新列表，前端据此刷新卡片
     assert r.json()["detail"]["workflows"][0]["billingType"] == "钱包余额"
+    # 文案是给 escapeHtml+innerHTML 用的，不能带 markdown 星号
+    assert "**" not in msg
 
 
-def test_run_preflight_blocks_wallet_workflow_without_hitting_upstream(monkeypatch: pytest.MonkeyPatch):
+def test_run_preflight_blocks_wallet_workflow_without_hitting_upstream(isolated_store: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch):
     """已标「钱包余额」+ 钱包为 null/0 → 预检 402，**一次上游都不打**。"""
     from unittest.mock import AsyncMock
 

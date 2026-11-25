@@ -1733,10 +1733,18 @@ async def ui_runninghub_workflows_run(request: Request):
         log.warning("runninghub 工作流 %s 提交失败 code=%s: %s",
                     webapp_id, exc.code, str(exc)[:200])
         if learned and wf and billing != learned:
-            rh_store.rename_workflow(webapp_id, str(wf.get("name") or webapp_id), learned)
-            hint = ("该工作流实际扣**钱包余额**（上游 NOT_ENOUGH_BALANCE），已自动改标；"
+            # 记下「是哪种账号判出来的」：标签存在工作流上，但「余额不足」是**账号**的
+            # 拒绝——SHARED 号只认钱包，同一个开源工作流换消费级号可能金币就能跑。
+            # 预检暂不按它分流（手动 ✎ 可改回），留字段给后续做多账号时用。
+            updated = dict(wf)
+            updated["billingType"] = learned
+            updated["billingLearnedFrom"] = {
+                "apiType": status_info.get("apiType"), "accountId": aid,
+            }
+            rh_store.upsert_workflow(updated)
+            hint = ("该工作流实际扣「钱包余额」（上游 NOT_ENOUGH_BALANCE），已自动改标；"
                     if learned == "钱包余额" else
-                    "该工作流实际扣**RH 金币**（上游提示金币不足），已自动改标；")
+                    "该工作流实际扣「RH 金币」（上游提示金币不足），已自动改标；")
             hint += (f"当前 remainMoney={money}、remainCoins={coins:.0f}。"
                      + ("请充值钱包或切换账号。" if learned == "钱包余额" else "请获取金币或切换账号。"))
         else:
