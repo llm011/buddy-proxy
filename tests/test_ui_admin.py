@@ -2323,7 +2323,7 @@ def test_load_dotenv_overrides_malformed_env_json(tmp_path, monkeypatch, caplog)
 
     value = os.environ["TRAE_PAT_BEARER_PROFILES"]
     assert json.loads(value) == [{"id": "a", "bearer": "good"}], ".env 的好值必须赢"
-    assert any("不是合法 JSON" in r.getMessage() for r in caplog.records)
+    assert any("不可用" in r.getMessage() for r in caplog.records)
 
 
 def test_load_dotenv_keeps_valid_env_value(tmp_path, monkeypatch):
@@ -2359,6 +2359,35 @@ def test_load_dotenv_non_json_values_unaffected(tmp_path, monkeypatch):
 
     assert os.environ["SOME_PATH"] == "/from/shell"
     assert os.environ["SOME_FLAG"] == "1"
+
+
+def test_load_dotenv_overrides_empty_container_env_value(tmp_path, monkeypatch, caplog):
+    """环境里是 ``[]``/``{}`` 这类「合法但等于没配」的值 → 也要让 .env 赢。
+
+    只判 ``json.loads`` 能过是不够的：``[]`` 语法合法，但 PAT 要求非空数组，
+    环境里残留一个 ``[]`` 同样会把 .env 里 10 个账号压住、通道 503——同一个
+    bug 换个壳。以 ``[``/``{`` 开头的空容器一律视同坏值。
+    """
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        'TRAE_PAT_BEARER_PROFILES=[{"id":"a","bearer":"good"}]\n', encoding="utf-8")
+    for empty in ("[]", "{}"):
+        monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", empty)
+        with caplog.at_level(logging.WARNING):
+            m._load_dotenv(env_file)
+        assert json.loads(os.environ["TRAE_PAT_BEARER_PROFILES"]) == [
+            {"id": "a", "bearer": "good"}], f"环境值 {empty!r} 不该压住文件里的配置"
+
+
+def test_load_dotenv_empty_container_still_wins_when_file_also_empty(tmp_path, monkeypatch):
+    """两边都是空容器时不折腾：维持「环境变量赢」。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text("TRAE_PAT_BEARER_PROFILES=[]\n", encoding="utf-8")
+    monkeypatch.setenv("TRAE_PAT_BEARER_PROFILES", "{}")
+
+    m._load_dotenv(env_file)
+
+    assert os.environ["TRAE_PAT_BEARER_PROFILES"] == "{}"
 
 
 def test_pat_config_error_points_at_env_shadowing(monkeypatch):

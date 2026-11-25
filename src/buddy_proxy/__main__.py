@@ -159,29 +159,55 @@ def _load_dotenv(path: pathlib.Path | str | None = None) -> None:
         # 问题出在 shell 而不是文件。这里只在「环境值坏 + 文件值好」时反超，
         # 两边都坏或都好都维持原有语义。
         existing = os.environ[key]
-        if existing == value or _looks_well_formed(existing) or not _looks_well_formed(value):
+        if existing == value or _usable(existing, file_value=value):
             continue
         _log.warning(
-            "%s: 环境变量里的值不是合法 JSON（长度 %d），改用 .env 里的（长度 %d）",
+            "%s: 环境变量里的值不可用（长度 %d），改用 .env 里的（长度 %d）",
             key, len(existing), len(value),
         )
         os.environ[key] = value
 
 
-def _looks_well_formed(value: str) -> bool:
-    """判断一个「看起来像 JSON」的配置值是否真的能解析。
+def _usable(env_value: str, *, file_value: str) -> bool:
+    """环境里的值是否可以压住 ``.env`` 里的同名配置。
 
-    非 JSON 形态的值（普通字符串、路径、开关）一律视为没问题——本函数只用来
-    区分「结构化配置被弄坏了」，不是通用校验器。
+    默认是「可以」（显式 export 优先于文件）。只有一种情况反超：**文件里是一份
+    像样的结构化配置，而环境里的那份明显是坏的**。
+
+    什么算「坏」：以 ``[``/``{`` 开头却解析不了（半截括号），或解析出来是空壳
+    （``[]`` / ``{}`` / ``null``）。这三种都会让 PAT 这类「非空数组」配置 503，
+    同时又把文件里的好配置压住。
+
+    什么不算坏：普通字符串/路径/开关——它们可能是「故意覆盖成别的形态」，
+    不在本判定范围内，维持环境变量优先。
+
+    2026-11-25 事故：shell 里残留 ``TRAE_PAT_BEARER_PROFILES="["``，.env 里
+    10 个账号正常，坏值一路赢到运行期 ``json.loads`` 才炸，报错只说
+    「不是合法 JSON」，用户只会去翻没毛病的 .env。
     """
-    text = value.strip()
-    if not text or text[0] not in "[{":
+    if not _structured_ok(file_value):
+        # 文件里不是可用结构化配置：没东西可反超，维持原语义。
         return True
+    return _structured_ok(env_value) or not _looks_like_json(env_value)
+
+
+def _looks_like_json(value: str) -> bool:
+    """值是否**意图**写成结构化配置（以 [ 或 { 开头）。"""
+    return value.strip()[:1] in ("[", "{")
+
+
+def _structured_ok(value: str) -> bool:
+    """值是否是一份「真的配上了东西」的结构化配置。
+
+    非结构化形态（普通字符串、路径、开关）返回 False——它们不参与反超判定。
+    """
+    if not _looks_like_json(value):
+        return False
     try:
-        json.loads(text)
+        parsed = json.loads(value.strip())
     except (TypeError, ValueError):
         return False
-    return True
+    return not (parsed is None or (isinstance(parsed, (list, dict)) and not parsed))
 
 
 async def _qoder_model_refresh_loop(provider) -> None:
