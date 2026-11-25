@@ -58,10 +58,14 @@ def _clear_state():
     failover._cooldowns.clear()
     with prov._entitlement_skip_lock:
         prov._entitlement_skip.clear()
+    with prov._model_overflow_lock:
+        prov._model_overflow_mark.clear()
     yield
     failover._cooldowns.clear()
     with prov._entitlement_skip_lock:
         prov._entitlement_skip.clear()
+    with prov._model_overflow_lock:
+        prov._model_overflow_mark.clear()
 
 
 def test_4026_rotates_without_account_cooldown(_clear_state):
@@ -150,13 +154,12 @@ def test_all_accounts_overflowed_tries_each_once_and_reraises(_clear_state):
                     "openai")
         return run, calls
 
-    for round_no in (1, 2):
-        run, calls = make()
-        with pytest.raises(HTTPException) as ei:
-            asyncio.run(run())
-        assert prov._is_context_overflow(ei.value) is True, "全部 4026 时要如实抛出"
-        assert sorted(calls) == sorted(ids), (
-            f"第 {round_no} 轮：每个账号只试一次，实际 {calls}")
+    # 第一轮：每个账号试一次（全员 4026），如实抛出
+    run, calls = make()
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(run())
+    assert prov._is_context_overflow(ei.value) is True, "全部 4026 时要如实抛出"
+    assert sorted(calls) == sorted(ids), f"每个账号只试一次，实际 {calls}"
     assert all(prov._entitlement_skipped(a, "glm-5.4") for a in ids)
 
 
@@ -209,3 +212,51 @@ def test_stream_4026_rotates_to_next_account(_clear_state):
     assert calls == [accounts[0].id, accounts[1].id], "流式 4026 也必须换号"
     assert resp.status_code == 200
     assert failover.cooldown_left(accounts[0].id)[0] == 0, "不整账号冷却"
+
+
+def test_model_wide_overflow_short_circuits_further_fanout(_clear_state):
+    """全员 4026 后，本模型进短冷却：后续请求不再把账号挨个打一遍。
+
+    review 实测：跳过表全满后选号回退全量，两轮请求打 18 次上游（9 账号×2）。
+    上下文太大时每个账号都注定 4026，重复 fan-out 只是白付往返；模型级标记
+    TTL 内直接抛 4026，让客户端（DSH）去压缩。
+    """
+    accounts = [save_account_cred(_cred(u)) for u in ("m1", "m2")]
+    ids = {a.id for a in accounts}
+    isolated = [a for a in prov.failover.list_accounts() if a.id in ids]
+    p = TraeProvider()
+
+    def make():
+        calls: list[str] = []
+
+        async def fake_forward_once(*a, **k):
+            calls.append(_CURRENT_WORK_ACCOUNT.get())
+            raise _ctx_exc()
+
+        async def run():
+            with mock.patch.object(prov.failover, "list_accounts", return_value=isolated), \
+                 mock.patch.object(TraeProvider, "_forward_once", side_effect=fake_forward_once):
+                return await p.forward(
+                    {"model": "glm-5.4", "messages": [{"role": "user", "content": "hi"}]},
+                    "openai")
+        return run, calls
+
+    run, calls = make()
+    with pytest.raises(HTTPException):
+        asyncio.run(run())
+    assert len(calls) == 2, "第一轮：每个账号试一次"
+
+    run, calls = make()
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(run())
+    assert len(calls) == 0, f"全员 4026 后不该再打上游，实际打了 {calls}"
+    assert prov._is_context_overflow(ei.value) is True, "如实抛 4026 让客户端压缩"
+
+
+def test_model_wide_overflow_mark_is_model_scoped_and_expires(_clear_state):
+    prov._mark_model_overflow("glm-5.4", ttl=60.0)
+    assert prov._model_overflow_recently("glm-5.4") is True
+    assert prov._model_overflow_recently("glm-5.3") is False, "别的模型不受影响"
+    prov._model_overflow_mark.clear()
+    prov._mark_model_overflow("glm-5.4", ttl=-1.0)
+    assert prov._model_overflow_recently("glm-5.4") is False, "过期即失效"
