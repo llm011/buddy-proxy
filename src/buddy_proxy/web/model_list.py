@@ -197,11 +197,13 @@ def dsh_capability_fields(m: dict[str, Any]) -> dict[str, Any]:
     mo = m.get("max_output")
     if not isinstance(mo, int) or isinstance(mo, bool) or mo <= 0:
         mo = _DSH_DEFAULT_MAX_OUTPUT
-    # 钳制：必须严格小于窗口减去 headroom 余量，否则 DSH 压缩预算 ≤ 0 崩溃。
+    # 钳制：输出预留必须严格小于 cw - 65536（DSH 默认 headroom），否则压缩器的
+    # pressureBudget = cw - mo - 65536 ≤ 0 照样抛 leaving no message budget。
+    # 统一按 cw - _DSH_OUTPUT_HEADROOM 上界钳制；极端小窗口（cw ≤ 65536 + 余量）
+    # 时 DSH 默认 headroom 本身就无解，退到 1 token——至少不用会越界的公式保证崩溃。
     safe_max = cw - _DSH_OUTPUT_HEADROOM
-    if safe_max < 8192:
-        # 极端小窗口（< 77824）：留 8k 输出保底，其余给消息。
-        safe_max = max(8192, cw - 16384)
+    if safe_max < 1:
+        safe_max = 1
     if mo > safe_max:
         mo = safe_max
     if mo < 1:

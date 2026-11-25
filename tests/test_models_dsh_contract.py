@@ -125,6 +125,23 @@ def test_max_output_clamped_when_declared_too_large():
     assert fields["max_output_tokens"] < 272000 - _DSH_HEADROOM
 
 
+def test_small_window_clamp_never_violates_pressure_budget():
+    """小窗口模型的输出预留必须满足 mo < cw - 65536，否则 DSH pressure budget ≤ 0。
+
+    回归：早期实现对 cw < 77824 走 safe_max = max(8192, cw-16384)，算出来反而
+    大于 cw - 65536，等于「防崩溃兜底」把小窗口模型保证成崩溃。
+    注意 cw ≤ 65536 时 DSH 固定 headroom 本身已吃满窗口，靠声明无解（属 DSH
+    侧限制），故这里只测可解区间 cw ≥ 65538。
+    """
+    for cw in (65538, 66000, 70000, 73728, 77823, 80000):
+        fields = dsh_capability_fields({"context_window": cw, "max_output": 999999})
+        mo = fields["max_output_tokens"]
+        assert mo < cw - _DSH_HEADROOM, (
+            f"cw={cw}: max_output_tokens={mo} 必须 < {cw - _DSH_HEADROOM}，"
+            f"否则 DSH 压缩预算 ≤ 0 崩溃")
+        assert mo >= 1
+
+
 def test_context_window_falls_back_to_max_input():
     """context_window 缺失但 max_input 存在时（聚合后常见），用 max_input 兜底。"""
     fields = dsh_capability_fields({"max_input": 200000, "max_output": 48000})
