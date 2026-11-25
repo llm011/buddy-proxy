@@ -788,7 +788,7 @@
            padding: 9px 18px; border-radius: 10px; font-size: 13px; display: none; z-index: 99; }
   #toast.err { border-color: rgba(255,107,107,.5); color: #ffb3b3; }
   #cal-tip, #chart-tip { position: fixed; z-index: 60; display: none; pointer-events: none;
-             background: #0b0e13; border: 1px solid #2d3846; color: var(--text);
+             background: var(--card); border: 1px solid var(--line); color: var(--text);
              padding: 8px 11px; border-radius: 8px; font-size: 12px;
              box-shadow: 0 6px 18px rgba(0,0,0,.45); min-width: 130px; }
   #cal-tip .t-date, #chart-tip .t-date { color: var(--muted); margin-bottom: 4px; }
@@ -796,14 +796,12 @@
   #cal-tip .t-p i, #chart-tip .t-p i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
   #chart-tip .t-p b { font-weight: 600; }
   /* 悬浮框里分组之间的细线（如模型 → 各通道明细），避免不同层级的信息糊在一起 */
-  #chart-tip .t-sep, #cal-tip .t-sep { height: 1px; background: rgba(255,255,255,.1);
+  #chart-tip .t-sep, #cal-tip .t-sep { height: 1px; background: var(--line);
                                       margin: 5px 0; }
-  /* 亮色主题下悬浮框背景要变浅，否则 var(--text) 深色字在深色底上看不见 */
+  /* 亮色主题下悬浮框阴影调淡：背景/边框已用主题变量自动适配，
+     这里只覆盖阴影深浅，不依赖整块覆盖，避免被在途改动删掉后文字不可见 */
   [data-theme="light"] #cal-tip, [data-theme="light"] #chart-tip {
-    background: var(--card); border-color: var(--line); color: var(--text);
     box-shadow: 0 6px 18px rgba(0,0,0,.18); }
-  [data-theme="light"] #chart-tip .t-sep, [data-theme="light"] #cal-tip .t-sep {
-    background: rgba(17,24,39,.1); }
   .hitzone { cursor: crosshair; }
   .hitzone:hover { fill: rgba(255,255,255,.05); }
   /* ── 请求日志页头部：各模型使用占比饼图 ──
