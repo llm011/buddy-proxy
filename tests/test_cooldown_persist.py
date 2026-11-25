@@ -20,7 +20,10 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+
+from pathlib import Path
 
 import pytest
 
@@ -191,3 +194,49 @@ def test_clear_last_long_cooldown_rewrites_file_as_empty(tmp_path):
     tr.clear("a")
     assert path.exists(), "文件已存在必须回写"
     assert af.load_persisted(path) == {}, "清掉后重启不能复活这条冷却"
+
+
+# -- 惰性路径：import 时构造的 tracker 也要跟着环境变量走 ----------------------
+
+def test_persist_path_can_be_lazy_callable(tmp_path, monkeypatch):
+    """路径可以是 Callable：每次落盘/读取时才解析。
+
+    各通道的模块级 tracker 都在 **import 时**构造。若那时把路径定死，之后
+    环境变量（``*_STATE_DIR``）再变它也不跟——测试夹具想隔离状态目录隔不掉，
+    冷却会写进真实目录：跑一次测试，线上正在风控冷却的账号就被「赦免」了
+    （真踩过：test_raccoon_channel 把假账号的冷却写进了 ~/.buddy-proxy）。
+    """
+    seen = tmp_path / "state"
+    monkeypatch.setenv("XX_COOLDOWN_DIR_TEST", str(seen / "a"))
+    path_of = lambda: Path(os.environ["XX_COOLDOWN_DIR_TEST"]) / "c.json"  # noqa: E731
+    tr = CooldownTracker(persist_path=path_of, persist=True, persist_min_seconds=300.0)
+    tr.mark("acct", kind="quota")
+    assert (seen / "a" / "c.json").exists()
+    assert tr.persist_path == seen / "a" / "c.json"
+
+    # 环境变量变了：同一个 tracker 的落盘位置跟着变（没固化在构造时）
+    (seen / "a" / "c.json").unlink()
+    monkeypatch.setenv("XX_COOLDOWN_DIR_TEST", str(seen / "b"))
+    tr.mark("acct2", kind="quota")
+    assert (seen / "b" / "c.json").exists(), "同一个 tracker 要跟着新路径走"
+    assert not (seen / "a" / "c.json").exists()
+
+
+def test_lazy_path_resolving_failure_skips_persist_without_raising(tmp_path):
+    """路径解析抛异常：跳过这次落盘，不把 mark 搞挂（旁路语义）。"""
+    def boom() -> Path:
+        raise RuntimeError("state dir not ready")
+
+    tr = CooldownTracker(persist_path=boom, persist=True, persist_min_seconds=300.0)
+    assert tr.mark("a", kind="quota") == af.DEFAULT_QUOTA_COOLDOWN_S
+    assert tr.is_cooling("a") is True
+    assert tr.persist_path is None
+
+
+def test_plain_path_still_accepted(tmp_path):
+    """直接传 Path 的老用法照常可用（其它调用方/测试兼容）。"""
+    path = tmp_path / "c.json"
+    tr = CooldownTracker(persist_path=path, persist=True, persist_min_seconds=300.0)
+    tr.mark("a", kind="quota")
+    assert path.exists()
+    assert tr.persist_path == path

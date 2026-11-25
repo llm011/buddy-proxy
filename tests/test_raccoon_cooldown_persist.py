@@ -114,3 +114,27 @@ def test_clear_all_wipes_persisted_file(tmp_path, monkeypatch):
     # 文件保留但内容为空快照（不删文件：别的进程/下次启动读到损坏的半截文件
     # 比读到空快照更糟）。关键是重启后这条冷却不能复活。
     assert af.load_persisted(tmp_path / "cooldowns.json") == {}, "清空后盘上不能残留"
+
+
+def test_clear_cooldown_also_clears_model_composite_keys(tmp_path, monkeypatch):
+    """删账号时管理页调的是 ``clear_cooldown(账号id)``，必须连「账号\\x00模型」
+    复合键一起清。
+
+    持久化前漏掉无所谓（进程重启清空）；落盘后复合键会一直活着——账号删了、
+    它的模型级冷却还在盘上，下次重启被恢复成一个谁也对不上的幽灵条目
+    （对账要等重启才跑，删账号当下的进程里它一直占着）。
+    """
+    monkeypatch.setenv("RACCOON_STATE_DIR", str(tmp_path))
+    _swap_tracker(monkeypatch)
+    model = "sn-deepseek-v4-1-flash-1017"
+    failover.mark_cooldown("pu-a", retry_after="1800")          # 账号键
+    failover.mark_model_cooldown("pu-a", model)                  # 复合键
+    failover.mark_model_cooldown("pu-b", model)                  # 别的账号，不能误伤
+
+    failover.clear_cooldown("pu-a")
+
+    assert failover.cooldown_left("pu-a")[0] == 0
+    assert failover.model_cooldown_left("pu-a", model)[0] == 0, "复合键要一起清"
+    assert failover.model_cooldown_left("pu-b", model)[0] > 0, "别的账号不受影响"
+    # 盘上也不能残留（否则重启后复合键复活）
+    assert set(af.load_persisted(tmp_path / "cooldowns.json")) == {f"pu-b\x00{model}"}

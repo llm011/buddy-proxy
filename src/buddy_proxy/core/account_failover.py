@@ -143,7 +143,7 @@ class CooldownTracker:
         account_cooldown_s: float = DEFAULT_ACCOUNT_COOLDOWN_S,
         quota_cooldown_s: float = DEFAULT_QUOTA_COOLDOWN_S,
         extra_kinds: dict[str, float] | None = None,
-        persist_path: Path | None = None,
+        persist_path: "Path | Callable[[], Path] | None" = None,
         persist: bool = False,
         persist_min_seconds: float = 300.0,
     ) -> None:
@@ -154,6 +154,12 @@ class CooldownTracker:
         的「唯一的例外」）。``persist_min_seconds``：只有冷却时长超过它的才
         落盘——短冷却重启清零无害（重探免费），少写一次盘。构造时若文件里有
         未过期条目，直接恢复进内存。
+
+        ``persist_path`` 可以是 ``Callable[[], Path]``：每次落盘/读取时才解析
+        路径。**各通道的模块级 tracker 都在 import 时构造**，若那时就把路径
+        定死，之后环境变量（``*_STATE_DIR``）再变它也不跟——测试夹具想隔离
+        状态目录也隔不掉，冷却会写进真实目录（测试一跑，线上正在风控冷却的
+        账号就被「赦免」了）。
         """
         self._durations: dict[str, float] = {
             "account": account_cooldown_s,
@@ -166,8 +172,23 @@ class CooldownTracker:
         self._persist_path = persist_path if persist else None
         self._persist_min_seconds = float(persist_min_seconds)
         if self._persist_path is not None:
-            for aid, (left, kind) in load_persisted(self._persist_path).items():
+            for aid, (left, kind) in load_persisted(self._resolve_path()).items():
                 self._cooldowns[aid] = (time.time() + left, kind)
+
+    def _resolve_path(self) -> Path | None:
+        """解析落盘路径（``Callable`` 则调用它；解析失败返回 None = 这次不落盘）。"""
+        src = self._persist_path
+        if src is None:
+            return None
+        try:
+            return src() if callable(src) else src
+        except Exception:  # noqa: BLE001 - 旁路：解析不出路径就跳过这次落盘
+            return None
+
+    @property
+    def persist_path(self) -> Path | None:
+        """当前解析出的落盘路径（未开启持久化为 None）。测试/诊断用。"""
+        return self._resolve_path()
 
     def _persist(self) -> None:
         """把当前未过期的冷却落盘（未开启时是空操作）。
@@ -177,13 +198,13 @@ class CooldownTracker:
         取快照 / 路径处理若抛异常会漏到 ``mark``——落盘是旁路，任何失败都
         不能影响内存状态与主链路（测试 ``test_persist_failure_never_breaks_mark``）。
         """
-        if self._persist_path is None:
+        path = self._resolve_path()
+        if path is None:
             return
         try:
-            persist_snapshot(self._persist_path, self.snapshot())
+            persist_snapshot(path, self.snapshot())
         except Exception as exc:  # noqa: BLE001 - 旁路：绝不影响 mark/clear
-            _log.warning("冷却快照落盘失败（忽略，不影响内存状态）%s: %s",
-                         self._persist_path, exc)
+            _log.warning("冷却快照落盘失败（忽略，不影响内存状态）%s: %s", path, exc)
 
     # -- 基本操作 -----------------------------------------------------------
 

@@ -68,8 +68,11 @@ def _new_tracker() -> CooldownTracker:
     并回写。账号列表读不出来（None/异常）时**不动**快照——宁可多留一条幽灵冷却
     （最多让一个不存在的账号「被跳过」，无害），也不能把活账号的冷却误删。
     """
+    # 传**函数**而不是路径：本模块的 tracker 在 import 时构造，那时把路径定死
+    # 的话，之后环境变量（RACCOON_STATE_DIR）再变它也不跟——测试夹具想隔离
+    # 状态目录隔不掉，冷却会写进真实目录。
     tracker = CooldownTracker(
-        persist_path=_cooldown_path(),
+        persist_path=_cooldown_path,
         persist=True,
         persist_min_seconds=_PERSIST_MIN_SECONDS,
     )
@@ -186,8 +189,19 @@ def mark_relogin_needed(account_id: str, reason: str = "") -> float:
 
 
 def clear_cooldown(account_id: str) -> None:
-    """清掉该账号的冷却标记（删除账号后调用，防内存残留）。"""
+    """清掉该账号的冷却标记（删除账号后调用，防内存残留）。
+
+    必须连「账号\\x00模型」复合键一起清：``mark_model_cooldown`` 的键是拼接出来
+    的，不等于账号 id，只 ``clear(账号id)`` 清不掉它。持久化前漏掉无所谓（进程
+    重启清空）；落盘后复合键会一直活着——账号删了、它的模型级冷却还在盘上，
+    重启后被恢复成谁也对不上的幽灵条目。删除账号当下就得清干净，不能等重启时
+    的对账（那只是兜底）。
+    """
     _tracker.clear(account_id)
+    prefix = f"{account_id}{_MODEL_KEY_SEP}"
+    for key in [k for k, (left, _kind) in _tracker.snapshot().items()
+                if left > 0 and k.startswith(prefix)]:
+        _tracker.clear(key)
 
 
 def cooldown_left(account_id: str) -> tuple[float, str]:
