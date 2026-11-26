@@ -37,13 +37,16 @@ class _FakeClient:
         self.fail_first = 0          # 前 N 次 chat_completion 抛 WSClosed
         self.calls = 0
         self.consecutive_failures = 0  # _with_reconnect 的 401/409 判据读它
+        self.launch_flags: list[bool] = []
 
-    async def start(self) -> None:
+    async def start(self, *, allow_launch: bool = True) -> None:
         self.starts += 1
+        self.launch_flags.append(allow_launch)
         self.is_ready = True
 
-    async def restart(self) -> None:
+    async def restart(self, *, allow_launch: bool = True) -> None:
         self.restarts += 1
+        self.launch_flags.append(allow_launch)
         self.is_ready = True     # 真实现里由 _drop_connection + start() 配合完成
 
     def record_failure(self, code: int = 0) -> None:
@@ -104,6 +107,35 @@ def test_ensure_started_noop_when_connected():
 
     asyncio.run(p._ensure_started())
     assert (client.restarts, client.starts) == (0, 0)
+
+
+def test_ensure_started_forwards_passive_launch_policy():
+    """被动查询的 allow_launch=False 必须传到客户端，不能被中间层吞掉。"""
+    client = _FakeClient()
+    client.is_ready = False
+    p = _provider(client)
+    p._started = False
+
+    asyncio.run(p._ensure_started(allow_launch=False))
+    assert client.launch_flags == [False]
+
+
+def test_passive_reconnect_failure_preserves_started_history():
+    """被动查询失败不能抹掉曾经启动过的事实，避免后续请求错报 401。"""
+    client = _FakeClient()
+    client.is_ready = False
+    p = _provider(client)
+    p._started = True
+
+    async def _no_cdp(*, allow_launch: bool = True) -> None:
+        client.restarts += 1
+        client.launch_flags.append(allow_launch)
+        client.is_ready = False
+
+    client.restart = _no_cdp  # type: ignore[assignment]
+    asyncio.run(p._ensure_started(allow_launch=False))
+    assert client.launch_flags == [False]
+    assert p._started is True
 
 
 def test_stream_retries_once_after_reconnect():
@@ -192,7 +224,7 @@ def test_ensure_started_restarts_only_once():
 
 
 def _count_and_ready(client: _FakeClient):
-    async def _restart() -> None:
+    async def _restart(*, allow_launch: bool = True) -> None:
         client.restarts += 1
         client.is_ready = True
     return _restart
@@ -220,7 +252,7 @@ def test_restart_drops_dead_connection_before_reusing_port(
     client._ready = True
     client._web_id = "old"
 
-    async def fake_start() -> None:
+    async def fake_start(*, allow_launch: bool = True) -> None:
         # start() 之后仍要看到「不 ready」，证明 restart 清过状态
         events.append(f"start:ready={client.is_ready}:ws={client._ws}")
         client._ready = True
@@ -241,7 +273,7 @@ def test_collect_still_409_when_reconnect_fails():
     client.fail_first = 99
     p = _provider(client)
 
-    async def _restart_fail() -> None:
+    async def _restart_fail(*, allow_launch: bool = True) -> None:
         client.restarts += 1
         client.is_ready = False
 
@@ -324,7 +356,7 @@ def test_real_reconnect_restarts_after_self_invalidation(monkeypatch):
 
     calls = {"n": 0}
 
-    async def _restart():
+    async def _restart(*, allow_launch: bool = True):
         calls["n"] += 1
         alive = _WS.__new__(_WS)
         alive._alive = True
@@ -398,7 +430,7 @@ def test_with_reconnect_reports_401_when_never_connected():
     client = _FakeClient()
     client.is_ready = False
 
-    async def _start_fail() -> None:
+    async def _start_fail(*, allow_launch: bool = True) -> None:
         client.starts += 1
         client.is_ready = False
 

@@ -106,12 +106,12 @@ def test_ensure_started_survives_checkin_loop_then_main_loop(monkeypatch):
     p._client._ready = False
     started = []
 
-    async def fake_start():
+    async def fake_start(*, allow_launch=True):
         started.append(asyncio.get_running_loop())
         p._client._ready = True   # 启动完成 → 后续调用走 _is_connected 快路径
 
-    async def fake_restart():
-        await fake_start()
+    async def fake_restart(*, allow_launch=True):
+        await fake_start(allow_launch=allow_launch)
 
     monkeypatch.setattr(p._client, "start", fake_start)
     monkeypatch.setattr(p._client, "restart", fake_restart)
@@ -133,11 +133,11 @@ def test_ensure_started_checkin_path_after_forward(monkeypatch):
     p._started = False
     p._client._ready = False
 
-    async def fake_start():
+    async def fake_start(*, allow_launch=True):
         p._client._ready = True
 
-    async def fake_restart():
-        await fake_start()
+    async def fake_restart(*, allow_launch=True):
+        await fake_start(allow_launch=allow_launch)
 
     monkeypatch.setattr(p._client, "start", fake_start)
     monkeypatch.setattr(p._client, "restart", fake_restart)

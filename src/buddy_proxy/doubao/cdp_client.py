@@ -229,7 +229,7 @@ class CDPDoubaoClient:
         self._ready = True
         log.info("CDPDoubaoClient: ready (web_id=%s)", self._web_id[:20])
 
-    async def start(self) -> None:
+    async def start(self, *, allow_launch: bool = True) -> None:
         """确保 CDP 可用：优先复用主 App（共存，不杀用户进程），其次「App 身份
         启动 Helper」，最后才退回裸 Helper 直连。
 
@@ -237,6 +237,10 @@ class CDPDoubaoClient:
         Chromium 单例锁（``SingletonLock -> <host>-<pid>``）。之后用户自己点开
         豆包工作 App，App 发现锁被一个无 UI 的 Helper 占着就起不来，表现就是
         「豆包工作打不开」。所以只有「App 身份启动也拿不到 CDP」时才用裸 Helper。
+
+        ``allow_launch=False`` 只复用端口上已有的 CDP，绝不执行 ``open -a`` 或
+        启动 Helper。签到状态查询走这条路径：它被 /ui 面板与自动打卡轮询，
+        若允许启动，用户每次打开管理页都会把已退出的豆包工作重新拉起来。
         """
         # 1) 端口已有 CDP 直接复用（主 App 正在跑且开了调试端口）。
         #    但**复用前**先确认这不是本进程遗留的裸 Helper —— 见
@@ -252,6 +256,13 @@ class CDPDoubaoClient:
             log.warning(
                 "CDPDoubaoClient: 清理裸 Helper 后调试口消失，改走 App 身份启动"
             )
+
+        if not allow_launch:
+            # 被动查询（签到状态）只搭便车：App 没开就返回，由调用方展示
+            # 「未运行」而不是替用户启动一个桌面 App。真正的聊天转发和手动
+            # 签到仍走默认 allow_launch=True。
+            log.debug("CDPDoubaoClient: no CDP to reuse; passive start skips launch")
+            return
 
         # 2) 由 App 身份拉起（主 App 已在跑时 open -a 只激活，不杀进程）
         self._require_main_app_installed()
@@ -532,11 +543,11 @@ class CDPDoubaoClient:
     async def is_alive(self) -> bool:
         return self._ready and self._proc is not None and self._proc.poll() is None
 
-    async def restart(self) -> None:
+    async def restart(self, *, allow_launch: bool = True) -> None:
         await self.stop()
         # 本进程自己起的 Helper 已经在 stop() 里收掉；主 App 身份起的
         # （``_proc`` 为空，进程归 launchd 管）不动，start() 会复用它的调试口。
-        await self.start()
+        await self.start(allow_launch=allow_launch)
 
     # ------------------------------------------------------------------
     # 内部：CDP 辅助
