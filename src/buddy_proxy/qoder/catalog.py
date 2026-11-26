@@ -41,18 +41,17 @@ CHAT_SCENES = ("chat", "developer", "assistant", "app")
 #: 2026-10-03 曾实测三方模型整批被收回（目录 ``enable=false``，调用返回
 #: code 112 的 403）；2026-10-05 复测权益已恢复——那是**账号级**分桶而非
 #: 全局门：全量账号目录回到 14 条。本表按该全量目录重建
-#: （``cmodel``/``smodel`` 目录里彻底消失，不收）；price_factor 全部按实测
-#: 修正（qmodel_latest 0.1→0.5、q37fmodel 0.02→0.1；``qmodel_latest`` 2026-11-17
-#: 随上游改名 Qwen4-Max 再改为 0.4）。个别账号仍受限的
+#: （``cmodel``/``smodel`` 目录里彻底消失，不收）；price_factor 按实测持续
+#: 修正（2026-11-17 Qwen4-Max 0.4；2026-11-27 Qwen3.8-Max 0.2、
+#: Qwen3.8-Flash 0.04，新增 GLM-5.4 0.8 与 Step-5-Preview 0.3）。个别账号仍受限的
 #: 情况走 :data:`MODEL_OVERRIDE`（per-account 白名单）处理，兜底表不管。
 FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
-    # 2026-10-31 用户从客户端「模型倍率」面板截图核对：Qwen3.8-Max 是 0.5×
-    # 且**不带 Free 标**（同批只有 Qwen3.8-Flash / DeepSeek-Flash 标了 Free）。
-    # 旧值 0.2 + is_free=True 是低峰期口径，与当前面板不符，按面板修正。
+    # 2026-11-27 用户从客户端「模型倍率」面板截图核对，并与实时目录交叉确认：
+    # Qwen3.8-Max 已降为 0.2×；Qwen3.8-Flash 从限时 Free 恢复为 0.04×。
     {"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.5, "is_free": False, "max_input_tokens": 180000},
+     "is_vl": True, "price_factor": 0.2, "is_free": False, "max_input_tokens": 180000},
     {"key": "qfmodel", "display_name": "Qwen3.8-Flash", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.0, "is_free": True, "max_input_tokens": 180000},
+     "is_vl": True, "price_factor": 0.04, "is_free": False, "max_input_tokens": 180000},
     # 2026-11-17 上游目录：``qmodel_latest`` 已改名为 Qwen4-Max（0.4×，1M），
     # 倍率与面板截图一致。
     {"key": "qmodel_latest", "display_name": "Qwen4-Max", "is_reasoning": True,
@@ -68,10 +67,11 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
      "is_vl": True, "price_factor": 0.1, "max_input_tokens": 1000000},
     {"key": "dmodel", "display_name": "DeepSeek-V4-Pro", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.5, "max_input_tokens": 1000000},
-    # 2026-10-31 面板截图：标 Free，倍率 0.1× 划掉显示 0——按免费处理
-    # （同批 Qwen3.8-Flash 口径一致）。price_factor 保留原值，仅补 is_free。
+    # 2026-11-27 面板与实时目录均为 0.1× 且不再标 Free，去掉旧的限免标记。
     {"key": "dfmodel", "display_name": "DeepSeek-Flash", "is_reasoning": True,
-     "is_vl": True, "price_factor": 0.1, "is_free": True, "max_input_tokens": 1000000},
+     "is_vl": True, "price_factor": 0.1, "is_free": False, "max_input_tokens": 1000000},
+    {"key": "gmodel_latest", "display_name": "GLM-5.4", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.8, "is_free": False, "max_input_tokens": 180000},
     {"key": "gmodel", "display_name": "GLM-5.3", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.8, "is_free": False, "max_input_tokens": 180000},
     {"key": "gfmodel", "display_name": "GLM-5.3-Flash", "is_reasoning": True,
@@ -86,6 +86,9 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
      "is_vl": True, "price_factor": 1.0, "is_free": False, "max_input_tokens": 180000},
     {"key": "kmodel", "display_name": "Kimi-K2.8-Preview", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.8},
+    # 2026-11-27 新增：实时目录 key=jmodel，面板倍率 0.3×，1M 上下文。
+    {"key": "jmodel", "display_name": "Step-5-Preview", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.3, "is_free": False, "max_input_tokens": 1000000},
     {"key": "mmodel", "display_name": "MiniMax-M3.1-Flash", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.1, "max_input_tokens": 180000},
 )
@@ -178,11 +181,13 @@ MODEL_IDS: dict[str, str] = {
     # 称呼它，故对外 id 用带版本号的名字，和 CodeBuddy 通道的
     # ``deepseek-v4.1-flash`` 对齐，两边叫法一致。
     "dfmodel": "deepseek-v4.1-flash",
+    "gmodel_latest": "glm-5.4",
     "gmodel": "glm-5.3",
     "gfmodel": "glm-5.3-flash",
     "gm51model": "glm-5.2",
     "kmodel_latest": "kimi-k3.1-pro",
     "kmodel": "kimi-k2.8-preview",
+    "jmodel": "step-5-preview",
     "mmodel": "minimax-m3.1-flash",
     "cmodel": "cantus",
     "smodel": "sonus",
@@ -201,6 +206,9 @@ MODEL_IDS: dict[str, str] = {
 #: ⚠ 只填**确定的**能力字段。上游没声明 ``max_input`` / 是否支持图片，
 #: 这里就不写——`to_openai_model` 会把这些留空，客户端按「未知」处理，
 #: 不会因为编了个数字导致长上下文请求被误判。
+#:
+#: 2026-11-27 面板里的 HungerG（0.0× 限免）**不要补进来**：它是官方 App/IDE
+#: 限时活动模型，当前 CLI 的 model/list 全场景都没有上游 key，无法经本代理调用。
 LOCAL_EXTRA_MODELS: tuple[dict[str, Any], ...] = ()
 
 

@@ -45,3 +45,24 @@ def test_fallback_catalog_knows_qwen4_max():
     by_key = {str(m.get("key")): m for m in FALLBACK_MODELS}
     assert public_model_id(by_key["qmodel_latest"]) == "qwen4-max"
     assert by_key["qmodel_latest"]["price_factor"] == 0.4
+
+
+def test_new_models_have_stable_public_ids_and_measured_rates():
+    """GLM-5.4 / Step-5-Preview 必须有稳定对外 id，并在断网兜底时保留倍率。"""
+    from buddy_proxy.qoder.catalog import (
+        Catalog, MODEL_IDS, is_hidden, public_model_id, to_openai_model,
+    )
+
+    by_key = {str(m.get("key")): m for m in Catalog.fallback()}
+    expected = {
+        "gmodel_latest": ("glm-5.4", "GLM-5.4", 0.8),
+        "jmodel": ("step-5-preview", "Step-5-Preview", 0.3),
+    }
+    for key, (public_id, display_name, rate) in expected.items():
+        assert MODEL_IDS[key] == public_id
+        assert public_model_id(by_key[key]) == public_id
+        assert not is_hidden(by_key[key])
+        model = to_openai_model(by_key[key], "qoder")
+        assert model["id"] == f"qoder/{public_id}"
+        assert model["name"] == display_name
+        assert model["credits"] == rate

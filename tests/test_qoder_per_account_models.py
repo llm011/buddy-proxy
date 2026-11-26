@@ -358,20 +358,29 @@ def test_override_missing_model_synthesized(monkeypatch, _override):
 # ---------------------------------------------------------------------------
 
 def test_fallback_models_restored_with_measured_prices():
-    """兜底表恢复三方模型，实测倍率修正到位（0.0 免费档必须保留）。"""
+    """兜底表与 2026-11-27 面板/实时目录一致，限免结束不能残留 Free 标。"""
     by_key = {m["key"]: m for m in FALLBACK_MODELS}
-    for key in ("gmodel", "gfmodel", "dmodel", "dfmodel", "kmodel_latest",
-                "kmodel", "gm51model", "mmodel"):
+    for key in ("gmodel_latest", "gmodel", "gfmodel", "dmodel", "dfmodel", "kmodel_latest",
+                "kmodel", "jmodel", "gm51model", "mmodel"):
         assert key in by_key, f"兜底表缺三方模型 {key}"
-    assert by_key["qfmodel"]["price_factor"] == 0.0
+    assert by_key["qmodel_38max"]["price_factor"] == 0.2
+    assert by_key["qfmodel"]["price_factor"] == 0.04
+    assert by_key["qfmodel"]["is_free"] is False
     # 2026-11-17 上游把 qmodel_latest 改名为 Qwen4-Max，倍率 0.5→0.4
     assert by_key["qmodel_latest"]["price_factor"] == 0.4
     assert by_key["q37fmodel"]["price_factor"] == 0.1
+    assert by_key["dfmodel"]["price_factor"] == 0.1
+    assert by_key["dfmodel"]["is_free"] is False
+    assert by_key["gmodel_latest"]["price_factor"] == 0.8
+    assert by_key["jmodel"]["price_factor"] == 0.3
     assert by_key["kmodel_latest"]["price_factor"] == 1.0
     assert by_key["mmodel"]["price_factor"] == 0.1
-    # 0.0 倍率必须进 OpenAI 元数据（credits 字段曾因真值判断丢失）
     m = to_openai_model(by_key["qfmodel"], "qoder")
-    assert m["credits"] == 0.0
+    assert m["credits"] == 0.04
+    assert "free" not in m["tags"]
+    # 即便以后还有 0.0 免费档，也必须保留 credits（曾因真值判断丢失）。
+    free = to_openai_model(dict(by_key["qfmodel"], price_factor=0.0, is_free=True), "qoder")
+    assert free["credits"] == 0.0
 
 
 def test_model_support_map_and_provider_models_passthrough(monkeypatch, _override):
