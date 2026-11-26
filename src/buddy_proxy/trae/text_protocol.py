@@ -234,15 +234,9 @@ def _build_chat_body(
     # 字段名 is_max_mode 由上游契约决定（2026-11-25 复核社区实现）。
     if max_mode:
         body["is_max_mode"] = True
-    # ``config_name`` 是 Work 通道要求 model/config_name 成对的老约定，但**不是
-    # 所有模型都吃**。2026-11-24 实测 glm-5.4 在两条 function 上都一样：
-    #
-    #   inline_chat + config_name → 4001 param is invalid
-    #   inline_chat 无 config_name → 正常出流
-    #
-    # 与 native 通道（``native_tools._build_native_body``）是同一份模型名单，
-    # 共用 ``_NATIVE_NO_CONFIG_NAME``——两处必须一起改，只改一处会让 4001 回落
-    # 路径继续挂（native 失败正好会落到这里）。
+    # ``config_name`` 决定上游实际模型路由：省略 glm-5.4 会 HTTP 200 却静默
+    # 落到 Seed。与 native 通道共用同一省略名单；两处必须同步，否则 native
+    # 回退到 text 时仍可能改变模型。
     from .native_tools import _omits_config_name  # 延迟导入：native_tools 依赖本模块
 
     if not _omits_config_name(model):

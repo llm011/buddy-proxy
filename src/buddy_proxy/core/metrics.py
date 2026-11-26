@@ -25,6 +25,28 @@ from .metrics_protocol import (
 _PREFIX_REUSE_MAX = 1.0
 
 
+def _safe_trae_attempts(attempts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """将公开 metrics API 的 Trae 尝试摘要收敛为可安全落盘的标量。"""
+    if not isinstance(attempts, list):
+        return []
+    text_limits = {
+        "request_id": 80, "session_id": 80, "transport": 16, "model": 80,
+        "account": 40, "endpoint": 80, "outcome": 40,
+    }
+    normalized: list[dict[str, Any]] = []
+    for attempt in attempts[:8]:
+        if not isinstance(attempt, dict):
+            continue
+        item = {key: str(attempt.get(key) or "")[:limit] for key, limit in text_limits.items()}
+        item["max_mode"] = bool(attempt.get("max_mode"))
+        try:
+            item["duration_ms"] = max(0, int(attempt.get("duration_ms") or 0))
+        except (TypeError, ValueError):
+            item["duration_ms"] = 0
+        normalized.append(item)
+    return normalized
+
+
 def _prefix_reuse(cached: int, prev_prompt: Optional[int]) -> Optional[float]:
     """``cached / prev_prompt``，保留 4 位小数；无法计算时 None。
 
@@ -162,6 +184,11 @@ class MetricsCollector:
         credit_estimated: bool = False,
         client: str = "",
         account: str = "",
+        trae_client_request_id: str = "",
+        trae_request_id: str = "",
+        trae_session_id: str = "",
+        trae_final_transport: str = "",
+        trae_attempts: list[dict[str, Any]] | None = None,
     ) -> None:
         ts = time.time()
         rec = {
@@ -197,6 +224,12 @@ class MetricsCollector:
             "error": (error or "")[:300],
             "client": (client or "")[:40],
             "account": (account or "")[:40],
+            "trae_client_request_id": (trae_client_request_id or "")[:64],
+            "trae_request_id": (trae_request_id or "")[:80],
+            "trae_session_id": (trae_session_id or "")[:80],
+            "trae_final_transport": (trae_final_transport or "")[:16],
+            # 公共 API 再次规范化，避免非 JSON 值令整条 JSONL 指标静默丢失。
+            "trae_attempts": _safe_trae_attempts(trae_attempts),
         }
         with self._lock:
             # 前缀复用率必须在**同一把锁**里算并更新上一条记录：转发是并发的，

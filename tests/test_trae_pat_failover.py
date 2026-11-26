@@ -10,6 +10,7 @@ import errno
 import io
 import json
 import os
+import socket
 import stat
 import threading
 import time
@@ -25,6 +26,7 @@ from buddy_proxy.trae.pat import chat as pat_chat_module
 from buddy_proxy.trae.pat import net as _PAT_NET
 from buddy_proxy.trae import provider as provider_module
 from buddy_proxy.trae.pat_provider import TraePatProvider
+from buddy_proxy.core.metrics_protocol import ACCOUNT_META
 from buddy_proxy.trae.sse import _SSEDecoder
 
 
@@ -531,6 +533,78 @@ def test_401_with_distinct_new_token_still_401_then_switches(monkeypatch):
         ("primary", True, "old-primary"),
         ("backup", False, None),
     ]
+
+
+def test_401_refresh_records_two_physical_telemetry_attempts(monkeypatch):
+    _configure_two(monkeypatch)
+    calls = 0
+
+    def credentials(profile, *, force_refresh=False, **_kwargs):
+        token = "fresh" if force_refresh else "stale"
+        return pat.PatCredentials(token, "uid-primary", "machine", "device")
+
+    def post(_url, _payload, _credentials, _stream):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise _http_error(401)
+        return _OK
+
+    monkeypatch.setattr(pat, "_get_profile_credentials", credentials)
+    monkeypatch.setattr(pat, "_post_chat", post)
+    meta: dict[str, Any] = {}
+    token = ACCOUNT_META.set(meta)
+    try:
+        assert pat.send_pat_native([], "standard-model", False, meta=meta) == _OK
+    finally:
+        ACCOUNT_META.reset(token)
+
+    attempts = meta["trae_attempts"]
+    assert [item["outcome"] for item in attempts] == ["http_401", "response"]
+    assert len({item["request_id"] for item in attempts}) == 1
+    assert len({item["session_id"] for item in attempts}) == 1
+    assert meta["trae_final_transport"] == "pat-native"
+    assert meta["trae_request_id"] == attempts[-1]["request_id"]
+
+
+def test_connect_retry_records_each_physical_telemetry_attempt(monkeypatch):
+    """PAT 内部 DNS 重连也必须逐次落 attempt，不能折叠为最终成功。"""
+    _configure_two(monkeypatch)
+    _install_credentials(monkeypatch)
+    calls = 0
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read1(self, _size):
+            if getattr(self, "done", False):
+                return b""
+            self.done = True
+            return _OK.encode()
+
+    def open_direct(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise urllib.error.URLError(socket.gaierror("offline"))
+        return Response()
+
+    monkeypatch.setattr(_PAT_NET, "open_direct", open_direct)
+    monkeypatch.setattr(pat_chat_module.time, "sleep", lambda _delay: None)
+    meta: dict[str, Any] = {}
+    token = ACCOUNT_META.set(meta)
+    try:
+        assert pat.send_pat_native([], "standard-model", False, meta=meta) == _OK
+    finally:
+        ACCOUNT_META.reset(token)
+
+    assert [item["outcome"] for item in meta["trae_attempts"]] == ["network_error", "response"]
+    assert len({item["request_id"] for item in meta["trae_attempts"]}) == 1
+    assert meta["trae_final_transport"] == "pat-native"
 
 
 def test_payload_is_byte_identical_across_accounts(monkeypatch):
