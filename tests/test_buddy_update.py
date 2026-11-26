@@ -14,10 +14,13 @@
 from __future__ import annotations
 
 import inspect
+import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -62,12 +65,13 @@ def _make_repo(root: pathlib.Path, restart_marker: pathlib.Path | None = None
     (work / ".gitignore").write_text("uv.lock\n.venv/\nlogs/\n")
     shutil.copy2(BUDDY, work / "buddy")
     (work / "buddy").chmod(0o755)
-    if restart_marker is not None:
-        # 假 proxy.sh：被调用就往 marker 里追加一行。用来断言「重启到底有没有
-        # 发生」——uv sync 失败时必须**没有**这行，否则服务就被带起来了。
-        proxy = work / "proxy.sh"
-        proxy.write_text(f'#!/bin/sh\necho restart >> "{restart_marker}"\n')
-        proxy.chmod(0o755)
+    # 所有成功路径都要隔离重启；否则缺 proxy.sh 的失败会掩盖后续副作用。
+    restart_marker = restart_marker or root / "restart.log"
+    proxy = work / "proxy.sh"
+    proxy.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> {shlex.quote(str(restart_marker))}\n'
+    )
+    proxy.chmod(0o755)
     _git("add", "-A", cwd=work)
     _git("commit", "-qm", "init", cwd=work)
     _git("push", "-q", "origin", "HEAD:main", cwd=work)
@@ -77,19 +81,32 @@ def _make_repo(root: pathlib.Path, restart_marker: pathlib.Path | None = None
 
 def _run_update(work: pathlib.Path, extra_path: pathlib.Path | None = None
                 ) -> subprocess.CompletedProcess[str]:
-    """跑一次 ``buddy update``。
+    """只跑真实本地 git；浏览器、健康检查和依赖工具不能泄漏到宿主。
 
-    ``PATH`` 默认**不含 uv**，于是走「跳过依赖同步」那条分支。要覆盖
-    ``uv sync`` 本身，用 ``extra_path`` 挂一个假 uv 目录进来——本机 uv 装在
-    ``~/.local/bin``，不在下面这个 PATH 里，所以不显式挂就永远测不到它。
+    系统 PATH 并不保证没有 uv，还会找到真实 open/curl。只允许脚本需要的
+    无副作用工具；uv 仅由 extra_path 显式提供，保留「没有 uv」的真实分支。
     """
-    path = "/usr/bin:/bin:/usr/local/bin"
-    if extra_path is not None:
-        path = f"{extra_path}:{path}"
-    return subprocess.run(
-        ["./buddy", "update"], cwd=work, capture_output=True, text=True,
-        env={"PATH": path, "HOME": str(work), "BUDDY_HOME": str(work)},
-    )
+    with tempfile.TemporaryDirectory(prefix="buddy-update-bin-") as temp:
+        bin_dir = pathlib.Path(temp)
+        for command in ("bash", "git", "sed", "grep"):
+            executable = shutil.which(command)
+            assert executable is not None, f"需要 {command}"
+            (bin_dir / command).symlink_to(executable)
+        # 健康检查立即成功，不探测真实 8787，也不等待真实秒数。
+        for command in ("curl", "open", "xdg-open"):
+            fake = bin_dir / command
+            fake.write_text("#!/bin/sh\nexit 0\n")
+            fake.chmod(0o755)
+        path = str(bin_dir)
+        if extra_path is not None:
+            path = f"{extra_path}:{path}"
+        return subprocess.run(
+            ["./buddy", "update"], cwd=work, capture_output=True, text=True,
+            env={"PATH": path, "HOME": str(work), "BUDDY_HOME": str(work),
+                 "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                 "GIT_ALLOW_PROTOCOL": "file", "GIT_TERMINAL_PROMPT": "0"},
+            timeout=10,
+        )
 
 
 def _fake_uv(dir_: pathlib.Path, *, exit_code: int = 0) -> pathlib.Path:
@@ -101,7 +118,10 @@ def _fake_uv(dir_: pathlib.Path, *, exit_code: int = 0) -> pathlib.Path:
     """
     dir_.mkdir(parents=True, exist_ok=True)
     uv = dir_ / "uv"
-    uv.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+    uv.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$PWD" "$*" >> '
+        f'{shlex.quote(str(dir_ / "uv.log"))}\nexit {exit_code}\n'
+    )
     uv.chmod(0o755)
     return dir_
 
@@ -162,6 +182,9 @@ def test_fast_forwards_when_clean(tmp_path: pathlib.Path) -> None:
 
     proc = _run_update(work)
 
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert "未找到 uv" in proc.stdout, proc.stdout
+    assert (tmp_path / "restart.log").read_text().splitlines() == ["restart"]
     assert _head(work) == upstream_head, f"没快进到上游:\n{proc.stdout}\n{proc.stderr}"
     assert (work / "marker.txt").read_text() == "new upstream commit"
 
@@ -268,7 +291,8 @@ def test_syncs_dependencies_when_uv_is_available(tmp_path: pathlib.Path) -> None
     # 在 CI 上只能看到「assert 3 == 0」这种毫无线索的输出（第一版就是）。
     assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     assert "同步依赖" in proc.stdout, proc.stdout
-    assert marker.read_text().count("restart") == 1, "成功路径应该重启且只重启一次"
+    assert (uvdir / "uv.log").read_text().splitlines() == [str(work), "sync"]
+    assert marker.read_text().splitlines() == ["restart"], "成功路径应该重启且只重启一次"
 
 
 def test_update_succeeds_even_if_opening_the_browser_fails(
@@ -307,6 +331,30 @@ def test_update_succeeds_even_if_opening_the_browser_fails(
     )
 
 
+def test_update_does_not_use_host_side_effect_commands(
+        tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """宿主恰好装了 uv/浏览器也不能改变分支或触发真实网络请求。"""
+    work = _make_repo(tmp_path)
+    hostbin = tmp_path / "hostbin"
+    hostbin.mkdir()
+    marker = tmp_path / "host-command.log"
+    for command in ("uv", "pip", "pip3", "python", "python3",
+                    "curl", "open", "xdg-open"):
+        fake = hostbin / command
+        fake.write_text(
+            f'#!/bin/sh\necho {command} >> {shlex.quote(str(marker))}\nexit 99\n'
+        )
+        fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{hostbin}{os.pathsep}{os.environ['PATH']}")
+
+    proc = _run_update(work)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert "未找到 uv" in proc.stdout, proc.stdout
+    assert not marker.exists(), "不该调用宿主的安装/浏览器/网络命令"
+    assert (tmp_path / "restart.log").read_text().splitlines() == ["restart"]
+
+
 def test_aborts_before_restart_when_uv_sync_fails(tmp_path: pathlib.Path) -> None:
     """``uv sync`` 失败 → 中止，**不能**把服务重启起来。
 
@@ -323,6 +371,7 @@ def test_aborts_before_restart_when_uv_sync_fails(tmp_path: pathlib.Path) -> Non
 
     assert proc.returncode != 0, f"uv sync 失败竟然返回 0:\n{proc.stdout}"
     assert "uv sync 失败" in proc.stdout, proc.stdout
+    assert (uvdir / "uv.log").read_text().splitlines() == [str(work), "sync"]
     assert not marker.exists(), "uv sync 失败后不该重启服务"
 
 
