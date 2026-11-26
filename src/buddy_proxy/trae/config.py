@@ -72,6 +72,17 @@ class TraeRegion:
         """权益/额度用量接口。"""
         return f"{self.ug_base}/trae/api/{self.ug_usage_version}/pay/ide_user_ent_usage"
 
+    def usage_logs_url(self) -> str:
+        """会话级消耗明细接口（官网 dashboard#usage 背后那个）。
+
+        CN 在 ``api.trae.cn`` 的 v1；海外目前只在 ``growsg-normal`` /
+        ``grow-normal`` 上路由通（``api.trae.ai`` 是 TLB 404），但实测海外
+        账号返回 total=0——是否真正支持待一个确认有海外消耗的账号验证。
+        统一走 v1，不要用额度接口的 ug_usage_version（海外额度是 v1、会话明细
+        v2 是 404，两者版本号不共享）。
+        """
+        return f"{self.ug_base}/trae/api/v1/pay/query_user_usage_group_by_session"
+
     def checkin_url(self, action: str) -> str:
         """签到接口（``action`` = ``status`` / ``claim``）；无签到的区域不应调用。"""
         return f"{self.ug_base}/trae/api/v2/ug/checkin_credits/{action}"

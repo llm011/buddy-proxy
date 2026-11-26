@@ -23,6 +23,25 @@ from .common import _ensure_local
 log = logging.getLogger(__name__)
 
 
+def _local_str_to_epoch(value: str) -> float | None:
+    """``YYYY-MM-DD HH:MM:SS``（无时区、按本机时间）→ epoch 秒；解析不了返回 None。
+
+    CodeBuddy 的 ``requestTime`` 就是这种形态：上游按账号所在时区出数、不带
+    偏移量。本机时区与账号时区一致时才准——不一致会有偏差，但比丢掉时间强，
+    hover 仍展示原始串（``time_raw``）供核对。
+    """
+    import time as _t
+    text = (value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return _t.mktime(_t.strptime(text, fmt))
+        except ValueError:
+            continue
+    return None
+
+
 @app.get("/ui/api/qoder/auth")
 async def ui_qoder_auth(request: Request):
     """Qoder 登录/鉴权状态 + 账号信息（供管理页鉴权面板展示）。
@@ -402,6 +421,171 @@ async def ui_trae_accounts_rename(request: Request):
         raise HTTPException(status_code=404, detail={"error": {"message": str(exc)}})
     from ...trae import failover
     return await asyncio.to_thread(failover.accounts_status)
+
+
+@app.get("/ui/api/trae/usage-logs")
+async def ui_trae_usage_logs(request: Request):
+    """拉取 trae 官方会话级消耗明细（官网 dashboard#usage 背后的接口）。
+
+    仅用于**展示**，不回写 metrics——上游粒度是会话级（一个会话含多次请求），
+    与我们日志的请求级对不上，1:1 认领会重复记账。账号面板点「官方明细」按钮
+    时调用，弹窗外部分页。
+
+    查询参数：``id``（账号 id，必填）、``page``（默认 1）、``page_size``（默认
+    30，上限 50）。窗口固定最近 30 天（接口上限）。
+
+    上游不可达 / token 失效 / 参数被拒时返回 ``{"error": "..."}``（HTTP 200，
+    不抛 5xx）——让弹窗渲染友好空态，而不是把整个面板拖挂。
+    """
+    _ensure_local(request)
+    aid = request.query_params.get("id", "").strip()
+    if not aid:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（账号 id）"}})
+    page = max(1, int(request.query_params.get("page") or 1))
+    page_size = int(request.query_params.get("page_size") or 30)
+
+    try:
+        from ...trae import credentials as creds
+        from ...trae import benefits_api
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "trae 通道不可用"}})
+
+    def _fetch() -> dict[str, Any]:
+        token, cred = creds.ensure_account_token(aid)
+        region = (cred.get("region") or "").strip() or "cn"
+        out = benefits_api.fetch_usage_logs(
+            token=token, account_id=aid, region=region,
+            page_size=page_size, page_num=page)
+        # 与 raccoon / codebuddy 路由对齐：统一叫 currency（credits | dollar），
+        # 前端一套格式化逻辑通吃三路
+        out["currency"] = out.pop("billing", "credits")
+        return out
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        # 凭据不存在 / token 刷新失败 / 上游拒绝（9004）/ 网络——都归到 error 字段，
+        # 前端弹窗显示原话，不让单账号失败拖垮面板。
+        return {"error": str(exc)[:400], "rows": [], "total": 0, "page": page,
+                "page_size": page_size}
+
+
+@app.get("/ui/api/raccoon/usage-logs")
+async def ui_raccoon_usage_logs(request: Request):
+    """拉取小浣熊官方积分消耗流水（``/api/web/points/v2/bills?type=expense``）。
+
+    与 trae 一样**只展示不回写**：expense 流水是**会话/任务级**（biz_id 是会话
+    级聚合 id），不是我们日志的请求级，1:1 认领会重复。流水本身也不带模型名与
+    用户 prompt（只有 event_name / client_type），所以预览列显示事件名。
+
+    上游用 **cursor 分页**（``has_more`` / ``next_cursor``，无 total），前端按
+    前后翻页（不跳页）。查询参数：``id``（必填）、``page_size``（默认 30，上限
+    100）、``cursor``（下一页游标，缺省=首页）。
+    """
+    _ensure_local(request)
+    aid = request.query_params.get("id", "").strip()
+    if not aid:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（账号 id）"}})
+    page_size = max(1, min(int(request.query_params.get("page_size") or 30), 100))
+    cursor = request.query_params.get("cursor", "") or None
+
+    try:
+        from ...raccoon import credentials as creds
+        from ...raccoon import login as rlogin
+        from ...raccoon.upstream import BILLS_PATH, build_headers, parse_usage_logs
+        from buddy_proxy.core import net as core_net
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "raccoon 通道不可用"}})
+
+    def _fetch() -> dict[str, Any]:
+        token, cred = creds.ensure_account_token(aid)
+        device_id = str(cred.get("device_id") or "")
+        params: dict[str, Any] = {"paging.limit": page_size, "type": "expense"}
+        if cursor:
+            params["cursor"] = cursor
+        headers = build_headers(token, device_id)
+        headers["Accept"] = "application/json"
+        with core_net.client(timeout=20) as c:
+            resp = c.get(f"{rlogin.endpoint()}{BILLS_PATH}", headers=headers, params=params)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"raccoon bills HTTP {resp.status_code}")
+        rows, has_more, next_cursor = parse_usage_logs(resp.json())
+        return {"rows": rows, "currency": "credits",
+                "page_size": page_size, "has_more": has_more,
+                "next_cursor": next_cursor, "cursor": cursor}
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        return {"error": str(exc)[:400], "rows": [], "page_size": page_size,
+                "has_more": False}
+
+
+@app.get("/ui/api/codebuddy/usage-logs")
+async def ui_codebuddy_usage_logs(request: Request):
+    """拉取 CodeBuddy 官方请求级消耗流水（``/billing/meter/get-user-request-usage``）。
+
+    来源是 WorkBuddy web「使用记录」页同源接口，字段最齐：credit（实扣积分）、
+    model、client、requestTime、input（用户首条消息截断）。**请求级**粒度，与
+    我们日志行天然对得上，但这里仍只做展示（不回写 metrics，避免与转发时本地
+    记的 usage 重复；如要对账另开）。
+
+    CN 与海外版（codebuddyintl）共用本路由：``id`` 带 ``intl-`` 前缀时
+    ``api_post_as`` 自动路由到海外 base。offset 分页（有 total），可跳页。
+    窗口默认最近 30 天（接口约 31 天上限，按 30 切分留余量）。
+    """
+    _ensure_local(request)
+    aid = request.query_params.get("id", "").strip()
+    if not aid:
+        raise HTTPException(status_code=400,
+                            detail={"error": {"message": "缺少 id（账号 id）"}})
+    page = max(1, int(request.query_params.get("page") or 1))
+    page_size = max(1, min(int(request.query_params.get("page_size") or 30), 100))
+
+    try:
+        from ...codebuddy_provider import credentials as creds
+    except Exception:
+        raise HTTPException(status_code=503, detail={"error": {"message": "codebuddy 通道不可用"}})
+
+    def _fetch() -> dict[str, Any]:
+        import time as _t
+        end = _t.strftime("%Y-%m-%d %H:%M:%S")
+        start = _t.strftime("%Y-%m-%d %H:%M:%S", _t.localtime(_t.time() - 30 * 86400))
+        payload = creds.api_post_as(
+            aid, "/billing/meter/get-user-request-usage",
+            {"startTime": start, "endTime": end, "pageNum": page, "pageSize": page_size})
+        code = payload.get("code")
+        if code not in (0, None):
+            raise RuntimeError(payload.get("msg") or f"code={code}")
+        data = payload.get("data") or {}
+        rows = []
+        for r in data.get("data") or []:
+            if not isinstance(r, dict):
+                continue
+            inp = str(r.get("inputTrunc") or r.get("input") or "").strip()
+            time_raw = str(r.get("requestTime") or "")
+            rows.append({
+                "credits": r.get("credit"),
+                "currency": "credits",
+                "model": r.get("model") or "",
+                "client": r.get("client") or "",
+                "time_raw": time_raw,
+                # requestTime 形如 "2026-11-25 01:05:00"，无时区、按本地时间记
+                # （上游按账号所在时区出数），按本机时区转 epoch 给前端统一格式化
+                "ts": _local_str_to_epoch(time_raw),
+                "request_id": r.get("requestId") or "",
+                "preview": inp if inp and inp != "-" else "",
+            })
+        return {"rows": rows, "total": int(data.get("total") or len(rows)),
+                "page": page, "page_size": page_size, "currency": "credits"}
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        return {"error": str(exc)[:400], "rows": [], "total": 0, "page": page,
+                "page_size": page_size}
 
 
 @app.get("/ui/api/kimi/accounts")

@@ -274,8 +274,12 @@ function renderRaccoonPanel() {
     const renewBtn = (acct && acct.auto_renew)
       ? `<button class="ghost" title="用已保存的手机号密码重新登录，刷新会话" ` +
         `onclick="raccoonRelogin('${acct.id}')">↻登录</button>` : '';
+    // 官方消耗明细：/points/v2/bills?type=expense，流水不带模型名，看事件/客户端
+    const logsBtn = acct
+      ? `<button class="ghost" title="查看该账号的官方积分消耗流水（最近 30 天）" ` +
+        `onclick="openUsageLogs('raccoon','${acct.id}')">📜 明细</button>` : '';
     const rowBtns = `<span class="ag-move">${renameBtn}${renewBtn}${moveBtns}` +
-      `${acctDisableButton('raccoon', acct)}${delBtn}</span>`;
+      `${acctDisableButton('raccoon', acct)}${logsBtn}${delBtn}</span>`;
     const headSum = quotaHeadSum({ items: its });
     return `
     <div class="pat-pkg">

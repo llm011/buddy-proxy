@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .config import resolve_trae_region
+from .config import TraeRegion, resolve_trae_region
 from .credentials import _auth
 from .pat import net
 
@@ -292,4 +292,131 @@ def fetch_ent_usage(token: str = "", account_id: str = "",
             return json.loads(resp.read().decode("utf-8", errors="replace"))
     except urllib.error.HTTPError as e:
         raise RuntimeError(f"Trae usage [{e.code}]: {e.read().decode()[:300]}")
+
+
+# ───────────────────────── 会话级消耗明细（官方 dashboard#usage） ─────────────────────────
+#
+# 官网 www.trae.cn/dashboard#usage 页面背后的接口，返回**会话级**真实消耗（不是
+# 我们日志的请求级：一个会话含多次请求，无法 1:1 认领，所以这里只做展示、不回写
+# metrics，避免重复记账）。
+#
+# 几个实测固化的约束（2026-11-25，CN 账号本地 token 打通）：
+# - 头部必须走**浏览器 Web 路由**形态：浏览器 UA + Origin/Referer 指向官网域，
+#   **不能**带 x-device-id / x-device-brand / package-type 这些 IDE 指纹头——
+#   带上会触发 9004 参数校验失败（与签到/额度接口的头正好相反，别复用
+#   _build_checkin_headers）。
+# - 时间窗口最大 30 天，超了同样 9004。
+# - page_size 对齐官方控制台上限 ~50；200 直接 9004。
+# - usage_type=[7] = Cloud-IDE 会话积分消耗；1–8 实测只有 7 有数据。
+# - 海外（growsg-normal / grow-normal）路由通但返回 total=0，api.trae.ai 是
+#   TLB 404——海外是否真有会话明细待确认有海外消耗的账号验证，目前按「不支持」
+#   处理，前端给明确提示而不是空列表假装没数据。
+
+#: 会话明细接口允许的最大时间窗口（天）。超限上游 9004 拒绝。
+_USAGE_LOGS_MAX_WINDOW_DAYS = 30
+#: 单页最大条数。page_size 超限上游 9004（实测 200 被拒，50 通过）。
+_USAGE_LOGS_MAX_PAGE_SIZE = 50
+
+
+def _build_usage_logs_headers(token: str, region: TraeRegion) -> dict[str, str]:
+    """会话明细接口的请求头：浏览器 Web 路由形态，**不带** IDE 指纹。"""
+    host = region.auth_host  # www.trae.cn / www.trae.ai
+    return {
+        "Authorization": f"Cloud-IDE-JWT {token}",
+        "Content-Type": "application/json",
+        "User-Agent": ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+        "Origin": f"https://{host}",
+        "Referer": f"https://{host}/",
+        "sec-fetch-site": "same-site",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-dest": "empty",
+    }
+
+
+def fetch_usage_logs(token: str = "", account_id: str = "",
+                     region: str | None = None, *,
+                     start_ts: int | None = None, end_ts: int | None = None,
+                     page_size: int = 30, page_num: int = 1,
+                     usage_type: list[int] | None = None) -> dict[str, Any]:
+    """拉取 trae 官方会话级消耗明细（对应官网 dashboard#usage 页）。
+
+    返回 ``{"total": N, "rows": [...], "page": n, "page_size": m, "window_days": d,
+    "billing": "credits"|"dollar"}``。``rows`` 是归一化后的会话行，字段见
+    :func:`_normalize_usage_log_row`。
+
+    窗口默认最近 30 天（接口上限）；调用方也可传 start_ts/end_ts 收窄。任何
+    上游错误抛 ``RuntimeError``，由 UI 层接住转成空态提示——别让一个账号的拉取
+    失败拖垮整个面板。
+    """
+    if not token:
+        token, _ = _auth()
+    reg = resolve_trae_region(region)
+    now = int(time.time())
+    end = int(end_ts) if end_ts else now
+    win_days = _USAGE_LOGS_MAX_WINDOW_DAYS
+    start = int(start_ts) if start_ts else end - win_days * 86400
+    # 兜底：窗口超上限就收窄到上限（按 end 对齐，保证「最近 N 天」语义）
+    if end - start > _USAGE_LOGS_MAX_WINDOW_DAYS * 86400:
+        start = end - _USAGE_LOGS_MAX_WINDOW_DAYS * 86400
+    page_size = max(1, min(int(page_size), _USAGE_LOGS_MAX_PAGE_SIZE))
+    page_num = max(1, int(page_num))
+
+    body = json.dumps({
+        "start_time": start, "end_time": end,
+        "page_size": page_size, "page_num": page_num,
+        "usage_type": usage_type if usage_type is not None else [7],
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        reg.usage_logs_url(), data=body,
+        headers=_build_usage_logs_headers(token, reg), method="POST",
+    )
+    try:
+        with net.open_direct(req, timeout=20) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Trae usage logs [{e.code}]: {e.read().decode()[:300]}")
+
+    data = json.loads(raw)
+    # 9004 是应用级错误码（HTTP 可能仍是 200）：参数校验失败
+    code = data.get("code")
+    if code not in (0, None):
+        raise RuntimeError(f"Trae usage logs 上游拒绝 code={code}: {data.get('message', '')[:200]}")
+
+    sessions = data.get("user_usage_group_by_sessions") or []
+    return {
+        "total": int(data.get("total") or 0),
+        "page": page_num,
+        "page_size": page_size,
+        "window_days": win_days,
+        "billing": reg.billing,
+        "rows": [_normalize_usage_log_row(s) for s in sessions],
+    }
+
+
+def _normalize_usage_log_row(s: dict[str, Any]) -> dict[str, Any]:
+    """把上游会话行摊平成前端直接能用的结构，顺手防御字段缺失。"""
+    extra = s.get("extra_info") or {}
+    cred = s.get("credits_float")
+    if cred is None:
+        cred = s.get("amount_float")
+    # mode：上游 use_max_mode=true 时 mode 常为 "Max"；把两者合并成单一展示串
+    mode = s.get("mode") or ""
+    if s.get("use_max_mode") and mode != "Max":
+        mode = mode or "Max"
+    return {
+        "session_id": s.get("session_id") or "",
+        "ts": s.get("usage_time"),  # unix 秒，可能缺失
+        "model": s.get("model_name") or "",
+        "mode": mode,
+        "credits": cred,
+        "cost_money": s.get("cost_money_float"),
+        "dollar": s.get("dollar_float"),
+        "input_tokens": extra.get("input_token"),
+        "output_tokens": extra.get("output_token"),
+        "cache_read_tokens": extra.get("cache_read_token"),
+        "cache_write_tokens": extra.get("cache_write_token"),
+        "preview": s.get("user_input_preview") or "",
+        "usage_source": s.get("usage_source"),
+    }
 
