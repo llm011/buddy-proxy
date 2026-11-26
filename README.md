@@ -18,7 +18,7 @@
 - **Message compression** (`--optimize-context`) — compresses long histories / large schemas / oversized tool output for `/v1/responses`, cutting token usage dramatically
 - **Tool calls** — full function calling support with automatic filtering of invalid tool definitions; `tool_choice` is normalized across both OpenAI and Anthropic shapes so it never reaches the upstream as an object
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
-- **Reasoning separation** — Trae non-stream Chat Completions preserve upstream reasoning in `message.reasoning_content`, never in answer text; reasoning-only and tool-call responses retain it for compatible clients. This does not enable thinking or guarantee every upstream returns reasoning. Both Trae transports preserve upstream usage extensions and explicit cache zeros; absent cache evidence stays absent, with no cache/credit estimation changes.
+- **Reasoning separation** — Trae non-stream Chat Completions preserve upstream reasoning in `message.reasoning_content`, never in answer text; reasoning-only and tool-call responses retain it for compatible clients. This does not enable thinking or guarantee every upstream returns reasoning. Trae native history conversion currently does not forward input `reasoning_content`; preserving it in responses or receiving a multi-turn 200 does not prove reasoning was replayed to Trae, nor satisfy DeepSeek official's strict reasoning-replay acceptance. Both Trae transports preserve upstream usage extensions and explicit cache zeros; absent cache evidence stays absent, with no cache/credit estimation changes.
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
@@ -328,6 +328,14 @@ A built-in provider for Baidu's DuMate (千帆桌面端) desktop app. It connect
 ### Trae provider (optional)
 
 Decrypts the Trae IDE's locally stored login state and talks straight to the underlying models.
+
+Implementation boundaries: `provider.py` retains the public class, native override hooks
+and legacy globals; `provider_catalog.py` owns discovery/generation convergence,
+`provider_accounts.py` check-in/quota, `provider_forward.py` regional failover/protocol
+dispatch, `provider_stream.py` SSE delivery, `provider_gate.py` first-event commitment,
+and `provider_policy.py` shared rejection/error policy. Extracted methods resolve facade
+hooks at runtime to preserve replacement monkeypatches and PAT/Intl overrides; protocol,
+retry, billing and usage semantics are unchanged. See [architecture](docs/architecture.md).
 
 ```bash
 buddy start
