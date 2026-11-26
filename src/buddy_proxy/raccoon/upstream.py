@@ -2,11 +2,11 @@
 
 ## 协议形态
 
-标准 OpenAI 兼容（``/api/web/llm/v2/chat/completions``），**无签名、无设备
-指纹**——这是它比 qoder（私有 COSY 签名）/ trae（多套 IDE 头）都简单的地方。
-``tool_calls`` 流式/非流式、``role=tool`` 回传、``include_usage`` 都实测通过。
+标准 OpenAI 兼容（``/api/web/llm/v2/chat/completions``），无 COSY 这类请求
+签名；但需要绑定设备并携带 X-Client-* 头，否则 v2 可能触发 200108 风控。
+``tool_calls``、``role=tool`` 回传与非流式 usage 都实测通过。
 
-认证只有一个 cookie 等价的头：``xhx_token: <JWT>``。
+认证同时带 ``xhx_token``、Authorization 与 Cookie。
 
 ## 三个必须防的坑
 
@@ -36,13 +36,12 @@ log = logging.getLogger(__name__)
 
 #: 上游端点（相对根地址）。
 #:
-#: v1 而非 v2 的原因：v2 端点有风控闸（``200108``），拦「非官方客户端」形态
-#: 的请求。同一账号同一秒，v2 回 429、v1 回 200。v1 的**非流式**完全正常，
-#: 但**流式是坏的**——返回 HTTP 200 的 SSE，内容却是
-#: ``data:{"data":null,"status":{"code":9,"message":"invalid upstream stream
-#: response"}}``，然后是 ``data:[DONE]``。所以流式请求要改为非流式 + 本地合成
-#: （见 ``provider.py`` 的 ``_synthesize_sse``）。
-CHAT_PATH = "/api/web/llm/v1/chat/completions"
+#: **聊天必须走 v2，不能为了绕风控回切 v1。** 2026-11-27 同账号同模型对照：
+#: v1 返回 200 和正常 usage，但请求前后余额差为 0、bills 没有新行；v2 返回
+#: 200 后余额立即 -1，并生成对应 expense 流水。v1 是「能答但不计费」的陷阱。
+#: v2 曾回 429/200108，补齐设备绑定与 X-Client-* 头后同账号实测已恢复 200。
+#: 当前仍采用非流式上游 + 本地合成 SSE，避免同时改变已经稳定的流式出口。
+CHAT_PATH = "/api/web/llm/v2/chat/completions"
 CATALOG_PATH = "/api/web/llm/v2/model_catalog"
 BALANCE_PATH = "/api/web/points/v1/balance"
 #: 积分流水（``type=income`` 只留发放 = 资源包明细；``all`` 会混消费）
@@ -141,10 +140,10 @@ def build_chat_body(body: dict[str, Any], *, model: str, stream: bool) -> dict[s
     1. 强制 ``model`` 为目录里的真名（客户端可能带 ``raccoon/`` 前缀）；
     2. ``stream`` 按调用方决定（不由客户端的 body 决定）。
 
-    ⚠️ ``stream`` 目前**恒为 False**：v1 的流式端点坏了，所有上游请求都走
-    非流式，客户端要流式由 ``provider._synthesize_openai_stream`` 本地合成。
-    所以 ``stream_options.include_usage`` 那段现在走不到——保留是因为签名有
-    测试锁着，且万一以后 v1 修好了流式，这里能直接用。
+    ⚠️ ``stream`` 目前**恒为 False**：所有上游请求都走非流式，客户端要流式由
+    ``provider._synthesize_openai_stream`` 本地合成。v2 恢复计费后先保留这条
+    已稳定的出口，不把「修计费」和「切原生 SSE」混成一次变更。因此
+    ``stream_options.include_usage`` 那段现在走不到，但函数本身仍保留完整语义。
     """
     out = dict(body)
     out["model"] = model

@@ -763,13 +763,17 @@ def test_checkin_dates_feed_the_calendar():
 # 11. 流式必须直通（不能过 gemini 转换器）
 # ---------------------------------------------------------------------------
 
+def test_chat_path_is_billing_v2():
+    """v1 会正常回答却不扣分、不出账；聊天端点必须固定在计费的 v2。"""
+    from buddy_proxy.raccoon.upstream import CHAT_PATH
+
+    assert CHAT_PATH == "/api/web/llm/v2/chat/completions"
+
+
 def test_upstream_chat_always_non_stream():
-    """上游 chat 请求必须**永远**非流式（v1 的流式端点是坏的）。
+    """上游 chat 请求保持非流式，客户端流式响应由本地合成。
 
-    v1 端点回 HTTP 200 的 SSE，但内容是
-    ``data:{"data":null,"status":{"code":9,"message":"invalid upstream stream
-    response"}}`` —— 客户端会拿到空回复。所以流式请求也发非流式，本地合成。
-
+    v2 恢复计费后不顺便切换原生 SSE，避免修计费时引入另一组流式变化。
     这条直接锁 ``forward`` 的源码：``build_chat_body`` 的 stream 参数必须是
     字面量 ``False``，且 ``client.send`` 的 stream 也必须是 ``False``。
     改成 ``stream=stream`` 当场红。
@@ -784,7 +788,7 @@ def test_upstream_chat_always_non_stream():
     assert any("build_chat_body(body, model=upstream_model, stream=False)" in ln
                for ln in code), "上游 chat body 必须强制 stream=False"
     assert not any("stream=stream" in ln for ln in code), \
-        "不能把客户端的 stream 透给上游——v1 流式端点坏了"
+        "不能把客户端的 stream 透给上游——当前出口使用本地合成"
     # 客户端要流式时走合成
     assert "_synthesize_openai_stream" in src
     assert "_synthesize_anthropic_stream" in src
@@ -994,7 +998,7 @@ def test_anthropic_stream_emits_content_blocks():
     同一个坑（上游是 OpenAI 形态，不能过 Gemini 的转换器）。
 
     改用 ``AnthropicStreamConverter``（mimo/copilot/ark 同款，本来就吃
-    OpenAI chunk）。v1 端点非流式化之后，输入换成**本地合成的 chunk**，
+    OpenAI chunk）。上游统一非流式后，输入换成**本地合成的 chunk**，
     但转换器不变——这条测试锁的是「有 content_block」这个结果。
     """
     import asyncio
@@ -1032,7 +1036,7 @@ def test_raccoon_never_uses_gemini_stream_converters():
     anthropic 出口只剩 message_start/stop、没有 content_block；openai 出口
     客户端拿不到内容、metrics 里 token 恒为 0。
 
-    v1 改成非流式 + 本地合成后，输入是合成 chunk、仍走
+    上游非流式 + 本地合成后，输入是合成 chunk、仍走
     ``AnthropicStreamConverter``（它本来就吃 OpenAI chunk）。这条守卫整个
     模块，比只查某一个函数更难绕过。
     """
@@ -1088,7 +1092,7 @@ def test_synthesize_stream_releases_lease_when_cancelled():
     释放。每断开一次漏一个名额（每账号上限 2），漏满就永久拿不到，全通道
     停摆；症状极具误导性：上游正常，本地却排队 90s 报「并发排队超时」。
 
-    v1 改成非流式 + 本地合成后，结算挪到合成流收尾，对象换成
+    上游非流式 + 本地合成后，结算挪到合成流收尾，对象换成
     ``_synthesize_openai_stream``。锁的语义不变：cancel 打在结算那个 await
     上，名额仍要还回来。
 
@@ -1251,8 +1255,8 @@ def test_ensure_device_bound_is_best_effort(monkeypatch):
 def test_gate_only_handles_non_stream():
     """闸门只处理非流式响应，不能再出现读 SSE 的分支。
 
-    v1 端点流式是坏的，上游请求全部非流式，客户端要流式由合成流负责。以前
-    闸门里有一条读 ``aiter_lines()`` 的 SSE 分支，改成全非流式之后不可达；
+    上游请求全部非流式，客户端要流式由合成流负责。以前闸门里有一条读
+    ``aiter_lines()`` 的 SSE 分支，改成全非流式之后不可达；
     留着会让后来者以为流式仍走上游，排查时往错的方向找。
 
     这条锁两个点：签名里没有 ``stream`` 参数、源码里没有 ``aiter_lines``。
