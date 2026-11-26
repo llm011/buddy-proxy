@@ -867,7 +867,14 @@ async def ui_model_order_pin(request: Request):
     候选顺序）。落 ``settings.json`` 的 ``model_order_pinned``，重启不丢。
     """
     _ensure_local(request)
-    body = await request.json()
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(
+            status_code=400, detail={"error": {"message": "请求体须为 JSON 对象"}}) from None
+    if not isinstance(body, dict):
+        raise HTTPException(
+            status_code=400, detail={"error": {"message": "请求体须为 JSON 对象"}})
     model = body.get("model")
     pinned_flag = body.get("pinned")
     if not isinstance(model, str) or not model.strip():
