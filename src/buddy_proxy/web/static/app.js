@@ -338,6 +338,9 @@ window.toggleTheme = function toggleTheme() {
   tip.setAttribute('role', 'tooltip');
   document.body.appendChild(tip);
   let describedTarget = null;
+  // 鼠标与键盘可能同时落在同一按钮：任一路径仍在时都必须保留提示和描述关系。
+  let hoveredTarget = null;
+  let focusedTarget = null;
 
   function clearTip(target = describedTarget) {
     if (target && target.dataset.bpTooltipDescribed !== undefined) {
@@ -387,23 +390,40 @@ window.toggleTheme = function toggleTheme() {
   function pickTipTarget(node) {
     return node && node.closest ? node.closest(PICK) : null;
   }
+  // 焦点优先：鼠标移到别的按钮时，仍获焦的按钮必须继续拥有它的读屏描述。
+  function syncTip() {
+    const target = focusedTarget || hoveredTarget;
+    if (target) showTip(target); else clearTip();
+  }
   document.addEventListener('mouseover', (e) => {
     const target = pickTipTarget(e.target);
     // 从同一按钮的图标/文字间移动不应闪烁或重复布局。
-    if (target && !target.contains(e.relatedTarget)) showTip(target);
+    if (target && !target.contains(e.relatedTarget)) {
+      hoveredTarget = target;
+      syncTip();
+    }
   });
   document.addEventListener('mouseout', (e) => {
     const target = pickTipTarget(e.target);
-    if (target && !target.contains(e.relatedTarget)) clearTip(target);
+    if (target && !target.contains(e.relatedTarget) && hoveredTarget === target) {
+      hoveredTarget = null;
+      syncTip();
+    }
   });
   // title 被迁走后原生浏览器提示不会再覆盖焦点用户，必须同步保留键盘路径。
   document.addEventListener('focusin', (e) => {
     const target = pickTipTarget(e.target);
-    if (target) showTip(target);
+    if (target) {
+      focusedTarget = target;
+      syncTip();
+    }
   });
   document.addEventListener('focusout', (e) => {
     const target = pickTipTarget(e.target);
-    if (target && !target.contains(e.relatedTarget)) clearTip(target);
+    if (target && !target.contains(e.relatedTarget) && focusedTarget === target) {
+      focusedTarget = null;
+      syncTip();
+    }
   });
 })();
 // 范围选择器仅在总览/请求日志页有意义

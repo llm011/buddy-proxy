@@ -54,3 +54,6 @@ def test_global_button_tooltip_has_pointer_and_keyboard_lifecycle():
     assert "document.addEventListener('focusin'" in tooltip
     assert "document.addEventListener('focusout'" in tooltip
     assert "target.contains(e.relatedTarget)" in tooltip, "按钮内部移动不应闪烁或提前隐藏提示"
+    assert "let hoveredTarget = null" in tooltip and "let focusedTarget = null" in tooltip
+    assert "const target = focusedTarget || hoveredTarget" in tooltip, \
+        "鼠标离开时仍获焦的按钮必须保留 tooltip 与读屏描述"
