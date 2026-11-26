@@ -109,6 +109,10 @@ class WebSession:
             extra=dict(d.get("extra") or {}),
         )
 
+    def __repr__(self) -> str:  # 防止 f"{session}" / log.debug 把 JWT 带进日志
+        return (f"WebSession(user_id={self.user_id!r}, expires_in={self.expires_at - time.time():.0f}s, "
+                f"has_refresh={bool(self.refresh_token)}, cooldown={self.in_cooldown()})")
+
     def expiring(self, margin: float = REFRESH_MARGIN_SECONDS) -> bool:
         return self.expires_at > 0 and time.time() + margin >= self.expires_at
 
@@ -279,23 +283,6 @@ async def ensure_session(
         raise
 
 
-async def retry_on_stale(
-    session: WebSession | None,
-    email: str,
-    password: str,
-    call,  # async (token: str) -> Any
-):
-    """带 token 的调用：遇到 401/412 就续期/重登一次再试，第二次还失败就放弃。"""
-    cur = await ensure_session(session, email, password)
-    try:
-        return await call(cur.access_token), cur
-    except WebSessionError as exc:
-        if exc.kind != "refresh":
-            raise
-    cur = await ensure_session(cur, email, password, force=True)
-    return await call(cur.access_token), cur
-
-
 # ---------------------------------------------------------------------------
 # 站内业务接口
 # ---------------------------------------------------------------------------
@@ -322,13 +309,11 @@ async def get_balance(token: str, *, timeout: float = 30.0) -> dict[str, Any]:
     - ``transitionCoins``：过渡币（本模块存在的意义——只有网页端能花）
     - ``activityPoints`` / ``paidPoints``：活动 / 付费积分
     - ``walletBalance`` / ``apiConsumableBalance``：钱包余额 / API 可用余额（USD）
-    - ``apiKey`` / ``sharedApiKey``：站内展示的 key（可能和用户导入的不同）
     """
     info, pts = await asyncio.gather(
         get_user_info(token, timeout=timeout), get_point_summary(token, timeout=timeout)
     )
     wallet = info.get("walletInfo") if isinstance(info.get("walletInfo"), dict) else {}
-    keys = await get_api_keys(token, timeout=timeout)
     return {
         "userId": info.get("_userId") or info.get("id"),
         "email": info.get("email"),
@@ -341,8 +326,8 @@ async def get_balance(token: str, *, timeout: float = 30.0) -> dict[str, Any]:
         "walletBalance": _to_float(wallet.get("balance")),
         "apiConsumableBalance": _to_float(wallet.get("apiConsumableBalance")),
         "currency": wallet.get("currency"),
-        "apiKey": info.get("apiKey"),
-        "sharedApiKey": (keys.get("sharedApi") or {}).get("apiKey") if isinstance(keys, dict) else None,
+        # 刻意**不**带 apiKey / sharedApiKey：这个 dict 会整个写进 account_info 并回给前端。
+        # 上传要 key 时走 get_api_keys() 现取（见 channels.ui_runninghub_upload）。
     }
 
 

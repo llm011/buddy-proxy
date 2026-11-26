@@ -2080,10 +2080,12 @@ async def ui_runninghub_upload(request: Request):
     if not api_key and acc.get("email") and acc.get("password"):
         # 没存 key：用登录态拿站内展示的 normalApiKey，顺手写回账号记录
         try:
-            keys, _ = await WebAccountSession(acc, persist=rh_store.update_session).call(
-                lambda t: websession.get_api_keys(t)
+            # /uc/apiKey/get 的 normalApiKey 是脱敏串（af1e****96e1）不能用来请求；
+            # getUserInfo.apiKey 才是完整的。只在真要上传时才取，不往 account_info 里放。
+            info, _ = await WebAccountSession(acc, persist=rh_store.update_session).call(
+                lambda t: websession.get_user_info(t)
             )
-            api_key = str((keys or {}).get("normalApiKey") or "")
+            api_key = str(info.get("apiKey") or "")
             if api_key:
                 rh_store.upsert_account(email=acc["email"], api_key=api_key)
         except websession.WebSessionError as exc:

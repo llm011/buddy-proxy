@@ -146,8 +146,10 @@ class WebAccountSession:
         except WebSessionError as exc:
             if exc.kind != "refresh":
                 raise
+            # 只记文案，**不**记 last_error_at：冷却（in_cooldown）只由 login()/refresh()
+            # 真正失败那一支触发。否则这里一记，下面 force 重登再失败时，下次请求
+            # 看到的是「刚失败过…5 分钟内不重试」而不是真实的「密码错了」。
             if self.session is not None:
-                self.session.last_error_at = time.time()
                 self.session.last_error = f"token 失效: {exc}"
         token = await self.ensure(force=True)
         return await fn(token), token

@@ -83,7 +83,17 @@ def _public(acc: dict[str, Any]) -> dict[str, Any]:
     out["masked_email"] = _mask_email(str(acc.get("email") or ""))
     out["masked_key"] = _mask_key(str(acc.get("api_key") or ""))
     out["web_session_status"] = _session_status(acc.get("web_session"))
+    # account_info 是上游 dict 整个存进来的，万一哪天接口多回一个 apiKey/token 字段，
+    # 这里兜底抹掉——别指望上游永远不加字段
+    info = out.get("account_info")
+    if isinstance(info, dict):
+        out["account_info"] = {k: v for k, v in info.items() if not _looks_secret(k)}
     return out
+
+
+def _looks_secret(key: str) -> bool:
+    k = key.lower()
+    return k.endswith(("key", "token", "secret", "password")) or "apikey" in k
 
 
 def list_accounts(*, include_secret: bool = False) -> list[dict[str, Any]]:

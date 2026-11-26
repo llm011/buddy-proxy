@@ -381,3 +381,54 @@ def test_ui_run_requires_email_account(isolated_store: Path, monkeypatch: pytest
     r = _client(monkeypatch).post("/ui/api/runninghub/workflows/run", json={"webapp_id": "w", "nodeInfoList": []})
     assert r.status_code == 400
     assert "邮箱" in r.json()["detail"]["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
+# review 修复的回归（PR #368）
+# ---------------------------------------------------------------------------
+
+def test_401_retry_failure_does_not_trigger_cooldown(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """401 → force 重登 → 重登失败：冷却由 login() 那一支记，但用户**第一次**看到的
+    必须是真实原因，不是「刚失败过」。"""
+    acc = _acct(isolated_store)
+    rec = _Recorder({
+        "/uc/abroad/pwdLogin": {"code": 123, "msg": "Account or password incorrect"},
+    })
+    rec.install(monkeypatch)
+    ws = runner.WebAccountSession(acc, persist=store.update_session)
+    # 直接用 call：token 还没拿 → ensure 先登录就失败
+    with pytest.raises(WebSessionError) as ei:
+        asyncio.run(ws.call(lambda t: websession.get_user_info(t)))
+    assert "incorrect" in str(ei.value), "第一次失败要把上游原文抛出来"
+    assert ws.session.in_cooldown()
+    # 第二次：进冷却，不打上游
+    n = len(rec.calls)
+    with pytest.raises(WebSessionError) as ei2:
+        asyncio.run(ws.call(lambda t: websession.get_user_info(t)))
+    assert len(rec.calls) == n and "不重试" in str(ei2.value)
+
+
+def test_session_repr_never_leaks_token():
+    tok = _fake_jwt(sub="77")
+    s = WebSession(access_token=tok, refresh_token="refresh-secret")
+    r = repr(s)
+    assert tok not in r and "refresh-secret" not in r
+    assert "user_id='77'" in r
+
+
+def test_public_view_strips_secret_looking_keys_in_account_info(isolated_store: Path):
+    acc = store.upsert_account(email="a@x.com", password="pw",
+                               account_info={"transitionCoins": 984, "apiKey": "af1e96e1", "access_token": "jwt", "nickName": "u"})
+    assert "apiKey" not in acc["account_info"] and "access_token" not in acc["account_info"]
+    assert acc["account_info"]["transitionCoins"] == 984 and acc["account_info"]["nickName"] == "u"
+
+
+def test_get_balance_does_not_call_api_keys(monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder({
+        "/uc/getUserInfo": {"code": 0, "data": {"id": "1", "apiKey": "af1e96e1", "walletInfo": {"balance": 0}}},
+        "/uc/point/summary": {"code": 0, "data": {"transitionCoinRemained": "984"}},
+    })
+    rec.install(monkeypatch)
+    bal = asyncio.run(websession.get_balance("tok"))
+    assert [c[0] for c in rec.calls] == ["/uc/getUserInfo", "/uc/point/summary"]
+    assert "apiKey" not in bal and bal["transitionCoins"] == 984.0
