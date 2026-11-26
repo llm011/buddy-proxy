@@ -145,7 +145,11 @@ function renderCodebuddyPanel() {
       ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
         `onclick="codebuddyDeleteAccount('${acct.id}')">✕</button>` : '';
     const renameBtn = acctRenameButton('codebuddy', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('codebuddy', acct)}${delBtn}</span>`;
+    // 官方消耗明细：/billing/meter/get-user-request-usage，请求级、带模型/客户端/预览
+    const logsBtn = acct
+      ? `<button class="ghost" title="查看该账号的官方消耗明细（请求级，最近 30 天）" ` +
+        `onclick="openUsageLogs('codebuddy','${acct.id}')">📜 明细</button>` : '';
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('codebuddy', acct)}${logsBtn}${delBtn}</span>`;
     // 合计行：codebuddy 的订阅套餐/资源包是并存的份额，加起来才是账号总量
     // （后端 sum_items 声明可合计）。
     const headSum = quotaHeadSum({items: its, sum_items: true});
@@ -257,7 +261,10 @@ function renderCodebuddyIntlPanel() {
       `${acctSubHtml(acct, null, 'data-codebuddyintl-sub')}` +
       `${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}` +
       `${quotaItemsHtml(its, 'codebuddyintl:' + grp)}` +
-      `${acct ? `<span class="ag-move">${acctRenameButton('codebuddyintl', acct)}${acctDisableButton('codebuddyintl', acct)}</span>` : ''}</div>`;
+      `${acct ? `<span class="ag-move">${acctRenameButton('codebuddyintl', acct)}` +
+        `<button class="ghost" title="查看该账号的官方消耗明细（请求级，最近 30 天）" ` +
+        `onclick="openUsageLogs('codebuddy','${acct.id}')">📜 明细</button>` +
+        `${acctDisableButton('codebuddyintl', acct)}</span>` : ''}</div>`;
   }).join('');
   const noticeHtml = notices.map(quotaItemHtml).join('');
   // 同上：没有账号卡（未登录 / 查询为空）就收起明细，以免整块空白占屏。

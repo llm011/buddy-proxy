@@ -381,6 +381,69 @@ def parse_bills(payload: Any) -> list[dict[str, Any]]:
     return out
 
 
+#: 消耗明细（/points/v2/bills?type=expense）单页最大条数。实测 200 被截到 100。
+_USAGE_LOGS_MAX_LIMIT = 100
+
+
+def _iso_to_epoch(value: str) -> float | None:
+    """上游 ISO 时间串 → epoch 秒；解析不了返回 None（别抛，流水行缺时间就空着）。
+
+    上游带 ``+08:00`` 偏移；万一没有就按 +08:00 补（与 ``has_daily_grant_today``
+    同一口径），不要落到本机时区。
+    """
+    from datetime import datetime, timedelta, timezone
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
+    return dt.timestamp()
+
+
+def parse_usage_logs(payload: Any) -> tuple[list[dict[str, Any]], bool, str | None]:
+    """解析 ``/points/v2/bills?type=expense`` 响应 → 归一化消耗行 + 分页游标。
+
+    上游用 cursor 分页（无 total）：``data.has_more`` / ``data.next_cursor``，
+    下一页请求把 ``cursor=<next_cursor>`` 带上。本函数只解析一页；翻页由调用
+    方（UI 路由）持游标。
+
+    返回 ``(rows, has_more, next_cursor)``。
+    """
+    if not isinstance(payload, dict):
+        return [], False, None
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    items = data.get("items") if isinstance(data, dict) else None
+    rows: list[dict[str, Any]] = []
+    if isinstance(items, list):
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            pts = _first_number(it, ("points", "amount", "value"))
+            created = str(it.get("created_at") or "")
+            rows.append({
+                # points 是带符号的（消耗为负），展示取绝对值
+                "credits": abs(float(pts)) if pts is not None else None,
+                "currency": "credits",
+                "event": str(it.get("event_name") or it.get("biz_type") or ""),
+                "biz_type": str(it.get("biz_type") or ""),
+                "client": str(it.get("client_type") or ""),
+                "time_raw": created,
+                # 统一给前端 unix 秒（前端按本地时区格式化，hover 看完整秒）
+                "ts": _iso_to_epoch(created),
+                "bill_id": str(it.get("bill_id") or ""),
+                "biz_id": str(it.get("biz_id") or ""),
+                # 预览：上游 expense 流水不带用户 prompt，用事件名占位，别空着
+                "preview": str(it.get("event_name") or "消耗"),
+            })
+    has_more = bool(data.get("has_more")) if isinstance(data, dict) else False
+    cursor = data.get("next_cursor") if isinstance(data, dict) else None
+    return rows, has_more, (str(cursor) if cursor else None)
+
+
 def parse_setting_balance(payload: Any) -> dict[str, Any]:
     """从 ``setting_info`` 兜底读积分（``/points/v1/balance`` 回 403 时用）。
 

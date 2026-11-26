@@ -770,6 +770,17 @@
   .modal-foot > * { flex-shrink: 0; }
   .modal-foot button { white-space: nowrap; }
   .modal-foot:empty { display: none; }
+  /* trae 官方消耗明细表（弹窗内）：5 列在 620px 弹窗里要紧凑，预览列截断 */
+  .trae-logs { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .trae-logs th, .trae-logs td { padding: 6px 8px; border-bottom: 1px solid var(--line);
+                                 text-align: left; vertical-align: top; }
+  .trae-logs th { color: var(--muted); font-weight: 600; font-size: 11px;
+                  letter-spacing: .03em; text-transform: uppercase; }
+  .trae-logs td.num, .trae-logs th.num { text-align: right; white-space: nowrap; }
+  .trae-logs td.mono { font-size: 11px; }
+  .trae-logs tr:last-child td { border-bottom: none; }
+  .trae-logs .trae-log-preview { display: block; max-width: 260px; white-space: nowrap;
+                                 overflow: hidden; text-overflow: ellipsis; }
   /* 「新增模型顺序」的模型选择列表：按归属通道分组，组内只写模型名 */
   .order-new-list { max-height: 44vh; overflow: auto; margin-top: 2px; }
   .order-new-group { position: sticky; top: 0; z-index: 1; background: var(--card);

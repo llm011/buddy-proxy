@@ -63,7 +63,7 @@ buddy login codebuddy
 
 buddy start                # 启动（未运行时）并打开 http://127.0.0.1:8787/ui
 buddy stop / restart / status / logs
-buddy login [provider]     # 登录/自检上游账号（codebuddy(=workbuddy)/trae(=traeintl 海外)/zcode/glm/doubao/dumate/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/codex/copilot）
+buddy login [provider]     # 登录/自检上游账号（codebuddy(=workbuddy, =codebuddyintl 海外)/trae(=traeintl 海外)/zcode/glm/ark/doubao/dumate/qwenpc/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/raccoon/codex/copilot/deepseek/yuntoken/kiro）
                            # trae/qoder 可加 --region cn|global（两区账号不通用），其它 provider 忽略该参数；
                            # traeintl/qoderintl 是登录别名，等价 --region global；登录过海外账号会自动启用独立通道，
                            # 管理页里海外额度单独一张卡
@@ -495,6 +495,7 @@ buddy login copilot --token gho_… # 直接给一把 GitHub token
 把 **火山引擎方舟（Volcengine Ark）** 的 API key 变成一条上游通道，以 `ark/<id>` 寻址：
 
 ```bash
+buddy login ark                       # 自检 key / 模型表，缺配置时打印具体步骤
 python -m buddy_proxy --ark           # 或 ARK_ENABLED=1；默认 EXTRA_ARGS 里已带 --ark
 ```
 

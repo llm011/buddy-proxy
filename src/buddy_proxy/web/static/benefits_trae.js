@@ -184,7 +184,13 @@ function renderTraePanel() {
       ? `<button class="ghost danger" title="删除该账号（不再使用/凭据失效时）" ` +
         `onclick="traeDeleteAccount('${acct.id}')">✕</button>` : '';
     const renameBtn = acctRenameButton('trae', acct);
-    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('trae', acct)}${delBtn}</span>`;
+    // 「官方明细」按钮：拉 trae 官网 dashboard#usage 的会话级真实消耗，弹窗分页
+    // 展示。**只 CN 区**：海外（growsg-normal）实测返回 total=0、是否真支持待
+    // 确认有海外消耗的账号验证，先不给入口以免点了全是空态误导。
+    const logsBtn = (acct && acct.region !== 'global')
+      ? `<button class="ghost" title="查看该账号的官方消耗明细（会话级，最近 30 天）" ` +
+        `onclick="openUsageLogs('trae','${acct.id}')">📜 明细</button>` : '';
+    const rowBtns = `<span class="ag-move">${renameBtn}${moveBtns}${acctDisableButton('trae', acct)}${logsBtn}${delBtn}</span>`;
     // 合计行：总额度那条（head_only，unshift 到组首）单独供数——各权益包是
     // 它的明细不能相加，quotaHeadSum 走非 sum_items 分支取第一条有数的。
     const headSum = quotaHeadSum({items: its});
