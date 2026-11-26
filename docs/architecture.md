@@ -121,8 +121,17 @@ blocking through sync helpers remain review territory.
   expiry dates — the second source is best-effort and must never fail the
   quota card.
 - **`trae/`** is split by responsibility (credentials, transport, SSE,
-  native tools, text fallback, and PAT). `trae_provider.py` remains the
-  published `trae-cli` entrypoint and trae façade (not a shim to remove).
+  native tools, text fallback, non-stream collection, and PAT). `trae_provider.py`
+  remains the published `trae-cli` entrypoint and trae façade (not a shim to remove).
+  `trae/collection.py` collects non-stream SSE through the provider's existing
+  override/patch hooks. It keeps upstream `reasoning_content` separate from
+  `content`, including reasoning-only/tool-call responses; the Anthropic adapter
+  converts that field into a thinking block. Streaming reasoning is unchanged.
+  `trae/usage.py` preserves upstream usage extensions in both transports and maps
+  explicitly present cache counts to `prompt_tokens_details.cached_tokens`;
+  explicit zero stays zero and missing evidence is not invented. Credit estimation
+  is unchanged. This wire preservation is not evidence that a particular live
+  upstream returned reasoning or achieved a cache hit.
 - **`web/ui/`** provides localhost-only administration endpoints (split by
   responsibility: channels, models, settings, queries, page) and the bundled
   UI under `web/static/`: an `index.html` skeleton, `style.css`, and small

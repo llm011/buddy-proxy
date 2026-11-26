@@ -18,6 +18,7 @@
 - **Message compression** (`--optimize-context`) — compresses long histories / large schemas / oversized tool output for `/v1/responses`, cutting token usage dramatically
 - **Tool calls** — full function calling support with automatic filtering of invalid tool definitions; `tool_choice` is normalized across both OpenAI and Anthropic shapes so it never reaches the upstream as an object
 - **DSML parsing** — detects and converts DeepSeek Markup Language tool calls
+- **Reasoning separation** — Trae non-stream Chat Completions preserve upstream reasoning in `message.reasoning_content`, never in answer text; reasoning-only and tool-call responses retain it for compatible clients. This does not enable thinking or guarantee every upstream returns reasoning. Both Trae transports preserve upstream usage extensions and explicit cache zeros; absent cache evidence stays absent, with no cache/credit estimation changes.
 - **Streaming** — SSE output with idle / total-duration timeout protection
 - **Both wire protocols** — OpenAI (`/v1/chat/completions`) and Anthropic (`/v1/messages`, i.e. Claude Code) over the same models; each provider converts responses back to whichever protocol the client asked for
 
