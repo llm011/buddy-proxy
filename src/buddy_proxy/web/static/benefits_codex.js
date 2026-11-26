@@ -47,7 +47,7 @@ function codexConfirmDelete(id) {
   });
 }
 
-async function codexMoveAccount(idx, delta, id) {
+async function codexMoveAccount(idx, delta, id, pin) {
   if (CODEX_MOVING) return;
   CODEX_MOVING = true;
   try {
@@ -63,7 +63,7 @@ async function codexMoveAccount(idx, delta, id) {
       if (at < 0) return;
       idx = at + 1;
     }
-    const to = idx + delta;
+    const to = pin ? 1 : idx + delta;
     if (to < 1 || to > accts.length) return;
     const ids = accts.map(a => a.id);
     const [moved] = ids.splice(idx - 1, 1);

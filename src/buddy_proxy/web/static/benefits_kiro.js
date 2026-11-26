@@ -171,7 +171,7 @@ function loadKiroAccounts() {
   })());
 }
 
-async function kiroMoveAccount(idx, delta, id) {
+async function kiroMoveAccount(idx, delta, id, pin) {
   if (KIRO_MOVING) return;
   KIRO_MOVING = true;
   try {
@@ -182,7 +182,7 @@ async function kiroMoveAccount(idx, delta, id) {
     const ids = KIRO_ACCTS.map(a => a.id);
     const from = ids.indexOf(id);
     if (from < 0) return;
-    const to = from + delta;
+    const to = pin ? 0 : from + delta;
     if (to < 0 || to >= ids.length) return;
     ids.splice(to, 0, ids.splice(from, 1)[0]);
     const r = await api('/ui/api/kiro/accounts/order', {

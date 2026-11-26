@@ -95,11 +95,11 @@ function fillRaccoonAccounts(accts) {
 
 let RACCOON_DESKTOP_OK = false;
 
-async function raccoonMoveAccount(idx, delta, id) {
+async function raccoonMoveAccount(idx, delta, id, pin) {
   if (!RACCOON_ACCTS) await loadRaccoonAccounts();
   const list = (RACCOON_ACCTS || []).map(a => a.id);
   const cur = list.indexOf(id);
-  const next = cur + delta;
+  const next = pin ? 0 : cur + delta;
   if (cur < 0 || next < 0 || next >= list.length) return;
   list.splice(cur, 1);
   list.splice(next, 0, id);
