@@ -40,7 +40,8 @@ function _ag_move_btns(idx, n, id) {
   // id 字符集由后端 _ID_RE 约束（字母数字 ._@-），内联进 onclick 安全。
   // 只出裸按钮——外壳 <span class="ag-move"> 由调用方统一搭（✕ 删除同排）。
   const arg = id ? `,'${id}'` : '';
-  return `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+  return acctPinButton('antigravity', idx, id) +
+    `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
     `onclick="agMoveAccount(${idx},-1${arg})">▲</button>` +
     `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
     `onclick="agMoveAccount(${idx},1${arg})">▼</button>`;

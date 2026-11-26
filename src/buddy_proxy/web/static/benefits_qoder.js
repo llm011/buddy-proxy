@@ -56,7 +56,8 @@ function _qoder_sub_html(a) {
 function _qoder_move_btns(idx, n, id) {
   // 上/下移按钮（与 _kimi_move_btns 同构；顺位语义按快照里该 id 的实际位次挪）
   const arg = id ? `,'${id}'` : '';
-  return `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+  return acctPinButton('qoder', idx, id) +
+    `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
     `onclick="qoderMoveAccount(${idx},-1${arg})">▲</button>` +
     `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
     `onclick="qoderMoveAccount(${idx},1${arg})">▼</button>`;

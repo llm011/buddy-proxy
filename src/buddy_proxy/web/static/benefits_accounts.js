@@ -209,10 +209,25 @@ async function acctRenameSubmit(pid, id) {
  *  不动错人。id 字符集由后端 _ID_RE 约束（字母数字 ._@-），内联进 onclick 安全。 */
 function acctMoveButtons(pid, idx, n, id) {
   const arg = id ? `,'${id}'` : '';
-  return `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+  return acctPinButton(pid, idx, id) +
+    `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
     `onclick="acctMove('${pid}',${idx},-1${arg})">▲</button>` +
     `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
     `onclick="acctMove('${pid}',${idx},1${arg})">▼</button>`;
+}
+
+/** 📌 置顶按钮：一键把账号挪到顺位 #1（= 连点 ▲ 到顶）。
+ *
+ *  复用各通道现成的 ``MoveAccount(idx, delta, id)``：它们内部都是「相对位移」
+ *  （1-based 的算 ``idx + delta``，raccoon/kiro 0-based 的算 ``cur + delta``，
+ *  但 cur 恒等于 idx-1），所以 ``delta = 1 - idx`` 两边都正好落到第一位，
+ *  不需要任何后端改动。顺位 #1 本身就禁用，与 ▲ 的禁用口径一致。 */
+function acctPinButton(pid, idx, id) {
+  const arg = id ? `,'${id}'` : '';
+  // 带文字而不是裸符号：📌 单独一个字符用户看不出是干什么的（2026-11-25 实报）；
+  // icon 与模型顺序页的置顶按钮统一用 📌，全站置顶视觉一致。
+  return `<button class="ghost acct-pin" title="置顶（移到顺位 #1，最优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+    `onclick="acctMove('${pid}',${idx},${1 - idx}${arg})">📌 置顶</button>`;
 }
 
 /** ✕ 删除按钮（要账号 id；快照没到（首屏）时先不渲染，等下轮回填）。 */

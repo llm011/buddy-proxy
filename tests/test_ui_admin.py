@@ -903,6 +903,42 @@ def test_model_order_get_lists_exactly_the_config_keys(env):
     assert env.client.get("/ui/api/model-order").json()["items"] == []
 
 
+def test_model_order_pin_persists_recency_and_filters_stale_models(env):
+    """置顶仅改变顺序页展示，最近置顶在前且不会把历史已删键返回给前端。"""
+    env.state.model_order = {"fake-model": [], "fake-stream-model": []}
+    settings_mod.save_settings({"model_order_pinned": ["gone", "fake-model", "fake-model"]})
+
+    body = env.client.get("/ui/api/model-order").json()
+    assert body["pinned"] == ["fake-model"], "历史删掉的模型和重复项都不能占排序位"
+
+    r = env.client.post("/ui/api/model-order/pin",
+                        json={"model": "fake-stream-model", "pinned": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["pinned_list"] == ["fake-stream-model", "fake-model"]
+    assert settings_mod.load_settings()["model_order_pinned"] == [
+        "fake-stream-model", "fake-model"]
+
+    # 重复点击置顶只移动到最前，不制造重复项；取消后立即从 GET 中消失。
+    r = env.client.post("/ui/api/model-order/pin",
+                        json={"model": "fake-model", "pinned": True})
+    assert r.json()["pinned_list"] == ["fake-model", "fake-stream-model"]
+    r = env.client.post("/ui/api/model-order/pin",
+                        json={"model": "fake-model", "pinned": False})
+    assert r.json()["pinned_list"] == ["fake-stream-model"]
+    assert env.client.get("/ui/api/model-order").json()["pinned"] == ["fake-stream-model"]
+
+
+@pytest.mark.parametrize("payload, status", [
+    ({"model": "", "pinned": True}, 400),
+    ({"model": "fake-model", "pinned": "true"}, 400),
+    ({"model": "missing", "pinned": True}, 404),
+])
+def test_model_order_pin_rejects_invalid_or_unknown_model(env, payload, status):
+    env.state.model_order = {"fake-model": []}
+    r = env.client.post("/ui/api/model-order/pin", json=payload)
+    assert r.status_code == status
+
+
 def test_model_order_get_reports_cooldown_marks(env):
     """冷却状态随同一个接口下发，页面据此显示 ⏸（不改变键的集合）。"""
     from buddy_proxy.core import cooldown as cooldown_mod

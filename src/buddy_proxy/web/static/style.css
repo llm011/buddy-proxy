@@ -203,6 +203,12 @@
   input[type="time"]::-webkit-calendar-picker-indicator { filter: invert(.65); cursor: pointer; }
   /* ── 模型顺序页 ── */
   .order-card { margin-bottom: 10px; padding: 0; overflow: hidden; }
+  /* 置顶卡片：左侧一道主色竖线 + 微弱底色，一眼看出哪几张是钉住的 */
+  .order-card.order-pinned { border-left: 3px solid var(--ok); }
+  /* 置顶按钮：带文字、不淡化（之前 📍 12px + opacity .45，用户看不出是什么操作）。
+     已置顶用绿色描边 + 字色，和左侧竖线呼应。 */
+  .order-pin { padding: 2px 8px; font-size: 11px; white-space: nowrap; }
+  .order-pin.active { color: var(--ok); border-color: var(--ok); }
   .order-head { display: flex; align-items: center; gap: 9px;
                 padding: 7px 14px 7px 0; transition: background .15s; }
   .order-head-main { display: flex; align-items: center; gap: 9px; cursor: pointer;

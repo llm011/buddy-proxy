@@ -335,13 +335,46 @@ window.toggleTheme = function toggleTheme() {
 (function initGlobalTooltip() {
   const tip = document.createElement('div');
   tip.id = 'bp-tooltip';
+  tip.setAttribute('role', 'tooltip');
   document.body.appendChild(tip);
+  let describedTarget = null;
+  // 鼠标与键盘可能同时落在同一按钮：任一路径仍在时都必须保留提示和描述关系。
+  let hoveredTarget = null;
+  let focusedTarget = null;
 
-  document.addEventListener('mouseover', (e) => {
-    const target = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
-    if (!target) return;
+  function clearTip(target = describedTarget) {
+    if (target && target.dataset.bpTooltipDescribed !== undefined) {
+      const previous = target.dataset.bpTooltipDescribed;
+      if (previous) target.setAttribute('aria-describedby', previous);
+      else target.removeAttribute('aria-describedby');
+      delete target.dataset.bpTooltipDescribed;
+    }
+    if (!target || target === describedTarget) describedTarget = null;
+    tip.classList.remove('show');
+  }
+
+  // 选靶：优先 [data-tip]；**按钮只有原生 title 的也算**——原生 title 要悬停约 1 秒
+  // 才出、还没样式，小 icon 按钮（▲▼ ✕ ✎ 置顶 …）用户看不出是什么操作
+  // （2026-11-25 实报）。首次悬停把 title 迁成 data-tip 并删掉 title：之后走这套
+  // 即时 + 带样式的 tooltip，也不会和原生 tooltip 重复弹。只认 <button>，表格
+  // 单元格/长文本 span 上的 title 仍走原生（那些是补充信息，不是操作说明）。
+  const PICK = '[data-tip], button[title]';
+  function showTip(target) {
+    if (!target.hasAttribute('data-tip') && target.hasAttribute('title')) {
+      const t = target.getAttribute('title');
+      if (t) target.setAttribute('data-tip', t);
+      // title 是这些图标按钮唯一的可访问名称，迁移后须保留给读屏器。
+      if (t && !target.hasAttribute('aria-label')) target.setAttribute('aria-label', t);
+      target.removeAttribute('title');
+    }
     const text = target.getAttribute('data-tip');
     if (!text) return;
+    if (describedTarget && describedTarget !== target) clearTip(describedTarget);
+    if (target.dataset.bpTooltipDescribed === undefined) {
+      target.dataset.bpTooltipDescribed = target.getAttribute('aria-describedby') || '';
+      target.setAttribute('aria-describedby', [target.dataset.bpTooltipDescribed, tip.id].filter(Boolean).join(' '));
+    }
+    describedTarget = target;
     tip.textContent = text;
     tip.classList.add('show');
     const r = target.getBoundingClientRect();
@@ -353,11 +386,44 @@ window.toggleTheme = function toggleTheme() {
     if (top < 8) top = r.bottom + 6;
     tip.style.left = left + 'px';
     tip.style.top = top + 'px';
+  }
+  function pickTipTarget(node) {
+    return node && node.closest ? node.closest(PICK) : null;
+  }
+  // 焦点优先：鼠标移到别的按钮时，仍获焦的按钮必须继续拥有它的读屏描述。
+  function syncTip() {
+    const target = focusedTarget || hoveredTarget;
+    if (target) showTip(target); else clearTip();
+  }
+  document.addEventListener('mouseover', (e) => {
+    const target = pickTipTarget(e.target);
+    // 从同一按钮的图标/文字间移动不应闪烁或重复布局。
+    if (target && !target.contains(e.relatedTarget)) {
+      hoveredTarget = target;
+      syncTip();
+    }
   });
-
   document.addEventListener('mouseout', (e) => {
-    const target = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
-    if (target) tip.classList.remove('show');
+    const target = pickTipTarget(e.target);
+    if (target && !target.contains(e.relatedTarget) && hoveredTarget === target) {
+      hoveredTarget = null;
+      syncTip();
+    }
+  });
+  // title 被迁走后原生浏览器提示不会再覆盖焦点用户，必须同步保留键盘路径。
+  document.addEventListener('focusin', (e) => {
+    const target = pickTipTarget(e.target);
+    if (target) {
+      focusedTarget = target;
+      syncTip();
+    }
+  });
+  document.addEventListener('focusout', (e) => {
+    const target = pickTipTarget(e.target);
+    if (target && !target.contains(e.relatedTarget) && focusedTarget === target) {
+      focusedTarget = null;
+      syncTip();
+    }
   });
 })();
 // 范围选择器仅在总览/请求日志页有意义

@@ -78,6 +78,10 @@ function orderRows() {
 
 // 顺序页要渲染的卡片 = 配置里的键 + **还没保存、正在编辑中的**草稿键。
 // 后者只有「+ 新增模型」选完到点保存之间才会出现（那时配置里还没有这个键）。
+//
+// 置顶优先：``ORDER.pinned`` 是用户在页面上 📌 的模型（存 settings 的
+// model_order_pinned，纯展示偏好、不影响路由）。多个置顶按「最近置顶的在最上」
+// 排，其余照后端给的字母序——所以模型多了也能把常用的几张开头就能看见。
 function pageRows() {
   const out = [];
   const known = new Set();
@@ -89,7 +93,34 @@ function pageRows() {
     if (known.has(name)) return;
     out.push({ m: name, order: { targets: [], marks: [] } });
   });
-  return out;
+  return orderPinnedFirst(out);
+}
+
+// 置顶的排前面：按 pinned 列表的顺序（最近置顶的在最上），没置顶的保持原序
+function orderPinnedFirst(rows) {
+  const pinned = (ORDER && Array.isArray(ORDER.pinned)) ? ORDER.pinned : [];
+  if (!pinned.length) return rows;
+  const rank = new Map(pinned.map((m, i) => [m, i]));
+  // 显式带原下标：未置顶卡保持后端原序，且比较器不在每次比较里反复 indexOf。
+  return rows.map((row, index) => ({ row, index })).sort((a, b) => {
+    const ra = rank.has(a.row.m) ? rank.get(a.row.m) : Number.MAX_SAFE_INTEGER;
+    const rb = rank.has(b.row.m) ? rank.get(b.row.m) : Number.MAX_SAFE_INTEGER;
+    if (ra !== rb) return ra - rb;
+    return a.index - b.index;
+  }).map(({ row }) => row);
+}
+
+async function orderTogglePin(key) {
+  const pinned = new Set((ORDER && Array.isArray(ORDER.pinned)) ? ORDER.pinned : []);
+  const next = !pinned.has(key);
+  try {
+    const r = await api('/ui/api/model-order/pin', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ model: key, pinned: next })});
+    if (ORDER) ORDER.pinned = r.pinned_list || [];
+    renderOrderPage();
+    toast(next ? `${key} 已置顶` : `${key} 已取消置顶`);
+  } catch (e) { toast('置顶失败: ' + e.message, true); }
 }
 
 // 某个模型名的配置（来自上面的接口；草稿另有 ORDER_DRAFT）
@@ -180,6 +211,7 @@ function renderOrderPage() {
 function orderPageCard(r) {
   const key = r.m;   // 卡片键 = model_order 的键本身
   const open = ORDER_OPEN.has(key);
+  const pinned = (ORDER && Array.isArray(ORDER.pinned)) ? ORDER.pinned.includes(key) : false;
   // 草稿优先：用户正在编辑时不要被新拉到的数据覆盖
   const items = ORDER_DRAFT[key] || orderTargetsToItems(r.order.targets);
   const marks = ORDER_PAGE_MARKS[key] || {};
@@ -190,7 +222,7 @@ function orderPageCard(r) {
   // targets，编辑中就能立刻看到改动后的样子。
   const chain = items.filter(i => i.model).map(i => i.provider).join(' → ');
 
-  return `<div class="card order-card" data-key="${esc(key)}">
+  return `<div class="card order-card${pinned ? ' order-pinned' : ''}" data-key="${esc(key)}">
     <div class="order-head">
       <div class="order-head-main" onclick="orderToggle('${esc(key)}')">
         <span class="chev" style="transform:rotate(${open ? 0 : -90}deg)">▾</span>
@@ -203,6 +235,8 @@ function orderPageCard(r) {
         <span class="tag bad order-dirty" title="有未保存的修改" style="${orderIsDirty(key) ? '' : 'display:none'}">未保存</span>
         <span class="order-chain mono">${esc(chain)}</span>
       </div>
+      <button class="ghost order-pin${pinned ? ' active' : ''}" title="${pinned ? '已置顶，点击取消' : '置顶：排到最前面（可多个，最近置顶的在最上）'}"
+              onclick="event.stopPropagation();orderTogglePin(${jsq(key)})">📌 ${pinned ? '已置顶' : '置顶'}</button>
       <button class="primary order-test" onclick="runTest('','${esc(key)}')">测试</button>
     </div>
     ${open ? `<div class="order-body">
