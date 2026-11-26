@@ -410,7 +410,8 @@ def test_401_retry_failure_does_not_trigger_cooldown(isolated_store: Path, monke
 
 def test_session_repr_never_leaks_token():
     tok = _fake_jwt(sub="77")
-    s = WebSession(access_token=tok, refresh_token="refresh-secret")
+    s = WebSession.from_login({"access_token": tok, "refresh_token": "refresh-secret"})
+    assert s.user_id == "77"
     r = repr(s)
     assert tok not in r and "refresh-secret" not in r
     assert "user_id='77'" in r

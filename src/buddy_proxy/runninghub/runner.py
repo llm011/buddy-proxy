@@ -129,6 +129,11 @@ class WebAccountSession:
             self._persist(self.account_id, self.session.to_dict())
 
     async def ensure(self, *, force: bool = False) -> str:
+        # ensure_session 失败时会把「冷却」记在它返回/持有的那个对象上——所以要先把手里的
+        # 引用交出去（没有就造一个空的），失败后 self.session 才带着 last_error_at，
+        # 下一次 ensure 才会进冷却。否则每次请求都重新撞密码错。
+        if self.session is None:
+            self.session = WebSession(access_token="", refresh_token="", expires_at=0.0)
         self.session = await websession.ensure_session(
             self.session, self.email, self.password, force=force
         )
