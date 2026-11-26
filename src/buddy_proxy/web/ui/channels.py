@@ -1704,38 +1704,64 @@ async def ui_runninghub_accounts(request: Request):
 
 @app.post("/ui/api/runninghub/accounts/import")
 async def ui_runninghub_accounts_import(request: Request):
+    """导入账号：**邮箱 + 密码**（走站内，能花过渡币）；api_key 可选（纯 OpenAPI 备用）。
+
+    导入即登录一次，拿到的登录态和站内余额一起落盘；登录失败直接把上游原文
+    抛出去（密码错 / 要验证码），不写入半条记录。
+    """
     _ensure_local(request)
-    from ...runninghub import client as rh_client
     from ...runninghub import store as rh_store
+    from ...runninghub import websession
+    from ...runninghub.runner import WebAccountSession, refresh_balance
 
     body = await request.json()
-    api_key = str(body.get("api_key") or "").strip()
+    email = str(body.get("email") or "").strip()
+    password = str(body.get("password") or "")
+    api_key = str(body.get("api_key") or "").strip() or None
     label = str(body.get("label") or "").strip() or None
-    if not api_key:
-        raise HTTPException(status_code=400, detail={"error": {"message": "api_key 不能为空"}})
+    if not email and not api_key:
+        raise HTTPException(status_code=400, detail={"error": {"message": "email/password 或 api_key 至少要有一个"}})
+    if email and not password:
+        raise HTTPException(status_code=400, detail={"error": {"message": "邮箱账号必须填密码"}})
+
+    if not email:
+        # 纯 OpenAPI 账号（旧模式）：只验 key 能不能查余额
+        from ...runninghub import client as rh_client
+        try:
+            info = await rh_client.fetch_account_status(api_key)
+        except rh_client.RunningHubError as exc:
+            raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+        acc = rh_store.upsert_account(api_key=api_key, label=label, account_info=info)
+        return {"accounts": rh_store.list_accounts(include_secret=False)}
 
     try:
-        info = await rh_client.fetch_account_status(api_key)
-    except rh_client.RunningHubError as exc:
-        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
+        session = await websession.login(email, password)
+    except websession.WebSessionError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"登录失败：{exc}"}})
 
     if not label:
-        uname = str(info.get("username") or "").strip()
-        if uname:
-            label = uname
-        else:
-            api_type = str(info.get("apiType") or "RH").strip()
-            label = f"{api_type}-{api_key[-4:]}" if len(api_key) >= 4 else api_type
-
-    rh_store.upsert_account(api_key, label=label, account_info=info)
+        label = email.split("@")[0]
+    acc = rh_store.upsert_account(email=email, password=password, api_key=api_key, label=label)
+    rh_store.update_session(acc["account_id"], session.to_dict())
+    # 站内余额（过渡币/积分/钱包）——拉失败不阻塞导入
+    try:
+        balance = await refresh_balance(
+            WebAccountSession(rh_store.get_account(acc["account_id"]), persist=rh_store.update_session)
+        )
+        rh_store.update_account_info(acc["account_id"], balance)
+    except websession.WebSessionError:
+        pass
     return {"accounts": rh_store.list_accounts(include_secret=False)}
 
 
 @app.post("/ui/api/runninghub/accounts/refresh")
 async def ui_runninghub_accounts_refresh(request: Request):
+    """刷新额度：邮箱账号拉站内余额（顺带续登录态）；纯 key 账号走 accountStatus。"""
     _ensure_local(request)
     from ...runninghub import client as rh_client
     from ...runninghub import store as rh_store
+    from ...runninghub import websession
+    from ...runninghub.runner import WebAccountSession, refresh_balance
 
     body = await request.json() if (await request.body()) else {}
     target_id = str(body.get("account_id") or "").strip()
@@ -1744,10 +1770,35 @@ async def ui_runninghub_accounts_refresh(request: Request):
         if target_id and aid != target_id:
             continue
         try:
-            info = await rh_client.fetch_account_status(acc["api_key"])
-            rh_store.update_account_info(aid, info)
-        except rh_client.RunningHubError:
+            if acc.get("email") and acc.get("password"):
+                balance = await refresh_balance(WebAccountSession(acc, persist=rh_store.update_session))
+                rh_store.update_account_info(aid, balance)
+            elif acc.get("api_key"):
+                info = await rh_client.fetch_account_status(acc["api_key"])
+                rh_store.update_account_info(aid, info)
+        except (rh_client.RunningHubError, websession.WebSessionError):
             pass
+    return {"accounts": rh_store.list_accounts(include_secret=False)}
+
+
+@app.post("/ui/api/runninghub/accounts/relogin")
+async def ui_runninghub_accounts_relogin(request: Request):
+    """强制重新登录（用户在网页改了密码 / 登录态坏了）。"""
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+    from ...runninghub import websession
+    from ...runninghub.runner import WebAccountSession
+
+    body = await request.json()
+    aid = str(body.get("account_id") or "").strip()
+    acc = rh_store.get_account(aid)
+    if not acc or not (acc.get("email") and acc.get("password")):
+        raise HTTPException(status_code=404, detail={"error": {"message": "账号不存在或不是邮箱账号"}})
+    try:
+        session = await websession.login(acc["email"], acc["password"])
+        rh_store.update_session(aid, session.to_dict())
+    except websession.WebSessionError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"登录失败：{exc}"}})
     return {"accounts": rh_store.list_accounts(include_secret=False)}
 
 
@@ -1802,9 +1853,16 @@ async def ui_runninghub_workflows(request: Request):
 
 @app.post("/ui/api/runninghub/workflows/import")
 async def ui_runninghub_workflows_import(request: Request):
+    """导入 AI 应用：优先用登录态拿 ``/api/webapp/detail``（inputNodes 带 fieldType）。
+
+    这个接口**不需要登录**就能拿 schema，所以没有账号也能导入；但闭源节点判断
+    （``closedSource``）要靠价格预估，那一步需要登录态——有账号就顺手做，没有就
+    标「未知」，等运行时再学。
+    """
     _ensure_local(request)
-    from ...runninghub import client as rh_client
     from ...runninghub import store as rh_store
+    from ...runninghub import websession
+    from ...runninghub.runner import WebAccountSession, closed_source_nodes
 
     body = await request.json()
     webapp_id = str(body.get("webapp_id") or "").strip()
@@ -1812,19 +1870,57 @@ async def ui_runninghub_workflows_import(request: Request):
     if not webapp_id:
         raise HTTPException(status_code=400, detail={"error": {"message": "webapp_id 不能为空"}})
 
-    accounts = rh_store.get_active_accounts()
-    if not accounts:
-        raise HTTPException(status_code=400, detail={"error": {"message": "请先导入至少一个 RunningHub 账号"}})
-
+    # schema：公开接口，不带 token 也行
     try:
-        info = await rh_client.fetch_webapp_info(accounts[0]["api_key"], webapp_id)
-    except rh_client.RunningHubError as exc:
-        raise HTTPException(status_code=400, detail={"error": {"message": str(exc)}})
-
+        data = await websession._post("/api/webapp/detail", {"webappId": webapp_id})
+    except websession.WebSessionError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"获取应用失败：{exc}"}})
+    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+    if not inner:
+        raise HTTPException(status_code=404, detail={"error": {"message": f"应用不存在: {webapp_id}"}})
+    info: dict = {
+        "webappId": webapp_id,
+        "name": inner.get("name") or f"ai-app-{webapp_id}",
+        "description": inner.get("description") or "",
+        "nodeInfoList": list(inner.get("inputNodes") or []),
+        "instanceType": inner.get("instanceType"),
+        "avgRunningSeconds": inner.get("avgRunningSeconds"),
+        "runningSuccessRate": inner.get("runningSuccessRate"),
+        "runMode": "web",
+        "billingType": "过渡币（站内）",
+    }
     if custom_name:
         info["name"] = custom_name
+
+    # 有账号就顺手预估一次（免费）：能看出闭源节点和参考价
+    accounts = [a for a in rh_store.get_active_accounts() if a.get("email") and a.get("password")]
+    if accounts:
+        try:
+            acc = WebAccountSession(accounts[0], persist=rh_store.update_session)
+            inputs = websession.normalize_inputs(info["nodeInfoList"])
+            est, _ = await acc.call(lambda t: websession.price_estimate(webapp_id, inputs, t))
+            info["estimate"] = {
+                "totalPrice": est.get("totalPrice"), "currency": est.get("currency"),
+                "priceText": est.get("priceText"), "estimatedPoint": est.get("estimatedPoint"),
+                "estimatedTransitionCoin": est.get("estimatedTransitionCoin"),
+                "nodes": [n.get("classType") for n in (est.get("nodes") or []) if isinstance(n, dict)],
+            }
+            closed = closed_source_nodes(est)
+            # 预估 nodes 为空 → ["?"]：实测闭源应用就是这样，但开源应用偶尔也为空，
+            # 所以只在「明确列出闭源节点」时才标死，"?" 留给运行时学。
+            if any(c != "?" for c in closed):
+                info["closedSource"] = True
+                info["billingType"] = "钱包余额（闭源）"
+        except websession.WebSessionError:
+            pass
+
     if body.get("preview"):
         return {"workflow": info}
+    old = next((w for w in rh_store.list_workflows() if str(w.get("webappId")) == webapp_id), None)
+    if old:
+        for k in ("verifiedCost", "verifiedNote", "outputType", "closedSource", "verifiedAt"):
+            if old.get(k) is not None and k not in info:
+                info[k] = old[k]
     rh_store.upsert_workflow(info)
     return {"workflows": rh_store.list_workflows()}
 
@@ -1865,120 +1961,104 @@ async def ui_runninghub_workflows_rename(request: Request):
 
 @app.post("/ui/api/runninghub/workflows/run")
 async def ui_runninghub_workflows_run(request: Request):
+    """站内运行一个 AI 应用：登录态 → 预估 → ``/task/webapp/create`` → 轮询 → 取结果。
+
+    走的是**网页端同一条路**，花的是站内过渡币 / 积分。OpenAPI 那条路（要 api_key +
+    钱包余额）实测对这个账号是 605/821，所以不再作为主路径；``runMode="api"`` 时
+    才走 ``provider`` 那套，留给以后有钱包余额的号。
+    """
     _ensure_local(request)
-    from ...runninghub import client as rh_client
-    from ...runninghub import provider as rh_provider
+    from ...runninghub import runner as rh_runner
     from ...runninghub import store as rh_store
+    from ...runninghub import websession
 
     body = await request.json()
     webapp_id = str(body.get("webapp_id") or "").strip()
     node_info_list = body.get("nodeInfoList")
+    estimate_only = bool(body.get("estimate_only"))
     if not webapp_id:
         raise HTTPException(status_code=400, detail={"error": {"message": "缺少 webapp_id"}})
     if not isinstance(node_info_list, list):
         raise HTTPException(status_code=400, detail={"error": {"message": "nodeInfoList 必须是数组"}})
 
-    accounts = rh_store.get_active_accounts()
+    accounts = [a for a in rh_store.get_active_accounts() if a.get("email") and a.get("password")]
     if not accounts:
-        raise HTTPException(status_code=400, detail={"error": {"message": "请先导入至少一个 RunningHub 账号"}})
-
-    api_key = accounts[0]["api_key"]
+        raise HTTPException(status_code=400, detail={"error": {"message": "请先导入一个 RunningHub 邮箱账号（需要账号密码才能走站内运行）"}})
+    acc = rh_runner.WebAccountSession(accounts[0], persist=rh_store.update_session)
     aid = accounts[0].get("account_id", "")
     wf = next((w for w in rh_store.list_workflows() if str(w.get("webappId")) == webapp_id), None)
-    billing = str((wf or {}).get("billingType") or "")
 
-    # ---- 预检：余额不够就别打上游（上游会直接拒，还多一次失败记录） ----
+    # 顺手刷余额（登录态在 ensure 里续过已经写回）
     try:
-        status_info = await rh_client.fetch_account_status(api_key)
-    except rh_client.RunningHubError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"error": {"message": str(exc)}})
-    if aid:
-        rh_store.update_account_info(aid, status_info)
-    # remainMoney 实测可能是 null（不是 "0"）：float(None or 0) 兜成 0，否则 TypeError。
-    coins = float(status_info.get("remainCoins") or 0)
-    money = float(status_info.get("remainMoney") or 0)
-    if billing == "钱包余额" and money <= 0:
-        raise HTTPException(
-            status_code=402,
-            detail={"error": {"message": f"该工作流扣钱包余额，但当前账号 remainMoney={money}；请先充值钱包或切换账号（金币 {coins:.0f} 不能用于此工作流）"}},
-        )
-    if billing == "RH 金币" and coins <= 0:
-        raise HTTPException(
-            status_code=402,
-            detail={"error": {"message": f"该工作流扣 RH 金币，但当前账号 remainCoins={coins}；请先获取金币或切换账号"}},
-        )
-    if coins <= 0 and money <= 0:
-        raise HTTPException(
-            status_code=402,
-            detail={"error": {"message": "当前账号 RH 金币与钱包余额均为 0，无法发起调用"}},
-        )
+        balance = await rh_runner.refresh_balance(acc)
+        rh_store.update_account_info(aid, balance)
+    except websession.WebSessionError:
+        balance = {}
 
-    # ---- 提交：这一步是**学计费类型**的唯一机会 ----
-    # apiCallDemo 不返回计费字段，导入时只能标「RH 金币 / 余额」（未知）。真跑一次
-    # 被上游以「余额不足」拒掉，才知道它到底扣哪种——学完写回本地，下次预检就能
-    # 在打上游前拦住，报错也能说清是哪种资产不够。
     try:
-        created = await rh_client.submit_task(
-            api_key,
-            f"ai-app/{webapp_id}",
-            {"nodeInfoList": node_info_list},
-        )
-    except rh_client.RunningHubError as exc:
-        learned = rh_client.classify_billing_error(exc.code, str(exc))
-        # 上游错误体截断落日志（不含 apiKey；submit 的 msg 是上游文案）
-        log.warning("runninghub 工作流 %s 提交失败 code=%s: %s",
-                    webapp_id, exc.code, str(exc)[:200])
-        if learned and wf and billing != learned:
-            # 记下「是哪种账号判出来的」：标签存在工作流上，但「余额不足」是**账号**的
-            # 拒绝——SHARED 号只认钱包，同一个开源工作流换消费级号可能金币就能跑。
-            # 预检暂不按它分流（手动 ✎ 可改回），留字段给后续做多账号时用。
+        res = await rh_runner.run_workflow(acc, webapp_id, node_info_list, estimate_only=estimate_only)
+    except websession.WebSessionError as exc:
+        # 任务失败：把 taskResultDesc 里的 exception_message 挖出来（之前只显示 FAILED）
+        msg = str(exc)
+        status_code = 400 if exc.kind == "login" else 502
+        closed = False
+        if "605" in msg or "NOT_ENOUGH_BALANCE" in msg or "balance is insufficient" in msg.lower():
+            closed = True
+            msg = ("该应用含闭源模型节点（Seedance/Kling/MAGI 等），站内也只扣钱包余额，过渡币跑不了；"
+                   f"上游原文：{msg}")
+            status_code = 402
+        if wf and closed and not wf.get("closedSource"):
             updated = dict(wf)
-            updated["billingType"] = learned
-            updated["billingLearnedFrom"] = {
-                "apiType": status_info.get("apiType"), "accountId": aid,
-            }
+            updated["closedSource"] = True
+            updated["billingType"] = "钱包余额（闭源）"
+            updated["billingLearnedError"] = msg[:160]
             rh_store.upsert_workflow(updated)
-            hint = ("该工作流实际扣「钱包余额」（上游 NOT_ENOUGH_BALANCE），已自动改标；"
-                    if learned == "钱包余额" else
-                    "该工作流实际扣「RH 金币」（上游提示金币不足），已自动改标；")
-            hint += (f"当前 remainMoney={money}、remainCoins={coins:.0f}。"
-                     + ("请充值钱包或切换账号。" if learned == "钱包余额" else "请获取金币或切换账号。"))
-        else:
-            hint = ""
         raise HTTPException(
-            status_code=402 if learned else exc.status_code,
-            detail={"error": {"message": f"{exc}{('；' + hint) if hint else ''}"},
-                    # 带回最新列表，前端据此刷新卡片的计费标签
-                    "workflows": rh_store.list_workflows()},
+            status_code=status_code,
+            detail={"error": {"message": msg}, "workflows": rh_store.list_workflows()},
         )
 
-    task_id = created["taskId"]
-    deadline = asyncio.get_running_loop().time() + 600.0
-    try:
-        while True:
-            res = await rh_client.query_task(api_key, task_id)
-            status = str(res.get("status") or res.get("taskStatus") or "").upper()
-            if status == "SUCCESS":
-                outputs = [
-                    {"url": u, "type": t}
-                    for u, t in rh_provider._extract_output_urls(res)
-                ]
-                return {"taskId": task_id, "status": "SUCCESS", "outputs": outputs}
-            if status in ("FAILED", "CANCEL", "CANCELLED"):
-                reason = res.get("errorMessage") or res.get("failedReason") or status
-                raise HTTPException(status_code=502, detail={"error": {"message": f"任务失败: {reason}"}})
-            if asyncio.get_running_loop().time() >= deadline:
-                raise HTTPException(status_code=504, detail={"error": {"message": f"任务超时 (taskId={task_id})"}})
-            await asyncio.sleep(3.0)
-    except rh_client.RunningHubError as exc:
-        raise HTTPException(status_code=exc.status_code, detail={"error": {"message": str(exc)}})
+    # 成功：记下实扣（如果有余额前后差）+ 清掉旧的拒绝上下文
+    if not estimate_only and wf:
+        updated = dict(wf)
+        updated.pop("billingLearnedFrom", None)
+        updated.pop("billingLearnedError", None)
+        updated["closedSource"] = False
+        updated["lastRun"] = {"taskId": res.task_id, "at": int(asyncio.get_running_loop().time())}
+        rh_store.upsert_workflow(updated)
+
+    out = {
+        "taskId": res.task_id,
+        "status": res.status,
+        "outputs": res.outputs,
+        "estimate": {
+            "totalPrice": res.estimate.get("totalPrice"),
+            "currency": res.estimate.get("currency"),
+            "priceText": res.estimate.get("priceText"),
+            "estimatedPoint": res.estimate.get("estimatedPoint"),
+            "nodes": [n.get("classType") for n in (res.estimate.get("nodes") or []) if isinstance(n, dict)],
+        },
+        "closedSourceNodes": rh_runner.closed_source_nodes(res.estimate),
+        "balance": balance,
+        "workflows": rh_store.list_workflows(),
+    }
+    return out
 
 
 @app.post("/ui/api/runninghub/upload")
 async def ui_runninghub_upload(request: Request):
+    """上传本地图片/音频/视频，返回站内 LoadImage 节点能用的 fileName。
+
+    走官方 ``/openapi/v2/media/upload/binary``——它**只要 api_key**（不要登录态），
+    且实测同一个 key 在 .ai 域名能传、在 .cn 回「API Key不存在」。站内自己的
+    ``/upload/image`` 要 ComfyUI 的 ``Rh-Comfy-Auth``（编辑器 iframe 里才发），拿不到。
+    api_key 来源：账号记录里的，没有就用登录态 ``getUserInfo.apiKey`` 顺出来的。
+    """
     _ensure_local(request)
     from ...runninghub import client as rh_client
     from ...runninghub import store as rh_store
+    from ...runninghub import websession
+    from ...runninghub.runner import WebAccountSession
 
     accounts = rh_store.get_active_accounts()
     if not accounts:
@@ -1995,9 +2075,27 @@ async def ui_runninghub_upload(request: Request):
     if len(content) > 30 * 1024 * 1024:
         raise HTTPException(status_code=400, detail={"error": {"message": "文件大小不能超过 30MB"}})
 
+    acc = accounts[0]
+    api_key = str(acc.get("api_key") or "")
+    if not api_key and acc.get("email") and acc.get("password"):
+        # 没存 key：用登录态拿站内展示的 normalApiKey，顺手写回账号记录
+        try:
+            # /uc/apiKey/get 的 normalApiKey 是脱敏串（af1e****96e1）不能用来请求；
+            # getUserInfo.apiKey 才是完整的。只在真要上传时才取，不往 account_info 里放。
+            info, _ = await WebAccountSession(acc, persist=rh_store.update_session).call(
+                lambda t: websession.get_user_info(t)
+            )
+            api_key = str(info.get("apiKey") or "")
+            if api_key:
+                rh_store.upsert_account(email=acc["email"], api_key=api_key)
+        except websession.WebSessionError as exc:
+            raise HTTPException(status_code=400, detail={"error": {"message": f"拿不到 api_key：{exc}"}})
+    if not api_key:
+        raise HTTPException(status_code=400, detail={"error": {"message": "账号没有 api_key，无法上传；请在导入时填 api_key"}})
+
     try:
         file_name = await rh_client.upload_file(
-            accounts[0]["api_key"],
+            api_key,
             getattr(upload, "filename", "upload.bin") or "upload.bin",
             content,
             content_type=getattr(upload, "content_type", "application/octet-stream") or "application/octet-stream",

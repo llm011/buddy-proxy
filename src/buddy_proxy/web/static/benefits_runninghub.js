@@ -10,10 +10,14 @@
       .replace(/'/g, '&#39;');
   }
 
-  function renderBillingTag(billingType) {
-    const bType = billingType || 'RH 金币 / 余额';
-    const bCls = bType === '钱包余额' ? 'tag-money' : (bType === 'RH 金币' ? 'tag-coins' : 'tag-mixed');
-    return `<span class="tag ${bCls}" data-tip="计费方式">${escapeHtml(bType)}</span>`;
+  function renderBillingTag(billingType, closedSource) {
+    const bType = billingType || '未知';
+    const isClosed = !!closedSource || bType.indexOf('闭源') >= 0 || bType === '钱包余额';
+    const isCoin = bType.indexOf('过渡币') >= 0 || bType === 'RH 金币';
+    const bCls = isClosed ? 'tag-money' : (isCoin ? 'tag-coins' : 'tag-mixed');
+    const tip = isClosed ? '含闭源模型节点（Seedance/Kling/MAGI…），站内也只扣钱包 $，过渡币跑不了'
+      : (isCoin ? '开源节点跑在 RH 自家 GPU，站内过渡币可付（网页端登录态）' : '计费方式未知，运行一次后自动学');
+    return `<span class="tag ${bCls}" data-tip="${escapeHtml(tip)}">${escapeHtml(bType)}</span>`;
   }
 
   async function rhFetch(path, opts) {
@@ -95,13 +99,17 @@
 
     const cards = accounts.map((acc, idx) => {
       const info = acc.account_info || {};
-      const coins = info.remainCoins !== undefined && info.remainCoins !== null ? info.remainCoins : '—';
-      const money = info.remainMoney !== undefined && info.remainMoney !== null
-        ? `${info.remainMoney}${info.currency ? ' ' + info.currency : ''}`
-        : '—';
-      const tasks = info.currentTaskCounts !== undefined && info.currentTaskCounts !== null ? info.currentTaskCounts : '0';
-      const apiTypeRaw = String(info.apiType || 'NORMAL').toUpperCase();
-      const apiTypeLabel = apiTypeRaw === 'SHARED' ? '共享 API' : (apiTypeRaw === 'EXCLUSIVE' ? '独享 API' : apiTypeRaw);
+      // 邮箱账号（站内模式）account_info 来自 /uc/point/summary + getUserInfo：
+      //   transitionCoins 过渡币（只有网页端登录态能花）/ activityPoints 活动积分 / walletBalance 钱包 $
+      // 纯 key 账号（OpenAPI 模式）还是老的 remainCoins / remainMoney / remainPoint。
+      const isWeb = !!(acc.email && acc.web_session_status && acc.web_session_status.logged_in);
+      const coins = isWeb ? (info.transitionCoins ?? '—') : (info.remainCoins ?? '—');
+      const point = isWeb ? (info.activityPoints ?? info.paidPoints ?? '—') : (info.remainPoint ?? '—');
+      const money = isWeb ? (info.walletBalance ?? '—') : (info.remainMoney ?? '—');
+      const ss = acc.web_session_status || {};
+      const tasks = info.currentTaskCounts ?? '0';
+      const apiTypeRaw = String(info.apiType || (isWeb ? 'WEB' : 'NORMAL')).toUpperCase();
+      const apiTypeLabel = isWeb ? '站内登录态' : (apiTypeRaw === 'SHARED' ? '共享 API' : (apiTypeRaw === 'EXCLUSIVE' ? '独享 API' : apiTypeRaw));
 
       const upBtn = idx > 0
         ? `<button class="ghost" data-tip="上移" data-rh-action="up" data-id="${escapeHtml(acc.account_id)}">↑</button>`
@@ -110,19 +118,24 @@
       return `
         <div class="pat-pkg" style="padding:14px 16px;">
           <div style="display:flex;align-items:center;gap:8px;min-width:0;border-bottom:1px solid var(--line);padding-bottom:10px;margin-bottom:10px;">
-            <span class="pat-pkg-name" style="font-size:14px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(acc.label || acc.account_id)}</span>
-            <span class="tag" style="flex-shrink:0;" data-tip="API 类型: ${escapeHtml(apiTypeRaw)}">${escapeHtml(apiTypeLabel)}</span>
+            <span class="pat-pkg-name" style="font-size:14px;font-weight:600;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(acc.masked_email || '')}">${escapeHtml(acc.label || acc.masked_email || acc.account_id)}</span>
+            <span class="tag ${isWeb ? 'tag-coins' : ''}" style="flex-shrink:0;" data-tip="${isWeb ? '网页端登录态（Bearer JWT）：能花站内过渡币' : '只有 api_key，走 OpenAPI 要钱包余额 ($)'}">${escapeHtml(apiTypeLabel)}</span>
             <span style="flex-shrink:0;display:inline-flex;gap:4px;">
               <button class="ghost" title="刷新额度" data-rh-action="refresh" data-id="${escapeHtml(acc.account_id)}">↻</button>
+              ${acc.email ? `<button class="ghost" title="重新登录（网页改过密码 / 登录态坏了）" data-rh-action="relogin" data-id="${escapeHtml(acc.account_id)}">🔑</button>` : ''}
               <button class="ghost" title="重命名" data-rh-action="rename" data-id="${escapeHtml(acc.account_id)}">✎</button>
               ${upBtn}
               <button class="ghost" title="删除" data-rh-action="delete" data-id="${escapeHtml(acc.account_id)}">✕</button>
             </span>
           </div>
-          <div class="muted mono" style="font-size:11px;margin:0 0 8px">${escapeHtml(acc.masked_key || '')}</div>
-          <div style="display:flex;gap:14px;font-size:12px;flex-wrap:wrap">
-            <span>金币 <strong class="mono">${escapeHtml(String(coins))}</strong></span>
-            <span>余额 <strong class="mono">${escapeHtml(String(money))}</strong></span>
+          <div class="muted mono" style="font-size:11px;margin:0 0 8px">${escapeHtml(acc.masked_email || acc.masked_key || '')}</div>
+          <div style="display:flex;gap:14px;font-size:12px;flex-wrap:wrap;align-items:center">
+            <span data-tip="${isWeb ? '过渡币：只有网页端登录态能花，API 通道不认' : '站内 RH 币：网页端可用，API 通道不认'}">${isWeb ? '过渡币' : '站内币'} <strong class="mono">${escapeHtml(String(coins))}</strong></span>
+            <span data-tip="${isWeb ? '活动 / 付费积分（站内）' : 'API 调用可用额度（remainPoint）'}">${isWeb ? '积分' : 'API 额度'} <strong class="mono">${escapeHtml(String(point))}</strong></span>
+            <span data-tip="钱包余额（USD）：闭源模型节点 / OpenAPI 只认这个">钱包 <strong class="mono">${escapeHtml(String(money))}</strong></span>
+            ${ss.logged_in
+              ? `<span data-tip="${escapeHtml(ss.last_error || '登录态正常')}" style="${ss.last_error ? 'color:#ef4444' : ''}">登录态 <strong class="mono">${ss.expires_in_days != null ? ss.expires_in_days + 'd' : 'ok'}</strong></span>`
+              : (acc.email ? '<span style="color:#f59e0b">未登录</span>' : '')}
             <span>运行中 <strong class="mono">${escapeHtml(String(tasks))}</strong></span>
           </div>
         </div>`;
@@ -137,6 +150,9 @@
         try {
           if (action === 'refresh') {
             const res = await rhFetch('/ui/api/runninghub/accounts/refresh', { method: 'POST', body: JSON.stringify({ account_id: id }) });
+            renderAccounts(panel, res.accounts);
+          } else if (action === 'relogin') {
+            const res = await rhFetch('/ui/api/runninghub/accounts/relogin', { method: 'POST', body: JSON.stringify({ account_id: id }) });
             renderAccounts(panel, res.accounts);
           } else if (action === 'rename') {
             const acc = accounts.find((a) => a.account_id === id);
@@ -169,10 +185,14 @@
 
   function openImportModal(panel) {
     const html = `
-      <p style="margin:0 0 8px">粘贴 RunningHub API Token，系统会自动查询账户金币与余额并安全落盘（0600）。</p>
+      <p style="margin:0 0 8px;font-size:12px;line-height:1.5">填 <strong>runninghub.ai 的登录邮箱 + 密码</strong>。系统会登录拿登录态（Bearer JWT，30 天，自动续期），
+      运行走网页端同一条路，<strong>花的是站内过渡币 / 积分</strong>。密码 0600 落盘，不进日志。<br/>
+      <span class="muted">只填 API Key 也行，但 OpenAPI 只认钱包余额（$），过渡币跑不了。</span></p>
       <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:8px">
-        <input type="text" id="rh-modal-label" placeholder="备注名（可选，留空自动填充）" />
-        <input type="password" id="rh-modal-token" class="mono" placeholder="输入 RunningHub API Token" />
+        <input type="text" id="rh-modal-label" placeholder="备注名（可选，留空用邮箱前缀）" />
+        <input type="email" id="rh-modal-email" class="mono" placeholder="登录邮箱（runninghub.ai）" />
+        <input type="password" id="rh-modal-password" class="mono" placeholder="密码" />
+        <input type="password" id="rh-modal-token" class="mono" placeholder="API Key（可选，仅上传文件用）" />
       </div>
       <div id="rh-modal-err" class="muted" style="font-size:12px;color:#ef4444"></div>
     `;
@@ -195,18 +215,24 @@
     if (submitBtn) {
       submitBtn.addEventListener('click', async () => {
         const token = (document.getElementById('rh-modal-token')?.value || '').trim();
+        const email = (document.getElementById('rh-modal-email')?.value || '').trim();
+        const password = document.getElementById('rh-modal-password')?.value || '';
         const label = (document.getElementById('rh-modal-label')?.value || '').trim();
         const errEl = document.getElementById('rh-modal-err');
-        if (!token) {
-          if (errEl) errEl.textContent = '请输入 API Token';
+        if (!email && !token) {
+          if (errEl) errEl.textContent = '请输入登录邮箱 + 密码（或至少 API Key）';
+          return;
+        }
+        if (email && !password) {
+          if (errEl) errEl.textContent = '邮箱账号必须填密码';
           return;
         }
         submitBtn.disabled = true;
-        submitBtn.textContent = '验证中…';
+        submitBtn.textContent = '登录中…';
         try {
           const res = await rhFetch('/ui/api/runninghub/accounts/import', {
             method: 'POST',
-            body: JSON.stringify({ api_key: token, label: label || undefined }),
+            body: JSON.stringify({ email: email || undefined, password: password || undefined, api_key: token || undefined, label: label || undefined }),
           });
           if (typeof closeModal === 'function') closeModal();
           else overlayEl.classList.remove('show');
@@ -321,9 +347,7 @@
     const cards = workflows.map((wf) => {
       const nodes = Array.isArray(wf.nodeInfoList) ? wf.nodeInfoList : [];
       const safeDesc = sanitizeHtml(wf.description);
-      const bType = wf.billingType || 'RH 金币 / 余额';
-      const bCls = bType === '钱包余额' ? 'tag-money' : (bType === 'RH 金币' ? 'tag-coins' : 'tag-mixed');
-      const billingTag = `<span class="tag ${bCls}" style="float:right;margin:0 0 6px 10px;" data-tip="计费方式">${escapeHtml(bType)}</span>`;
+      const billingTag = `<span style="float:right;margin:0 0 6px 10px;display:inline-flex;gap:4px;">${renderBillingTag(wf.billingType, wf.closedSource)}${wf.verifiedCost ? `<span class="tag tag-coins" data-tip="${escapeHtml(wf.verifiedNote || '实测成本')}">实测 ${escapeHtml(wf.verifiedCost)}</span>` : ''}</span>`;
       const desc = safeDesc
         ? `<div class="muted rh-wf-desc" style="font-size:12px;line-height:1.55;margin:0;word-break:break-word;">${billingTag}${safeDesc}</div>`
         : `<div class="muted" style="font-size:12px;">${billingTag}暂无描述</div>`;
@@ -485,7 +509,7 @@
             previewEl.innerHTML = `
               <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <strong style="font-size:13px;">${escapeHtml(wf.name || wid)}</strong>
-                ${renderBillingTag(wf.billingType)}
+                ${renderBillingTag(wf.billingType, wf.closedSource)}
               </div>
               ${wf.description ? `<div class="rh-wf-desc" style="margin-top:4px;">${sanitizeHtml(wf.description)}</div>` : '<div class="muted" style="margin-top:4px;">暂无应用描述</div>'}
               ${paramsHtml}
@@ -646,7 +670,7 @@
 
     const runBtn = document.getElementById('rh-wf-run-btn');
     if (runBtn) {
-      runBtn.addEventListener('click', async () => {
+      const doRun = async (force) => {
         const updatedNodes = nodes.map((n, idx) => {
           const input = bodyEl.querySelector(`.rh-wf-field[data-idx="${idx}"]`);
           return Object.assign({}, n, { fieldValue: input ? input.value : n.fieldValue });
@@ -661,9 +685,17 @@
         try {
           const res = await rhFetch('/ui/api/runninghub/workflows/run', {
             method: 'POST',
-            body: JSON.stringify({ webapp_id: wf.webappId, nodeInfoList: updatedNodes }),
+            body: JSON.stringify({ webapp_id: wf.webappId, nodeInfoList: updatedNodes, force: !!force }),
           });
-          if (statusEl) statusEl.textContent = `任务完成 (taskId=${res.taskId})`;
+          const est = res.estimate || {};
+          const closedNodes = Array.isArray(res.closedSourceNodes) ? res.closedSourceNodes.filter((n) => n !== '?') : [];
+          const estTxt = est.priceText || est.totalPrice != null ? `${est.totalPrice} ${est.currency || ''}`.trim() : '—';
+          if (statusEl) {
+            statusEl.innerHTML = `任务完成 (taskId=${escapeHtml(res.taskId)})`
+              + `<span class="muted" style="margin-left:8px">预估 ${escapeHtml(estTxt)} / ${escapeHtml(String(est.estimatedPoint ?? '—'))} 积分</span>`
+              + (res.balance && res.balance.transitionCoins != null ? `<span class="muted" style="margin-left:8px">剩余过渡币 <strong class="mono">${escapeHtml(String(res.balance.transitionCoins))}</strong></span>` : '')
+              + (closedNodes.length ? `<div style="color:#f59e0b;font-size:12px;margin-top:4px">注意：预估节点里有闭源模型 ${escapeHtml(closedNodes.join(', '))}，站内也扣钱包 $，这次能跑通说明是钱包/付费积分付的。</div>` : '');
+          }
           const outs = Array.isArray(res.outputs) ? res.outputs : [];
           if (resultEl) {
             resultEl.innerHTML = outs.length
@@ -674,6 +706,19 @@
           }
         } catch (err) {
           if (statusEl) statusEl.innerHTML = `<span style="color:#ef4444">${escapeHtml(err.message || String(err))}</span>`;
+          // 预检拦下时给一个「仍然提交」：预检依据的是本地学的计费标签（本质是
+          // 「那个号当时付不起」），不是上游判决，得让用户能绕过它拿上游原文。
+          if (resultEl && err && err.detail && err.detail.can_force) {
+            const forceBtn = document.createElement('button');
+            forceBtn.className = 'ghost';
+            forceBtn.style.marginTop = '8px';
+            forceBtn.textContent = '仍然提交（绕过本地预检）';
+            forceBtn.addEventListener('click', () => {
+              forceBtn.remove();
+              doRun(true);
+            });
+            resultEl.appendChild(forceBtn);
+          }
           // 提交被上游以「余额不足」拒掉时，后端已把该工作流的真实计费类型写回本地
           // 并随错误带回最新列表——刷新卡片，让标签立刻从「RH 金币 / 余额」变成「钱包余额」。
           const updated = err && err.detail && Array.isArray(err.detail.workflows) ? err.detail.workflows : null;
@@ -682,7 +727,8 @@
           runBtn.disabled = false;
           runBtn.textContent = '发起调用';
         }
-      });
+      };
+      runBtn.addEventListener('click', () => doRun(false));
     }
   }
 })();
