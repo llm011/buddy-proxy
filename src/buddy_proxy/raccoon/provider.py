@@ -2,21 +2,17 @@
 
 ## 协议
 
-上游是 OpenAI chat-completions 形态，但走的是 **v1** 端点
-（``/api/web/llm/v1/chat/completions``）：v2 有风控闸（``200108``），会拦
-「非官方客户端」形态的请求，同一账号同一秒 v2 回 429、v1 回 200。
+上游是 OpenAI chat-completions 形态，聊天走 **v2** 端点
+（``/api/web/llm/v2/chat/completions``）。不能回切 v1：2026-11-27 实测 v1
+虽返回 200 与正常 usage，但余额不动、bills 不生成消费流水；同账号同请求换
+v2 后立即扣分并出账。v2 曾经的 200108 风控由设备绑定与客户端头解决。
 
-⚠️ v1 的**流式端点是坏的**：回 HTTP 200 的 SSE，内容却是
-``data:{"data":null,"status":{"code":9,"message":"invalid upstream stream
-response"}}``，客户端拿到空回复。所以：
+当前发给上游的请求仍**一律非流式**（``build_chat_body(..., stream=False)``），
+客户端要流式时拿完整 JSON 在本地合成 SSE（``_synthesize_openai_stream`` /
+``_synthesize_anthropic_stream``）。这是保留稳定出口的实现取舍，代价是首字
+延迟等于整条上游响应时间；修计费不同时切换原生 SSE。
 
-* 发给上游的请求**一律非流式**（``build_chat_body(..., stream=False)``）；
-* 客户端要流式时，拿完整 JSON 在本地合成 SSE
-  （``_synthesize_openai_stream`` / ``_synthesize_anthropic_stream``）。
-
-代价是首字延迟等于整条响应时间——这是端点的限制，不是实现取舍。
-
-认证只有 ``xhx_token`` 一个头，无签名、无设备指纹。
+认证使用 ``xhx_token`` / Authorization / Cookie，并带绑定设备的客户端头。
 
 ## 多账号
 
@@ -97,11 +93,9 @@ from .upstream import (
 
 log = logging.getLogger(__name__)
 
-#: 流式：read 是「相邻两次读」的上限。小浣熊实测 411K token 输入 14.2 秒返回，
-#: 首字不算慢；给 120s 足够吸收大上下文的排队。
-#: 上游只有非流式一条路（v1 的流式端点坏了），所以只有这一个超时。
-#: read=300s 是「整条响应」的上限——客户端要流式时首字延迟也受它约束，
-#: 因为内容得等上游整条返回才能开始合成。
+#: 当前上游统一走非流式，所以只有这一个超时。read=300s 是「整条响应」的
+#: 上限——客户端要流式时首字延迟也受它约束，因为内容得等上游整条返回才能
+#: 开始本地合成。
 _TIMEOUT_NONSTREAM = httpx.Timeout(connect=15.0, read=300.0, write=60.0, pool=15.0)
 #: 兼容旧名。
 _TIMEOUT = _TIMEOUT_NONSTREAM
@@ -358,8 +352,8 @@ class RaccoonProvider(BaseProvider):
                 rate_limited.append(acct.id)
                 continue
 
-            # v1 端点的流式是坏的（上游回 SSE 但内容是错误信息），所以**所有
-            # 请求都走非流式**；客户端要流式的话，拿到完整 JSON 后本地合成。
+            # v2 已恢复计费；继续沿用稳定的非流式上游 + 本地合成，客户端要
+            # 流式时拿到完整 JSON 后再合成，不在本次修复里同时切换原生 SSE。
             # 见 CHAT_PATH 的注释和 _synthesize_openai_stream 的说明。
             upstream_body = build_chat_body(body, model=upstream_model, stream=False)
             # 必须带设备头：绑定成功后上游按设备认会话，聊天却不声明自己属于
@@ -492,11 +486,8 @@ class RaccoonProvider(BaseProvider):
                 # 不能凭倍率瞎算——见 _settle_credit 的说明。
 
             if stream:
-                # v1 上游被强制为非流式，响应已经是完整 JSON。这里把非流式响应
-                # 拆成 OpenAI SSE 合成流，客户端无感。
-                #
-                # 为什么不直接透传：v1 的流式端点坏了（上游 SSE 里回
-                # ``code:9 invalid upstream stream response``），不能用。
+                # 上游统一非流式，响应已经是完整 JSON。这里拆成 OpenAI SSE
+                # 合成流，保持现有客户端出口不变；v2 只负责恢复真实计费。
                 payload = gate.payload
                 if payload is None:
                     await gate.resp.aclose()
@@ -593,9 +584,9 @@ class RaccoonProvider(BaseProvider):
         2. **校验 model 回显**：未知模型会静默回落默认模型，必须比对。
         3. **识别非 JSON**：拿不到 payload = 假成功，换号。
 
-        只处理**非流式**响应。v1 端点的流式是坏的（回 SSE 但内容是错误信息），
-        所以上游请求全部非流式；客户端要流式由 ``_synthesize_openai_stream``
-        在本地合成。以前这里还有一条读 ``aiter_lines()`` 的 SSE 分支，改成
+        只处理**非流式**响应。上游请求统一非流式，客户端要流式由
+        ``_synthesize_openai_stream`` 在本地合成。以前这里还有一条读
+        ``aiter_lines()`` 的 SSE 分支，改成
         全非流式之后不可达，已删除——留着会让后来者以为流式仍走上游。
         """
         try:
@@ -1472,11 +1463,10 @@ def _is_session_dead(status: int, detail: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# 合成流：v1 非流式响应 → OpenAI SSE / Anthropic SSE
+# 合成流：上游非流式响应 → OpenAI SSE / Anthropic SSE
 #
-# 为什么需要合成：v1 端点的流式是坏的（上游回 SSE 但内容是
-# ``code:9 invalid upstream stream response``），所以所有请求都走非流式。
-# 客户端要流式时，拿到完整 JSON 后本地拆成 SSE 帧发出去。
+# 所有请求都走非流式；客户端要流式时，拿到完整 JSON 后本地拆成 SSE 帧。
+# v2 恢复计费后仍保留这条稳定出口，不把端点修复与原生 SSE 切换耦合。
 # ---------------------------------------------------------------------------
 
 
