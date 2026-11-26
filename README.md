@@ -57,7 +57,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 # After installation, use buddy from any directory.
 buddy start                # start (if not running) and open http://127.0.0.1:8787/ui
 buddy stop / restart / status / logs
-buddy login [provider]     # upstream login (codebuddy(=workbuddy, =codebuddyintl global)/trae(=traeintl global)/zcode/glm/doubao/mimo/qoder(=qoderintl global)/gemini/antigravity/kimi/codex/copilot)
+buddy login [provider]     # upstream login/check (codebuddy(=workbuddy, =codebuddyintl global)/trae(=traeintl global)/zcode/glm/ark/doubao/dumate/qwenpc/mimo/qoder(=qoderintl global)/gemini/antigravity/kimi/raccoon/codex/copilot/deepseek/yuntoken/kiro)
                            # trae/qoder/codebuddy accept --region cn|global (accounts differ per region); other providers ignore it
                            # traeintl/qoderintl/codebuddyintl are login aliases meaning --region global; logging in a global account also enables the
                            # traeintl/qoderintl/codebuddyintl channels — separate quota cards in the UI
@@ -769,6 +769,7 @@ buddy login copilot --token gho_… # paste a GitHub token directly
 Turns a **Volcengine Ark (火山方舟)** API key into an upstream channel, addressed as `ark/<id>`:
 
 ```bash
+buddy login ark                       # check the key/model table and print setup guidance
 python -m buddy_proxy --ark           # or ARK_ENABLED=1; the default EXTRA_ARGS already includes --ark
 ```
 

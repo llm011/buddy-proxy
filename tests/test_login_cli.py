@@ -27,7 +27,7 @@ from buddy_proxy.providers import zcode
 def _clean_env(monkeypatch, tmp_path):
     """隔离状态目录与相关环境变量，绝不碰真实的 key 文件。"""
     monkeypatch.setenv("BUDDY_PROXY_STATE_DIR", str(tmp_path))
-    for name in ("ZCODE_API_KEY", "MIMO_API_KEY", "MIMO_ACCOUNT_JSON", "MIMO_COOKIE_DB"):
+    for name in ("ZCODE_API_KEY", "ARK_API_KEY", "MIMO_API_KEY", "MIMO_ACCOUNT_JSON", "MIMO_COOKIE_DB"):
         monkeypatch.delenv(name, raising=False)
     # 别真去读用户主目录下的 ZCode CLI 配置（config.json 那条回退链）
     monkeypatch.setattr(
@@ -260,6 +260,53 @@ def test_proxy_sh_login_whitelist_covers_python_side():
         f"proxy.sh login 白名单缺少: {sorted(missing)}——"
         f"python 侧认的名字 shell 层不认，`buddy login` 会直接报未知参数"
     )
+
+
+def test_known_providers_exactly_cover_dispatch():
+    """帮助、shell 白名单与真实 handler 必须同源，不许只加其中一层。"""
+    assert set(auth_login.KNOWN_PROVIDERS) == set(auth_login._DISPATCH)
+
+
+def test_ark_login_checks_key_and_model_table(capsys, monkeypatch):
+    """key 型通道也要能经 buddy login 自检，缺模型表不能报配置完成。"""
+    monkeypatch.setenv("ARK_API_KEY", "1234567890abcdef")
+    assert auth_login._login_ark() == 1
+    out = capsys.readouterr().out
+    assert auth_login.ARK_CONSOLE_URL in out
+    assert "ark.json" in out
+
+    from buddy_proxy.providers import ark
+
+    ark.config_file_path().write_text(
+        '{"models": [{"id": "ds-flash", "endpoint": "ep-test"}]}',
+        encoding="utf-8",
+    )
+    assert auth_login._login_ark() == 0
+    out = capsys.readouterr().out
+    assert "1234567890abcdef" not in out
+    assert "123456***cdef" in out
+    assert "模型: 1 个" in out
+
+
+def test_qwenpc_login_uses_desktop_credential_flow(capsys, monkeypatch):
+    """qwenpc 走桌面端凭据链，失败时给可操作提示且不泄露 token。"""
+    from buddy_proxy.qwenpc import credentials
+
+    monkeypatch.setattr(credentials, "auth_token", lambda: "secret-token")
+    monkeypatch.setattr(credentials, "api_base", lambda: "https://api9.qwenwork.cn")
+    assert auth_login._login_qwenpc() == 0
+    out = capsys.readouterr().out
+    assert "secret-token" not in out
+    assert "凭据已就绪" in out
+
+    def fail():
+        raise credentials.CredentialError("没有可用登录态")
+
+    monkeypatch.setattr(credentials, "auth_token", fail)
+    assert auth_login._login_qwenpc() == 1
+    err = capsys.readouterr().err
+    assert "QwenWorkCN" in err
+    assert "没有可用登录态" in err
 
 
 # ---------------------------------------------------------------------------

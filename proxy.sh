@@ -9,7 +9,7 @@
 #   ./proxy.sh logs                              # 跟踪日志
 #   ./proxy.sh ui                                # 确保在跑并打开管理页 http://127.0.0.1:8787/ui
 #   ./proxy.sh login    [provider] [--no-browser] [--region cn|global] # 登录上游账号（默认 codebuddy；
-#                                                # provider: codebuddy(=workbuddy, =codebuddyintl 海外)/trae(=traeintl 海外)/zcode/glm/ark/deepseek/doubao/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/raccoon/codex/copilot/yuntoken）
+#                                                # provider: codebuddy(=workbuddy, =codebuddyintl 海外)/trae(=traeintl 海外)/zcode/glm/ark/deepseek/doubao/dumate/qwenpc/mimo/qoder(=qoderintl 海外)/gemini/antigravity/kimi/raccoon/codex/copilot/yuntoken/kiro）
 #                                                # --region 仅 trae/qoder/codebuddy 生效（两区账号不通用；交互终端不给会问一句）
 #                                                # 登录成功后若网关在运行，需 restart 生效
 #
@@ -275,7 +275,7 @@ cmd_login() {
     # tests/test_login_cli.py 的白名单同步测试会盯住。
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|doubao|dumate|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi|raccoon|codex|deepseek|yuntoken|kiro|copilot)
+            codebuddy|codebuddyintl|cb|workbuddy|trae|traeintl|zcode|glm|ark|doubao|dumate|qwenpc|mimo|qoder|qoderintl|qodercn|qoder-cn|quoder|qodor|qder|gemini|gemini-cli|antigravity|kimi|raccoon|codex|deepseek|yuntoken|kiro|copilot)
                 # 别名（workbuddy/cb/quoder 系、intl 系）原样透传，python 侧归一
                 provider="$1" ;;
             --no-browser)

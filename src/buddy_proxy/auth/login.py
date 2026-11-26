@@ -53,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "doubao", "dumate", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "copilot", "raccoon")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "glm", "ark", "doubao", "dumate", "qwenpc", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "copilot", "raccoon")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -355,6 +355,9 @@ ZCODE_PLAN_URL = "https://bigmodel.cn/glm-coding"
 DEEPSEEK_CONSOLE_URL = "https://platform.deepseek.com/api_keys"
 DEEPSEEK_TOPUP_URL = "https://platform.deepseek.com/top_up"
 
+#: 火山方舟控制台取 key 的入口；与 zcode/deepseek 一样只打印，不落任何凭据。
+ARK_CONSOLE_URL = "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey"
+
 
 def _login_zcode(**_kwargs) -> int:
     """zcode 无交互登录：凭据是 API key，这里检查配置并打印指引。
@@ -527,6 +530,36 @@ def _login_glm(**_kwargs) -> int:
     return 1
 
 
+def _login_ark(**_kwargs) -> int:
+    """ark 无交互登录：检查 API key 与本地模型表，并给出缺失项的配置指引。"""
+    from buddy_proxy.providers import ark
+
+    key = ark.resolve_api_key()
+    config = ark.load_config()
+    models = ark.parse_models(config)
+    if key and models:
+        print(f"[OK] ark 凭据已配置: {key[:6]}***{key[-4:]}  模型: {len(models)} 个")
+        print(f"     base: {ark.resolve_base_url(str(config.get('base_url') or ''))}")
+        print("     换 key 改 ARK_API_KEY 或 "
+              f"{ark.secret_file_path()}；模型表在 {ark.config_file_path()}。")
+        return 0
+
+    print("[!] ark 配置不完整。它用火山方舟 API key + 本地模型表，不支持账号密码登录。")
+    print(f"    ① 领 key：{ARK_CONSOLE_URL}")
+    if not key:
+        print("    ② 配 key（任选一种）：")
+        print("       a) export ARK_API_KEY=<粘贴 key>")
+        secret = ark.secret_file_path()
+        print(f"       b) mkdir -p {secret.parent} && echo '<粘贴 key>' > {secret}")
+        print("          然后 chmod 600（`>` 是覆盖，别用 `>>` 追加）")
+    if not models:
+        cfg = ark.config_file_path()
+        print(f"    ③ 在 {cfg} 配置 models："
+              '[{"id": "ds-flash", "endpoint": "ep-..."}]')
+    print("    配完后 buddy restart（启动参数里要有 --ark）")
+    return 1
+
+
 def _login_doubao(**_kwargs) -> int:
     """豆包走 CDP 直连豆包工作 App，无独立登录流程。"""
     print("豆包 provider 无独立登录：它通过 Chrome CDP 复用本机豆包工作 App 的登录态。")
@@ -550,6 +583,24 @@ def _login_dumate(**_kwargs) -> int:
     print(f"[未就绪] {state.get('hint')}")
     print("     需要先打开并登录百度搭子桌面端，再启用 --dumate。")
     return 1
+
+
+def _login_qwenpc(**_kwargs) -> int:
+    """qwenpc 复用千问办公桌面端登录态，必要时引导 App 以 CDP 模式重启。"""
+    from buddy_proxy.qwenpc import credentials
+
+    try:
+        credentials.auth_token()
+    except credentials.CredentialError as exc:
+        print(f"[!] qwenpc 登录失败: {exc}", file=sys.stderr)
+        print("    请先安装并登录 QwenWorkCN 桌面端，再重试；首次获取凭据时"
+              "App 可能提示退出并以调试模式重启。", file=sys.stderr)
+        return 1
+    print("[OK] qwenpc 凭据已就绪（未打印 token）")
+    print(f"     缓存: {credentials.token_path()}  base: {credentials.api_base()}")
+    print("     日常 token 会自动刷新；OAuth 登录态过期后重跑 buddy login qwenpc。")
+    print("     启动参数里加 --qwenpc 后 buddy restart 即可使用。")
+    return 0
 
 
 def _login_mimo(open_browser: bool = True, **_kwargs) -> int:
@@ -1145,8 +1196,10 @@ _DISPATCH = {
     "trae": _login_trae,
     "zcode": _login_zcode,
     "glm": _login_glm,
+    "ark": _login_ark,
     "doubao": _login_doubao,
     "dumate": _login_dumate,
+    "qwenpc": _login_qwenpc,
     "mimo": _login_mimo,
     "qoder": _login_qoder,
     "gemini": _login_gemini,
@@ -1187,7 +1240,7 @@ def main() -> int:
         description="各上游 provider 的统一登录入口（provider 支持 workbuddy=codebuddy 别名）",
     )
     parser.add_argument("provider", nargs="?", default="codebuddy",
-                        help="codebuddy(=workbuddy, =codebuddyintl 海外) / trae(=traeintl 海外) / zcode / glm / doubao / mimo / qoder(=qoderintl 海外) / gemini / antigravity / kimi / raccoon / codex / copilot，默认 codebuddy")
+                        help=f"{' / '.join(KNOWN_PROVIDERS)}，默认 codebuddy")
     parser.add_argument("--no-browser", action="store_true",
                         help="codebuddy/trae/mimo/qoder/gemini/antigravity/kimi/codex 登录不自动打开浏览器，只打印链接")
     parser.add_argument("--gh", action="store_true",
