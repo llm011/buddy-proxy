@@ -138,10 +138,12 @@ def test_charts_js_prefers_account_name():
 
 def test_trae_writes_stable_id_to_log():
     """trae 历史上写的是当时的 alias——统一改成落库存 id（展示端解析当前名）。"""
-    from pathlib import Path
+    import inspect
+    from buddy_proxy.trae.provider import TraeProvider
 
-    src = (Path(__file__).resolve().parents[1] / "src" / "buddy_proxy" / "trae"
-           / "provider.py").read_text(encoding="utf-8")
+    # Follow the inherited implementation rather than pinning its source file;
+    # a responsibility split must not weaken the stable-account-id assertion.
+    src = inspect.getsource(TraeProvider.forward)
     assert 'meta["account"] = acct.id' in src
     assert 'meta["account"] = acct.alias' not in src
 

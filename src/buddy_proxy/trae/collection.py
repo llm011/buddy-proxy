@@ -1,4 +1,4 @@
-"""Trae non-stream SSE collection; streaming stays in the provider facade."""
+"""Trae non-stream SSE collection; streaming lives in provider_stream."""
 
 from __future__ import annotations
 

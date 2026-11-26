@@ -12,7 +12,11 @@
 - ``native_tools``   原生 function calling 通道（chat_v3 直通，2026-09 实测）
 - ``transport``      legacy 文本协议 HTTP 发送（端点回退 / Work 重试）
 - ``sse``            SSE 解析与 Anthropic 流包装
-- ``provider``       TraeProvider 编排入口
+- ``provider``       兼容 facade：公开类、native 覆写钩子与旧 globals
+- ``provider_catalog`` / ``provider_accounts`` 目录/代际、签到/额度
+- ``provider_forward`` / ``provider_stream``   按区换号/协议分派、SSE 传输
+- ``provider_policy`` / ``provider_gate``      拒绝节流/错误分类、首事件提交
+- ``collection``     非流式 SSE 聚合（与 mixin 共用运行时 facade hooks）
 - ``cli``            账号工具命令行
 """
 

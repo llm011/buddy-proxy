@@ -18,7 +18,7 @@
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
 - **工具调用** — 完整的 function calling 支持，自动过滤无效工具定义；`tool_choice` 在 OpenAI / Anthropic 两种形态之间统一归一化，绝不会以 object 形式发给上游
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
-- **推理与正文分流** — Trae 非流式 Chat Completions 将上游推理保存在 `message.reasoning_content`，不混入回答正文；仅推理或工具调用响应也保留该字段，供兼容客户端续轮回传。这不会主动开启 thinking，也不保证每个上游都返回推理。Trae 流式/非流式均保留上游 usage 扩展和显式缓存零值；缺失的缓存证据不补零，不改缓存或积分估算。
+- **推理与正文分流** — Trae 非流式 Chat Completions 将上游推理保存在 `message.reasoning_content`，不混入回答正文；仅推理或工具调用响应也保留该字段，供兼容客户端读取。这不会主动开启 thinking，也不保证每个上游都返回推理。Trae 原生历史转换目前不透传输入 `reasoning_content`，因此出口保留推理及入口多轮 200 不证明推理已回传 Trae 上游，也不构成 DeepSeek 官方严格回传验收。Trae 流式/非流式均保留上游 usage 扩展和显式缓存零值；缺失的缓存证据不补零，不改缓存或积分估算。
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
@@ -1184,7 +1184,13 @@ Trae PAT 频控：部分扩展模型上游按「账号 × 模型」限频（队�
 `pat_provider` + `pat/`（PAT 底层模型通道：多账号、撞码分级冷却、
 4031 快速失败）。零依赖 AES 兜底实现已移到 `core/aes_pure`（与 Qoder 的 COSY 签名共用，
 通道子包之间不互相 import）。
-`trae_provider.py` 保留为兼容 shim，历史导入与 `python -m buddy_proxy.trae_provider` 不受影响。
+`trae_provider.py` 保留为兼容入口，历史导入与 `python -m buddy_proxy.trae_provider` 不受影响。
+`trae/provider.py` 保留公开类、native 覆写钩子与旧 globals；职责实现分别在
+`provider_catalog.py`（目录发现/代际收敛）、`provider_accounts.py`（签到/额度）、
+`provider_forward.py`（按区换号/协议分派）、`provider_stream.py`（SSE 传输）、
+`provider_gate.py`（首语义事件提交）和 `provider_policy.py`（共享拒绝节流/错误分类）。
+迁移的方法运行时读取 facade hooks，保留替换式 monkeypatch 与 PAT/海外子类覆写；
+协议、重试、计费和 usage 语义不变。详见 [架构说明](docs/architecture.md)。
 
 | 类别 | 接口 | 说明 |
 | --- | --- | --- |

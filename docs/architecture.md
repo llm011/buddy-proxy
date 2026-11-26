@@ -123,10 +123,31 @@ blocking through sync helpers remain review territory.
 - **`trae/`** is split by responsibility (credentials, transport, SSE,
   native tools, text fallback, non-stream collection, and PAT). `trae_provider.py`
   remains the published `trae-cli` entrypoint and trae façade (not a shim to remove).
+  `trae/provider.py` composes responsibility mixins while retaining the original
+  class/import path, native transport override hooks, and module globals.
+  `provider_catalog.py` owns catalog refresh and generation convergence;
+  `provider_accounts.py` owns Work check-in/quota aggregation;
+  `provider_forward.py` owns regional account failover and protocol dispatch;
+  `provider_stream.py` owns native/text SSE delivery and reader timeout handling;
+  `provider_gate.py` owns first-semantic-event commitment and dedicated executor
+  adaptation; `provider_policy.py` owns native rejection pacing and account/model
+  error classification. Implementations lazily resolve facade hooks at runtime:
+  copying bindings would break replacement monkeypatches, and binding transport
+  methods directly would bypass PAT/Intl overrides. Mutable policy state and pools
+  remain facade-owned so old imports and replacement patches still address the
+  same runtime objects. No module-level back-import cycle is introduced.
+  These boundaries change structure only, not protocol, retry or billing policy;
+  `tests/test_trae_provider_boundaries.py` characterizes imports, rebinding, PAT
+  isolation and stream commitment and enforces the 700-line module ceiling.
   `trae/collection.py` collects non-stream SSE through the provider's existing
   override/patch hooks. It keeps upstream `reasoning_content` separate from
   `content`, including reasoning-only/tool-call responses; the Anthropic adapter
   converts that field into a thinking block. Streaming reasoning is unchanged.
+  Trae native history conversion (`native_tools._native_messages`) currently does
+  not forward input `reasoning_content`. Preserving output reasoning and obtaining
+  a multi-turn 200 are not evidence of upstream reasoning replay and do not satisfy
+  DeepSeek official's strict reasoning-replay acceptance; no unsupported input
+  fields are added by this structural extraction.
   `trae/usage.py` preserves upstream usage extensions in both transports and maps
   explicitly present cache counts to `prompt_tokens_details.cached_tokens`;
   explicit zero stays zero and missing evidence is not invented. Credit estimation
