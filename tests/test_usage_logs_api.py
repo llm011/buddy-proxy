@@ -222,6 +222,25 @@ def test_endpoint_missing_id_is_400():
         assert ei.value.status_code == 400
 
 
+@pytest.mark.parametrize("params", [
+    {"id": "a", "page": "abc"},
+    {"id": "a", "page_size": "abc"},
+])
+def test_usage_log_endpoints_reject_non_integer_pagination(params):
+    """三条路由都不能让 int() 的 ValueError 漏成 500。"""
+    from buddy_proxy.web.ui import channels as ch
+
+    fns = [ch.ui_trae_usage_logs, ch.ui_raccoon_usage_logs,
+           ch.ui_codebuddy_usage_logs]
+    if "page" in params:
+        fns.remove(ch.ui_raccoon_usage_logs)  # cursor 分页本来就没有 page 参数
+    for fn in fns:
+        with pytest.raises(HTTPException) as ei:
+            _call(fn, **params)
+        assert ei.value.status_code == 400
+        assert "正整数" in str(ei.value.detail)
+
+
 def test_trae_endpoint_returns_error_object_not_5xx(monkeypatch):
     """账号不存在 / 上游拒绝 → {"error":...}（HTTP 200），弹窗显示原话。"""
     from buddy_proxy.web.ui import channels as ch

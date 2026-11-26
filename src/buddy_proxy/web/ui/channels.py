@@ -23,6 +23,18 @@ from .common import _ensure_local
 log = logging.getLogger(__name__)
 
 
+def _query_int(request: Request, name: str, default: int, *, maximum: int | None = None) -> int:
+    """解析正整数查询参数；非法输入给 400，而不是漏成未捕获的 ValueError。"""
+    raw = request.query_params.get(name)
+    try:
+        value = int(raw or default)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail={"error": {
+            "message": f"{name} 必须是正整数"}}) from exc
+    value = max(1, value)
+    return min(value, maximum) if maximum is not None else value
+
+
 def _local_str_to_epoch(value: str) -> float | None:
     """``YYYY-MM-DD HH:MM:SS``（无时区、按本机时间）→ epoch 秒；解析不了返回 None。
 
@@ -442,8 +454,8 @@ async def ui_trae_usage_logs(request: Request):
     if not aid:
         raise HTTPException(status_code=400,
                             detail={"error": {"message": "缺少 id（账号 id）"}})
-    page = max(1, int(request.query_params.get("page") or 1))
-    page_size = int(request.query_params.get("page_size") or 30)
+    page = _query_int(request, "page", 1)
+    page_size = _query_int(request, "page_size", 30, maximum=50)
 
     try:
         from ...trae import credentials as creds
@@ -488,7 +500,7 @@ async def ui_raccoon_usage_logs(request: Request):
     if not aid:
         raise HTTPException(status_code=400,
                             detail={"error": {"message": "缺少 id（账号 id）"}})
-    page_size = max(1, min(int(request.query_params.get("page_size") or 30), 100))
+    page_size = _query_int(request, "page_size", 30, maximum=100)
     cursor = request.query_params.get("cursor", "") or None
 
     try:
@@ -541,8 +553,8 @@ async def ui_codebuddy_usage_logs(request: Request):
     if not aid:
         raise HTTPException(status_code=400,
                             detail={"error": {"message": "缺少 id（账号 id）"}})
-    page = max(1, int(request.query_params.get("page") or 1))
-    page_size = max(1, min(int(request.query_params.get("page_size") or 30), 100))
+    page = _query_int(request, "page", 1)
+    page_size = _query_int(request, "page_size", 30, maximum=100)
 
     try:
         from ...codebuddy_provider import credentials as creds
