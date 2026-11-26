@@ -352,7 +352,10 @@ class RaccoonProvider(BaseProvider):
                 rate_limited.append(acct.id)
                 continue
 
-            upstream_body = build_chat_body(body, model=upstream_model, stream=stream)
+            # v1 端点的流式是坏的（上游回 SSE 但内容是错误信息），所以**所有
+            # 请求都走非流式**；客户端要流式的话，拿到完整 JSON 后本地合成。
+            # 见 CHAT_PATH 的注释和 _synthesize_sse 的说明。
+            upstream_body = build_chat_body(body, model=upstream_model, stream=False)
             # 必须带设备头：绑定成功后上游按设备认会话，聊天却不声明自己属于
             # 那台设备 = 未绑定设备在调模型，正是 200108 风控抓的形态。
             headers = build_headers(access_token, _device_id_for(acct.id))
@@ -363,8 +366,11 @@ class RaccoonProvider(BaseProvider):
             try:
                 req = client.build_request(
                     "POST", url, json=upstream_body, headers=headers,
-                    timeout=_TIMEOUT_STREAM if stream else _TIMEOUT_NONSTREAM)
-                resp = await client.send(req, stream=stream)
+                    # 非流式上游的超时用 _TIMEOUT_NONSTREAM（300s read），
+                    # 即使是流式请求——因为上游就是非流式。
+                    timeout=_TIMEOUT_NONSTREAM)
+                # 永远 stream=False：上游就是非流式，不需要 httpx 的流式接收
+                resp = await client.send(req, stream=False)
             except httpx.TimeoutException as exc:
                 lease.release()
                 last_status, last_detail = 504, f"upstream timeout: {exc}"
@@ -424,8 +430,9 @@ class RaccoonProvider(BaseProvider):
                 continue
 
             # 200：过首事件闸门（校验 model 回显 + 识别带内错误）
+            # 流式请求也用非流式闸门——上游已经被强制为非流式了，响应是完整 JSON。
             try:
-                gate = await self._gate_first_event(resp, stream, upstream_model)
+                gate = await self._gate_first_event(resp, False, upstream_model)
             except BaseException:
                 lease.release()
                 await _drain(resp)
@@ -479,33 +486,34 @@ class RaccoonProvider(BaseProvider):
                 # 不能凭倍率瞎算——见 _settle_credit 的说明。
 
             if stream:
-                replay = _ReplayStream(gate.resp, gate.buffered, gate.lines,
-                                       lease=lease, provider=self,
-                                       access_token=access_token,
-                                       balance_before=balance_before)
+                # v1 上游被强制为非流式，响应已经是完整 JSON。这里把非流式响应
+                # 拆成 OpenAI SSE 合成流，客户端无感。
+                #
+                # 为什么不直接透传：v1 的流式端点坏了（上游 SSE 里回
+                # ``code:9 invalid upstream stream response``），不能用。
+                payload = gate.payload
+                if payload is None:
+                    await gate.resp.aclose()
+                    lease.release()
+                    raise HTTPException(
+                        status_code=502,
+                        detail={"error": {
+                            "message": "raccoon upstream returned non-JSON",
+                            "type": "bad_gateway"}},
+                    )
+                await gate.resp.aclose()
                 if protocol == "anthropic":
-                    # anthropic 出口必须用 **OpenAI chunk** 转换器：
-                    # ``AnthropicStreamConverter``（mimo/copilot/ark 同款）。
-                    #
-                    # 不能用 ``gemini._to_anthropic_stream``——它按 Gemini 事件
-                    # 形状解析，而本通道上游发的是 OpenAI ``choices``，结果是
-                    # 只有 ``message_start`` 紧跟 ``message_stop``、**没有一个
-                    # content_block**（2026-11-23 实测：客户端拿到空回复）。
                     return StreamingResponse(
-                        _to_anthropic_openai_stream(replay, upstream_model),
+                        _synthesize_anthropic_stream(
+                            payload, upstream_model, lease=lease, provider=self,
+                            access_token=access_token, balance_before=balance_before),
                         media_type="text/event-stream",
                         headers={"Cache-Control": "no-cache", "Connection": "close"},
                     )
-                # openai 出口**直通**：上游本身就是 OpenAI SSE。
-                #
-                # 以前这里错误地走了 gemini 的 ``_to_openai_stream``——它按
-                # Gemini 事件形状解析（``candidates``/``parts``），而 raccoon
-                # 上游发的是标准 ``choices``/``usage``，于是整条流被当成
-                # 「没有语义事件」丢掉，客户端拿不到内容、metrics 里
-                # ``prompt_tokens``/``completion_tokens`` 恒为 0
-                # （用户实报「日志里都看不到 token 消耗信息」）。
                 return StreamingResponse(
-                    _passthrough_sse(replay),
+                    _synthesize_openai_stream(
+                        payload, upstream_model, lease=lease, provider=self,
+                        access_token=access_token, balance_before=balance_before),
                     media_type="text/event-stream",
                     headers={"Cache-Control": "no-cache", "Connection": "close"},
                 )
@@ -1441,195 +1449,6 @@ def _epoch_from_iso(value: str) -> float:
         return 0.0
 
 
-class _ReplayStream:
-    """闸门缓冲行 → 真实流的适配器（先补放缓冲，再接原流）。
-
-    gemini 转换器只用 ``aiter_lines()``/``aclose()``，实现这两个就够了。
-    ``lines`` 为闸门的在途迭代器——续跑它而不是重开 ``resp.aiter_lines()``。
-    """
-
-    def __init__(self, resp: httpx.Response, buffered: list[str],
-                 lines: AsyncIterator[str] | None = None,
-                 lease: rate_limit.Lease | None = None,
-                 provider: "RaccoonProvider | None" = None,
-                 access_token: str = "",
-                 balance_before: float | None = None) -> None:
-        self._resp = resp
-        self._buffered = list(buffered)
-        self._lines = lines
-        self._lease = lease
-        self._usage: dict[str, Any] | None = None
-        # 积分结算所需的上下文（provider + 请求前余额）
-        self._provider = provider
-        self._access_token = access_token
-        self._balance_before = balance_before
-
-    def _note_usage(self, line: str) -> None:
-        """从上游 SSE 行里挑 token 数（供指标落库）。
-
-        为什么必须有这一步：流式请求的 usage 只在**最后几帧**里，而
-        ``_instrument`` 读的是 ``ACCOUNT_META`` 里那份 meta。以前这个适配器
-        只做透传、不解析 usage，于是流式请求在 metrics 里恒为
-        ``prompt_tokens=0 / completion_tokens=0``——用户实报「日志里都看不到
-        token 消耗信息，只有耗时信息」正是这个原因。
-
-        上游在 ``stream_options.include_usage`` 时会于收尾前发一帧
-        ``choices: []`` + ``usage``（OpenAI 兼容口径）；取最后见到的为准。
-        """
-        if not line.startswith("data:"):
-            return
-        data = line[5:].strip()
-        if not data or data == "[DONE]":
-            return
-        try:
-            obj = json.loads(data)
-        except (ValueError, TypeError):
-            return
-        if not isinstance(obj, dict):
-            return
-        usage = obj.get("usage")
-        if isinstance(usage, dict):
-            self._usage = usage
-
-    async def aiter_lines(self) -> AsyncIterator[str]:
-        for line in self._buffered:
-            self._note_usage(line)
-            yield line
-        if self._lines is not None:
-            async for line in self._lines:
-                self._note_usage(line)
-                yield line
-
-    async def aclose(self) -> None:
-        # ⚠️ 顺序是**契约**，不是风格：lease 必须在最外层 finally 里释放，
-        # 且结算/关流全都要在它之前、并且各自兜住 CancelledError。
-        #
-        # 2026-11-23 用户实报「raccoon 越来越慢，最后全是 429」的根因就在这里：
-        # 原来是「先 await 余额结算（网络 IO），再 finally 释放 lease」。客户端
-        # 中途断开时 Starlette 会 cancel 这个生成器，CancelledError 正好打在
-        # 结算那个 await 上——而 CancelledError 继承 BaseException，`except
-        # Exception` 兜不住，于是直接跳过了后面的 lease.release()。
-        #
-        # 每断开一次漏一个名额（每账号上限 2），漏满就**永久**拿不到，全通道
-        # 停摆，且症状极具误导性：上游完全正常（直连 1.9s），本地却排队 90s
-        # 后报「并发排队超时」。所以这里用 try/finally 把 release 提到最外层，
-        # 并把结算降级为「失败也无所谓」的旁路。
-        try:
-            await self._settle_and_close()
-        finally:
-            if self._lease is not None:
-                self._lease.release()
-
-    async def _settle_and_close(self) -> None:
-        """结算积分 + 关上游流。任何一步失败都只记日志，绝不影响 lease 释放。"""
-        # 把本流解析到的 usage 写进请求级 meta：``_instrument`` 在流结束时
-        # 读 ``ACCOUNT_META`` 那份 dict 落库（与 antigravity 的 _ReplayStream
-        # 同一条路径）。没有 usage 时不写，让指标保持 0 而不是编数。
-        if self._usage:
-            meta = ACCOUNT_META.get()
-            if isinstance(meta, dict):
-                meta["usage"] = self._usage
-        # 积分结算：流结束后读一次余额，与请求前相减。
-        # 必须在 aclose 之前做完——``_instrument`` 会在流结束后立刻读 meta
-        # 落库，晚一步就记不上。
-        #
-        # 这里捕 BaseException：客户端断开时这条路径会被 cancel，而
-        # CancelledError 不是 Exception。吞掉它是安全的——结算只是旁路，
-        # 而且外层 finally 照样会释放 lease。
-        if self._provider is not None and self._access_token:
-            try:
-                after = await asyncio.to_thread(
-                    self._provider._balance_now, self._access_token)
-                self._provider._settle_credit(
-                    ACCOUNT_META.get(), self._balance_before, after)
-            except BaseException as exc:  # noqa: BLE001 - 旁路，不能影响 lease 释放
-                log.debug("raccoon 积分结算失败（忽略）: %s: %s",
-                          type(exc).__name__, exc)
-        try:
-            await self._resp.aclose()
-        except BaseException:  # noqa: BLE001 - 收尾失败不影响 lease 释放
-            pass
-
-
-async def _to_anthropic_openai_stream(stream: "_ReplayStream",
-                                       model: str) -> AsyncIterator[str]:
-    """OpenAI SSE → Anthropic Messages 事件流。
-
-    与 :func:`_passthrough_sse` 同一份输入（上游 OpenAI chunk），只是出口协议
-    不同。转换交给 ``AnthropicStreamConverter``——它本来就吃 OpenAI chunk，
-    mimo/copilot/ark 都用这一份，不必自己再写。
-
-    收尾必须**先关块再抛**：``feed_chunk`` 对畸形 chunk 会抛，不兜的话客户端
-    拿到的是「内容块悬空、没有 message_stop」的残流，比直接报错更难查
-    （mimo 那边踩过同样的坑）。
-    """
-    from ..protocols.anthropic_adapter import AnthropicStreamConverter
-
-    converter = AnthropicStreamConverter(model)
-
-    def _emit(name: str, payload: dict[str, Any]) -> str:
-        return (f"event: {name}\ndata: "
-                f"{json.dumps(payload, ensure_ascii=False)}\n\n")
-
-    def _close_open() -> list[str]:
-        try:
-            return [_emit(n, p) for n, p in converter.close_open_blocks()]
-        except Exception:  # noqa: BLE001 - 收尾失败不能盖掉原错误
-            return []
-
-    def _abort(msg: str) -> list[str]:
-        out = _close_open()
-        out.append(_emit("error", {"type": "error",
-                                   "error": {"type": "api_error", "message": msg}}))
-        return out
-
-    try:
-        async for line in stream.aiter_lines():
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if not data or data == "[DONE]":
-                continue
-            try:
-                chunk = json.loads(data)
-            except (ValueError, TypeError):
-                continue
-            if not isinstance(chunk, dict):
-                continue
-            if chunk.get("error"):
-                err = chunk["error"]
-                msg = str(err.get("message", err)) if isinstance(err, dict) else str(err)
-                for event in _abort(msg):
-                    yield event
-                return
-            for name, payload in converter.feed_chunk(chunk):
-                yield _emit(name, payload)
-        for name, payload in converter.finish():
-            yield _emit(name, payload)
-    except Exception as exc:  # noqa: BLE001 - 上游畸形数据不该让客户端只收到半截流
-        log.warning("raccoon anthropic stream aborted: %s: %s",
-                    type(exc).__name__, exc)
-        for event in _abort(f"{type(exc).__name__}: {exc}"):
-            yield event
-        return
-    finally:
-        await stream.aclose()
-
-
-async def _passthrough_sse(stream: "_ReplayStream") -> AsyncIterator[str]:
-    """把上游 OpenAI SSE 原样转给客户端（不解析、不改写）。
-
-    只做两件事：逐行产出、结束时关流（``aclose`` 会释放并发 lease）。
-    行分隔符保持 ``\n\n``——SSE 规范允许 ``\n`` 或 ``\r\n``，客户端都认，
-    但保持与上游一致最省事。
-    """
-    try:
-        async for line in stream.aiter_lines():
-            yield line + "\n"
-    finally:
-        await stream.aclose()
-
-
 async def _drain(resp: httpx.Response, lines: AsyncIterator[str] | None = None) -> None:
     """排空并关闭上游响应（释放连接回池，避免半读连接卡住 pool）。"""
     try:
@@ -1685,3 +1504,206 @@ def _is_session_dead(status: int, detail: str) -> bool:
     text = (detail or "").lower()
     return ("device_bind" in text or "needs_relogin" in text
             or "relogin" in text or "session" in text and "expired" in text)
+
+
+# ---------------------------------------------------------------------------
+# 合成流：v1 非流式响应 → OpenAI SSE / Anthropic SSE
+#
+# 为什么需要合成：v1 端点的流式是坏的（上游回 SSE 但内容是
+# ``code:9 invalid upstream stream response``），所以所有请求都走非流式。
+# 客户端要流式时，拿到完整 JSON 后本地拆成 SSE 帧发出去。
+# ---------------------------------------------------------------------------
+
+
+async def _synthesize_openai_stream(
+    payload: dict[str, Any],
+    model: str,
+    *,
+    lease: rate_limit.Lease | None = None,
+    provider: "RaccoonProvider | None" = None,
+    access_token: str = "",
+    balance_before: float | None = None,
+) -> AsyncIterator[str]:
+    """把非流式 OpenAI 响应拆成 SSE 帧。
+
+    帧序列（与 v2 上游的真实流式行为对齐）：
+    1. ``role`` 帧（``delta: {"role": "assistant"}``）
+    2. ``reasoning_content`` 帧（如果有，放在 content 之前）
+    3. ``content`` 帧（完整文本，一帧发完——非流式拿到的就是完整文本）
+    4. ``tool_calls`` 帧（如果有，每个 tool_call 一帧）
+    5. ``finish_reason`` 帧（``delta: {}, finish_reason: "stop"``）
+    6. ``usage`` 帧（``choices: []`` + ``usage``，OpenAI 兼容口径）
+    7. ``[DONE]``
+
+    收尾时结算积分 + 释放 lease（与 _ReplayStream.aclose 同一条路径）。
+    """
+    try:
+        choices = payload.get("choices") or []
+        choice = choices[0] if choices else {}
+        message = choice.get("message") or {}
+        finish_reason = choice.get("finish_reason") or "stop"
+        chunk_id = payload.get("id") or ""
+        created = payload.get("created") or 0
+        model_name = payload.get("model") or model
+        usage = payload.get("usage")
+
+        def _chunk(delta: dict[str, Any], fr: str | None = None) -> str:
+            c: dict[str, Any] = {
+                "id": chunk_id, "object": "chat.completion.chunk",
+                "created": created, "model": model_name,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": fr}],
+            }
+            return f"data: {json.dumps(c, ensure_ascii=False)}\n\n"
+
+        # 1. role 帧
+        yield _chunk({"role": "assistant"})
+
+        # 2. reasoning_content（如果有）
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            yield _chunk({"reasoning_content": reasoning})
+
+        # 3. content
+        content = message.get("content")
+        if content:
+            yield _chunk({"content": content})
+
+        # 4. tool_calls
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for i, tc in enumerate(tool_calls):
+                delta_tc = {"index": i, **tc}
+                yield _chunk({"tool_calls": [delta_tc]})
+
+        # 5. finish_reason
+        yield _chunk({}, fr=finish_reason)
+
+        # 6. usage（OpenAI 兼容：choices 为空 + usage 字段）
+        if usage:
+            usage_chunk = {
+                "id": chunk_id, "object": "chat.completion.chunk",
+                "created": created, "model": model_name,
+                "choices": [], "usage": usage,
+            }
+            yield f"data: {json.dumps(usage_chunk, ensure_ascii=False)}\n\n"
+
+        # 7. [DONE]
+        yield "data: [DONE]\n\n"
+
+        # 结算积分 + 写 usage 到 meta
+        if usage:
+            meta = ACCOUNT_META.get()
+            if isinstance(meta, dict):
+                meta["usage"] = usage
+        if provider and access_token:
+            try:
+                after = await asyncio.to_thread(provider._balance_now, access_token)
+                provider._settle_credit(ACCOUNT_META.get(), balance_before, after)
+            except Exception as exc:  # noqa: BLE001
+                # 结算失败不影响已经发出去的内容，但**必须留痕**：静默 pass 会
+                # 让「积分对不上」变成无从查起的问题（写这条测试时就踩过：
+                # time 没导入导致 NameError 被吞，表现成「结算瞬间完成」）。
+                log.warning("raccoon 积分结算失败（合成流）: %s: %s",
+                            type(exc).__name__, exc)
+    finally:
+        if lease is not None:
+            lease.release()
+
+
+async def _synthesize_anthropic_stream(
+    payload: dict[str, Any],
+    model: str,
+    *,
+    lease: rate_limit.Lease | None = None,
+    provider: "RaccoonProvider | None" = None,
+    access_token: str = "",
+    balance_before: float | None = None,
+) -> AsyncIterator[str]:
+    """把非流式 OpenAI 响应转成 Anthropic Messages 事件流。
+
+    复用 ``AnthropicStreamConverter``：把非流式响应拆成 OpenAI chunk 喂给它，
+    它负责转成 Anthropic 事件。与 ``_to_anthropic_openai_stream`` 同一条路径，
+    只是输入来源不同（那里是上游 SSE 流，这里是本地合成的 chunk）。
+    """
+    from ..protocols.anthropic_adapter import AnthropicStreamConverter
+
+    converter = AnthropicStreamConverter(model)
+
+    def _emit(name: str, data: dict[str, Any]) -> str:
+        return (f"event: {name}\ndata: "
+                f"{json.dumps(data, ensure_ascii=False)}\n\n")
+
+    try:
+        choices = payload.get("choices") or []
+        choice = choices[0] if choices else {}
+        message = choice.get("message") or {}
+        finish_reason = choice.get("finish_reason") or "stop"
+        chunk_id = payload.get("id") or ""
+        created = payload.get("created") or 0
+        model_name = payload.get("model") or model
+        usage = payload.get("usage")
+
+        def _chunk(delta: dict[str, Any], fr: str | None = None) -> dict[str, Any]:
+            return {
+                "id": chunk_id, "object": "chat.completion.chunk",
+                "created": created, "model": model_name,
+                "choices": [{"index": 0, "delta": delta, "finish_reason": fr}],
+            }
+
+        # 逐帧喂给转换器
+        chunks = [
+            _chunk({"role": "assistant"}),
+        ]
+        reasoning = message.get("reasoning_content")
+        if reasoning:
+            chunks.append(_chunk({"reasoning_content": reasoning}))
+        content = message.get("content")
+        if content:
+            chunks.append(_chunk({"content": content}))
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for i, tc in enumerate(tool_calls):
+                chunks.append(_chunk({"tool_calls": [{"index": i, **tc}]}))
+        chunks.append(_chunk({}, fr=finish_reason))
+        # usage 必须单独成帧喂进去：``AnthropicStreamConverter.feed_chunk`` 是从
+        # ``chunk["usage"]`` 里取的（见 anthropic_adapter.py:535），不喂的话
+        # message_delta 里的 input_tokens/output_tokens 恒为 0——面板和 metrics
+        # 都会显示「没有 token」。这一帧按 OpenAI 口径是 choices=[] + usage。
+        if isinstance(usage, dict):
+            chunks.append({
+                "id": chunk_id, "object": "chat.completion.chunk",
+                "created": created, "model": model_name,
+                "choices": [], "usage": usage,
+            })
+
+        for chunk in chunks:
+            for name, data in converter.feed_chunk(chunk):
+                yield _emit(name, data)
+        for name, data in converter.finish():
+            yield _emit(name, data)
+
+        # 结算积分 + 写 usage 到 meta
+        if usage:
+            meta = ACCOUNT_META.get()
+            if isinstance(meta, dict):
+                meta["usage"] = usage
+        if provider and access_token:
+            try:
+                after = await asyncio.to_thread(provider._balance_now, access_token)
+                provider._settle_credit(ACCOUNT_META.get(), balance_before, after)
+            except Exception as exc:  # noqa: BLE001
+                # 结算失败不影响已经发出去的内容，但**必须留痕**：静默 pass 会
+                # 让「积分对不上」变成无从查起的问题（写这条测试时就踩过：
+                # time 没导入导致 NameError 被吞，表现成「结算瞬间完成」）。
+                log.warning("raccoon 积分结算失败（合成流）: %s: %s",
+                            type(exc).__name__, exc)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("raccoon anthropic synthesize aborted: %s: %s",
+                    type(exc).__name__, exc)
+        for name, data in converter.close_open_blocks():
+            yield _emit(name, data)
+        yield _emit("error", {"type": "error",
+                              "error": {"type": "api_error", "message": str(exc)}})
+    finally:
+        if lease is not None:
+            lease.release()

@@ -35,7 +35,14 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 #: 上游端点（相对根地址）。
-CHAT_PATH = "/api/web/llm/v2/chat/completions"
+#:
+#: v1 而非 v2 的原因：v2 端点有风控闸（``200108``），拦「非官方客户端」形态
+#: 的请求。同一账号同一秒，v2 回 429、v1 回 200。v1 的**非流式**完全正常，
+#: 但**流式是坏的**——返回 HTTP 200 的 SSE，内容却是
+#: ``data:{"data":null,"status":{"code":9,"message":"invalid upstream stream
+#: response"}}``，然后是 ``data:[DONE]``。所以流式请求要改为非流式 + 本地合成
+#: （见 ``provider.py`` 的 ``_synthesize_sse``）。
+CHAT_PATH = "/api/web/llm/v1/chat/completions"
 CATALOG_PATH = "/api/web/llm/v2/model_catalog"
 BALANCE_PATH = "/api/web/points/v1/balance"
 #: 积分流水（``type=income`` 只留发放 = 资源包明细；``all`` 会混消费）

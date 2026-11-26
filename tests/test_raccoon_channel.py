@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import time
 
 import pytest
 
@@ -762,73 +763,127 @@ def test_checkin_dates_feed_the_calendar():
 # 11. 流式必须直通（不能过 gemini 转换器）
 # ---------------------------------------------------------------------------
 
-def test_openai_stream_is_passthrough_not_gemini_converter():
-    """openai 出口必须**直通**上游 SSE，不能走 gemini 的转换器。
+def test_upstream_chat_always_non_stream():
+    """上游 chat 请求必须**永远**非流式（v1 的流式端点是坏的）。
 
-    2026-11-23 用户实报「日志里都看不到 token 消耗信息，只有耗时信息」。
-    根因：上游本身就是 OpenAI SSE（``choices``/``usage``），却走了
-    ``gemini._to_openai_stream``——它按 Gemini 形状（``candidates``/``parts``）
-    解析，整条流被当成「没有语义事件」丢掉：客户端拿不到内容、
-    metrics 里 prompt/completion 恒为 0。
+    v1 端点回 HTTP 200 的 SSE，但内容是
+    ``data:{"data":null,"status":{"code":9,"message":"invalid upstream stream
+    response"}}`` —— 客户端会拿到空回复。所以流式请求也发非流式，本地合成。
 
-    这条断言 forward 的流式分支用的是 ``_passthrough_sse`` 而不是
-    ``_to_openai_stream``（anthropic 出口仍需转换，单独判断）。
+    这条直接锁 ``forward`` 的源码：``build_chat_body`` 的 stream 参数必须是
+    字面量 ``False``，且 ``client.send`` 的 stream 也必须是 ``False``。
+    改成 ``stream=stream`` 当场红。
     """
     import inspect
 
-    from buddy_proxy.raccoon.provider import RaccoonProvider, _passthrough_sse
+    from buddy_proxy.raccoon.provider import RaccoonProvider
 
     src = inspect.getsource(RaccoonProvider.forward)
-    assert "_passthrough_sse" in src, "openai 流式必须直通"
-    # gemini 的 openai 转换器不能出现在**代码行**里（注释里提到它不算——
-    # 解释「为什么不用它」是必要的）。所以逐行判、跳过注释。
-    code_lines = [ln for ln in src.splitlines()
-                  if not ln.lstrip().startswith("#")]
-    offenders = [ln.strip() for ln in code_lines if "_to_openai_stream(" in ln]
-    assert not offenders, (
-        "openai 出口不能过 gemini 转换器——上游是 OpenAI 形态，转换会把"
-        f"整条流当无语义事件丢掉：{offenders}")
-    # anthropic 出口仍要转换
-    assert "_to_anthropic_stream" in src
-    assert callable(_passthrough_sse)
+    code = [ln.strip() for ln in src.splitlines()
+            if not ln.lstrip().startswith("#")]
+    assert any("build_chat_body(body, model=upstream_model, stream=False)" in ln
+               for ln in code), "上游 chat body 必须强制 stream=False"
+    assert not any("stream=stream" in ln for ln in code), \
+        "不能把客户端的 stream 透给上游——v1 流式端点坏了"
+    # 客户端要流式时走合成
+    assert "_synthesize_openai_stream" in src
+    assert "_synthesize_anthropic_stream" in src
 
 
-def test_passthrough_sse_keeps_usage_frame():
-    """直通要保留 usage 帧（metrics 靠它记 token）。"""
+def test_synthesize_openai_stream_emits_full_frame_sequence():
+    """合成流要产出完整的 OpenAI SSE 帧序列，usage 不能丢。
+
+    帧序：role → content → finish_reason → usage → [DONE]。
+    usage 必须保留——metrics 靠它记 token，丢了就是「日志里看不到 token」。
+    """
     import asyncio
 
-    from buddy_proxy.raccoon.provider import _passthrough_sse
+    from buddy_proxy.raccoon.provider import _synthesize_openai_stream
 
-    class _FakeStream:
-        def __init__(self):
-            self.closed = False
-            self._lines = [
-                'data: {"choices":[{"delta":{"content":"OK"}}]}',
-                'data: {"choices":[],"usage":{"prompt_tokens":33,'
-                '"completion_tokens":16,"total_tokens":49}}',
-                "data: [DONE]",
-            ]
-
-        async def aiter_lines(self):
-            for line in self._lines:
-                yield line
-
-        async def aclose(self):
-            self.closed = True
+    payload = {
+        "id": "chatcmpl-1", "created": 1700000000,
+        "model": "sn-deepseek-v4-1-flash-1017",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": "4"}}],
+        "usage": {"prompt_tokens": 37, "completion_tokens": 33,
+                  "total_tokens": 70},
+    }
 
     async def run():
-        stream = _FakeStream()
-        out = []
-        async for chunk in _passthrough_sse(stream):
-            out.append(chunk)
-        return out, stream
+        return [c async for c in _synthesize_openai_stream(payload, "m")]
 
-    out, stream = asyncio.run(run())
+    out = asyncio.run(run())
     joined = "".join(out)
-    assert '"usage"' in joined, "usage 帧必须保留"
-    assert '"prompt_tokens":33' in joined
-    assert "[DONE]" in joined
-    assert stream.closed, "流结束必须 aclose（释放并发 lease）"
+    assert '"role": "assistant"' in joined
+    assert '"content": "4"' in joined
+    assert '"finish_reason": "stop"' in joined
+    assert '"prompt_tokens": 37' in joined, "usage 帧必须保留"
+    assert joined.rstrip().endswith("data: [DONE]")
+    # usage 帧的 choices 必须是空数组（OpenAI 兼容口径）
+    usage_line = next(ln for ln in joined.splitlines() if '"usage"' in ln)
+    assert '"choices": []' in usage_line
+
+
+def test_synthesize_openai_stream_keeps_reasoning_and_tool_calls():
+    """合成流要保留 reasoning_content 与 tool_calls（agent 客户端全靠后者）。
+
+    tool_calls 丢了的症状是「跑一次就停」而不是报错，很难查。
+    """
+    import asyncio
+
+    from buddy_proxy.raccoon.provider import _synthesize_openai_stream
+
+    payload = {
+        "id": "c", "created": 1, "model": "m",
+        "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {
+            "role": "assistant", "content": None,
+            "reasoning_content": "想想",
+            "tool_calls": [{"id": "call_1", "type": "function",
+                            "function": {"name": "f", "arguments": "{}"}}],
+        }}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+    }
+
+    async def run():
+        return [c async for c in _synthesize_openai_stream(payload, "m")]
+
+    joined = "".join(asyncio.run(run()))
+    assert "想想" in joined, "reasoning_content 不能丢"
+    assert '"call_1"' in joined, "tool_calls 不能丢"
+    assert '"tool_calls"' in joined
+    assert '"finish_reason": "tool_calls"' in joined
+
+
+def test_synthesize_releases_lease_even_on_error():
+    """合成流出错也必须释放 lease（否则并发名额永久泄漏）。
+
+    2026-11-23 用户实报「raccoon 越来越慢，最后全是 429」就是 lease 泄漏：
+    每断开一次漏一个名额，漏满（每账号 2）就永久拿不到。
+    """
+    import asyncio
+
+    from buddy_proxy.raccoon.provider import _synthesize_openai_stream
+
+    class _Lease:
+        def __init__(self):
+            self.released = 0
+
+        def release(self):
+            self.released += 1
+
+    lease = _Lease()
+    # choices 是字符串而不是 list → 访问 [0] 抛 TypeError
+    bad = {"choices": "not-a-list"}
+
+    async def run():
+        try:
+            async for _ in _synthesize_openai_stream(bad, "m", lease=lease):
+                pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    asyncio.run(run())
+    assert lease.released == 1, "异常路径也必须释放 lease"
 
 
 def test_multiplier_label_for_model_page():
@@ -939,60 +994,62 @@ def test_anthropic_stream_emits_content_blocks():
     同一个坑（上游是 OpenAI 形态，不能过 Gemini 的转换器）。
 
     改用 ``AnthropicStreamConverter``（mimo/copilot/ark 同款，本来就吃
-    OpenAI chunk）。
+    OpenAI chunk）。v1 端点非流式化之后，输入换成**本地合成的 chunk**，
+    但转换器不变——这条测试锁的是「有 content_block」这个结果。
     """
     import asyncio
 
-    from buddy_proxy.raccoon.provider import _to_anthropic_openai_stream
+    from buddy_proxy.raccoon.provider import _synthesize_anthropic_stream
 
-    class _FakeStream:
-        def __init__(self):
-            self.closed = False
-
-        async def aiter_lines(self):
-            for line in [
-                'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}',
-                'data: {"choices":[{"delta":{"content":"OK"}}]}',
-                'data: {"choices":[],"usage":{"prompt_tokens":15,'
-                '"completion_tokens":3}}',
-                "data: [DONE]",
-            ]:
-                yield line
-
-        async def aclose(self):
-            self.closed = True
+    payload = {
+        "id": "c", "created": 1, "model": "sn-glm-5-3-flash",
+        "choices": [{"index": 0, "finish_reason": "stop",
+                     "message": {"role": "assistant", "content": "OK"}}],
+        "usage": {"prompt_tokens": 15, "completion_tokens": 3},
+    }
 
     async def run():
-        stream = _FakeStream()
-        out = []
-        async for ev in _to_anthropic_openai_stream(stream, "sn-glm-5-3-flash"):
-            out.append(ev)
-        return out, stream
+        return [ev async for ev in
+                _synthesize_anthropic_stream(payload, "sn-glm-5-3-flash")]
 
-    events, stream = asyncio.run(run())
-    joined = "".join(events)
+    joined = "".join(asyncio.run(run()))
     assert "message_start" in joined
     assert "content_block_start" in joined, "必须有内容块（否则客户端拿到空回复）"
+    assert "OK" in joined, "内容必须进 content_block"
+    assert "message_stop" in joined, "必须有收尾事件"
     assert "content_block_delta" in joined
-    assert "OK" in joined, "正文内容要真的转出来"
     assert "content_block_stop" in joined
-    assert "message_stop" in joined
     # usage 要透传（message_delta 里带 input/output）
     assert '"input_tokens": 15' in joined or '"input_tokens":15' in joined
-    assert stream.closed, "流结束必须 aclose（释放并发 lease）"
 
 
-def test_anthropic_stream_never_uses_gemini_converter():
-    """无论哪个出口，都不能再引入 gemini 的流转换器（同一个坑）。"""
+def test_raccoon_never_uses_gemini_stream_converters():
+    """raccoon 模块里不能出现 gemini 的流转换器（同一个坑）。
+
+    2026-11-23 实测：上游是 OpenAI 形态（``choices``/``usage``），却过了
+    ``gemini._to_anthropic_stream`` / ``_to_openai_stream``——它们按 Gemini
+    形状（``candidates``/``parts``）解析，整条流被当成「没有语义事件」丢掉：
+    anthropic 出口只剩 message_start/stop、没有 content_block；openai 出口
+    客户端拿不到内容、metrics 里 token 恒为 0。
+
+    v1 改成非流式 + 本地合成后，输入是合成 chunk、仍走
+    ``AnthropicStreamConverter``（它本来就吃 OpenAI chunk）。这条守卫整个
+    模块，比只查某一个函数更难绕过。
+    """
     import inspect
 
-    from buddy_proxy.raccoon.provider import _to_anthropic_openai_stream
+    from buddy_proxy.raccoon import provider as raccoon_provider
 
-    src = inspect.getsource(_to_anthropic_openai_stream)
+    src = inspect.getsource(raccoon_provider)
+    code_lines = [ln for ln in src.splitlines()
+                  if not ln.lstrip().startswith("#")]
+    offenders = [ln.strip() for ln in code_lines
+                 if "_to_anthropic_stream(" in ln or "_to_openai_stream(" in ln]
+    assert not offenders, (
+        "raccoon 不能引 gemini 的流转换器——上游是 OpenAI 形态，"
+        f"转换会把整条流当无语义事件丢掉：{offenders}")
+    # 必须用吃 OpenAI chunk 的那个
     assert "AnthropicStreamConverter" in src
-    code_lines = [ln for ln in src.splitlines() if not ln.lstrip().startswith("#")]
-    assert not any("_to_anthropic_stream(" in ln for ln in code_lines), (
-        "gemini 的 _to_anthropic_stream 按 Gemini 形状解析，用在这里会产出空流")
 
 def test_account_risk_control_is_account_level_not_model_level():
     """``200108`` 账号风控必须整号长冷却，不能降级成模型级。
@@ -1022,69 +1079,86 @@ def test_account_risk_control_is_account_level_not_model_level():
 # 7. lease 泄漏：客户端断开时必须释放并发名额
 # ---------------------------------------------------------------------------
 
-def test_replay_stream_releases_lease_when_settlement_is_cancelled():
+def test_synthesize_stream_releases_lease_when_cancelled():
     """客户端断开（cancel）时 lease 必须释放——否则名额被永久吃掉。
 
-    2026-11-23 用户实报「小浣熊越来越慢，最后全是 429」的根因：
+    2026-11-23 用户实报「小浣熊越来越慢，最后全是 429」的根因：结算在
+    ``lease.release()`` 之前 await，客户端中途断开时 ``CancelledError`` 打在
+    结算上——它继承 ``BaseException``，``except Exception`` 兜不住，于是跳过
+    释放。每断开一次漏一个名额（每账号上限 2），漏满就永久拿不到，全通道
+    停摆；症状极具误导性：上游正常，本地却排队 90s 报「并发排队超时」。
 
-    ``_ReplayStream.aclose`` 原来是「先 await 余额结算（网络 IO），再在
-    finally 里释放 lease」。客户端中途断开时 Starlette 会 cancel 这个生成器，
-    ``CancelledError`` 正好打在结算那个 await 上——而它继承 ``BaseException``，
-    ``except Exception`` 兜不住，于是跳过了 ``lease.release()``。
+    v1 改成非流式 + 本地合成后，结算挪到合成流收尾，对象换成
+    ``_synthesize_openai_stream``。锁的语义不变：cancel 打在结算那个 await
+    上，名额仍要还回来。
 
-    每断开一次漏一个名额（每账号上限 2），漏满就**永久**拿不到，全通道停摆。
-    症状极具误导性：上游完全正常（直连 1.9s），本地却排队 90s 报「并发排队
-    超时」，看起来像账号被风控。
-
-    这条测试锁「cancel 打到结算上，名额仍要还回来」。实现要点：结算必须
-    卡在一个**可被取消的 async 点**上（``asyncio.Event().wait()``）。早先
-    版本用 ``time.sleep`` 在线程池里模拟，取消时线程照跑不误、``finally``
-    仍会执行，于是测试在**有 bug 的实现上也绿**——反向验证过才发现的。
+    ⚠️ 两个坑（都踩过）：
+    1. 结算必须**真的阻塞住**。合成流产帧是瞬间完成的，结算立刻返回的话，
+       cancel 打上去时流早跑完、lease 早释放过——测试在「漏释放」的实现上也
+       绿（假绿）。
+    2. ``_balance_now`` 跑在 ``asyncio.to_thread`` 里，**线程本身不可 cancel**，
+       ``asyncio.run`` 退出时会 join 线程池。所以这里的 sleep 必须短（0.3s），
+       否则测试要陪着线程睡完（踩过：写 5s 导致 pytest 卡住）。
     """
-    from buddy_proxy.raccoon.provider import _ReplayStream
+    from buddy_proxy.raccoon.provider import _synthesize_openai_stream
 
-    limiter = AccountConcurrencyLimiter(max_concurrent=2, queue_timeout_s=0.1)
-    gate = asyncio.Event()          # 永不 set：结算就停在这里等取消
+    class _Lease:
+        def __init__(self):
+            self.released = 0
 
-    class _Resp:
-        is_closed = False
+        def release(self):
+            self.released += 1
 
-        async def aclose(self):
-            self.is_closed = True
-
-    class _Provider:
+    class _SlowProvider:
         def _balance_now(self, token):
+            # 睡够长，保证 cancel 一定打在结算的 await 上。这里不能太短：
+            # 0.3s 时结算已经跑完并正常释放了，前提校验会报「期间不该已释放」
+            # （实测踩过）。线程本身不可 cancel，asyncio.run 退出时会 join 它，
+            # 所以这个值也决定测试总耗时——1s 是「稳定卡住」与「不拖慢」的折中。
+            time.sleep(1.0)
             return 1.0
 
         def _settle_credit(self, *a, **k):
             pass
 
+    payload = {"id": "c", "created": 1, "model": "m",
+               "choices": [{"index": 0, "finish_reason": "stop",
+                            "message": {"role": "assistant", "content": "hi"}}],
+               "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                         "total_tokens": 2}}
+    lease = _Lease()
+
     async def run():
-        lease = await limiter.acquire("acct")
-        assert lease is not None
-        stream = _ReplayStream(
-            _Resp(), [], lines=None, lease=lease, provider=_Provider(),
+        stream = _synthesize_openai_stream(
+            payload, "m", lease=lease, provider=_SlowProvider(),
             access_token="tok", balance_before=1.0,
         )
-        # 把结算的 await 换成永不完成的 gate（真实的 to_thread 无法被 cancel，
-        # 用它测不出「取消打在 await 上」这个形态）。
-        async def _blocked():
-            await gate.wait()
+        seen_usage = False
 
-        stream._settle_and_close = _blocked          # type: ignore[method-assign]
-        task = asyncio.create_task(stream.aclose())
-        await asyncio.sleep(0.05)                    # 让它进到 gate.wait()
-        task.cancel()                                # 客户端断开
+        async def consume():
+            nonlocal seen_usage
+            async for frame in stream:
+                if '"usage"' in frame:
+                    seen_usage = True
+
+        task = asyncio.create_task(consume())
+        for _ in range(100):          # 等它进入结算阶段
+            await asyncio.sleep(0.01)
+            if seen_usage:
+                break
+        assert seen_usage, "usage 帧应该已经发出（说明已进入结算阶段）"
+        await asyncio.sleep(0.1)
+        assert lease.released == 0, "结算期间名额不该已释放（前提校验）"
+        task.cancel()                 # 客户端断开，CancelledError 打在结算上
         try:
             await task
         except asyncio.CancelledError:
             pass
-        return limiter.inflight("acct")
 
-    left = asyncio.run(run())
-    assert left == 0, (
-        f"cancel 后仍有 {left} 个名额没还——lease 泄漏了，"
-        f"漏满 max_concurrent 后整个通道会永久 429"
+    asyncio.run(run())
+    assert lease.released == 1, (
+        "cancel 后 lease 没有释放——名额泄漏，漏满 max_concurrent 后"
+        "整个通道会永久 429"
     )
 
 
