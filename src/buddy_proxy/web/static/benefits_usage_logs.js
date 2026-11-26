@@ -14,6 +14,13 @@
 
 let UL = null;  // 当前弹窗状态；null = 没打开
 
+function resetUsageLogs() {
+  // closeModal 是所有弹窗共用的：关闭后还有在途明细请求时，必须让响应失效，
+  // 否则它会覆盖随后打开的 rename/test 弹窗（seq 只防 A 切 B，防不了关闭）。
+  if (UL) UL.seq += 1;
+  UL = null;
+}
+
 const USAGE_LOGS_CFG = {
   trae: {
     title: 'Trae 官方消耗明细',

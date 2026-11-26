@@ -49,7 +49,7 @@ const _el = id => (els[id] ||= {innerHTML: '', textContent: '', classList: {add(
 globalThis.document = {getElementById: _el};
 globalThis.esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 globalThis.setModalFoot = () => {};
-globalThis.closeModal = () => {};
+globalThis.closeModal = () => { if (typeof resetUsageLogs === 'function') resetUsageLogs(); };
 globalThis.api = async (url, opts) => {
   (globalThis.__calls ||= []).push({url, opts: opts || null});
   if (typeof globalThis.__respond === 'function') return globalThis.__respond(url);
@@ -224,6 +224,38 @@ await pa;
 console.log('@@' + JSON.stringify({body: document.getElementById('modal-body').innerHTML}));
 """)["body"]
     assert "B-model" in out and "A-model" not in out, "旧响应不能覆盖新弹窗"
+
+
+def test_stale_response_after_close_does_not_overwrite_shared_modal():
+    """关闭后打开 rename/test：在途明细响应不能再覆盖新弹窗及保存按钮。"""
+    out = _run("""
+let resolveA;
+globalThis.__respond = () => new Promise(r => { resolveA = r; });
+const pending = openUsageLogs('trae', 'acc-a', 'A');
+closeModal();
+document.getElementById('modal-title').textContent = '重命名账号';
+document.getElementById('modal-body').innerHTML = '<input id="rename-input">';
+document.getElementById('modal-foot').innerHTML = '<button id="save">保存</button>';
+resolveA({rows: [{ts: 1, model: 'A-model', credits: 9}], total: 1, currency: 'credits'});
+await pending;
+console.log('@@' + JSON.stringify({
+  title: document.getElementById('modal-title').textContent,
+  body: document.getElementById('modal-body').innerHTML,
+  foot: document.getElementById('modal-foot').innerHTML,
+  state: UL,
+}));
+""")
+    assert out["title"] == "重命名账号"
+    assert out["body"] == '<input id="rename-input">'
+    assert out["foot"] == '<button id="save">保存</button>'
+    assert out["state"] is None
+
+
+def test_real_close_modal_invalidates_usage_logs():
+    """node 桩之外，再钉住生产 closeModal 真的调用了作废钩子。"""
+    src = (_STATIC / "app_run_test.js").read_text(encoding="utf-8")
+    match = re.search(r"function closeModal\(\) \{(?P<body>.*?)\n\}", src, re.S)
+    assert match and "resetUsageLogs()" in match.group("body")
 
 
 # -- 三通道面板都有入口 -------------------------------------------------------
