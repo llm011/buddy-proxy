@@ -508,19 +508,19 @@ cmd_cleanup() {
 }
 
 open_ui() {
-    # 「顺手打开管理页」是**尽力而为**，打不开不该让整条命令失败。缺了
-    # `|| true` 时 `set -e` 会把失败往外传：无头机器 / 没装浏览器 / `open`
-    # 自己报错时，`buddy update` 会在**已经更新成功并重启完**之后以非零退出
-    # （CI 上实测 exit 3，日志里 "已更新 -> " "重启服务" 全打完了），
-    # 用户看到失败会以为没更成，实际早更完了。xdg-open 那支本来就带了
-    # `|| true`，open 这支漏了。
+    # 「顺手打开管理页」必须完全脱离命令生命周期。2026-11-26 实测 macOS LaunchServices
+    # 的 open 已打开页面却几十分钟不退出，前台等待会把 start/restart/update 一起挂住。
+    # 三路 fd 都重定向：不仅 shell 不能等它，capture_output / IDE 也不能因管道未关而等 EOF。
+    local opener
     if command -v open >/dev/null 2>&1; then
-        open "$UI_URL" 2>/dev/null || true
+        opener=open
     elif command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "$UI_URL" 2>/dev/null || true
+        opener=xdg-open
     else
         log "$UI_URL"
+        return 0
     fi
+    "$opener" "$UI_URL" </dev/null >/dev/null 2>&1 &
 }
 
 # ---------------------------------------------------------------------------

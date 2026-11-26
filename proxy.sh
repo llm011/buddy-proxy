@@ -257,13 +257,17 @@ cmd_ui() {
     actual=$(ps -o command= -p "$(read_pid)" 2>/dev/null | grep -oE -- '--port[[:space:]]+[0-9]+' | awk '{print $2}' | head -1)
     local url="http://127.0.0.1:${actual:-$PROXY_PORT}/ui"
     log "opening $url"
+    # 与 buddy open_ui 同因：系统 opener 可能一直不退出，不能拖住 proxy.sh ui。
+    local opener
     if command -v open >/dev/null 2>&1; then
-        open "$url"
+        opener=open
     elif command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "$url"
+        opener=xdg-open
     else
         echo "$url"
+        return 0
     fi
+    "$opener" "$url" </dev/null >/dev/null 2>&1 &
 }
 
 cmd_login() {
