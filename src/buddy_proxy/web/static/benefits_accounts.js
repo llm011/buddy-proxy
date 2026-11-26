@@ -222,11 +222,13 @@ function acctMoveButtons(pid, idx, n, id) {
  *  id 会把 idx 校正到快照里的真实位次，若只按渲染时的 idx 算 delta，旧按钮在重排后
  *  再点会算错目标甚至变成 no-op。顺位 #1 本身就禁用，与 ▲ 的禁用口径一致。 */
 function acctPinButton(pid, idx, id) {
-  const arg = id ? `'${id}'` : 'null';
+  // 没有账号 id（首屏快照未到）就不能安全置顶：1-based 通道补拉新快照后仍会用
+  // 旧 idx，可能挪错人；raccoon/kiro 的 indexOf(null) 则直接 no-op。等 id 回填再出按钮。
+  if (!id) return '';
   // 带文字而不是裸符号：📌 单独一个字符用户看不出是干什么的（2026-11-25 实报）；
   // icon 与模型顺序页的置顶按钮统一用 📌，全站置顶视觉一致。
   return `<button class="ghost acct-pin" title="置顶（移到顺位 #1，最优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
-    `onclick="acctMove('${pid}',${idx},${1 - idx},${arg},true)">📌 置顶</button>`;
+    `onclick="acctMove('${pid}',${idx},${1 - idx},'${id}',true)">📌 置顶</button>`;
 }
 
 /** ✕ 删除按钮（要账号 id；快照没到（首屏）时先不渲染，等下轮回填）。 */

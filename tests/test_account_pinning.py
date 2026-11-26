@@ -98,8 +98,8 @@ console.log(JSON.stringify({
     assert "acctMove('codex',3,1,'c')" in data["mid"], "原有 ▼ 参数形状不变"
     assert "disabled" in _pin_tag(data["first"]), "顺位 #1 的置顶必须禁用"
     assert "acctMove('codex',1,0,'a',true)" in data["first"], "禁用按钮仍保留目标/id（契约可读）"
-    assert "acctMove('codex',3,-2,null,true)" in data["noId"], \
-        "快照未到也要占住 id 参数位，不能把 true 错当成 id"
+    assert "acct-pin" not in data["noId"], "快照没有 id 时不出置顶，不能按旧 idx 挪错人"
+    assert "acctMove('codex',3,-1)" in data["noId"], "原有 ▲▼ 不受置顶入口隐藏影响"
 
 
 @pytest.mark.parametrize(
@@ -125,7 +125,8 @@ console.log(JSON.stringify({{mid, first, noId}}));
     assert f"acctMove('{pid}',3,-2,'c',true)" in data["mid"]
     assert "disabled" in _pin_tag(data["first"])
     assert f"acctMove('{pid}',1,0,'a',true)" in data["first"]
-    assert f"acctMove('{pid}',3,-2,null,true)" in data["noId"]
+    assert "acct-pin" not in data["noId"], "无 id 快照不出置顶，等回填后再开放"
+    assert "3,-1)" in data["noId"] and "3,1)" in data["noId"]
     assert data["mid"].count("acct-pin") == 1, "每组只能有一个置顶按钮"
     assert "3,-1,'c')" in data["mid"], "▲ 仍是相对位移"
     assert "3,1,'c')" in data["mid"], "▼ 仍是相对位移"
