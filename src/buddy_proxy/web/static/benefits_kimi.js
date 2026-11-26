@@ -54,7 +54,7 @@ function kimiConfirmDelete(id) {
 // 调 POST /ui/api/kimi/accounts/order 提交完整顺序（agMoveAccount 同构）。
 // 后端重写 priority 后 quota 缓存键（quota_epoch 带 priority）随之失效，
 // 这里拿到响应后 refreshAll() 重取 benefits，进度条组顺序即更新。
-async function kimiMoveAccount(idx, delta, id) {
+async function kimiMoveAccount(idx, delta, id, pin) {
   if (KIMI_MOVING) return;
   KIMI_MOVING = true;
   try {
@@ -70,7 +70,7 @@ async function kimiMoveAccount(idx, delta, id) {
       if (at < 0) return;
       idx = at + 1;
     }
-    const to = idx + delta;
+    const to = pin ? 1 : idx + delta;
     if (to < 1 || to > accts.length) return;
     const ids = accts.map(a => a.id);
     const [moved] = ids.splice(idx - 1, 1);

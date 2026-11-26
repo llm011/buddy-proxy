@@ -55,7 +55,7 @@ function _ag_move_btns(idx, n, id) {
 // 额度还没重取完），按快照里该 id 的**当前**位次挪，而不是按按钮上的 idx
 // ——否则连点两下 = 连提交两次同方向重排（第二次拿旧 idx 在新顺序里挪到了
 // 别的账号，整轮被点回去）。在飞期间 AG_MOVING 挡住后续点按。
-async function agMoveAccount(idx, delta, id) {
+async function agMoveAccount(idx, delta, id, pin) {
   if (AG_MOVING) return;
   AG_MOVING = true;
   try {
@@ -72,7 +72,7 @@ async function agMoveAccount(idx, delta, id) {
       if (at < 0) return;  // 该账号已不在快照里（刚被删？）：宁可不动，别按过期 idx 挪错人
       idx = at + 1;
     }
-    const to = idx + delta;  // idx 是 1-based 顺位，to 是目标顺位
+    const to = pin ? 1 : idx + delta;  // pin 用绝对目标，避免旧按钮 idx 与 id 校正后的位次不一致
     if (to < 1 || to > accts.length) return;
     const ids = accts.map(a => a.id);
     const [moved] = ids.splice(idx - 1, 1);

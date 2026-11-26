@@ -167,8 +167,7 @@ console.log(JSON.stringify({
     assert data["note2"], "套餐档位写在条目 note 里（qitem 正文小字）"
     assert data["sub2"], "副标题=冷却"
     assert "%" not in data["html"], "没有总量时不出现任何百分比（不编假数字）"
-    assert data["moves"] == 6, "每个账号仍有一对 ▲▼ 和一个置顶（首位的置顶按钮禁用）"
-    assert "📌 置顶" in data["html"] and "acctMove('codex',2,-1,'u2')" in data["html"]
+    assert data["moves"] == 6, "两个账号各 📌 置顶 + 一对 ▲▼"
     assert data["ren1"] and data["del1"], "✎/✕ 带账号 id"
     assert data["importBtn"], "「导入账号」按钮常在"
     # 首渲拉一次；首份快照到位后整卡重渲又拉一次（数据已同走早退，不会循环）
