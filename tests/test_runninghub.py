@@ -38,6 +38,10 @@ def test_classify_billing_error_maps_upstream_codes():
     assert classify_billing_error(416, "") == "钱包余额"
     assert classify_billing_error(None, "RunningHub 提交任务失败: NOT_ENOUGH_BALANCE") == "钱包余额"
     assert classify_billing_error("416", "TASK_CREATE_FAILED_BY_NOT_ENOUGH_WALLET") == "钱包余额"
+    # 605 是 ai-app/run 实测回的（官方码表没列），812 是企业版余额不足
+    assert classify_billing_error(605, "NOT_ENOUGH_BALANCE") == "钱包余额"
+    assert classify_billing_error("605", "") == "钱包余额"
+    assert classify_billing_error(812, "CORPAPIKEY_INSUFFICIENT_FUNDS") == "钱包余额"
     assert classify_billing_error(None, "NOT_ENOUGH_COINS") == "RH 金币"
     assert classify_billing_error(500, "some other error") is None
     assert classify_billing_error(None, "") is None
@@ -50,80 +54,76 @@ def _wf_store_with(billing: str) -> dict:
     })
 
 
-def test_run_learns_wallet_billing_from_upstream_reject(isolated_store: Path,
-                                                        monkeypatch: pytest.MonkeyPatch):
-    """标「未知」的工作流被上游以余额不足拒掉 → 改标「钱包余额」、402、带回最新列表。
+def test_submit_task_reads_v2_task_envelope_error(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """v2 /openapi/v2/run/... 回的是任务信封 {errorCode, errorMessage}，不是 {code, msg}。
 
-    这是计费类型**唯一**可靠的来源：apiCallDemo 没有计费字段，导入时只能标未知；
-    真跑一次被拒才知道。学完写回本地，下次预检能在打上游前拦住。
+    2026-11-27 实测：同一个 key 在 v2 上回
+    {"taskId":"","errorCode":"605","errorMessage":"Your balance is insufficient..."}。
+    不认这个形状就会误报成「未返回 taskId」，605 根因全丢。
     """
-    from unittest.mock import AsyncMock
-
-    from buddy_proxy import __main__ as m
     from buddy_proxy.runninghub import client as rh_client
-    from fastapi.testclient import TestClient
 
-    store.upsert_account("rh-secret-token-123456", label="t")
-    _wf_store_with("RH 金币 / 余额")
+    class _Resp:
+        status_code = 200
 
-    submit = AsyncMock(side_effect=rh_client.RunningHubError(
-        "RunningHub 提交任务失败: NOT_ENOUGH_BALANCE", status_code=400, code=7))
-    monkeypatch.setattr(rh_client, "fetch_account_status", AsyncMock(return_value={
-        # 实测形态：金币有、钱包是 null（不是 "0"）
-        "remainCoins": "994", "remainMoney": None, "apiType": "SHARED",
-    }))
-    monkeypatch.setattr(rh_client, "submit_task", submit)
-    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+        def json(self):
+            return {"taskId": "", "status": "", "errorCode": "605",
+                    "errorMessage": "Your balance is insufficient. Please top up your account."}
 
-    r = TestClient(m.app).post("/ui/api/runninghub/workflows/run", json={
-        "webapp_id": "2046794551444119554", "nodeInfoList": []})
+    class _Client:
+        async def __aenter__(self):
+            return self
 
-    assert r.status_code == 402, r.text
-    msg = r.json()["detail"]["error"]["message"]
-    assert "钱包余额" in msg and "remainMoney" in msg
-    # 本地标签已改写，且记下了是哪种账号判出来的（拒绝是 per-account 的）
-    learned = store.list_workflows()
-    assert len(learned) == 1, "必须用隔离 store：写进真实 ~/.buddy-proxy 会覆盖用户的工作流"
-    learned = learned[0]
-    assert learned["billingType"] == "钱包余额"
-    assert learned["billingLearnedFrom"] == {"apiType": "SHARED", "accountId": ANY}
-    assert len(learned["nodeInfoList"]) == 0, "学计费类型只改标签，不能动参数列表"
-    # 错误体顺带带回最新列表，前端据此刷新卡片
-    assert r.json()["detail"]["workflows"][0]["billingType"] == "钱包余额"
-    # 文案是给 escapeHtml+innerHTML 用的，不能带 markdown 星号
-    assert "**" not in msg
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            return _Resp()
+
+    monkeypatch.setattr(rh_client.httpx, "AsyncClient", lambda **kw: _Client())
+    with pytest.raises(rh_client.RunningHubError) as ei:
+        asyncio.run(rh_client.submit_task("k", "ai-app/2002675341464334337", {"nodeInfoList": []}))
+    assert ei.value.code == "605"
+    assert "balance is insufficient" in str(ei.value)
+    assert rh_client.classify_billing_error(ei.value.code, str(ei.value)) == "钱包余额"
 
 
-def test_run_preflight_blocks_wallet_workflow_without_hitting_upstream(isolated_store: Path,
-                                                                      monkeypatch: pytest.MonkeyPatch):
-    """已标「钱包余额」+ 钱包为 null/0 → 预检 402，**一次上游都不打**。"""
-    from unittest.mock import AsyncMock
-
-    from buddy_proxy import __main__ as m
+def test_fetch_account_status_returns_remain_point():
+    """accountStatus 实测多回一个 remainPoint（API 可用额度），必须采回来。"""
     from buddy_proxy.runninghub import client as rh_client
-    from fastapi.testclient import TestClient
 
-    store.upsert_account("rh-secret-token-123456", label="t")
-    _wf_store_with("钱包余额")
+    class _Resp:
+        status_code = 200
 
-    submit = AsyncMock(return_value={"taskId": "x"})
-    monkeypatch.setattr(rh_client, "fetch_account_status", AsyncMock(return_value={
-        "remainCoins": "994", "remainMoney": None,
-    }))
-    monkeypatch.setattr(rh_client, "submit_task", submit)
-    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+        def json(self):
+            return {"code": 0, "msg": "success", "data": {
+                "remainCoins": "994", "currentTaskCounts": "0", "remainMoney": None,
+                "remainPoint": 0.000, "currency": None, "apiType": "SHARED"}}
 
-    r = TestClient(m.app).post("/ui/api/runninghub/workflows/run", json={
-        "webapp_id": "2046794551444119554", "nodeInfoList": []})
+    class _Client:
+        async def __aenter__(self):
+            return self
 
-    assert r.status_code == 402
-    assert "金币 994 不能用于此工作流" in r.json()["detail"]["error"]["message"]
-    submit.assert_not_called()
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, *a, **kw):
+            return _Resp()
+
+    old = rh_client.httpx.AsyncClient
+    rh_client.httpx.AsyncClient = lambda **kw: _Client()
+    try:
+        info = asyncio.run(rh_client.fetch_account_status("k"))
+    finally:
+        rh_client.httpx.AsyncClient = old
+    assert info["remainPoint"] == 0.000
+    assert info["remainCoins"] == "994"
+    assert info["apiType"] == "SHARED"
 
 
 def test_store_crud_and_permissions(isolated_store: Path):
     acc = store.upsert_account(
-        "rh-secret-token-123456",
+        api_key="rh-secret-token-123456",
         label="主账号",
         account_info={"remainCoins": "500", "currency": "CNY"},
     )
@@ -145,7 +145,7 @@ def test_store_crud_and_permissions(isolated_store: Path):
 
 
 def test_provider_non_stream_image(isolated_store: Path):
-    store.upsert_account("rh-secret-token-123456", label="test")
+    store.upsert_account(api_key="rh-secret-token-123456", label="test")
     provider = RunningHubProvider()
 
     with (
@@ -178,7 +178,7 @@ def test_provider_non_stream_image(isolated_store: Path):
 
 def test_provider_stream_video(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("RUNNINGHUB_POLL_INTERVAL", "0.01")
-    store.upsert_account("rh-secret-token-123456", label="test")
+    store.upsert_account(api_key="rh-secret-token-123456", label="test")
     provider = RunningHubProvider()
 
     query_mock = AsyncMock(

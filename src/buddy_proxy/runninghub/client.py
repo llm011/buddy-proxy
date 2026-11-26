@@ -68,6 +68,11 @@ async def fetch_account_status(
         "remainCoins": payload.get("remainCoins"),
         "currentTaskCounts": payload.get("currentTaskCounts"),
         "remainMoney": payload.get("remainMoney"),
+        # remainPoint = 站内「API 调用可用额度」，和 remainCoins（RH 币）不是一个钱包。
+        # 2026-11-27 实测一个 apiType=SHARED 的号：remainCoins=994、remainMoney=null、
+        # remainPoint=0.000——网页端拿 RH 币跑得通，走 API 一律 605 NOT_ENOUGH_BALANCE。
+        # 不采这个字段就没法解释「站内有币、API 说没钱」，只能干瞪眼。
+        "remainPoint": payload.get("remainPoint"),
         "currency": payload.get("currency"),
         "apiType": payload.get("apiType"),
         "username": (
@@ -108,6 +113,15 @@ async def submit_task(
     data = resp.json()
     if not isinstance(data, dict):
         raise RunningHubError("RunningHub 提交任务响应非 JSON 对象")
+    # v1 /task/openapi/ai-app/run 回 {code, msg}；v2 /openapi/v2/run/... 回的是
+    # 任务信封 {taskId, errorCode, errorMessage}。两种形状都要认，否则 v2 的
+    # 605「余额不足」会被误报成「未返回 taskId」，根因全丢。
+    if data.get("errorCode") not in (None, "", "0"):
+        raise RunningHubError(
+            f"RunningHub 提交任务失败: {data.get('errorMessage') or '未知错误'}",
+            status_code=400,
+            code=data.get("errorCode"),
+        )
     if data.get("code") not in (0, None):
         raise RunningHubError(
             f"RunningHub 提交任务失败: {data.get('msg') or data.get('errorMessage') or '未知错误'}",
@@ -215,6 +229,9 @@ _WALLET_INSUFFICIENT_MARKERS = (
     "NOT_ENOUGH_BALANCE", "NOT_ENOUGH_WALLET", "NOT_ENOUGH_MONEY",
     "INSUFFICIENT_BALANCE", "INSUFFICIENT_WALLET",
 )
+#: 「钱包/API 额度不足」的错误码。416 见官方错误码表，812 是企业版余额不足；
+#: 605 是 ai-app/run 实测回的（官方码表里没列，msg 是 NOT_ENOUGH_BALANCE）。
+_WALLET_INSUFFICIENT_CODES = ("416", "605", "812")
 #: 「金币不足」类错误的标识（对称地也学一下，虽然目前没实测到）。
 _COINS_INSUFFICIENT_MARKERS = (
     "NOT_ENOUGH_COINS", "NOT_ENOUGH_COIN", "INSUFFICIENT_COINS",
@@ -230,11 +247,73 @@ def classify_billing_error(code: int | str | None, message: str) -> str | None:
     """
     text = str(message or "").upper()
     code_str = str(code) if code is not None else ""
-    if code_str == "416" or any(m in text for m in _WALLET_INSUFFICIENT_MARKERS):
+    if code_str in _WALLET_INSUFFICIENT_CODES or any(m in text for m in _WALLET_INSUFFICIENT_MARKERS):
         return "钱包余额"
     if any(m in text for m in _COINS_INSUFFICIENT_MARKERS):
         return "RH 金币"
     return None
+
+
+async def _upload_v2(
+    api_key: str,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    timeout: float,
+) -> str:
+    """官方现行上传接口：只有 Authorization 头 + 单个 file 字段，不给 fileType。"""
+    url = f"{_base_url()}/openapi/v2/media/upload/binary"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            files={"file": (filename or "upload.bin", content, content_type)},
+        )
+    if resp.status_code >= 400:
+        raise RunningHubError(
+            f"RunningHub 上传文件失败 (HTTP {resp.status_code})", status_code=resp.status_code
+        )
+    data = resp.json()
+    if not isinstance(data, dict) or data.get("code") not in (0, None):
+        msg = data.get("msg") if isinstance(data, dict) else "未知错误"
+        raise RunningHubError(f"RunningHub 上传文件失败: {msg}")
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    file_name = inner.get("fileName") or inner.get("file_name")
+    if not file_name:
+        raise RunningHubError("RunningHub 上传成功但未返回 fileName")
+    return str(file_name)
+
+
+async def _upload_legacy(
+    api_key: str,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    file_type: str,
+    timeout: float,
+) -> str:
+    """老接口 /task/openapi/upload（apiKey 走表单）。官方已标「弃用」，留作兜底。"""
+    url = f"{_base_url()}/task/openapi/upload"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}"},
+            data={"apiKey": api_key, "fileType": file_type},
+            files={"file": (filename or "upload.bin", content, content_type)},
+        )
+    if resp.status_code >= 400:
+        raise RunningHubError(
+            f"RunningHub 上传文件失败 (HTTP {resp.status_code})", status_code=resp.status_code
+        )
+    data = resp.json()
+    if not isinstance(data, dict) or data.get("code") not in (0, None):
+        msg = data.get("msg") if isinstance(data, dict) else "未知错误"
+        raise RunningHubError(f"RunningHub 上传文件失败: {msg}")
+    inner = data.get("data") if isinstance(data.get("data"), dict) else data
+    file_name = inner.get("fileName") or inner.get("file_name")
+    if not file_name:
+        raise RunningHubError("RunningHub 上传成功但未返回 fileName")
+    return str(file_name)
 
 
 async def upload_file(
@@ -246,28 +325,26 @@ async def upload_file(
     file_type: str = "image",
     timeout: float = 60.0,
 ) -> str:
-    """上传本地文件（图片/音频/视频）到 RunningHub，返回服务端 fileName。"""
-    url = f"{_base_url()}/task/openapi/upload"
-    files = {"file": (filename or "upload.bin", content, content_type)}
-    form_data = {"apiKey": api_key, "fileType": file_type}
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
-            url,
-            headers={"Authorization": f"Bearer {api_key}"},
-            data=form_data,
-            files=files,
-        )
-    if resp.status_code >= 400:
-        raise RunningHubError(
-            f"RunningHub 上传文件失败 (HTTP {resp.status_code})",
-            status_code=resp.status_code,
-        )
-    data = resp.json()
-    if not isinstance(data, dict) or data.get("code") not in (0, None):
-        msg = data.get("msg") if isinstance(data, dict) else "未知错误"
-        raise RunningHubError(f"RunningHub 上传文件失败: {msg}")
-    inner = data.get("data") if isinstance(data.get("data"), dict) else data
-    file_name = inner.get("fileName") or inner.get("file_name")
-    if not file_name:
-        raise RunningHubError("RunningHub 上传成功但未返回 fileName")
-    return str(file_name)
+    """上传本地文件（图片/音频/视频）到 RunningHub，返回服务端 fileName。
+
+    先走 v2 的 `/openapi/v2/media/upload/binary`，失败再退回老接口——两条路**各有
+    各的脾气**，都是实测出来的：
+
+    - 老接口 `/task/openapi/upload`（apiKey 走表单）对「会员消费 Key」直接
+      `401 ApiKey verification failed`，同一个 key 查 accountStatus 却是通的；
+    - v2 接口在 **.cn 域名**回 `{"code":1,"msg":"API Key不存在"}`，同一个 key 在
+      **.ai 域名**成功。默认域名是 .ai，所以主路径没问题；但谁把
+      RUNNINGHUB_BASE_URL 指到 .cn 时，v2 会坏而老接口可能反而能用。
+
+    所以两条都试，只有两条都失败才报错——错误里带两条路各自的原文，别只报一条。
+    """
+    errors: list[str] = []
+    try:
+        return await _upload_v2(api_key, filename, content, content_type, timeout)
+    except RunningHubError as exc:
+        errors.append(f"v2: {exc}")
+    try:
+        return await _upload_legacy(api_key, filename, content, content_type, file_type, timeout)
+    except RunningHubError as exc:
+        errors.append(f"legacy: {exc}")
+    raise RunningHubError("RunningHub 上传文件失败（" + "；".join(errors) + "）")

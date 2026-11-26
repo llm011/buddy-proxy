@@ -1,0 +1,383 @@
+"""RunningHub 站内（网页端登录态）链路测试。
+
+2026-11-27 实测出来的事实，每条测试都锁一个「实现退化就会立刻红」的点：
+
+- 两套账：过渡币 / 积分只有登录态能花；OpenAPI 对 SHARED key 回 605、NORMAL key 回 821。
+- 登录：``POST /uc/abroad/pwdLogin``，密码 MD5，响应 ``access_token``（JWT 30 天）/ ``refresh_token``。
+- 续期：JWT 快过期用 refresh_token；401/412 强制重登；失败后 5 分钟冷却（上游会锁密码）。
+- 闭源节点（``RH_OpenAPI_*`` 等）站内也扣钱包 $，预估接口对它回 ``$0.00 / nodes: []``。
+- 任务失败原因藏在 ``taskResultDesc.exception_message`` 里，要挖出来。
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from buddy_proxy.runninghub import runner, store, websession
+from buddy_proxy.runninghub.websession import WebSession, WebSessionError
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    p = tmp_path / "runninghub_accounts.json"
+    monkeypatch.setenv("RUNNINGHUB_ACCOUNTS_PATH", str(p))
+    monkeypatch.setenv("RUNNINGHUB_WORKFLOWS_PATH", str(tmp_path / "runninghub_workflows.json"))
+    return p
+
+
+def _fake_jwt(sub: str = "2100902343205564418", exp_delta: float = 30 * 86400) -> str:
+    def b64(d: dict[str, Any]) -> str:
+        return base64.urlsafe_b64encode(json.dumps(d).encode()).decode().rstrip("=")
+    return f"{b64({'alg': 'HS256'})}.{b64({'sub': sub, 'exp': int(time.time() + exp_delta), 'username': 'x'})}.sig"
+
+
+class _Resp:
+    def __init__(self, payload: dict[str, Any], status_code: int = 200):
+        self._payload = payload
+        self.status_code = status_code
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+
+class _Recorder:
+    """记录每次 POST 的 (path, body, headers)，按 path 返回预设响应。"""
+
+    def __init__(self, routes: dict[str, Any]):
+        self.routes = routes
+        self.calls: list[tuple[str, dict[str, Any], dict[str, str]]] = []
+
+    def install(self, monkeypatch: pytest.MonkeyPatch):
+        rec = self
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def post(self, url, headers=None, json=None, **kw):
+                path = url.split("runninghub.ai", 1)[-1]
+                rec.calls.append((path, json or {}, dict(headers or {})))
+                r = rec.routes.get(path)
+                if r is None:
+                    return _Resp({"code": 404, "msg": f"no route for {path}"})
+                return _Resp(r() if callable(r) else r)
+
+        monkeypatch.setattr(websession.httpx, "AsyncClient", lambda **kw: _Client())
+
+
+# ---------------------------------------------------------------------------
+# store：邮箱账号 / 脱敏 / 登录态
+# ---------------------------------------------------------------------------
+
+def test_store_email_account_masks_everything_secret(isolated_store: Path):
+    """账号视图绝不带 password / api_key / access_token / refresh_token。"""
+    acc = store.upsert_account(email="Someone@icloud.com", password="pw-secret", label="主号")
+    assert acc["account_id"].startswith("e")
+    assert acc["masked_email"] == "So***@icloud.com"
+    assert "password" not in acc and "api_key" not in acc and "web_session" not in acc
+    assert acc["web_session_status"] == {"logged_in": False}
+
+    listed = store.list_accounts()
+    assert "password" not in listed[0]
+    raw = json.loads(isolated_store.read_text())["accounts"][0]
+    assert raw["password"] == "pw-secret", "密码要落盘（0600），否则重启后要用户重输"
+    mode = isolated_store.stat().st_mode & 0o777
+    assert mode == 0o600
+
+
+def test_store_same_email_updates_not_duplicates_and_password_change_kills_session(isolated_store: Path):
+    """同邮箱再导入 = 更新；密码变了旧登录态必须作废（否则拿着旧 token 去撞 401）。"""
+    a1 = store.upsert_account(email="a@x.com", password="pw1")
+    store.update_session(a1["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    a2 = store.upsert_account(email="a@x.com", password=None, label="改名")  # 只改备注
+    assert a2["account_id"] == a1["account_id"]
+    assert store.get_account(a1["account_id"])["password"] == "pw1"
+    assert a2["web_session_status"]["logged_in"] is True, "只改备注不能把登录态冲掉"
+
+    a3 = store.upsert_account(email="a@x.com", password="pw2")
+    assert a3["web_session_status"] == {"logged_in": False}
+    assert len(store.list_accounts()) == 1
+
+
+def test_store_legacy_key_only_account_still_works(isolated_store: Path):
+    """老的纯 api_key 记录不能因为这次改动坏掉。"""
+    acc = store.upsert_account(api_key="938bcfc2f8da4650abdf67b617b533a0", label="旧号")
+    assert acc["masked_key"] == "938b...33a0"
+    assert acc["masked_email"] == ""
+    assert store.get_active_accounts()[0]["api_key"].startswith("938b")
+
+
+def test_session_status_reports_expiry_and_errors():
+    ws = WebSession(access_token=_fake_jwt(exp_delta=3600), refresh_token="r", expires_at=time.time() + 3600,
+                    last_error="登录失败: 密码错", last_error_at=time.time())
+    st = store._session_status(ws.to_dict())
+    assert st["logged_in"] is True
+    assert st["expires_at"] == ws.expires_at and st["expires_in_days"] is not None
+    assert "密码错" in st["last_error"]
+
+
+# ---------------------------------------------------------------------------
+# websession：登录 / 续期 / 冷却
+# ---------------------------------------------------------------------------
+
+def test_login_sends_md5_password_and_parses_jwt(monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder({"/uc/abroad/pwdLogin": {"code": 0, "data": {
+        "access_token": _fake_jwt(sub="42"), "refresh_token": "rftok", "identify": "id"}}})
+    rec.install(monkeypatch)
+    s = asyncio.run(websession.login("me@x.com", "fvvK5MsdsGhz"))
+    path, body, headers = rec.calls[0]
+    assert path == "/uc/abroad/pwdLogin"
+    assert body["password"] == hashlib.md5(b"fvvK5MsdsGhz").hexdigest(), "密码必须 MD5，不是明文"
+    assert "fvvK5MsdsGhz" not in json.dumps(body)
+    assert headers["client"] == "WEB"
+    assert "Authorization" not in headers, "登录请求本身不带 Bearer"
+    assert s.user_id == "42" and s.refresh_token == "rftok"
+    assert not s.expiring(), "30 天的 token 不该一拿到就判过期"
+
+
+def test_login_failure_surfaces_upstream_text(monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder({"/uc/abroad/pwdLogin": {"code": 123, "msg": "Account or password incorrect"}})
+    rec.install(monkeypatch)
+    with pytest.raises(WebSessionError) as ei:
+        asyncio.run(websession.login("me@x.com", "wrong"))
+    assert ei.value.kind == "login"
+    assert "incorrect" in str(ei.value)
+
+
+def test_ensure_session_refreshes_when_expiring(monkeypatch: pytest.MonkeyPatch):
+    """快过期 → 用 refresh_token 续，不带密码登录。"""
+    rec = _Recorder({
+        "/uc/token/refresh": {"code": 0, "data": {"access_token": _fake_jwt(exp_delta=30 * 86400), "refresh_token": "new"}},
+        "/uc/abroad/pwdLogin": {"code": 0, "data": {"access_token": _fake_jwt(), "refresh_token": "x"}},
+    })
+    rec.install(monkeypatch)
+    old = WebSession(access_token=_fake_jwt(exp_delta=600), refresh_token="old", expires_at=time.time() + 600)
+    s = asyncio.run(websession.ensure_session(old, "me@x.com", "pw"))
+    paths = [c[0] for c in rec.calls]
+    assert paths == ["/uc/token/refresh"], "能续期就不该走密码登录"
+    assert rec.calls[0][2]["Authorization"] == "Bearer old"
+    assert s.refresh_token == "new" and not s.expiring()
+
+
+def test_ensure_session_relogins_when_refresh_fails(monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder({
+        "/uc/token/refresh": {"code": 401, "msg": "expired"},
+        "/uc/abroad/pwdLogin": {"code": 0, "data": {"access_token": _fake_jwt(), "refresh_token": "again"}},
+    })
+    rec.install(monkeypatch)
+    old = WebSession(access_token=_fake_jwt(exp_delta=-1), refresh_token="dead", expires_at=time.time() - 1)
+    s = asyncio.run(websession.ensure_session(old, "me@x.com", "pw"))
+    assert [c[0] for c in rec.calls] == ["/uc/token/refresh", "/uc/abroad/pwdLogin"]
+    assert s.refresh_token == "again" and s.last_error == ""
+
+
+def test_ensure_session_cooldown_after_login_failure(monkeypatch: pytest.MonkeyPatch):
+    """登录失败后 5 分钟内不再重试——上游连续错密码会锁号。"""
+    rec = _Recorder({"/uc/abroad/pwdLogin": {"code": 126, "msg": "locked"}})
+    rec.install(monkeypatch)
+    with pytest.raises(WebSessionError):
+        asyncio.run(websession.ensure_session(None, "me@x.com", "bad"))
+    n = len(rec.calls)
+    # 第一次失败返回的是带 last_error 的会话对象，调用方（runner）下次会把它传回来
+    failed = WebSession(access_token="", refresh_token="", last_error="x", last_error_at=time.time())
+    with pytest.raises(WebSessionError) as ei:
+        asyncio.run(websession.ensure_session(failed, "me@x.com", "bad"))
+    assert len(rec.calls) == n, "冷却期内不该再打上游"
+    assert "不重试" in str(ei.value)
+
+
+def test_post_treats_401_and_412_as_refresh_kind(monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder({"/uc/getUserInfo": {"code": 412, "msg": "TOKEN_INVALID"}})
+    rec.install(monkeypatch)
+    with pytest.raises(WebSessionError) as ei:
+        asyncio.run(websession.get_user_info("tok"))
+    assert ei.value.kind == "refresh"
+
+
+# ---------------------------------------------------------------------------
+# runner：闭源预判 / 失败原因解析 / 完整跑通
+# ---------------------------------------------------------------------------
+
+def test_closed_source_detection():
+    assert runner.closed_source_nodes({"nodes": [{"classType": "RH_Nano_Banana2_Gemini31Flash"}]}) == []
+    assert runner.closed_source_nodes({"nodes": [{"classType": "RH_BytedanceSeedance25TokenTextToVideo"}]}) == [
+        "RH_BytedanceSeedance25TokenTextToVideo"]
+    # 实测：Seedance 应用预估 nodes 是空的——这是闭源的典型信号
+    assert runner.closed_source_nodes({"nodes": []}) == ["?"]
+    assert runner.closed_source_nodes({}) == ["?"]
+
+
+def test_parse_task_failure_digs_out_exception_message():
+    raw = {"taskStatus": "FAILED", "taskResultDesc": json.dumps({
+        "exception_type": "RuntimeError", "node_name": "RH_BytedanceSeedance25TokenTextToVideo",
+        "exception_message": "[RH_OpenAPI_BytedanceSeedance25TokenTextToVideo] Submit failed: Your balance is insufficient. [errorCode: 605]"})}
+    msg = runner.parse_task_failure(raw)
+    assert "605" in msg and "RH_BytedanceSeedance25TokenTextToVideo" in msg
+    assert runner.parse_task_failure({"taskStatus": "FAILED"}) == "FAILED"
+    assert runner.parse_task_failure({"taskResultDesc": "plain text"}) == "plain text"
+
+
+def _acct(tmp_path: Path) -> dict[str, Any]:
+    acc = store.upsert_account(email="me@x.com", password="pw", label="t")
+    return store.get_account(acc["account_id"])
+
+
+def test_run_workflow_happy_path_and_persists_refreshed_token(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    acc = _acct(isolated_store)
+    good = _fake_jwt()
+    routes = {
+        "/uc/token/refresh": {"code": 0, "data": {"access_token": good, "refresh_token": "new-rf"}},
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"totalPrice": 0.0, "currency": "USD",
+            "estimatedPoint": 21, "nodes": [{"classType": "RH_Nano_Banana2_Gemini31Flash"}]}},
+        "/task/webapp/create": {"code": 0, "data": {"taskId": "T1", "taskStatus": "RUNNING"}},
+        "/task/list": {"code": 0, "data": {"records": [{"taskId": "T1", "taskStatus": "SUCCESS"}]}},
+        "/api/output/v2/history": {"code": 0, "data": {"records": [
+            {"taskId": "T1", "fileUrl": "https://cdn/x.png", "outputType": "png"},
+            {"taskId": "OTHER", "fileUrl": "https://cdn/other.png", "outputType": "png"},
+        ]}},
+    }
+    rec = _Recorder(routes)
+    rec.install(monkeypatch)
+    # 存一个快过期的会话 → runner 应该先续期，续期结果写回 store
+    store.update_session(acc["account_id"], WebSession(
+        access_token=_fake_jwt(exp_delta=60), refresh_token="old-rf", expires_at=time.time() + 60).to_dict())
+
+    ws = runner.WebAccountSession(store.get_account(acc["account_id"]), persist=store.update_session)
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    res = asyncio.run(runner.run_workflow(ws, "2002675341464334337",
+                                          [{"nodeId": "3", "fieldName": "image", "fieldValue": "a.png", "extra": "drop me"}]))
+    assert res.status == "SUCCESS" and res.task_id == "T1"
+    assert res.outputs == [{"url": "https://cdn/x.png", "type": "image"}], "只能拿本任务的产出，不能把别人的历史混进来"
+    paths = [c[0] for c in rec.calls]
+    assert paths[0] == "/uc/token/refresh", "快过期要先续期"
+    assert "extra" not in rec.calls[[i for i, p in enumerate(paths) if p == "/task/webapp/create"][0]][1]["inputs"][0]
+    saved = store.get_account(acc["account_id"])["web_session"]
+    assert saved["refresh_token"] == "new-rf", "续期后的 token 必须写回，否则每次都重新登录"
+    assert saved["expires_at"] > time.time() + 29 * 86400
+
+
+def test_run_workflow_reruns_once_on_401(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    acc = _acct(isolated_store)
+    calls = {"n": 0}
+
+    def create():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {"code": 401, "msg": "TOKEN_INVALID"}
+        return {"code": 0, "data": {"taskId": "T2", "taskStatus": "RUNNING"}}
+
+    rec = _Recorder({
+        "/uc/token/refresh": {"code": 0, "data": {"access_token": _fake_jwt(), "refresh_token": "r2"}},
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"nodes": []}},
+        "/task/webapp/create": create,
+        "/task/list": {"code": 0, "data": {"records": [{"taskId": "T2", "taskStatus": "FAILED",
+                                                          "taskResultDesc": json.dumps({"exception_message": "boom 605"})}]}},
+    })
+    rec.install(monkeypatch)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r1").to_dict())
+    ws = runner.WebAccountSession(store.get_account(acc["account_id"]), persist=store.update_session)
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    with pytest.raises(WebSessionError) as ei:
+        asyncio.run(runner.run_workflow(ws, "w", []))
+    assert calls["n"] == 2, "401 要续期后重试一次"
+    assert "boom 605" in str(ei.value), "失败原因要挖 exception_message，不能只给 FAILED"
+    assert [c[0] for c in rec.calls].count("/uc/token/refresh") == 1
+
+
+def test_run_workflow_estimate_only_never_submits(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    acc = _acct(isolated_store)
+    rec = _Recorder({"/api/workflow/webapp-price-estimate": {"code": 0, "data": {"totalPrice": 0.03, "estimatedPoint": 21, "nodes": []}}})
+    rec.install(monkeypatch)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    ws = runner.WebAccountSession(store.get_account(acc["account_id"]))
+    res = asyncio.run(runner.run_workflow(ws, "w", [], estimate_only=True))
+    assert res.status == "ESTIMATE" and res.estimate["totalPrice"] == 0.03
+    assert all(p != "/task/webapp/create" for p, _, _ in rec.calls)
+
+
+# ---------------------------------------------------------------------------
+# UI 端点
+# ---------------------------------------------------------------------------
+
+def _client(monkeypatch: pytest.MonkeyPatch):
+    from fastapi.testclient import TestClient
+
+    from buddy_proxy import __main__ as m
+    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+    return TestClient(m.app)
+
+
+def test_ui_import_email_account_logs_in_and_stores_session(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder({
+        "/uc/abroad/pwdLogin": {"code": 0, "data": {"access_token": _fake_jwt(), "refresh_token": "rf", "identify": "id"}},
+        "/uc/getUserInfo": {"code": 0, "data": {"id": "2100902343205564418", "email": "me@x.com", "nickName": "u",
+                                                 "apiKey": "af1e96e1", "walletInfo": {"balance": 0, "apiConsumableBalance": 0, "currency": "USD"}}},
+        "/uc/point/summary": {"code": 0, "data": {"transitionCoinRemained": "984", "activityPoint": 30.0, "nearestExpireTime": "2026-11-27T16:00:00Z"}},
+        "/uc/apiKey/get": {"code": 0, "data": {"normalApiKey": "af1e****96e1", "sharedApi": {"apiKey": "0ece****7ec9"}}},
+    })
+    rec.install(monkeypatch)
+    r = _client(monkeypatch).post("/ui/api/runninghub/accounts/import", json={
+        "email": "me@x.com", "password": "pw", "label": "我的号"})
+    assert r.status_code == 200, r.text
+    acc = r.json()["accounts"][0]
+    assert acc["label"] == "我的号" and acc["web_session_status"]["logged_in"] is True
+    assert acc["account_info"]["transitionCoins"] == 984.0
+    assert acc["account_info"]["walletBalance"] == 0.0
+    assert "password" not in json.dumps(r.json()) and "access_token" not in json.dumps(r.json()) and "rf" != acc.get("refresh_token")
+
+
+def test_ui_import_rejects_bad_login_without_writing(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    rec = _Recorder({"/uc/abroad/pwdLogin": {"code": 123, "msg": "Account or password incorrect"}})
+    rec.install(monkeypatch)
+    r = _client(monkeypatch).post("/ui/api/runninghub/accounts/import", json={"email": "me@x.com", "password": "bad"})
+    assert r.status_code == 400
+    assert "incorrect" in r.json()["detail"]["error"]["message"]
+    assert store.list_accounts() == [], "登录失败不能落半条记录"
+
+
+def test_ui_run_marks_closed_source_on_605(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """站内提交被 605 拒 → 402 + 工作流标 closedSource，下次 UI 直接显示「钱包 $」。"""
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    store.upsert_workflow({"webappId": "2086711729156894722", "name": "Seedance", "description": "",
+                           "billingType": "过渡币（站内）", "nodeInfoList": []})
+    rec = _Recorder({
+        "/uc/getUserInfo": {"code": 0, "data": {"id": "1", "walletInfo": {"balance": 0}}},
+        "/uc/point/summary": {"code": 0, "data": {"transitionCoinRemained": "984"}},
+        "/uc/apiKey/get": {"code": 0, "data": {}},
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"totalPrice": 0.0, "nodes": []}},
+        "/task/webapp/create": {"code": 0, "data": {"taskId": "T3", "taskStatus": "RUNNING"}},
+        "/task/list": {"code": 0, "data": {"records": [{"taskId": "T3", "taskStatus": "FAILED", "taskResultDesc": json.dumps({
+            "node_name": "RH_BytedanceSeedance25TokenTextToVideo",
+            "exception_message": "[RH_OpenAPI_BytedanceSeedance25TokenTextToVideo] Submit failed: Your balance is insufficient. Please top up your account. [errorCode: 605]"})}]}},
+    })
+    rec.install(monkeypatch)
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    r = _client(monkeypatch).post("/ui/api/runninghub/workflows/run", json={
+        "webapp_id": "2086711729156894722", "nodeInfoList": []})
+    assert r.status_code == 402, r.text
+    body = r.json()["detail"]
+    assert "闭源" in body["error"]["message"] and "605" in body["error"]["message"]
+    wf = next(w for w in body["workflows"] if w["webappId"] == "2086711729156894722")
+    assert wf["closedSource"] is True and "闭源" in wf["billingType"]
+
+
+def test_ui_run_requires_email_account(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    store.upsert_account(api_key="938bcfc2f8da4650abdf67b617b533a0", label="纯key")
+    r = _client(monkeypatch).post("/ui/api/runninghub/workflows/run", json={"webapp_id": "w", "nodeInfoList": []})
+    assert r.status_code == 400
+    assert "邮箱" in r.json()["detail"]["error"]["message"]
