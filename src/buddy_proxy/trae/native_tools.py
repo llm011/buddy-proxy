@@ -28,6 +28,7 @@ from .config import (
 )
 from .credentials import _auth, _build_headers, _load_work_cred, _work_headers
 from .sse import _SSEDecoder, _parse_sse
+from .telemetry import finish_attempt, mark_final_success, response_outcome, start_attempt
 from .text_protocol import _content_blocks
 
 log = logging.getLogger(__name__)
@@ -274,13 +275,22 @@ def _send_native_chat(
     payload = json.dumps(body).encode("utf-8")
     last_error: Exception | None = None
     for attempt in range(1, _WORK_CHAT_MAX_ATTEMPTS + 1):
+        attempt_meta = start_attempt(
+            transport="native", request_id=body["request_id"], session_id=body["session_id"],
+            model=trae_model, max_mode=max_mode, endpoint="llm_utils_chat")
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=180) as resp:
-                return _read_all_bounded(resp)
+                raw = _read_all_bounded(resp)
+                outcome = response_outcome(raw)
+                finish_attempt(attempt_meta, outcome=outcome)
+                if outcome == "response":
+                    mark_final_success(attempt_meta)
+                return raw
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")[:2000]
             if e.code == 400:
+                finish_attempt(attempt_meta, outcome="fallback")
                 # Go schema 拒绝的另一种壳：原样返回文本，交给 _native_rejected
                 # 判定回落（文本协议兜底是对 4001 的正确响应）
                 return detail or '{"code":4001}'
@@ -289,11 +299,13 @@ def _send_native_chat(
             # 透传，坏账号永远不被冷却跳过（2026-10-12 实测：账号 #1 token
             # 被服务端吊销，native/work 两条通道都把它包成 502，failover
             # 失灵，所有请求都先撞它一次）。其余错误码维持 502 不变。
+            finish_attempt(attempt_meta, outcome=f"http_{e.code}")
             raise HTTPException(
                 status_code=e.code if e.code in (401, 403) else 502,
                 detail=f"trae native chat failed: {e.code} {detail}")
         except _NonStreamTimeout:
             # 总时长到点主动插断：不进下面的瞬态重试（3 × 上限会把挂死放大三倍）。
+            finish_attempt(attempt_meta, outcome="timeout")
             raise HTTPException(
                 status_code=504,
                 detail=f"trae 上游非流式响应超过 {TRAE_NONSTREAM_MAX_S}s 未完成，已主动断开") from None
@@ -301,6 +313,7 @@ def _send_native_chat(
             # 与 Work 通道同款：HTTPError 之外视为瞬态（IncompleteRead/断连/超时），
             # 同端点退避重试；4xx 参数拒绝不走这里（上面已返回/抛出）
             last_error = e
+            finish_attempt(attempt_meta, outcome="network_error")
             if attempt < _WORK_CHAT_MAX_ATTEMPTS:
                 log.warning(
                     "Trae native chat attempt %d/%d failed (%s: %s), retrying",
@@ -366,12 +379,16 @@ def _stream_native_chat_events(
     yielded = 0
     last_error: Exception | None = None
     for attempt in range(1, _WORK_CHAT_MAX_ATTEMPTS + 1):
+        attempt_meta = start_attempt(
+            transport="native", request_id=body["request_id"], session_id=body["session_id"],
+            model=trae_model, max_mode=max_mode, endpoint="llm_utils_chat")
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         try:
             resp = urllib.request.urlopen(req, timeout=read_timeout)
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")[:2000]
             if e.code == 400:
+                finish_attempt(attempt_meta, outcome="fallback")
                 # Go schema 拒绝的另一种壳：与 _send_native_chat 一致，交给
                 # 调用方按 4001 处理回落。还没出字时用异常表达（可安全重试），
                 # 已出字就只能当错误事件透传。
@@ -379,6 +396,7 @@ def _stream_native_chat_events(
                     raise _NativeStreamRejected(detail or '{"code":4001}') from None
                 yield ("error", {"code": 4001, "message": detail})
                 return
+            finish_attempt(attempt_meta, outcome=f"http_{e.code}")
             if e.code in (401, 403):
                 # 凭据级失败：透传真实状态码，provider 的 failover 闸门靠它
                 # 判「换号可能好转」。包成 502 会让坏账号永不被冷却跳过。
@@ -390,6 +408,7 @@ def _stream_native_chat_events(
                 detail=f"trae native stream failed: {e.code} {detail}") from None
         except Exception as e:  # noqa: BLE001 — 连接级瞬态，可重试
             last_error = e
+            finish_attempt(attempt_meta, outcome="network_error")
             if yielded:
                 # 已经出过字：不能重放（会重复内容），直接上报
                 raise HTTPException(
@@ -408,9 +427,13 @@ def _stream_native_chat_events(
                        f"{_WORK_CHAT_MAX_ATTEMPTS} attempts: {last_error}") from None
 
         decoder = _SSEDecoder()
+        saw_upstream_error = False
+        semantic_seen = False
+        done_seen = False
         try:
             while True:
                 if stop is not None and stop.is_set():
+                    finish_attempt(attempt_meta, outcome="cancelled")
                     return
                 chunk = resp.read1(65536)
                 if not chunk:
@@ -420,15 +443,39 @@ def _stream_native_chat_events(
                     if (not yielded and event[0] == "error"
                             and str((event[1] or {}).get("code")) == "4001"):
                         raise _NativeStreamRejected(json.dumps(event[1], ensure_ascii=False))
+                    saw_upstream_error = saw_upstream_error or event[0] == "error"
+                    semantic_seen = semantic_seen or (
+                        event[0] == "output" and bool(
+                            (event[1] or {}).get("reasoning_content")
+                            or (event[1] or {}).get("response")
+                            or (event[1] or {}).get("tool_calls")))
+                    done_seen = done_seen or event[0] == "done"
                     yielded += 1
                     yield event
             for event in decoder.finish():
                 if (not yielded and event[0] == "error"
                         and str((event[1] or {}).get("code")) == "4001"):
                     raise _NativeStreamRejected(json.dumps(event[1], ensure_ascii=False))
+                saw_upstream_error = saw_upstream_error or event[0] == "error"
+                semantic_seen = semantic_seen or (
+                    event[0] == "output" and bool(
+                        (event[1] or {}).get("reasoning_content")
+                        or (event[1] or {}).get("response")
+                        or (event[1] or {}).get("tool_calls")))
+                done_seen = done_seen or event[0] == "done"
                 yielded += 1
                 yield event
+            accepted = not saw_upstream_error and semantic_seen and done_seen
+            finish_attempt(attempt_meta, outcome="response" if accepted else "upstream_error")
+            if accepted:
+                mark_final_success(attempt_meta)
             return
+        except _NativeStreamRejected:
+            finish_attempt(attempt_meta, outcome="fallback")
+            raise
+        except Exception:
+            finish_attempt(attempt_meta, outcome="network_error")
+            raise
         finally:
             try:
                 resp.close()

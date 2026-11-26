@@ -16,6 +16,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from contextvars import ContextVar
 from typing import Any, Iterator
 
 import httpx
@@ -32,7 +33,9 @@ from buddy_proxy.trae.native_tools import (
     _native_tools_payload,
     _read_all_bounded,
 )
+from buddy_proxy.core.metrics import ACCOUNT_META
 from buddy_proxy.trae.sse import _parse_sse, _SSEDecoder
+from buddy_proxy.trae.telemetry import finish_attempt, mark_final_success, response_outcome, start_attempt
 
 from .config import (
     _CHAT_TIMEOUT_S,
@@ -192,18 +195,36 @@ def _is_retryable_connect_error(exc: BaseException) -> bool:
     return isinstance(reason, OSError) and reason.errno in _CONNECT_RETRY_ERRNOS
 
 
+# ``_post_chat`` 是 PAT 的长期 monkeypatch 接缝，四个位置参数不能扩展。外层在
+# 调用期把本次请求的安全关联信息放进 ContextVar，使 helper 的每一次实际建连都能
+# 单独落 attempt；直接调用/旧测试仍保持原有行为。
+_POST_TELEMETRY: ContextVar[dict[str, Any] | None] = ContextVar("pat_post_telemetry", default=None)
+
+
 def _post_chat(url: str, payload: bytes, credentials: PatCredentials, stream: bool) -> str:
     """非流式/兼容发送；流式入口使用 ``stream_pat_native`` 增量读取。"""
     headers = _pat_headers(credentials, "text/event-stream" if stream else "application/json")
     delays = (0.0, *_CONNECT_RETRY_DELAYS_S)
+    telemetry = _POST_TELEMETRY.get()
     for attempt, delay in enumerate(delays, start=1):
         if delay:
             time.sleep(delay)
+        attempt_meta = telemetry.pop("first_attempt", None) if telemetry is not None else None
+        if attempt_meta is None and telemetry is not None:
+            attempt_meta = start_attempt(**telemetry["start"])
         request = urllib.request.Request(url, data=payload, method="POST", headers=headers)
         try:
             with net.open_direct(request, timeout=_CHAT_TIMEOUT_S) as response:
-                return _read_all_bounded(response)
+                raw = _read_all_bounded(response)
+                finish_attempt(attempt_meta, outcome=response_outcome(raw))
+                if telemetry is not None:
+                    telemetry["last_attempt"] = attempt_meta
+                return raw
+        except urllib.error.HTTPError as exc:
+            finish_attempt(attempt_meta, outcome=f"http_{exc.code}")
+            raise
         except Exception as exc:
+            finish_attempt(attempt_meta, outcome="network_error")
             if attempt >= len(delays) or not _is_retryable_connect_error(exc):
                 raise
             log.warning(
@@ -377,17 +398,30 @@ def stream_pat_native(
         attempted_accounts += 1
         if meta is not None:
             meta["account"] = profile.id
+        telemetry_meta = meta if meta is ACCOUNT_META.get() else None
         refreshed = False
         rejected_token: str | None = None
         while True:
+            attempt_meta = start_attempt(
+                transport="pat-native", request_id=body["request_id"],
+                session_id=body["session_id"], model=model,
+                max_mode=bool(body.get("is_max_mode")), endpoint="llm_utils_chat",
+                meta=telemetry_meta,
+            )
             committed = False
             saw_terminal = False
             try:
                 for event, data in _ns._stream_profile_events(url, payload, credentials, stop):
                     if stop.is_set():
+                        finish_attempt(attempt_meta, outcome="cancelled")
                         return
                     code = _event_error_code(event, data)
                     if code is not None:
+                        if not committed and code in (_RATE_LIMIT_SSE_CODES | _FAILOVER_SSE_CODES):
+                            finish_attempt(attempt_meta, outcome="fallback")
+                        else:
+                            # 首个语义事件后的 error 不可重放，也绝不能伪装成成功。
+                            finish_attempt(attempt_meta, outcome="upstream_error")
                         if not committed and code in _RATE_LIMIT_SSE_CODES:
                             mark_rate_limited(profile, model, code)
                             rate_limited = True
@@ -428,13 +462,17 @@ def stream_pat_native(
                                 detail="trae PAT stream returned no content "
                                        f"(after {empty_retries - 1} retries)")
                         saw_terminal = True
+                        finish_attempt(attempt_meta, outcome="response")
+                        mark_final_success(attempt_meta, telemetry_meta)
                         yield event, data
                         return
                     yield event, data
                 else:
                     if stop.is_set():
+                        finish_attempt(attempt_meta, outcome="cancelled")
                         return
                     if not committed:
+                        finish_attempt(attempt_meta, outcome="fallback")
                         # 流自然耗尽也无语义内容：与 done 分支同处理。
                         empty_retries += 1
                         if empty_retries <= empty_budget:
@@ -445,12 +483,14 @@ def stream_pat_native(
                         raise HTTPException(
                             status_code=502, detail="trae PAT stream returned no content")
                     if not saw_terminal:
+                        finish_attempt(attempt_meta, outcome="upstream_error")
                         raise HTTPException(
                             status_code=502, detail="trae PAT stream ended before completion")
                     return
                 # 只有首个语义事件前的白名单错误才会走到这里并尝试下一账号。
                 break
             except httpx.HTTPStatusError as exc:
+                finish_attempt(attempt_meta, outcome=f"http_{exc.response.status_code}")
                 status = exc.response.status_code
                 last_status = status
                 if status == 401 and not refreshed:
@@ -472,8 +512,10 @@ def stream_pat_native(
                 raise HTTPException(
                     status_code=502, detail=f"trae PAT chat failed: HTTP {status}") from None
             except HTTPException:
+                finish_attempt(attempt_meta, outcome="upstream_error")
                 raise
             except Exception as exc:
+                finish_attempt(attempt_meta, outcome="network_error")
                 log.warning("PAT stream 传输失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
                 raise HTTPException(status_code=502, detail="trae PAT chat transport failed") from None
 
@@ -548,12 +590,32 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
         attempted_accounts += 1
         if meta is not None:
             meta["account"] = profile.id
+        telemetry_meta = meta if meta is ACCOUNT_META.get() else None
         refreshed = False
         rejected_token: str | None = None
         while True:
+            post_telemetry = None
+            if telemetry_meta is not None:
+                post_telemetry = {"start": {
+                    "transport": "pat-native", "request_id": body["request_id"],
+                    "session_id": body["session_id"], "model": model,
+                    "max_mode": bool(body.get("is_max_mode")), "endpoint": "llm_utils_chat",
+                    "meta": telemetry_meta,
+                }, "last_attempt": None}
+                # `_post_chat` 是可 monkeypatch 的四参兼容接缝。预建首条让替身
+                # 仍有一条物理 send；真实 helper 会消费它，再为内部重连新建条目。
+                post_telemetry["first_attempt"] = start_attempt(**post_telemetry["start"])
+            post_token = _POST_TELEMETRY.set(post_telemetry)
+            attempt_meta = post_telemetry["first_attempt"] if post_telemetry is not None else None
             try:
-                raw = _ns._post_chat(url, payload, credentials, stream)
+                try:
+                    raw = _ns._post_chat(url, payload, credentials, stream)
+                finally:
+                    _POST_TELEMETRY.reset(post_token)
+                if post_telemetry is not None and post_telemetry["last_attempt"] is not None:
+                    attempt_meta = post_telemetry["last_attempt"]
             except urllib.error.HTTPError as exc:
+                finish_attempt(attempt_meta, outcome=f"http_{exc.code}")
                 status = exc.code
                 last_status = status
                 # 消耗响应体但不记录、不回显，避免上游把秘密带进诊断。
@@ -588,6 +650,7 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                 raise HTTPException(status_code=502,
                                     detail=f"trae PAT chat failed: HTTP {status}") from None
             except _NonStreamTimeout:
+                finish_attempt(attempt_meta, outcome="timeout")
                 # 总时长到点主动插断：与传输失败同路径（不重试不换号，防重复计费），
                 # 但 504 + 明确文案，让客户端知道是上游卡死被代理掐掉。
                 log.warning("PAT chat 非流式超时插断，账号序号=%d", profile.index)
@@ -595,15 +658,18 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                     status_code=504,
                     detail=f"trae PAT 上游非流式响应超过 {TRAE_NONSTREAM_MAX_S}s 未完成，已主动断开") from None
             except Exception as exc:
+                finish_attempt(attempt_meta, outcome="network_error")
                 log.warning("PAT chat 传输失败，账号序号=%d（%s）", profile.index, type(exc).__name__)
                 raise HTTPException(status_code=502, detail="trae PAT chat transport failed") from None
             failover_code = _sse_failover_code(raw)
             if failover_code in _RATE_LIMIT_SSE_CODES:
+                finish_attempt(attempt_meta, outcome="fallback")
                 mark_rate_limited(profile, model, failover_code)
                 rate_limited = True
                 last_status = failover_code
                 break
             if failover_code is not None:
+                finish_attempt(attempt_meta, outcome="fallback")
                 if failover_code == 4031:
                     # 4031 = 该账号该池日额度耗尽。每个账号的日包相互独立，故先给
                     # 当前账号打短冷却并换号，去试下一个额度未耗尽的账号；只有本轮
@@ -622,12 +688,14 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
             if raw.lstrip().startswith("{"):
                 code = _json_error_code(raw.lstrip())
                 if code is not None:
+                    finish_attempt(attempt_meta, outcome="upstream_error")
                     raise HTTPException(status_code=502,
                                         detail=f"trae PAT chat failed: code {code}") from None
             # 上游「假成功」防护：请求成功返回但全文零语义内容（2026-09-09
             # 实测 gpt-5.6-sol 间歇性出现）。非流式响应尚未提交给客户端，
             # 换号重放无重复计费风险；不是额度故障，不标冷却。
             if not _sse_has_semantic_content(raw):
+                finish_attempt(attempt_meta, outcome="fallback")
                 empty_retries += 1
                 if empty_retries <= empty_budget:
                     log.warning(
@@ -640,6 +708,12 @@ def send_pat_native(native_msgs: list[dict[str, Any]], model: str, stream: bool,
                     status_code=502,
                     detail="trae PAT chat returned no content (empty success on "
                            f"{empty_retries} account(s))")
+            # 真正的 `_post_chat` 已在每次物理发送处分类；可注入替身不一定会
+            # 这么做，幂等 finish 让这里同时兼容两种路径。
+            outcome = response_outcome(raw)
+            finish_attempt(attempt_meta, outcome=outcome)
+            if outcome == "response":
+                mark_final_success(attempt_meta, telemetry_meta)
             return raw
 
     if paced.starved:

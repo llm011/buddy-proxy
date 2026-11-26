@@ -38,6 +38,14 @@ def _elapsed_ms(started: float) -> int:
     return round((time.time() - started) * 1000)
 
 
+def _trae_metric_kwargs(meta: dict[str, Any] | None) -> dict[str, Any]:
+    """提取 Trae 的安全关联摘要；没有 holder 的其它 provider 保持空字段。"""
+    meta = meta or {}
+    return {key: meta.get(key, "" if key != "trae_attempts" else []) for key in (
+        "trae_client_request_id", "trae_request_id", "trae_session_id",
+        "trae_final_transport", "trae_attempts")}
+
+
 def _exc_text(detail: Any) -> str:
     """HTTPException.detail → 短文本（dict 形式的结构化错误取 message）。"""
     if isinstance(detail, dict):
@@ -191,7 +199,7 @@ async def _instrument(
     # 写入（见 metrics.ACCOUNT_META 注释），流式落库发生在流结束，经此 dict 传回。
     # 不做 reset：流式 body 在本函数返回后才迭代，_stream 届时才复制上下文派生
     # 读线程；请求任务结束后上下文随之丢弃，不会泄漏到其它请求。
-    account_meta: dict[str, str] = {}
+    account_meta: dict[str, Any] = {}
     ACCOUNT_META.set(account_meta)
     started = time.time()
     try:
@@ -200,12 +208,14 @@ async def _instrument(
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=exc.status_code, duration_ms=_elapsed_ms(started),
                        error=_exc_text(exc.detail), client=client,
-                       account=account_meta.get("account", ""))
+                       account=account_meta.get("account", ""),
+                       **_trae_metric_kwargs(account_meta))
         raise
     except Exception as exc:
         metrics.record(provider=provider_id, model=model_id, protocol=protocol,
                        status=500, duration_ms=_elapsed_ms(started), error=str(exc),
-                       client=client, account=account_meta.get("account", ""))
+                       client=client, account=account_meta.get("account", ""),
+                       **_trae_metric_kwargs(account_meta))
         raise
 
     if isinstance(resp, StreamingResponse):
@@ -249,6 +259,7 @@ async def _instrument(
         error=error,
         client=client,
         account=account_meta.get("account", ""),
+        **_trae_metric_kwargs(account_meta),
     )
     return resp
 
@@ -300,7 +311,8 @@ async def _metrics_stream(inner, metrics, *, provider_id: str, model_id: str,
                        credit=credit,
                        credit_estimated=credit_estimated,
                        client=client,
-                       account=(account_meta or {}).get("account", ""))
+                       account=(account_meta or {}).get("account", ""),
+                       **_trae_metric_kwargs(account_meta))
 
 
 # ============================================================================

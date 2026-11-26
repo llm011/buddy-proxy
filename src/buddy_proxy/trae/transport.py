@@ -22,6 +22,7 @@ from .config import (
     resolve_trae_region_by_chat_base,
 )
 from .credentials import _auth, _build_headers, _load_work_cred, _work_headers
+from .telemetry import finish_attempt, mark_final_success, response_outcome, start_attempt
 from .text_protocol import _build_chat_body
 
 log = logging.getLogger(__name__)
@@ -60,6 +61,9 @@ def send_trae_chat(
         # URL 仍用调用方传入的 base_url（测试注入点/自定义网关原样生效）；
         # region 只用来选模型映射表，不改这里的 host。
         url = base_url + endpoint
+        attempt_meta = start_attempt(
+            transport="text", request_id=body["request_id"], session_id=body["session_id"],
+            model=trae_model, max_mode=max_mode, endpoint=endpoint)
         req = urllib.request.Request(
             url,
             data=json.dumps(body).encode("utf-8"),
@@ -70,14 +74,20 @@ def send_trae_chat(
             with urllib.request.urlopen(req, timeout=180) as resp:
                 data = resp.read().decode("utf-8", errors="replace")
                 log.info("Trae endpoint %s OK (status=%s)", endpoint, resp.status)
+                outcome = response_outcome(data)
+                finish_attempt(attempt_meta, outcome=outcome)
+                if outcome == "response":
+                    mark_final_success(attempt_meta)
                 return data
         except urllib.error.HTTPError as e:
+            finish_attempt(attempt_meta, outcome=f"http_{e.code}")
             detail = e.read().decode("utf-8", errors="replace")[:500]
             log.warning("Trae endpoint %s failed %s: %s", endpoint, e.code, detail)
             if e.code in (401, 403):
                 raise HTTPException(status_code=401, detail=f"trae auth failed: {detail}")
             last_error = RuntimeError(f"{endpoint}: {e.code} {detail}")
         except Exception as e:
+            finish_attempt(attempt_meta, outcome="network_error")
             log.warning("Trae endpoint %s error: %s", endpoint, e)
             last_error = e
     raise HTTPException(status_code=502, detail=f"trae all endpoints failed: {last_error}")
@@ -144,6 +154,9 @@ def _send_trae_work_chat(
     payload = json.dumps(body).encode("utf-8")
     last_error: Exception | None = None
     for attempt in range(1, _WORK_CHAT_MAX_ATTEMPTS + 1):
+        attempt_meta = start_attempt(
+            transport="text", request_id=body["request_id"], session_id=body["session_id"],
+            model=trae_model, max_mode=max_mode, endpoint="llm_utils_chat")
         req = urllib.request.Request(
             url,
             data=payload,
@@ -159,8 +172,13 @@ def _send_trae_work_chat(
                     function=body["function"],
                     raw=raw[:20000],
                 )
+                outcome = response_outcome(raw)
+                finish_attempt(attempt_meta, outcome=outcome)
+                if outcome == "response":
+                    mark_final_success(attempt_meta)
                 return raw
         except urllib.error.HTTPError as e:
+            finish_attempt(attempt_meta, outcome=f"http_{e.code}")
             detail = e.read().decode("utf-8", errors="replace")[:500]
             # 401/403 透传真实状态码，理由同 native_tools._send_native_chat：
             # 包成 502 会绕过 failover 的账号级闸门（形态码丢了），坏账号
@@ -172,6 +190,7 @@ def _send_trae_work_chat(
             # HTTPError 之外一律视为瞬态网络错误（IncompleteRead / 连接重置 / 超时等），
             # 保留原始异常重试；非瞬态错误重试 3 次也会快速失败，代价可接受。
             last_error = e
+            finish_attempt(attempt_meta, outcome="network_error")
             if attempt < _WORK_CHAT_MAX_ATTEMPTS:
                 log.warning(
                     "Trae Work chat attempt %d/%d failed (%s: %s), retrying",
