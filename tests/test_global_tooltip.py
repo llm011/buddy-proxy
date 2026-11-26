@@ -27,7 +27,8 @@ pytestmark = pytest.mark.skipif(
 _STUB = """
 const LISTENERS = {};
 const TIP = {
-  id: '', textContent: '', style: {}, offsetWidth: 80, offsetHeight: 20,
+  id: '', textContent: '', style: {}, attrs: {}, offsetWidth: 80, offsetHeight: 20,
+  setAttribute(k, v) { this.attrs[k] = String(v); },
   classList: {
     _s: new Set(),
     add(c) { this._s.add(c); },
@@ -71,7 +72,7 @@ def test_button_title_becomes_data_tip_on_first_hover():
     out = _run_js("""
 function mkButton(attrs) {
   return {
-    attrs,
+    attrs, dataset: {},
     hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); },
     getAttribute(k) { return this.hasAttribute(k) ? this.attrs[k] : null; },
     setAttribute(k, v) { this.attrs[k] = String(v); },
@@ -82,6 +83,7 @@ function mkButton(attrs) {
       return null;
     },
     getBoundingClientRect() { return {left: 100, width: 40, top: 100, bottom: 120}; },
+    contains(node) { return node === this; },
   };
 }
 const btn = mkButton({class: 'ghost', title: '置顶（移到顺位 #1）'});
@@ -103,6 +105,8 @@ console.log(JSON.stringify({
     data = _last_json(out)
     assert data["appended"] == 1 and data["first"]["attrs"]["class"] == "ghost"
     assert data["first"]["attrs"]["data-tip"] == "置顶（移到顺位 #1）"
+    assert data["first"]["attrs"]["aria-label"] == "置顶（移到顺位 #1）", "迁走 title 不能弄丢读屏名称"
+    assert data["first"]["attrs"]["aria-describedby"] == "bp-tooltip"
     assert "title" not in data["first"]["attrs"], "title 必须删掉，否则原生/自定义会重复弹"
     assert data["first"]["text"] == "置顶（移到顺位 #1）"
     assert data["first"]["shown"], "首次悬停就该显示，不等原生 ~1s"
@@ -115,7 +119,7 @@ def test_non_button_title_and_existing_data_tip_are_not_clobbered():
     out = _run_js("""
 function mkTarget(attrs, isButton) {
   return {
-    attrs, isButton,
+    attrs, isButton, dataset: {},
     hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); },
     getAttribute(k) { return this.hasAttribute(k) ? this.attrs[k] : null; },
     setAttribute(k, v) { this.attrs[k] = String(v); },
@@ -126,6 +130,7 @@ function mkTarget(attrs, isButton) {
       return null;
     },
     getBoundingClientRect() { return {left: 10, width: 20, top: 30, bottom: 40}; },
+    contains(node) { return node === this; },
   };
 }
 const cell = mkTarget({title: '补充信息，不是操作'}, false);
