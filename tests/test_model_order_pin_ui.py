@@ -69,6 +69,7 @@ console.log(JSON.stringify({
   before, sorted, withDraft, html,
   renderedKeys: Array.from(html.matchAll(/data-key="([^"]+)"/g), match => match[1]),
   summary: elements['order-summary'].textContent,
+  draftHead: html.split('data-key="delta"')[1].split('<div class="order-body">')[0],
 }));
 """)
     assert out["before"] == ["alpha", "beta", "gamma"], "展示排序不得改写接口原数组"
@@ -77,6 +78,7 @@ console.log(JSON.stringify({
         "未保存草稿不能因置顶排序消失或跑到已置顶项之前")
     assert out["renderedKeys"] == ["gamma", "beta", "alpha", "delta"]
     assert out["summary"] == "4 个模型已配顺序"
+    assert "order-pin" not in out["draftHead"], "未保存草稿不能提供必定 404 的置顶动作"
 
     html = out["html"]
     gamma_card = re.search(r'<div class="card order-card order-pinned" data-key="gamma">', html)

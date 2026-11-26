@@ -212,6 +212,8 @@ function orderPageCard(r) {
   const key = r.m;   // 卡片键 = model_order 的键本身
   const open = ORDER_OPEN.has(key);
   const pinned = (ORDER && Array.isArray(ORDER.pinned)) ? ORDER.pinned.includes(key) : false;
+  // 未保存草稿不在后端 model_order 里，先不出置顶按钮，否则点击必定 404。
+  const configured = !!orderRowOf(key);
   // 草稿优先：用户正在编辑时不要被新拉到的数据覆盖
   const items = ORDER_DRAFT[key] || orderTargetsToItems(r.order.targets);
   const marks = ORDER_PAGE_MARKS[key] || {};
@@ -235,8 +237,8 @@ function orderPageCard(r) {
         <span class="tag bad order-dirty" title="有未保存的修改" style="${orderIsDirty(key) ? '' : 'display:none'}">未保存</span>
         <span class="order-chain mono">${esc(chain)}</span>
       </div>
-      <button class="ghost order-pin${pinned ? ' active' : ''}" title="${pinned ? '已置顶，点击取消' : '置顶：排到最前面（可多个，最近置顶的在最上）'}"
-              onclick="event.stopPropagation();orderTogglePin(${jsq(key)})">📌 ${pinned ? '已置顶' : '置顶'}</button>
+      ${configured ? `<button class="ghost order-pin${pinned ? ' active' : ''}" title="${pinned ? '已置顶，点击取消' : '置顶：排到最前面（可多个，最近置顶的在最上）'}"
+              onclick="event.stopPropagation();orderTogglePin(${jsq(key)})">📌 ${pinned ? '已置顶' : '置顶'}</button>` : ''}
       <button class="primary order-test" onclick="runTest('','${esc(key)}')">测试</button>
     </div>
     ${open ? `<div class="order-body">
