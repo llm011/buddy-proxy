@@ -261,7 +261,7 @@ console.log(JSON.stringify({name: BENEFITS.providers[0].checkin.accounts[0].name
 
 
 def test_move_delete_row_buttons_markup():
-    """▲▼ 带 id 内联 + 首尾禁用；✕ 带 pid+id；↻ 只在渠道标题。"""
+    """📌/▲▼ 均复用带 id 的重排入口；首位禁用；✕ 带 pid+id；↻ 只在渠道标题。"""
     out = _run_js("""
 const acct = {id: 'u1'};
 console.log(JSON.stringify({
@@ -276,12 +276,16 @@ console.log(JSON.stringify({
     data = json.loads(out.strip().splitlines()[-1])
     assert "acctMove('dumate',2,-1,'u1')" in data["mid"]
     assert "acctMove('dumate',2,1,'u1')" in data["mid"]
+    assert "📌 置顶" in data["mid"]
+    assert "acctMove('dumate',3,-2,'u1')" in data["last"], "末位置顶必须直达顺位 #1"
     assert "disabled" in data["first"] and "acctMove('dumate',1,-1" in data["first"]
+    assert 'class="ghost acct-pin"' in data["first"] and "置顶" in data["first"]
     assert "disabled" in data["last"]
     assert "acctDelete('dumate','u1')" in data["del"] and "清除本地缓存" in data["del"]
     assert "ghost danger" in data["del"]
     assert data["delNoAcct"] == "", "没有账号（快照未到）时不渲染 ✕"
-    assert data["row"].startswith('<span class="ag-move"><button class="ghost" title="上移')
+    assert data["row"].startswith('<span class="ag-move"><button class="ghost acct-pin"'), \
+        "置顶按钮应排在细粒度上/下移之前"
     assert "refreshProviderQuota" not in data["row"], "账号卡内不应重复放渠道级 ↻"
     assert "refreshProviderQuota('dumate', this)" in _run_js(
         "console.log(providerRefreshButton('dumate'));"

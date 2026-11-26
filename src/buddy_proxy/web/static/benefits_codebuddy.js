@@ -44,7 +44,8 @@ function _codebuddy_sub_html(a) {
 function _codebuddy_move_btns(idx, n, id) {
   // 上/下移按钮（与 _qoder_move_btns 同构；顺位语义按快照里该 id 的实际位次挪）
   const arg = id ? `,'${id}'` : '';
-  return `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+  return acctPinButton('codebuddy', idx, id) +
+    `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
     `onclick="codebuddyMoveAccount(${idx},-1${arg})">▲</button>` +
     `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
     `onclick="codebuddyMoveAccount(${idx},1${arg})">▼</button>`;

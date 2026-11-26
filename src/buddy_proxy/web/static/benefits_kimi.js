@@ -33,7 +33,8 @@ function _kimi_move_btns(idx, n, id) {
   // 上/下移按钮（与 _ag_move_btns 同构；顺位语义照 antigravity：按快照里
   // 该 id 的实际位次挪，不按按钮上的 idx——面板重绘滞后时 idx 会过期）
   const arg = id ? `,'${id}'` : '';
-  return `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
+  return acctPinButton('kimi', idx, id) +
+    `<button class="ghost" title="上移（更优先使用）" ${idx <= 1 ? 'disabled' : ''} ` +
     `onclick="kimiMoveAccount(${idx},-1${arg})">▲</button>` +
     `<button class="ghost" title="下移" ${idx >= n ? 'disabled' : ''} ` +
     `onclick="kimiMoveAccount(${idx},1${arg})">▼</button>`;

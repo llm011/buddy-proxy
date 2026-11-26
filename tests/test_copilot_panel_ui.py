@@ -156,7 +156,7 @@ console.log(JSON.stringify({
     assert data["head"] and data["multi"]
     assert data["name1"] and data["name2"], "标题=别名/账号名（快照回填）"
     assert data["sub2"], "副标题=冷却 + 凭据来源"
-    assert data["moves"] == 4, "两个账号各一对 ▲▼"
+    assert data["moves"] == 6, "每个账号仍有一对 ▲▼ 和一个置顶（首位的置顶按钮禁用）"
     assert data["ren1"] and data["del1"], "✎/✕ 带账号 id"
     assert data["importBtn"] and data["refreshModels"]
     assert data["accountsApi"] == ["/ui/api/copilot/accounts"] * 2

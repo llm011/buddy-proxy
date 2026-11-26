@@ -833,7 +833,60 @@ async def ui_model_order_get(request: Request):
                               "cooldown_s": blocked,
                               "reason": "channel_block"})
         items.append({"model": key, "targets": targets, "marks": marks})
-    return {"items": items}
+    return {"items": items, "pinned": _model_order_pinned(order)}
+
+
+#: settings.json 里存「模型顺序页置顶模型」的键。**只影响展示顺序、不参与路由**：
+#: 转发侧只看 ``model_order`` 的候选顺序，置顶列表是纯 UI 偏好。
+_MODEL_ORDER_PINNED_KEY = "model_order_pinned"
+
+
+def _model_order_pinned(order: dict[str, Any] | None) -> list[str]:
+    """读置顶列表，顺手剔掉已不存在的模型（配置删了、置顶却还留着会占位）。
+
+    只在读取时过滤，不回写——回写留给用户下一次切换置顶（``ui_model_order_pin``）
+    时一起落盘，避免 GET 接口有写副作用。
+    """
+    raw = (settings_mod.load_settings() or {}).get(_MODEL_ORDER_PINNED_KEY)
+    if not isinstance(raw, list):
+        return []
+    keys = set(order or {})
+    out: list[str] = []
+    for name in raw:
+        if isinstance(name, str) and name in keys and name not in out:
+            out.append(name)
+    return out
+
+
+@app.post("/ui/api/model-order/pin")
+async def ui_model_order_pin(request: Request):
+    """置顶 / 取消置顶一个模型（``{model, pinned}``）。
+
+    置顶是**展示顺序**的偏好：置顶的卡片排在最前，多个置顶按「最近置顶的在最
+    上」排，其余仍按后端给的字母序。不影响转发路由（那是 ``model_order`` 的
+    候选顺序）。落 ``settings.json`` 的 ``model_order_pinned``，重启不丢。
+    """
+    _ensure_local(request)
+    body = await request.json()
+    model = body.get("model")
+    pinned_flag = body.get("pinned")
+    if not isinstance(model, str) or not model.strip():
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 model"}})
+    if not isinstance(pinned_flag, bool):
+        raise HTTPException(status_code=400, detail={"error": {"message": "pinned 须为布尔值"}})
+    model = model.strip()
+    state = get_state()
+    order = getattr(state, "model_order", None) or {}
+    if model not in order:
+        raise HTTPException(status_code=404,
+                            detail={"error": {"message": f"模型不在顺序配置里: {model}"}})
+    current = _model_order_pinned(order)
+    if pinned_flag:
+        current = [model] + [m for m in current if m != model]  # 最近置顶的在最上
+    else:
+        current = [m for m in current if m != model]
+    settings_mod.save_settings({_MODEL_ORDER_PINNED_KEY: current})
+    return {"ok": True, "model": model, "pinned": pinned_flag, "pinned_list": current}
 
 
 @app.post("/ui/api/model-order/mark-clear")
