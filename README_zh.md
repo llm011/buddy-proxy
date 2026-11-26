@@ -18,6 +18,7 @@
 - **消息压缩**（`--optimize-context`）— 压缩长历史 / 大 schema / 超大工具输出，大幅降低 token 消耗
 - **工具调用** — 完整的 function calling 支持，自动过滤无效工具定义；`tool_choice` 在 OpenAI / Anthropic 两种形态之间统一归一化，绝不会以 object 形式发给上游
 - **DSML 解析** — 自动识别并转换 DeepSeek Markup Language 工具调用
+- **推理与正文分流** — Trae 非流式 Chat Completions 将上游推理保存在 `message.reasoning_content`，不混入回答正文；仅推理或工具调用响应也保留该字段，供兼容客户端续轮回传。这不会主动开启 thinking，也不保证每个上游都返回推理。Trae 流式/非流式均保留上游 usage 扩展和显式缓存零值；缺失的缓存证据不补零，不改缓存或积分估算。
 - **流式输出** — SSE 实时返回，带空闲 / 总时长双重超时保护
 - **双协议** — 同一批模型同时提供 OpenAI（`/v1/chat/completions`）与 Anthropic（`/v1/messages`，即 Claude Code）；各 provider 负责把响应转回客户端要的协议
 
