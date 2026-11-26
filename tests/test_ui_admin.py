@@ -903,40 +903,99 @@ def test_model_order_get_lists_exactly_the_config_keys(env):
     assert env.client.get("/ui/api/model-order").json()["items"] == []
 
 
-def test_model_order_pin_persists_recency_and_filters_stale_models(env):
-    """置顶仅改变顺序页展示，最近置顶在前且不会把历史已删键返回给前端。"""
-    env.state.model_order = {"fake-model": [], "fake-stream-model": []}
-    settings_mod.save_settings({"model_order_pinned": ["gone", "fake-model", "fake-model"]})
+def test_model_order_pin_get_set_repin_and_unpin(env):
+    """置顶持久化且最近置顶最前；取消只删展示偏好，绝不改路由候选。"""
+    env.state.model_order = {
+        "fake-model": ["fakeprov/fake-model"],
+        "fake-stream-model": ["fakestream/fake-stream-model"],
+    }
+    original_order = {key: list(value) for key, value in env.state.model_order.items()}
+    settings_mod.save_settings({"model_order": original_order})
 
-    body = env.client.get("/ui/api/model-order").json()
-    assert body["pinned"] == ["fake-model"], "历史删掉的模型和重复项都不能占排序位"
+    assert env.client.get("/ui/api/model-order").json()["pinned"] == []
 
-    r = env.client.post("/ui/api/model-order/pin",
-                        json={"model": "fake-stream-model", "pinned": True})
-    assert r.status_code == 200, r.text
-    assert r.json()["pinned_list"] == ["fake-stream-model", "fake-model"]
-    assert settings_mod.load_settings()["model_order_pinned"] == [
+    def pin(model, pinned):
+        response = env.client.post(
+            "/ui/api/model-order/pin", json={"model": model, "pinned": pinned})
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    assert pin("fake-model", True)["pinned_list"] == ["fake-model"]
+    assert pin("fake-stream-model", True)["pinned_list"] == [
         "fake-stream-model", "fake-model"]
+    # 再次置顶已有项 = 提到最前，而不是追加重复项。
+    assert pin("fake-model", True)["pinned_list"] == [
+        "fake-model", "fake-stream-model"]
+    assert pin("fake-stream-model", False) == {
+        "ok": True, "model": "fake-stream-model", "pinned": False,
+        "pinned_list": ["fake-model"],
+    }
 
-    # 重复点击置顶只移动到最前，不制造重复项；取消后立即从 GET 中消失。
-    r = env.client.post("/ui/api/model-order/pin",
-                        json={"model": "fake-model", "pinned": True})
-    assert r.json()["pinned_list"] == ["fake-model", "fake-stream-model"]
-    r = env.client.post("/ui/api/model-order/pin",
-                        json={"model": "fake-model", "pinned": False})
-    assert r.json()["pinned_list"] == ["fake-stream-model"]
-    assert env.client.get("/ui/api/model-order").json()["pinned"] == ["fake-stream-model"]
+    assert env.client.get("/ui/api/model-order").json()["pinned"] == ["fake-model"]
+    saved = settings_mod.load_settings()
+    assert saved["model_order_pinned"] == ["fake-model"]
+    assert saved["model_order"] == original_order
+    assert env.state.model_order == original_order
 
 
-@pytest.mark.parametrize("payload, status", [
+def test_model_order_get_filters_deleted_and_duplicate_pins_without_writing(env):
+    """模型删除后 GET 过滤残留置顶；读取本身不回写 settings。"""
+    env.state.model_order = {
+        "fake-model": ["fakeprov/fake-model"],
+        "fake-stream-model": ["fakestream/fake-stream-model"],
+    }
+    settings_mod.save_settings({
+        "model_order": env.state.model_order,
+        "model_order_pinned": [
+            "deleted-model", "fake-model", "fake-model", 42,
+            "fake-stream-model",
+        ],
+    })
+    assert env.client.get("/ui/api/model-order").json()["pinned"] == [
+        "fake-model", "fake-stream-model"]
+
+    env.state.model_order.pop("fake-model")
+    settings_mod.save_settings({"model_order": env.state.model_order})
+    assert env.client.get("/ui/api/model-order").json()["pinned"] == [
+        "fake-stream-model"]
+    # 文档约定 GET 无副作用：残留等下一次 POST 时再收敛，不在读取时偷偷写盘。
+    assert settings_mod.load_settings()["model_order_pinned"] == [
+        "deleted-model", "fake-model", "fake-model", 42, "fake-stream-model"]
+
+
+@pytest.mark.parametrize("payload, expected_status", [
+    ({}, 400),
+    ({"model": "fake-model"}, 400),
+    ({"pinned": True}, 400),
     ({"model": "", "pinned": True}, 400),
+    ({"model": "   ", "pinned": True}, 400),
+    ({"model": 42, "pinned": True}, 400),
+    ({"model": "fake-model", "pinned": 1}, 400),
     ({"model": "fake-model", "pinned": "true"}, 400),
-    ({"model": "missing", "pinned": True}, 404),
+    ({"model": "missing-model", "pinned": True}, 404),
 ])
-def test_model_order_pin_rejects_invalid_or_unknown_model(env, payload, status):
-    env.state.model_order = {"fake-model": []}
-    r = env.client.post("/ui/api/model-order/pin", json=payload)
-    assert r.status_code == status
+def test_model_order_pin_rejects_invalid_input(env, payload, expected_status):
+    env.state.model_order = {"fake-model": ["fakeprov/fake-model"]}
+    response = env.client.post("/ui/api/model-order/pin", json=payload)
+    assert response.status_code == expected_status, response.text
+    assert "model_order_pinned" not in settings_mod.load_settings()
+    assert env.state.model_order == {"fake-model": ["fakeprov/fake-model"]}
+
+
+@pytest.mark.parametrize("payload", [None, [], "not-an-object", 42])
+def test_model_order_pin_rejects_non_object_json(env, payload):
+    env.state.model_order = {"fake-model": ["fakeprov/fake-model"]}
+    response = env.client.post("/ui/api/model-order/pin", json=payload)
+    assert response.status_code == 400, response.text
+    assert "JSON 对象" in response.text
+
+
+def test_model_order_pin_rejects_malformed_json(env):
+    env.state.model_order = {"fake-model": ["fakeprov/fake-model"]}
+    response = env.client.post(
+        "/ui/api/model-order/pin", content="{", headers={"Content-Type": "application/json"})
+    assert response.status_code == 400, response.text
+    assert "JSON 对象" in response.text
 
 
 def test_model_order_get_reports_cooldown_marks(env):
