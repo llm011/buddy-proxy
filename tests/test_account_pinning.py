@@ -20,6 +20,7 @@ import pathlib
 import re
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -65,9 +66,13 @@ def _run_js(body: str, files=None) -> str:
         + "\n(async () => {\n" + body
         + "\n})().catch(e => { console.error(e); process.exit(1); });\n"
     )
-    proc = subprocess.run(
-        ["node", "-e", script], capture_output=True, text=True, timeout=30,
-    )
+    # 九个静态文件拼起来超过 Linux exec 的单参数上限；node -e 在 CI 会 E2BIG。
+    with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8") as script_file:
+        script_file.write(script)
+        script_file.flush()
+        proc = subprocess.run(
+            ["node", script_file.name], capture_output=True, text=True, timeout=30,
+        )
     assert proc.returncode == 0, f"node 执行失败:\n{proc.stderr}"
     return proc.stdout
 
