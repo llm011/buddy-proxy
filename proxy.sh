@@ -268,6 +268,15 @@ cmd_ui() {
         return 0
     fi
     "$opener" "$url" </dev/null >/dev/null 2>&1 &
+    local opener_pid=$!
+    local opener_timeout="${BUDDY_OPEN_UI_TIMEOUT:-10}"
+    (
+        for ((i = 0; i < opener_timeout; i++)); do
+            kill -0 "$opener_pid" 2>/dev/null || exit 0
+            sleep 1
+        done
+        kill "$opener_pid" 2>/dev/null || true
+    ) </dev/null >/dev/null 2>&1 &
 }
 
 cmd_login() {

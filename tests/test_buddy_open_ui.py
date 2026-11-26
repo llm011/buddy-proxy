@@ -56,7 +56,7 @@ def test_start_and_restart_return_when_system_opener_hangs(tmp_path: pathlib.Pat
         "PATH": str(bin_dir),
         "HOME": str(tmp_path),
         "BUDDY_HOME": str(work),
-        "BUDDY_TEST": "1",
+        "BUDDY_OPEN_UI_TIMEOUT": "1",
     }
     try:
         for command in ("start", "restart"):
@@ -74,6 +74,20 @@ def test_start_and_restart_return_when_system_opener_hangs(tmp_path: pathlib.Pat
         assert open_log.read_text(encoding="utf-8").splitlines() == [
             "http://127.0.0.1:8787/ui", "http://127.0.0.1:8787/ui",
         ]
+        # 产品侧看门狗也必须回收挂死的 opener，不能只把清理责任转嫁给调用方。
+        pids = [int(pid) for pid in open_pids.read_text().splitlines()]
+        for _ in range(50):
+            alive = []
+            for pid in pids:
+                try:
+                    os.kill(pid, 0)
+                    alive.append(pid)
+                except ProcessLookupError:
+                    pass
+            if not alive:
+                break
+            time.sleep(0.1)
+        assert not alive, f"opener 超时后仍存活: {alive}"
     finally:
         # 异步 opener 是测试故意留下的短寿命进程，只按它自己写出的 pid 清理。
         if open_pids.exists():

@@ -521,6 +521,17 @@ open_ui() {
         return 0
     fi
     "$opener" "$UI_URL" </dev/null >/dev/null 2>&1 &
+    local opener_pid=$!
+    # 看门狗同样脱离三路 fd：opener 正常退出立即结束监控；像本次这样卡死则 10s 回收，
+    # 避免每次 restart 都永久积累一个进程。短 timeout 只供回归测试覆盖回收路径。
+    local opener_timeout="${BUDDY_OPEN_UI_TIMEOUT:-10}"
+    (
+        for ((i = 0; i < opener_timeout; i++)); do
+            kill -0 "$opener_pid" 2>/dev/null || exit 0
+            sleep 1
+        done
+        kill "$opener_pid" 2>/dev/null || true
+    ) </dev/null >/dev/null 2>&1 &
 }
 
 # ---------------------------------------------------------------------------
