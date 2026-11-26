@@ -182,6 +182,8 @@ class DoubaoProvider(BaseProvider):
         self._agent_session: str | None = None
         # 最近一次签到时的服务端登录态：False=明确未登录，None=没探到/没探过
         self._login_state: bool | None = None
+        # 被动签到查询是否因为 App 未运行而跳过（不自动拉起）；用于给出可操作提示
+        self._checkin_launch_skipped = False
 
     # ------------------------------------------------------------------
     # BaseProvider 接口
@@ -206,13 +208,16 @@ class DoubaoProvider(BaseProvider):
         """
         return
 
-    async def _ensure_started(self) -> None:
+    async def _ensure_started(self, *, allow_launch: bool = True) -> None:
         """异步确保 CDPDoubaoClient 已启动（惰性启动，加锁防并发双重启动）。
 
         ``_started`` 只在**启动过程**成功过就置 True，之后不复位——所以还必须
         看 ``client.is_ready``：认证/聊天页可以单独回滚（App 刷新、切换账号），
         那时 ``_started=True`` 但 ``is_ready=False``，只认前者会把通道永久判成
         「未登录」。
+
+        ``allow_launch=False`` 供签到状态这类被动查询使用：只复用已有 CDP，
+        不拉起豆包工作 App（原因见 ``CDPDoubaoClient.start``）。
         """
         if self._is_connected():
             return
@@ -221,23 +226,28 @@ class DoubaoProvider(BaseProvider):
                 return
             if self._started:
                 # 启动过一次但已失效：复用过的 CDP 会话/页面没了，重连
-                await self._reconnect()
+                await self._reconnect(allow_launch=allow_launch)
                 return
-            log.info("DoubaoProvider: starting CDP client")
+            log.info("DoubaoProvider: starting CDP client (allow_launch=%s)",
+                     allow_launch)
             try:
-                await self._client.start()
+                await self._client.start(allow_launch=allow_launch)
             except Exception as exc:
                 log.error("DoubaoProvider: client start failed: %s", exc)
                 raise HTTPException(
                     status_code=502,
                     detail=f"doubao client start failed: {exc}",
                 ) from exc
-            self._started = True
+            # 被动启动没找到现有 CDP 时会正常返回但并未启动任何进程，不能把
+            # _started 置 True——否则后续聊天请求会误判成「启动过但连接丢了」
+            # （409），而不是首次连接失败（401）。
+            if allow_launch or self._client.is_ready:
+                self._started = True
 
     def _is_connected(self) -> bool:
         return self._started and bool(self._client.is_ready)
 
-    async def _reconnect(self) -> bool:
+    async def _reconnect(self, *, allow_launch: bool = True) -> bool:
         """CDP 断线后重建连接；成功返回 True（并发请求只重连一次）。
 
         网关只在启动时连一次 CDP。豆包 App 刷新页面 / 被关掉再打开后，旧
@@ -252,17 +262,19 @@ class DoubaoProvider(BaseProvider):
             if self._is_connected():
                 return True  # 排队期间别的请求已经重连好了
             action = "restart" if self._started else "start"
-            log.info("DoubaoProvider: %s CDP client", action)
+            log.info("DoubaoProvider: %s CDP client (allow_launch=%s)",
+                     action, allow_launch)
             try:
                 if self._started:
-                    await self._client.restart()
+                    await self._client.restart(allow_launch=allow_launch)
                 else:
-                    await self._client.start()
+                    await self._client.start(allow_launch=allow_launch)
             except Exception as exc:
                 log.error("DoubaoProvider: CDP %s failed: %s", action,
                           describe_exception(exc))
                 return False
-            self._started = True
+            if allow_launch or self._client.is_ready:
+                self._started = True
             return bool(self._client.is_ready)
 
     async def _with_reconnect(self) -> None:
@@ -708,20 +720,25 @@ class DoubaoProvider(BaseProvider):
     # 签到（/ui 自动打卡循环消费；同步实现，调用方经 asyncio.to_thread 包装）
     # ------------------------------------------------------------------
 
-    def _run_checkin(self, fn: Any) -> Any:
+    def _run_checkin(self, fn: Any, *, allow_launch: bool = True) -> Any:
         """在独立事件循环里把 CDP 客户端拉到就绪，再执行同步的签到逻辑。
 
         ``checkin_status``/``checkin_claim`` 是被 ``benefits`` 用 to_thread
         调用的**同步**方法，而 CDP 客户端的启动/登录等待是异步的——这里用
         ``asyncio.run`` 起一个一次性循环（线程里没有运行中的循环，不会冲突；
         签到查询本身全程同步，不会和代理主循环抢事件循环）。
+
+        ``allow_launch=False`` 用于状态查询：面板轮询与自动打卡会频繁调用它，
+        不能因为查状态就把用户已经退出的豆包工作 App 拉起来。手动领取仍为
+        True——那是用户明确点击后的动作。
         """
         client = self._client
         # 服务端登录态三态（None=没探到）；只有明确未登录才在提示里说「未登录」。
         self._login_state: bool | None = None
+        self._checkin_launch_skipped = False
 
         async def _ready() -> None:
-            await self._ensure_started()
+            await self._ensure_started(allow_launch=allow_launch)
             # 登录探针和签到请求共用独立活动页（见 checkin.py）。不要再从聊天页
             # 提前探一次：聊天页探针失败不能挡住活动页自己的三态探测与归因。
 
@@ -733,6 +750,7 @@ class DoubaoProvider(BaseProvider):
             log.debug("doubao checkin: client not ready: %s", type(exc).__name__)
             return None
         if not client.is_ready or self._login_state is False:
+            self._checkin_launch_skipped = not allow_launch and not self._is_connected()
             return None
         result = fn(client)
         # 活动页的登录探针结果用于失败提示；没有新证据时保持 unknown。
@@ -753,7 +771,8 @@ class DoubaoProvider(BaseProvider):
             status, _path = doubao_checkin.fetch_checkin_status(client)
             return status
 
-        status = self._run_checkin(_query)
+        # 状态查询是面板轮询/自动打卡的被动路径，只复用现有 CDP，不拉起 App。
+        status = self._run_checkin(_query, allow_launch=False)
         if isinstance(status, dict):
             return status
         return {
@@ -766,6 +785,8 @@ class DoubaoProvider(BaseProvider):
 
     def _checkin_failure_message(self) -> str:
         """签到查不到时的提示：区分「没登录」和「接口没认出」，别让用户瞎猜。"""
+        if self._checkin_launch_skipped:
+            return "豆包工作未运行：打开 App 后可查询签到（状态查询不会自动拉起）"
         if self._login_state is False:
             return "豆包未登录：请在豆包 App 里重新扫码登录后重试"
         if self._login_state is True:

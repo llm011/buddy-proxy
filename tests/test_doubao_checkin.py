@@ -454,8 +454,12 @@ def _provider_with(monkeypatch, responses):
     provider = DoubaoProvider()
     client = FakeClient(responses)
     provider._client = client
-    async def _started():
+    client.launch_flags = []
+
+    async def _started(*, allow_launch=True):
+        client.launch_flags.append(allow_launch)
         provider._started = True
+
     monkeypatch.setattr(provider, "_ensure_started", _started)
     return provider, client
 
@@ -466,6 +470,7 @@ def test_provider_status_ok(monkeypatch, fake_page):
     assert status["checked_in"] is True and "query_failed" not in status
     assert status["daily_credit"] == 200
     assert client._login_state is True
+    assert client.launch_flags == [False], "状态查询必须禁止拉起 App"
 
 
 def test_provider_status_is_query_failed_not_unsigned(monkeypatch, fake_page):
@@ -475,6 +480,16 @@ def test_provider_status_is_query_failed_not_unsigned(monkeypatch, fake_page):
     assert status["checked_in"] is False
 
 
+def test_provider_status_explains_app_not_running(monkeypatch, fake_page):
+    """被动查询发现 App 没开时，提示要可操作，不能说成未登录或接口故障。"""
+    provider, client = _provider_with(monkeypatch, _responses(checked=True))
+    client.ready = False
+    status = provider.checkin_status()
+    assert status["query_failed"] is True
+    assert "豆包工作未运行" in status["message"]
+    assert "不会自动拉起" in status["message"]
+
+
 def test_provider_claim_refuses_when_already_signed(monkeypatch, fake_page):
     provider, client = _provider_with(monkeypatch, _responses(checked=True))
     state = provider.checkin_claim()
@@ -482,6 +497,7 @@ def test_provider_claim_refuses_when_already_signed(monkeypatch, fake_page):
     assert all(path != doubao_checkin._CLAIM_PATH for path, _ in client.requests)
     assert [path for path, _ in client.requests] == [
         doubao_checkin._LOGIN_PROBE, doubao_checkin._DETAIL_PATH]
+    assert client.launch_flags == [True], "用户主动签到仍允许拉起 App"
 
 
 def test_provider_checkin_uses_only_the_isolated_page_probe(monkeypatch, fake_page):

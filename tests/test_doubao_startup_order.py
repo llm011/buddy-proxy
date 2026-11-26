@@ -90,8 +90,8 @@ class _Harness:
         monkeypatch.setattr(cdp_client, "_main_app_installed", lambda: True)
         self.client = client
 
-    def run_start(self) -> None:
-        asyncio.run(self.client.start())
+    def run_start(self, *, allow_launch: bool = True) -> None:
+        asyncio.run(self.client.start(allow_launch=allow_launch))
 
 
 def test_reuses_existing_cdp_without_launching(monkeypatch: pytest.MonkeyPatch):
@@ -108,6 +108,19 @@ def test_open_app_first_and_reuse_its_cdp(monkeypatch: pytest.MonkeyPatch):
     h.run_start()
     assert h.calls == ["open", "connect"]
     assert h.popen_cmds == []
+
+
+def test_passive_start_never_launches_app_or_helper(monkeypatch: pytest.MonkeyPatch):
+    """签到状态查询必须零启动：App 没开就返回，不执行 open -a / Helper。"""
+    h = _Harness(monkeypatch, cdp_after_open=True)
+    h.run_start(allow_launch=False)
+    assert h.calls == [], "被动查询不能探测进程、拉起 App 或启动 Helper"
+    assert h.popen_cmds == []
+    assert h.client.is_ready is False
+
+    # 同一条客户端后续收到真实请求时仍可正常启动，不能把能力永久关掉。
+    h.run_start()
+    assert h.calls == ["open", "connect"]
 
 
 def test_helper_fallback_refused_when_main_app_still_running(
