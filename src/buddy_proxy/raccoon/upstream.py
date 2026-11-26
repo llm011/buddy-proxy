@@ -136,13 +136,15 @@ def build_chat_body(body: dict[str, Any], *, model: str, stream: bool) -> dict[s
     """把客户端请求整理成上游 chat 体。
 
     只做**必要**的整形，不重写协议：上游本身就是 OpenAI 形态，多改一处就多
-    一处「问 A 答 B」的风险。具体只做三件事：
+    一处「问 A 答 B」的风险。具体只做两件事：
 
     1. 强制 ``model`` 为目录里的真名（客户端可能带 ``raccoon/`` 前缀）；
-    2. ``stream`` 按本次转发路径对齐（流式/非流式由调用方决定，不由客户端
-       的 body 决定——两条路径的上游行为不同）；
-    3. 流式时补 ``stream_options.include_usage``：上游默认不吐 usage，而
-       积分/面板都要它。
+    2. ``stream`` 按调用方决定（不由客户端的 body 决定）。
+
+    ⚠️ ``stream`` 目前**恒为 False**：v1 的流式端点坏了，所有上游请求都走
+    非流式，客户端要流式由 ``provider._synthesize_openai_stream`` 本地合成。
+    所以 ``stream_options.include_usage`` 那段现在走不到——保留是因为签名有
+    测试锁着，且万一以后 v1 修好了流式，这里能直接用。
     """
     out = dict(body)
     out["model"] = model

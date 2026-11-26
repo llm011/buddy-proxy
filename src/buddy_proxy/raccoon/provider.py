@@ -2,12 +2,19 @@
 
 ## 协议
 
-上游本身就是 OpenAI chat-completions 形态（``/api/web/llm/v2/chat/completions``），
-所以请求/响应以**直通**为骨架（kimi / mimo 同款），只做三处必要整形：
+上游是 OpenAI chat-completions 形态，但走的是 **v1** 端点
+（``/api/web/llm/v1/chat/completions``）：v2 有风控闸（``200108``），会拦
+「非官方客户端」形态的请求，同一账号同一秒 v2 回 429、v1 回 200。
 
-1. 模型名对齐目录真名；
-2. ``stream`` 由本次转发路径决定；
-3. 流式补 ``stream_options.include_usage``（上游默认不吐 usage）。
+⚠️ v1 的**流式端点是坏的**：回 HTTP 200 的 SSE，内容却是
+``data:{"data":null,"status":{"code":9,"message":"invalid upstream stream
+response"}}``，客户端拿到空回复。所以：
+
+* 发给上游的请求**一律非流式**（``build_chat_body(..., stream=False)``）；
+* 客户端要流式时，拿完整 JSON 在本地合成 SSE
+  （``_synthesize_openai_stream`` / ``_synthesize_anthropic_stream``）。
+
+代价是首字延迟等于整条响应时间——这是端点的限制，不是实现取舍。
 
 认证只有 ``xhx_token`` 一个头，无签名、无设备指纹。
 
@@ -92,15 +99,14 @@ log = logging.getLogger(__name__)
 
 #: 流式：read 是「相邻两次读」的上限。小浣熊实测 411K token 输入 14.2 秒返回，
 #: 首字不算慢；给 120s 足够吸收大上下文的排队。
-_TIMEOUT_STREAM = httpx.Timeout(connect=15.0, read=120.0, write=60.0, pool=15.0)
-#: 非流式：一次 read 拿到全部响应 = 总时长上限。
+#: 上游只有非流式一条路（v1 的流式端点坏了），所以只有这一个超时。
+#: read=300s 是「整条响应」的上限——客户端要流式时首字延迟也受它约束，
+#: 因为内容得等上游整条返回才能开始合成。
 _TIMEOUT_NONSTREAM = httpx.Timeout(connect=15.0, read=300.0, write=60.0, pool=15.0)
 #: 兼容旧名。
 _TIMEOUT = _TIMEOUT_NONSTREAM
 #: failover 循环的尝试期总预算（只挡「还没开始试」的尝试）。
 _ATTEMPT_DEADLINE_S = 240.0
-#: 流式首事件闸门的缓冲行上限（防异常上游无界攒内存）。
-_GATE_BUFFER_MAX_LINES = 256
 
 #: 模型表放 JSON（models.json，随包分发）：实测要增删模型改文件就行。
 _MODELS_JSON = Path(__file__).with_name("models.json")
@@ -354,7 +360,7 @@ class RaccoonProvider(BaseProvider):
 
             # v1 端点的流式是坏的（上游回 SSE 但内容是错误信息），所以**所有
             # 请求都走非流式**；客户端要流式的话，拿到完整 JSON 后本地合成。
-            # 见 CHAT_PATH 的注释和 _synthesize_sse 的说明。
+            # 见 CHAT_PATH 的注释和 _synthesize_openai_stream 的说明。
             upstream_body = build_chat_body(body, model=upstream_model, stream=False)
             # 必须带设备头：绑定成功后上游按设备认会话，聊天却不声明自己属于
             # 那台设备 = 未绑定设备在调模型，正是 200108 风控抓的形态。
@@ -432,7 +438,7 @@ class RaccoonProvider(BaseProvider):
             # 200：过首事件闸门（校验 model 回显 + 识别带内错误）
             # 流式请求也用非流式闸门——上游已经被强制为非流式了，响应是完整 JSON。
             try:
-                gate = await self._gate_first_event(resp, False, upstream_model)
+                gate = await self._gate_first_event(resp, upstream_model)
             except BaseException:
                 lease.release()
                 await _drain(resp)
@@ -577,77 +583,36 @@ class RaccoonProvider(BaseProvider):
 
     # ---- 首事件闸门 --------------------------------------------------
 
-    async def _gate_first_event(self, resp: httpx.Response, stream: bool,
+    async def _gate_first_event(self, resp: httpx.Response,
                                 upstream_model: str) -> "_Gate":
-        """压住第一个上游事件再决定透传还是换号。
+        """校验上游响应再决定采用还是换号。
 
         三件事：
 
-        1. **识别带内错误**：上游偶发把错误塞进 200 的流里（``data: {"error":...}``）。
-        2. **校验 model 回显**：未知模型会静默回落默认模型，必须比对首帧。
-        3. **识别空流**：首事件前断流 = 假成功，换号。
+        1. **识别带内错误**：上游偶发把错误塞进 200 的响应里（``{"error":...}``）。
+        2. **校验 model 回显**：未知模型会静默回落默认模型，必须比对。
+        3. **识别非 JSON**：拿不到 payload = 假成功，换号。
 
-        校验通过后缓冲行随透传补放，客户端无损。
+        只处理**非流式**响应。v1 端点的流式是坏的（回 SSE 但内容是错误信息），
+        所以上游请求全部非流式；客户端要流式由 ``_synthesize_openai_stream``
+        在本地合成。以前这里还有一条读 ``aiter_lines()`` 的 SSE 分支，改成
+        全非流式之后不可达，已删除——留着会让后来者以为流式仍走上游。
         """
-        if not stream:
-            try:
-                payload = resp.json()
-            except ValueError:
-                return _Gate(resp=resp, committed=True, payload=None)
-            if isinstance(payload, dict):
-                err = payload.get("error")
-                if isinstance(err, dict):
-                    return _Gate(resp=resp, error_code=int(err.get("code") or 502),
-                                 error_message=str(err.get("message") or ""))
-                if not model_echo_matches(payload, upstream_model):
-                    return _Gate(resp=resp, model_mismatch=True,
-                                 echoed_model=str(payload.get("model") or ""))
-            return _Gate(resp=resp, committed=True,
-                         payload=payload if isinstance(payload, dict) else None)
-
-        buffered: list[str] = []
-        lines = resp.aiter_lines()
-        saw_any = False
         try:
-            async for line in lines:
-                buffered.append(line)
-                if len(buffered) > _GATE_BUFFER_MAX_LINES:
-                    # 上游一直发非语义事件：按已到达透传放行，别无界攒内存
-                    return _Gate(resp=resp, committed=True, buffered=buffered,
-                                 lines=lines)
-                stripped = line.strip()
-                if not stripped.startswith("data:"):
-                    continue
-                data = stripped[5:].strip()
-                if not data or data == "[DONE]":
-                    continue
-                saw_any = True
-                try:
-                    chunk = json.loads(data)
-                except ValueError:
-                    continue
-                if not isinstance(chunk, dict):
-                    continue
-                err = chunk.get("error")
-                if isinstance(err, dict):
-                    return _Gate(resp=resp, error_code=int(err.get("code") or 502),
-                                 error_message=str(err.get("message") or ""),
-                                 lines=lines)
-                if not model_echo_matches(chunk, upstream_model):
-                    return _Gate(resp=resp, model_mismatch=True,
-                                 echoed_model=str(chunk.get("model") or ""),
-                                 lines=lines)
-                # 见到任意带 choices 的帧即认为已提交（内容随透传补放）
-                if chunk.get("choices") is not None:
-                    return _Gate(resp=resp, committed=True, buffered=buffered,
-                                 lines=lines)
-                # 只有 usage / 心跳：继续等下一条
-        except httpx.TimeoutException:
-            return _Gate(resp=resp, eof=True, timed_out=True, lines=lines)
-        except httpx.HTTPError as exc:
-            log.warning("raccoon 上游流异常: %s: %s", type(exc).__name__, exc)
-            return _Gate(resp=resp, eof=True, lines=lines)
-        return _Gate(resp=resp, eof=True, saw_any=saw_any, lines=lines)
+            payload = resp.json()
+        except ValueError:
+            return _Gate(resp=resp, committed=True, payload=None)
+        if isinstance(payload, dict):
+            err = payload.get("error")
+            if isinstance(err, dict):
+                return _Gate(resp=resp, error_code=int(err.get("code") or 502),
+                             error_message=str(err.get("message") or ""))
+            if not model_echo_matches(payload, upstream_model):
+                return _Gate(resp=resp, model_mismatch=True,
+                             echoed_model=str(payload.get("model") or ""))
+        return _Gate(resp=resp, committed=True,
+                     payload=payload if isinstance(payload, dict) else None)
+
 
     # ---- 模型目录刷新 --------------------------------------------------
 

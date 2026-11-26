@@ -1246,3 +1246,47 @@ def test_ensure_device_bound_is_best_effort(monkeypatch):
     prov._ensure_device_bound("acct-x", "tok")
     assert "acct-x" not in prov._bound_ok, "失败不该标记为已绑定"
     assert "acct-x" in prov._bind_retry_after, "失败要记重试时刻，别每个请求都撞"
+
+
+def test_gate_only_handles_non_stream():
+    """闸门只处理非流式响应，不能再出现读 SSE 的分支。
+
+    v1 端点流式是坏的，上游请求全部非流式，客户端要流式由合成流负责。以前
+    闸门里有一条读 ``aiter_lines()`` 的 SSE 分支，改成全非流式之后不可达；
+    留着会让后来者以为流式仍走上游，排查时往错的方向找。
+
+    这条锁两个点：签名里没有 ``stream`` 参数、源码里没有 ``aiter_lines``。
+    """
+    import inspect
+
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    sig = inspect.signature(RaccoonProvider._gate_first_event)
+    assert "stream" not in sig.parameters, (
+        "闸门不该再有 stream 参数——上游只有非流式一条路")
+
+    src = inspect.getsource(RaccoonProvider._gate_first_event)
+    # 去掉 docstring 再判：docstring 里**应该**说明「以前有 SSE 分支、为什么
+    # 删掉」，那是必要的历史记录，不算实现。只查真正的代码行。
+    body = src.split('"""')
+    code_src = body[0] + (body[2] if len(body) > 2 else "")
+    code = [ln for ln in code_src.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("aiter_lines" in ln for ln in code), (
+        "闸门里不该再读 SSE——上游非流式，那段分支不可达")
+    assert "_GATE_BUFFER_MAX_LINES" not in code_src, "缓冲行上限随 SSE 分支一起删掉了"
+
+
+def test_no_orphan_stream_timeout_constant():
+    """``_TIMEOUT_STREAM`` 不该再存在（上游只有非流式，它是孤儿）。
+
+    留着会让人以为流式还单独走一套超时，实际所有请求都吃
+    ``_TIMEOUT_NONSTREAM``。这条顺便把「首字延迟受 300s 约束」这个后果
+    记在测试里。
+    """
+    from buddy_proxy.raccoon import provider
+
+    assert not hasattr(provider, "_TIMEOUT_STREAM"), (
+        "_TIMEOUT_STREAM 已无使用者，删掉；上游只有非流式一条路")
+    assert provider._TIMEOUT_NONSTREAM.read == 300.0, (
+        "非流式 read 超时 300s 是「整条响应」上限，客户端流式的首字延迟"
+        "也受它约束——改这个值要想清楚")
