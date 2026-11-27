@@ -2061,6 +2061,18 @@ def _new_local_task_id() -> str:
     return f"local-{int(_t.time() * 1000)}-{_u.uuid4().hex[:6]}"
 
 
+# 启动时把上一进程留下的 SUBMITTING / RUNNING 标成 INTERRUPTED，别让 UI 永远转圈。
+# 放在 import 时跑而不是 on_event("startup")：后者 FastAPI 已标 deprecated（-W error 直接炸），
+# 而 reap 只是同步文件 I/O，本模块每个进程只 import 一次，此刻 _running 必然为空，语义正好。
+# 注意：测试套件 import 这个模块时跑的是**真实**的 tasks 路径（fixture 的 env 还没生效）——
+# 只会把上一进程留下的进行中记录标成 INTERRUPTED，不会误伤（此时没有在跑的）。
+try:
+    from ...runninghub import runner as _rh_runner_for_reap
+    _rh_runner_for_reap.reap_orphans()
+except Exception:  # noqa: BLE001 — 辅助功能不能炸掉整个 UI 模块
+    pass
+
+
 @app.post("/ui/api/runninghub/tasks/submit")
 async def ui_runninghub_tasks_submit(request: Request):
     """提交一个站内任务到队列，**立即返回**本地 taskId；后台执行器负责推进状态。
@@ -2105,7 +2117,7 @@ async def ui_runninghub_tasks_submit(request: Request):
         "created_at": now,
         "upstreamTaskId": None,
     })
-    # 后台跑；进程重启会丢（记录停在 SUBMITTING/RUNNING），UI 把这类标成「中断」
+    # 后台跑；进程重启会丢——模块 import 时 reap_orphans() 把这类标成 INTERRUPTED
     asyncio.create_task(rh_runner.execute_task(
         account, task_id, persist_session=rh_store.update_session, balance_before=balance_before,
     ))

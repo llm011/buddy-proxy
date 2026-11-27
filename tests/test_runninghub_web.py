@@ -615,3 +615,69 @@ def test_ui_submit_requires_email_account(isolated_store: Path, monkeypatch: pyt
     store.upsert_account(api_key="938bcfc2f8da4650abdf67b617b533a0", label="纯key")
     r = _client(monkeypatch).post("/ui/api/runninghub/tasks/submit", json={"webapp_id": "w", "nodeInfoList": []})
     assert r.status_code == 400 and "邮箱" in r.json()["detail"]["error"]["message"]
+
+
+def test_cancel_before_submit_does_not_spend(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """SUBMITTING 那一两秒点「取消」= 没提交、没扣币。不能等 poll_task 才发现。"""
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    rec = _Recorder({})  # 任何上游调用都会 404 → 如果真提交了测试会红
+    rec.install(monkeypatch)
+    store.upsert_task({"taskId": "local-5", "status": "SUBMITTING", "webappId": "w", "inputs": [], "created_at": time.time()})
+    runner.request_cancel("local-5")
+    out = asyncio.run(runner.execute_task(store.get_account(acc["account_id"]), "local-5"))
+    assert out["status"] == "CANCELLED" and out["submitted"] is False
+    assert rec.calls == [], "提交前取消不该打任何上游接口"
+    assert "local-5" not in runner._cancel_flags
+
+
+def test_cancel_after_submit_marks_submitted(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """已提交再取消：记录要带 submitted=True + upstreamTaskId，UI 才能说清「币已扣」。"""
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    rec = _Recorder({
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"nodes": []}},
+        "/task/webapp/create": {"code": 0, "data": {"taskId": "UP7", "taskStatus": "RUNNING"}},
+        "/task/list": {"code": 0, "data": {"records": [{"taskId": "UP7", "taskStatus": "RUNNING"}]}},
+    })
+    rec.install(monkeypatch)
+    store.upsert_task({"taskId": "local-6", "status": "SUBMITTING", "webappId": "w", "inputs": [], "created_at": time.time()})
+
+    async def _go():
+        t = asyncio.create_task(runner.execute_task(store.get_account(acc["account_id"]), "local-6"))
+        await asyncio.sleep(0.1)
+        runner.request_cancel("local-6")
+        return await asyncio.wait_for(t, 3)
+    out = asyncio.run(_go())
+    assert out["status"] == "CANCELLED" and out["submitted"] is True and out["upstreamTaskId"] == "UP7"
+
+
+def test_submit_rejected_marks_not_submitted(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    rec = _Recorder({
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"nodes": []}},
+        "/task/webapp/create": {"code": 605, "msg": "NOT_ENOUGH_BALANCE"},
+    })
+    rec.install(monkeypatch)
+    store.upsert_task({"taskId": "local-7", "status": "SUBMITTING", "webappId": "w", "inputs": [], "created_at": time.time()})
+    out = asyncio.run(runner.execute_task(store.get_account(acc["account_id"]), "local-7"))
+    assert out["status"] == "FAILED" and out["submitted"] is False and out["closedSource"] is True
+
+
+def test_reap_orphans_marks_stale_running_but_not_inflight(isolated_store: Path):
+    """重启后上一进程的 SUBMITTING/RUNNING 没人推进 → INTERRUPTED；本进程正在跑的不动。"""
+    store.upsert_task({"taskId": "old-running", "status": "RUNNING", "submitted": True, "upstreamTaskId": "U1", "created_at": 1.0})
+    store.upsert_task({"taskId": "old-submit", "status": "SUBMITTING", "created_at": 2.0})
+    store.upsert_task({"taskId": "done", "status": "SUCCESS", "created_at": 3.0})
+    store.upsert_task({"taskId": "live", "status": "RUNNING", "submitted": True, "created_at": 4.0})
+    runner._running.add("live")
+    try:
+        reaped = runner.reap_orphans()
+    finally:
+        runner._running.discard("live")
+    assert sorted(reaped) == ["old-running", "old-submit"]
+    assert store.get_task("old-running")["status"] == "INTERRUPTED" and "重启" in store.get_task("old-running")["error"]
+    assert store.get_task("live")["status"] == "RUNNING"
+    assert store.get_task("done")["status"] == "SUCCESS"

@@ -367,13 +367,14 @@
   function isTaskActive(s) { return TASK_ACTIVE.has(String(s || '').toUpperCase()); }
   function statusLabel(s) {
     return ({ SUBMITTING: '提交中', RUNNING: '生成中', QUEUED: '排队中', SUCCESS: '已完成',
-      FAILED: '失败', TIMEOUT: '超时', CANCELLED: '已取消' })[String(s || '').toUpperCase()] || String(s || '?');
+      FAILED: '失败', TIMEOUT: '超时', CANCELLED: '已取消', INTERRUPTED: '已中断' })[String(s || '').toUpperCase()] || String(s || '?');
   }
   function statusColor(s) {
     s = String(s || '').toUpperCase();
     if (s === 'SUCCESS') return '#10b981';
     if (s === 'FAILED' || s === 'TIMEOUT') return '#ef4444';
     if (s === 'CANCELLED') return '#9ca3af';
+    if (s === 'INTERRUPTED') return '#f59e0b';
     return '#f59e0b';
   }
   function renderTaskOutputs(el, t) {
@@ -448,6 +449,8 @@
               <span>${escapeHtml(fmtDuration(t))}</span>
               ${cost}
               ${active && t.cancelRequested ? '<span style="color:#f59e0b">取消中…</span>' : ''}
+              ${t.status === 'CANCELLED' ? `<span class="muted">${t.submitted ? '已提交到站内，只是不再等待' : '提交前取消，未扣币'}</span>` : ''}
+              ${t.status === 'INTERRUPTED' ? '<span style="color:#f59e0b">服务重启丢了跟踪，去站内「任务历史」看结果</span>' : ''}
               ${t.error ? `<span style="color:#ef4444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px;" title="${escapeHtml(t.error)}">${escapeHtml(t.error)}</span>` : ''}
             </div>
           </div>
@@ -497,6 +500,8 @@
           ${est.priceText || est.estimatedPoint != null ? `<span>预估 ${escapeHtml(est.priceText || '—')} / ${escapeHtml(String(est.estimatedPoint ?? '—'))} 积分</span>` : ''}
           ${t.closedSource ? '<span class="tag tag-money">闭源 · 扣钱包</span>' : ''}
         </div>
+        ${t.status === 'CANCELLED' ? `<div class="muted" style="font-size:12px">${t.submitted ? '站内任务已提交，只是我们不再等待；已扣的过渡币不会退。' : '提交前取消，没有扣币。'}</div>` : ''}
+        ${t.status === 'INTERRUPTED' ? '<div style="color:#f59e0b;font-size:12px">服务重启导致丢失跟踪。站内任务可能已经跑完，去站内「任务历史」查看。</div>' : ''}
         ${t.error ? `<div style="color:#ef4444;font-size:12px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(t.error)}</div>` : ''}
         <details ${inputs.length && !(t.outputs && t.outputs.length) ? 'open' : ''}>
           <summary class="muted" style="cursor:pointer;font-size:12px;">输入参数（${inputs.length}）</summary>

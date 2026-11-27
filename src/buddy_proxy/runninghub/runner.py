@@ -260,6 +260,27 @@ def is_cancelled(task_id: str) -> bool:
     return task_id in _cancel_flags
 
 
+def reap_orphans() -> list[str]:
+    """进程重启后，上一进程留下的 SUBMITTING / RUNNING 记录没人推进了——标成 INTERRUPTED。
+
+    站内任务本身不受影响（可能早就跑完了），只是我们这边丢了跟踪；UI 会提示去
+    站内历史看结果。返回被标记的 taskId 列表。服务启动时调一次。
+    """
+    from . import store as rh_store
+
+    reaped: list[str] = []
+    for t in rh_store.list_tasks():
+        tid = str(t.get("taskId") or "")
+        if t.get("status") in ("SUBMITTING", "RUNNING", "QUEUED") and tid not in _running:
+            rh_store.update_task(
+                tid, status="INTERRUPTED",
+                error="服务重启，丢失跟踪；站内任务可能已跑完，请去站内「任务历史」查看",
+                finishedAt=time.time(),
+            )
+            reaped.append(tid)
+    return reaped
+
+
 def request_cancel(task_id: str) -> bool:
     _cancel_flags.add(task_id)
     return True
@@ -305,6 +326,12 @@ async def execute_task(
     webapp_id = str(rec.get("webappId") or "")
     inputs: list[dict[str, Any]] = list(rec.get("inputs") or [])
     try:
+        # 提交前先看一眼取消：SUBMITTING 那一两秒点「取消」应该等于「没提交、没扣币」，
+        # 不能等 poll_task 才发现——那时站内任务已经跑了
+        if task_id in _cancel_flags:
+            rh_store.update_task(task_id, status="CANCELLED", submitted=False,
+                                 error="提交前已取消", finishedAt=time.time())
+            return rh_store.get_task(task_id)
         acc = WebAccountSession(account, persist=persist_session)
         try:
             sub = await submit_task(acc, webapp_id, inputs)
@@ -312,10 +339,10 @@ async def execute_task(
             status, closed = _finalize_hint(exc)
             rh_store.update_task(task_id, status=status, error=str(exc)[:400],
                                  errorCode=str(exc.raw_code or ""), closedSource=closed,
-                                 upstreamTaskId=None, finishedAt=time.time())
+                                 upstreamTaskId=None, submitted=False, finishedAt=time.time())
             return rh_store.get_task(task_id)
         upstream_id = sub["taskId"]
-        rh_store.update_task(task_id, status="RUNNING", upstreamTaskId=upstream_id,
+        rh_store.update_task(task_id, status="RUNNING", upstreamTaskId=upstream_id, submitted=True,
                              estimate=_slim_estimate(sub["estimate"]),
                              closedSource=bool(closed_source_nodes(sub["estimate"]) != []))
         try:
@@ -327,7 +354,7 @@ async def execute_task(
             status, closed = _finalize_hint(exc)
             rh_store.update_task(task_id, status=status, error=str(exc)[:400],
                                  errorCode=str(exc.raw_code or ""), closedSource=closed,
-                                 finishedAt=time.time())
+                                 submitted=True, finishedAt=time.time())
             return rh_store.get_task(task_id)
         rh_store.update_task(
             task_id, status="SUCCESS", outputs=res.outputs, finishedAt=time.time(),
@@ -379,6 +406,7 @@ __all__ = [
     "execute_task",
     "is_cancelled",
     "poll_task",
+    "reap_orphans",
     "refresh_balance",
     "request_cancel",
     "run_workflow",
