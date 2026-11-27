@@ -97,6 +97,58 @@ IDENTITY_MASK = "[redacted: client identity]"
 #: 会触发拦截的角色。实测见模块 docstring；user / assistant 上游不扫。
 IDENTITY_ROLES = frozenset({"system", "developer"})
 
+#: 掩码之后要一并吃掉的「同一句」尾巴。
+#:
+#: marker 只到逗号为止（逗号是触发条件，见模块 docstring），所以直接替换会留下
+#: 半句残留：
+#:
+#:     You are Claude Code, Anthropic's official CLI for Claude.
+#:     → [redacted: client identity] Anthropic's official CLI for Claude.
+#:
+#: 残留本身不会再触发拦截，但它是一句**没有主语的自我描述**，会污染模型对自身
+#: 身份的推断——实测模型在 thinking 里明确复述了这句残留（「weird developer
+#: message ends "..."」）。掩码的目的是「不告诉上游是谁」，不是「留半句谜语」。
+#:
+#: 所以命中后，从 marker 结尾继续吃到本句句末（含标点）为止；只吃**同一句**
+#: （遇到换行就停），避免误吞后面的真实指令。
+_SENTENCE_END = "。．.!！?？\n"
+
+
+def _mask_one(text: str, marker: str) -> str:
+    """把 ``text`` 里所有 ``marker`` 换成掩码，并吃掉本句剩余部分。
+
+    「剩余部分」到本句句末或换行为止——见 :data:`_SENTENCE_END` 的说明。
+
+    **只有没收句的 marker 才需要吃尾巴**：DSH 那条自带句号
+    （``...DeepSeek Harness.``），它后面本来就是新的一句，再吃就会把用户的
+    真实指令吃掉。实测踩过：``...Harness. You must always be polite. Be brief.``
+    被吞成 ``[redacted] Be brief.``，中间那句指令凭空消失——这比留半句谜语
+    更糟，因为它**静默改变了模型行为**。
+    """
+    # marker 自己已经收句 → 没有「逗号之后那半句」的残留，原样替换即可。
+    eats_tail = marker[-1:] not in _SENTENCE_END
+
+    out: list[str] = []
+    start = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx < 0:
+            out.append(text[start:])
+            break
+        out.append(text[start:idx])
+        out.append(IDENTITY_MASK)
+        stop = idx + len(marker)
+        if eats_tail:
+            # 从 marker 结尾往后吃到本句句末；找不到句末（整段都是这一句）就吃到底。
+            while stop < len(text) and text[stop] not in _SENTENCE_END:
+                stop += 1
+            # 句末标点本身也吃掉（它是原客户端那句话的一部分），但换行要留着——
+            # 换行是结构，吃掉会把两段粘成一段。
+            if stop < len(text) and text[stop] != "\n":
+                stop += 1
+        start = stop
+    return "".join(out)
+
 
 def neutralize_identity_text(text: str) -> tuple[str, str | None]:
     """把文本里的竞品身份声明换成中性占位。
@@ -108,7 +160,7 @@ def neutralize_identity_text(text: str) -> tuple[str, str | None]:
         return text, None
     for marker in COMPETITOR_IDENTITY_MARKERS:
         if marker in text:
-            return text.replace(marker, IDENTITY_MASK), marker
+            return _mask_one(text, marker), marker
     return text, None
 
 

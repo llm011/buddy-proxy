@@ -274,6 +274,81 @@ def test_neutralize_identity_text_returns_hit_marker():
 
 
 # ---------------------------------------------------------------------------
+# 掩码不能留「半句谜语」
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("signature", [CLAUDE, CLAUDE_SDK, CODEX, DSH])
+def test_no_trailing_fragment_after_mask(signature):
+    """替换后不能剩下半句自我描述。
+
+    marker 只到逗号（逗号是触发条件），直接 ``text.replace`` 会留下：
+
+        You are Claude Code, Anthropic's official CLI for Claude.
+        → [redacted: client identity] Anthropic's official CLI for Claude.
+
+    残留本身不再触发拦截，但它是一句没有主语的自我描述，会污染模型对自身身份
+    的推断——实测 /v1/messages 的 thinking 里模型明确复述了这句残留
+    （「weird developer message ends "..."」）。掩码的目的是「不告诉上游是谁」，
+    不是「留半句谜语」。
+
+    断言方式：掩码之后除了空白不该剩下任何东西（这四条都是「整条 system 就
+    这一句」的形态）。
+    """
+    patched, _ = neutralize_identity_text(signature)
+    assert patched.strip() == MASK, f"掩码后残留了 {patched.strip()[len(MASK):]!r}"
+
+
+def test_tail_eating_stops_at_sentence_end():
+    """只吃**同一句**，后面的真实指令必须原样保留。
+
+    Codex 的 system 是「身份句 + 工作区说明」连在一起的：
+    ``You are Codex, an agent based on GPT-6. You and the user share a workspace.``
+    吃成整段就把工作区说明也删了，模型行为会变。
+    """
+    text = "You are Codex, an agent based on GPT-6. You and the user share a workspace."
+    patched, _ = neutralize_identity_text(text)
+    assert patched == MASK + " You and the user share a workspace."
+
+
+def test_tail_eating_stops_at_newline():
+    """换行是结构，不能被吃掉——否则两段会粘成一段。"""
+    text = DSH + "\n\n# Role\n\nYou are a coding assistant."
+    patched, _ = neutralize_identity_text(text)
+    assert patched == MASK + "\n\n# Role\n\nYou are a coding assistant."
+
+
+def test_tail_eating_does_not_touch_following_sentence():
+    """签名在中间时，前文和后文都保留。"""
+    text = "Preamble.\n" + CLAUDE + "\nSuffix instructions."
+    patched, _ = neutralize_identity_text(text)
+    assert patched == "Preamble.\n" + MASK + "\nSuffix instructions."
+
+
+def test_self_terminated_marker_does_not_eat_next_sentence():
+    """marker 自带句号时，**不能**再吃尾巴——否则会静默删掉真实指令。
+
+    DSH 那条是 ``...DeepSeek Harness.``，自带句号，后面本来就是新的一句。
+    实现里若无条件「吃到本句句末」，会把下一句也吞掉：
+
+        You are an AI agent powered by DeepSeek Harness. You must always be polite.
+        → [redacted: client identity]          ← 「polite」那句凭空消失
+
+    这比留半句谜语更糟：它**静默改变模型行为**，而且没有任何日志能看出来。
+    实测踩过（第一次写 tail-eating 时没区分「marker 是否已收句」）。
+    """
+    text = DSH + " You must always be polite. Be brief."
+    patched, _ = neutralize_identity_text(text)
+    assert patched == MASK + " You must always be polite. Be brief."
+    assert "polite" in patched, "真实指令被吞掉了"
+
+
+def test_self_terminated_marker_alone_is_fully_masked():
+    """marker 自带句号且后面没内容时，掩码后不该剩下任何东西。"""
+    patched, _ = neutralize_identity_text(DSH)
+    assert patched == MASK
+
+
+# ---------------------------------------------------------------------------
 # 跨通道生效：这是本次重构的**核心目的**
 # ---------------------------------------------------------------------------
 
