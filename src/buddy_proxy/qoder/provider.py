@@ -119,94 +119,6 @@ _PASSTHROUGH_FIELDS = (
     "system",
 )
 
-#: 竞品 Agent 的固定身份声明 —— 命中会让上游**挂住不回**，必须中性化。
-#:
-#: 2026-11-27 实测（qoder 通道，hungerg / qwen3.8-max）：system prompt 里带
-#: dsh 的 ``You are an AI agent powered by DeepSeek Harness.`` 时，请求不是
-#: 快速报错，而是**长时间无响应**——本机实测 200s 无首字节，同一请求把它换成
-#: 中性占位后 12.6s 正常出流。表现极具迷惑性：客户端看着像自己卡死
-#: （dsh 侧只停在 ``step_start``，没有任何报错），curl 直连也是干等，
-#: 排障时很容易误判成「模型慢」或「网关挂了」。
-#:
-#: 与 codebuddy 通道（``codebuddy_provider/provider.py``）的关系：那边是同一个
-#: 签名的**快速拒绝**（400 / code 11128），这边是**软性挂起**。两处判据一致，
-#: 但扫描范围不同——见 :func:`_neutralize_agent_signature`。
-#:
-#: 只有实测确认的形态才加进来（与 codebuddy 同一约定）：未测过的变体
-#: （全大写、换语序）不猜着往里加，否则只会平白篡改用户的 prompt。
-_AGENT_SIGNATURES = (
-    "You are an AI agent powered by DeepSeek Harness.",
-)
-
-#: 命中处的替换文本。不带任何 Agent 品牌字样。
-_AGENT_SIGNATURE_MASK = "[redacted: client identity]"
-
-#: 会触发挂起的角色。实测范围比 codebuddy 那边**窄**：
-#:
-#: ==========================================================  ======
-#: 签名所在位置                                                结果
-#: ==========================================================  ======
-#: 首条 ``system``（签名在开头 / 中间 / 换行后）               挂住
-#: 首条 ``developer``                                          挂住
-#: 第二条 ``system``（首条干净）                               200
-#: ``assistant`` / ``user`` 消息                               200
-#: ==========================================================  ======
-#:
-#: 所以只扫**第一条** system/developer 消息，且该条**整条**都扫——不像
-#: codebuddy 只查「去掉前导空格后的首段」。qoder 这边实测签名出现在
-#: ``# Role\n\n`` 或普通前言之后同样挂住，按首段匹配会漏。
-_AGENT_SIGNATURE_ROLES = frozenset({"system", "developer"})
-
-
-def _neutralize_agent_signature(messages: Any) -> Any:
-    """把首条 system/developer 里的竞品身份声明换成中性占位。
-
-    未命中直接返回原对象（**同一引用**，不复制）——绝大多数请求走这条路径，
-    不该为一份低频的防御性改写给每条消息都做一次深拷贝。
-
-    刻意只处理首条：实测第二条 system 里的同一签名上游照常放行（见
-    :data:`_AGENT_SIGNATURE_ROLES` 的表格），多改只会篡改用户的 prompt。
-    """
-    if not isinstance(messages, list):
-        return messages
-    for idx, msg in enumerate(messages):
-        if not isinstance(msg, dict):
-            continue
-        if msg.get("role") not in _AGENT_SIGNATURE_ROLES:
-            continue
-        # 只认首条 system/developer：后续同类消息上游不拦，见上面表格。
-        content = msg.get("content")
-        if isinstance(content, str):
-            hit = next((s for s in _AGENT_SIGNATURES if s in content), None)
-            if hit is None:
-                return messages
-            log.info("qoder 上游会挂住这个 system 签名，已中性化：%r", hit[:40])
-            out = list(messages)
-            out[idx] = {**msg, "content": content.replace(hit, _AGENT_SIGNATURE_MASK)}
-            return out
-        if isinstance(content, list):
-            # content blocks：只改 type=text 的块，图片等原样保留。
-            changed = False
-            blocks = []
-            for blk in content:
-                if isinstance(blk, dict) and blk.get("type") == "text":
-                    text = str(blk.get("text") or "")
-                    hit = next((s for s in _AGENT_SIGNATURES if s in text), None)
-                    if hit is not None:
-                        log.info("qoder 上游会挂住这个 system 签名，已中性化：%r",
-                                 hit[:40])
-                        blk = {**blk, "text": text.replace(hit, _AGENT_SIGNATURE_MASK)}
-                        changed = True
-                blocks.append(blk)
-            if changed:
-                out = list(messages)
-                out[idx] = {**msg, "content": blocks}
-                return out
-            return messages
-        return messages
-    return messages
-
-
 #: 流式：read 是「相邻两次读」的上限——首字节前（边缘收下不回应）与流中卡死都按它断。
 _TIMEOUT_STREAM = httpx.Timeout(connect=15.0, read=60.0, write=60.0, pool=15.0)
 #: 整轮流式上限（防止挂死连接长期占用）。
@@ -1238,14 +1150,14 @@ class QoderProvider(BaseProvider):
                 upstream[field] = value
 
         # developer -> system：上游在反序列化阶段整请求拒绝该 role。
+        #
+        # 竞品身份声明的中性化**不在这里做**了：它已上移到 ``forward_chat``
+        # （``core/agent_identity.py``），对全部通道生效。放公共层是因为
+        # 「上游挡别的 Agent」是跨通道的同一件事，逐个 provider 加必然漏——
+        # 本通道曾经没有、于是 dsh 的会话在这里挂死而在 codebuddy 上报 400。
         messages = upstream.get("messages")
         if isinstance(messages, list):
             upstream["messages"] = [_normalize_message(m) for m in messages]
-            # 必须排在 ``_normalize_message`` **之后**：那个函数会把
-            # ``developer`` 改写成 ``system``，而两种 role 都会触发挂起，
-            # 顺序对调不影响命中，但放后面能顺带覆盖「改写后才暴露」的形态
-            # （例如上游只认 system 时的等价处理）。
-            upstream["messages"] = _neutralize_agent_signature(upstream["messages"])
 
         now_ms = int(time.time() * 1000)
         request_id = str(uuid.uuid4())
