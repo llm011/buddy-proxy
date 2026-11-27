@@ -166,49 +166,235 @@ async def refresh_balance(acc: WebAccountSession) -> dict[str, Any]:
     return balance
 
 
+async def submit_task(
+    acc: WebAccountSession,
+    webapp_id: str,
+    node_info_list: list[dict[str, Any]],
+    *,
+    estimate_only: bool = False,
+) -> dict[str, Any]:
+    """预估 + 提交，**不等待**。返回 ``{taskId, status, estimate, inputs}``。
+
+    ``estimate_only=True`` 只做价格预估（免费、不扣任何东西），不提交。
+    """
+    inputs = websession.normalize_inputs(node_info_list)
+    estimate, _ = await acc.call(lambda t: websession.price_estimate(webapp_id, inputs, t))
+    if estimate_only:
+        return {"taskId": "", "status": "ESTIMATE", "estimate": estimate, "inputs": inputs}
+    created, _ = await acc.call(lambda t: websession.create_task(webapp_id, inputs, t))
+    return {"taskId": created["taskId"], "status": created.get("status") or "RUNNING",
+            "estimate": estimate, "inputs": inputs}
+
+
+async def poll_task(
+    acc: WebAccountSession,
+    webapp_id: str,
+    task_id: str,
+    *,
+    poll_interval: float | None = None,
+    max_wait: float | None = None,
+    should_cancel=None,
+) -> WebRunResult:
+    """轮询到终态并取结果。``should_cancel()`` 返回 True 时主动放弃（任务标 CANCELLED）。
+
+    默认值在**调用时**才从模块常量读，不写在签名里——签名里的默认值是 import 时就
+    定死的，测试 monkeypatch 和环境变量都改不动（踩过：测试改了 0.01 还是等 4s）。
+    """
+    poll_interval = POLL_INTERVAL if poll_interval is None else poll_interval
+    max_wait = MAX_WAIT if max_wait is None else max_wait
+    deadline = asyncio.get_running_loop().time() + max_wait
+    status = "RUNNING"
+    last_raw: dict[str, Any] = {}
+    while asyncio.get_running_loop().time() < deadline:
+        if should_cancel is not None and should_cancel():
+            raise WebSessionError(f"任务已取消 (taskId={task_id})", kind="cancel")
+        recs, _ = await acc.call(lambda t: websession.task_list(t, task_id=task_id))
+        if recs:
+            status = str(recs[0].get("taskStatus") or status).upper()
+            last_raw = recs[0]
+            if status not in ("RUNNING", "QUEUED"):
+                break
+        await asyncio.sleep(poll_interval)
+
+    if status in ("RUNNING", "QUEUED"):
+        raise WebSessionError(f"任务超时 (taskId={task_id}, status={status})", kind="timeout")
+    if status != "SUCCESS":
+        raise WebSessionError(
+            f"任务失败: {parse_task_failure(last_raw)} (taskId={task_id})", kind="upstream"
+        )
+    hist, _ = await acc.call(lambda t: websession.output_history(t, webapp_id=webapp_id, task_id=task_id))
+    return WebRunResult(task_id=task_id, status=status, outputs=_outputs_from_history(hist),
+                        estimate={}, raw=last_raw)
+
+
 async def run_workflow(
     acc: WebAccountSession,
     webapp_id: str,
     node_info_list: list[dict[str, Any]],
     *,
     estimate_only: bool = False,
-    poll_interval: float = POLL_INTERVAL,
-    max_wait: float = MAX_WAIT,
+    poll_interval: float | None = None,
+    max_wait: float | None = None,
 ) -> WebRunResult:
-    """站内运行一个 AI 应用：预估 → 提交 → 轮询 → 取结果。
-
-    ``estimate_only=True`` 只做价格预估（免费、不扣任何东西），给 UI 的「先看看
-    要花多少」用。
-    """
-    inputs = websession.normalize_inputs(node_info_list)
-    estimate, _ = await acc.call(lambda t: websession.price_estimate(webapp_id, inputs, t))
+    """同步跑完（提交 → 轮询 → 取结果）。给脚本 / 测试 / 旧调用方用；UI 走 ``execute_task``。"""
+    sub = await submit_task(acc, webapp_id, node_info_list, estimate_only=estimate_only)
     if estimate_only:
-        return WebRunResult(task_id="", status="ESTIMATE", outputs=[], estimate=estimate, raw={})
+        return WebRunResult(task_id="", status="ESTIMATE", outputs=[], estimate=sub["estimate"], raw={})
+    res = await poll_task(acc, webapp_id, sub["taskId"], poll_interval=poll_interval, max_wait=max_wait)
+    res.estimate = sub["estimate"]
+    return res
 
-    created, _ = await acc.call(lambda t: websession.create_task(webapp_id, inputs, t))
-    task_id = created["taskId"]
 
-    deadline = asyncio.get_running_loop().time() + max_wait
-    status = created.get("status") or "RUNNING"
-    last_raw: dict[str, Any] = created.get("raw") or {}
-    while status in ("RUNNING", "QUEUED") and asyncio.get_running_loop().time() < deadline:
-        await asyncio.sleep(poll_interval)
-        recs, _ = await acc.call(lambda t: websession.task_list(t, task_id=task_id))
-        if recs:
-            status = str(recs[0].get("taskStatus") or status).upper()
-            last_raw = recs[0]
+# ---------------------------------------------------------------------------
+# 后台执行器：提交即落盘，状态一路写回 store
+# ---------------------------------------------------------------------------
 
-    if status in ("RUNNING", "QUEUED"):
-        raise WebSessionError(f"任务超时 (taskId={task_id}, status={status})", kind="upstream")
-    outputs: list[dict[str, str]] = []
-    if status == "SUCCESS":
-        hist, _ = await acc.call(lambda t: websession.output_history(t, webapp_id=webapp_id, task_id=task_id))
-        outputs = _outputs_from_history(hist)
-    else:
-        raise WebSessionError(
-            f"任务失败: {parse_task_failure(last_raw)} (taskId={task_id})", kind="upstream"
+#: 进程内的取消标记：taskId -> True。取消只是「不再等它了」，站内任务本身照跑（RH 没有
+# 取消接口给网页端用），所以记录里写清楚，别让用户以为币会退。
+_cancel_flags: set[str] = set()
+#: 进程内正在跑的执行器，防止重启后重复提交
+_running: set[str] = set()
+
+
+def is_cancelled(task_id: str) -> bool:
+    return task_id in _cancel_flags
+
+
+def reap_orphans() -> list[str]:
+    """进程重启后，上一进程留下的 SUBMITTING / RUNNING 记录没人推进了——标成 INTERRUPTED。
+
+    站内任务本身不受影响（可能早就跑完了），只是我们这边丢了跟踪；UI 会提示去
+    站内历史看结果。返回被标记的 taskId 列表。服务启动时调一次。
+    """
+    from . import store as rh_store
+
+    reaped: list[str] = []
+    for t in rh_store.list_tasks():
+        tid = str(t.get("taskId") or "")
+        if t.get("status") in ("SUBMITTING", "RUNNING", "QUEUED") and tid not in _running:
+            rh_store.update_task(
+                tid, status="INTERRUPTED",
+                error="服务重启，丢失跟踪；站内任务可能已跑完，请去站内「任务历史」查看",
+                finishedAt=time.time(),
+            )
+            reaped.append(tid)
+    return reaped
+
+
+def request_cancel(task_id: str) -> bool:
+    _cancel_flags.add(task_id)
+    return True
+
+
+def _finalize_hint(exc: WebSessionError) -> tuple[str, bool]:
+    """把异常映射成 (status, 是否闭源 605)。"""
+    msg = str(exc)
+    closed = "605" in msg or "NOT_ENOUGH_BALANCE" in msg or "balance is insufficient" in msg.lower()
+    if exc.kind == "cancel":
+        return "CANCELLED", False
+    if exc.kind == "timeout":
+        return "TIMEOUT", False
+    if exc.kind == "login":
+        return "FAILED", False
+    return "FAILED", closed
+
+
+async def execute_task(
+    account: dict[str, Any],
+    task_id: str,
+    *,
+    persist_session=None,
+    poll_interval: float | None = None,
+    max_wait: float | None = None,
+    balance_before: float | None = None,
+) -> dict[str, Any] | None:
+    """后台跑一个**已落盘**的任务：预估 → 提交 → 轮询 → 写结果。
+
+    调用方（UI 端点）先 ``store.upsert_task`` 一条 ``status=SUBMITTING`` 的占位记录
+    （``taskId`` 用本地生成的），再 ``asyncio.create_task(execute_task(...))``。
+    这里拿到站内真 taskId 后把 ``upstreamTaskId`` 写回去，其余字段原样保留。
+
+    任何一步失败都写进记录（``status=FAILED`` + ``error`` + ``errorCode``），**不抛**——
+    后台任务抛出去没人接，只会变成一条 "Task exception was never retrieved" 的日志。
+    """
+    from . import store as rh_store
+
+    if task_id in _running:
+        return None
+    _running.add(task_id)
+    rec = rh_store.get_task(task_id) or {}
+    webapp_id = str(rec.get("webappId") or "")
+    inputs: list[dict[str, Any]] = list(rec.get("inputs") or [])
+    try:
+        # 提交前先看一眼取消：SUBMITTING 那一两秒点「取消」应该等于「没提交、没扣币」，
+        # 不能等 poll_task 才发现——那时站内任务已经跑了
+        if task_id in _cancel_flags:
+            rh_store.update_task(task_id, status="CANCELLED", submitted=False,
+                                 error="提交前已取消", finishedAt=time.time())
+            return rh_store.get_task(task_id)
+        acc = WebAccountSession(account, persist=persist_session)
+        try:
+            sub = await submit_task(acc, webapp_id, inputs)
+        except WebSessionError as exc:
+            status, closed = _finalize_hint(exc)
+            rh_store.update_task(task_id, status=status, error=str(exc)[:400],
+                                 errorCode=str(exc.raw_code or ""), closedSource=closed,
+                                 upstreamTaskId=None, submitted=False, finishedAt=time.time())
+            return rh_store.get_task(task_id)
+        upstream_id = sub["taskId"]
+        rh_store.update_task(task_id, status="RUNNING", upstreamTaskId=upstream_id, submitted=True,
+                             estimate=_slim_estimate(sub["estimate"]),
+                             closedSource=bool(closed_source_nodes(sub["estimate"]) != []))
+        try:
+            res = await poll_task(
+                acc, webapp_id, upstream_id, poll_interval=poll_interval, max_wait=max_wait,
+                should_cancel=lambda: task_id in _cancel_flags,
+            )
+        except WebSessionError as exc:
+            status, closed = _finalize_hint(exc)
+            rh_store.update_task(task_id, status=status, error=str(exc)[:400],
+                                 errorCode=str(exc.raw_code or ""), closedSource=closed,
+                                 submitted=True, finishedAt=time.time())
+            return rh_store.get_task(task_id)
+        rh_store.update_task(
+            task_id, status="SUCCESS", outputs=res.outputs, finishedAt=time.time(),
+            costTime=_cost_seconds(res.raw),
         )
-    return WebRunResult(task_id=task_id, status=status, outputs=outputs, estimate=estimate, raw=last_raw)
+        # 成功后刷一次余额算实扣（拉失败不阻塞，实扣就是 None）
+        if persist_session is not None and balance_before is not None:
+            try:
+                bal = await refresh_balance(acc)
+                after = bal.get("transitionCoins")
+                if after is not None:
+                    rh_store.update_task(task_id, coinsSpent=round(balance_before - float(after), 2),
+                                         balanceAfter=bal)
+            except WebSessionError:
+                pass
+        return rh_store.get_task(task_id)
+    except WebSessionError as exc:
+        # 账号级别的问题（没邮箱密码 / 登录冷却）——到这里说明连提交都没开始
+        rh_store.update_task(task_id, status="FAILED", error=str(exc)[:400], finishedAt=time.time())
+        return rh_store.get_task(task_id)
+    finally:
+        _running.discard(task_id)
+        _cancel_flags.discard(task_id)
+
+
+def _slim_estimate(est: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "totalPrice": est.get("totalPrice"), "currency": est.get("currency"),
+        "priceText": est.get("priceText"), "estimatedPoint": est.get("estimatedPoint"),
+        "estimatedTransitionCoin": est.get("estimatedTransitionCoin"),
+        "nodes": [n.get("classType") for n in (est.get("nodes") or []) if isinstance(n, dict)],
+    }
+
+
+def _cost_seconds(raw: dict[str, Any]) -> float | None:
+    v = (raw or {}).get("taskCostTime")
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
 
 
 __all__ = [
@@ -217,6 +403,12 @@ __all__ = [
     "RunningHubError",
     "WebAccountSession",
     "WebRunResult",
+    "execute_task",
+    "is_cancelled",
+    "poll_task",
+    "reap_orphans",
     "refresh_balance",
+    "request_cancel",
     "run_workflow",
+    "submit_task",
 ]

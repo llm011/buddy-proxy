@@ -2045,6 +2045,141 @@ async def ui_runninghub_workflows_run(request: Request):
     return out
 
 
+def _rh_email_account():
+    """拿第一个有邮箱密码的账号；没有就抛 400（站内运行必须有登录态）。"""
+    from ...runninghub import store as rh_store
+
+    accounts = [a for a in rh_store.get_active_accounts() if a.get("email") and a.get("password")]
+    if not accounts:
+        raise HTTPException(status_code=400, detail={"error": {"message": "请先导入一个 RunningHub 邮箱账号（需要账号密码才能走站内运行）"}})
+    return accounts[0]
+
+
+def _new_local_task_id() -> str:
+    import time as _t
+    import uuid as _u
+    return f"local-{int(_t.time() * 1000)}-{_u.uuid4().hex[:6]}"
+
+
+# 启动时把上一进程留下的 SUBMITTING / RUNNING 标成 INTERRUPTED，别让 UI 永远转圈。
+# 放在 import 时跑而不是 on_event("startup")：后者 FastAPI 已标 deprecated（-W error 直接炸），
+# 而 reap 只是同步文件 I/O，本模块每个进程只 import 一次，此刻 _running 必然为空，语义正好。
+# 注意：测试套件 import 这个模块时跑的是**真实**的 tasks 路径（fixture 的 env 还没生效）——
+# 只会把上一进程留下的进行中记录标成 INTERRUPTED，不会误伤（此时没有在跑的）。
+try:
+    from ...runninghub import runner as _rh_runner_for_reap
+    _rh_runner_for_reap.reap_orphans()
+except Exception:  # noqa: BLE001 — 辅助功能不能炸掉整个 UI 模块
+    pass
+
+
+@app.post("/ui/api/runninghub/tasks/submit")
+async def ui_runninghub_tasks_submit(request: Request):
+    """提交一个站内任务到队列，**立即返回**本地 taskId；后台执行器负责推进状态。
+
+    以前 ``workflows/run`` 是同步阻塞到出图（70s 视频 250s+），弹窗只能干等。现在
+    UI 提交后直接去队列页看进度，关掉页面任务也照跑（进程内）。
+    """
+    _ensure_local(request)
+    from ...runninghub import runner as rh_runner
+    from ...runninghub import store as rh_store
+    from ...runninghub import websession
+
+    body = await request.json()
+    webapp_id = str(body.get("webapp_id") or "").strip()
+    node_info_list = body.get("nodeInfoList")
+    if not webapp_id:
+        raise HTTPException(status_code=400, detail={"error": {"message": "缺少 webapp_id"}})
+    if not isinstance(node_info_list, list):
+        raise HTTPException(status_code=400, detail={"error": {"message": "nodeInfoList 必须是数组"}})
+    account = _rh_email_account()
+    wf = next((w for w in rh_store.list_workflows() if str(w.get("webappId")) == webapp_id), None)
+
+    # 先刷一次余额，拿「提交前」的过渡币数，完成后相减就是实扣
+    balance_before: float | None = None
+    try:
+        acc = rh_runner.WebAccountSession(account, persist=rh_store.update_session)
+        bal = await rh_runner.refresh_balance(acc)
+        rh_store.update_account_info(account["account_id"], bal)
+        balance_before = bal.get("transitionCoins")
+    except websession.WebSessionError as exc:
+        raise HTTPException(status_code=400, detail={"error": {"message": f"登录态不可用：{exc}"}})
+
+    task_id = _new_local_task_id()
+    now = asyncio.get_running_loop().time()
+    rh_store.upsert_task({
+        "taskId": task_id,
+        "status": "SUBMITTING",
+        "webappId": webapp_id,
+        "webappName": (wf or {}).get("name") or webapp_id,
+        "accountId": account["account_id"],
+        "inputs": rh_runner.websession.normalize_inputs(node_info_list),
+        "created_at": now,
+        "upstreamTaskId": None,
+    })
+    # 后台跑；进程重启会丢——模块 import 时 reap_orphans() 把这类标成 INTERRUPTED
+    asyncio.create_task(rh_runner.execute_task(
+        account, task_id, persist_session=rh_store.update_session, balance_before=balance_before,
+    ))
+    return {"task": rh_store.get_task(task_id), "balance": bal}
+
+
+@app.get("/ui/api/runninghub/tasks")
+async def ui_runninghub_tasks(request: Request):
+    """任务列表（新的在前）。``?limit=N`` 限制条数，默认 100。"""
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    try:
+        limit = int(request.query_params.get("limit") or 100)
+    except ValueError:
+        limit = 100
+    return {"tasks": rh_store.list_tasks(limit=limit)}
+
+
+@app.get("/ui/api/runninghub/tasks/{task_id}")
+async def ui_runninghub_task_detail(request: Request, task_id: str):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    t = rh_store.get_task(task_id)
+    if not t:
+        raise HTTPException(status_code=404, detail={"error": {"message": "任务不存在"}})
+    return {"task": t}
+
+
+@app.post("/ui/api/runninghub/tasks/cancel")
+async def ui_runninghub_tasks_cancel(request: Request):
+    """取消等待。RH 没给网页端取消接口，所以只是「不再等它」，已扣的币不会退。"""
+    _ensure_local(request)
+    from ...runninghub import runner as rh_runner
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    tid = str(body.get("task_id") or "").strip()
+    t = rh_store.get_task(tid) if tid else None
+    if not t:
+        raise HTTPException(status_code=404, detail={"error": {"message": "任务不存在"}})
+    if t.get("status") in ("SUCCESS", "FAILED", "TIMEOUT", "CANCELLED"):
+        return {"task": t}
+    rh_runner.request_cancel(tid)
+    # 执行器下一轮轮询会看到标记并写 CANCELLED；这里先把意图落下来，UI 立刻能反馈
+    rh_store.update_task(tid, cancelRequested=True)
+    return {"task": rh_store.get_task(tid)}
+
+
+@app.post("/ui/api/runninghub/tasks/delete")
+async def ui_runninghub_tasks_delete(request: Request):
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    tid = str(body.get("task_id") or "").strip()
+    if not rh_store.delete_task(tid):
+        raise HTTPException(status_code=404, detail={"error": {"message": "任务不存在"}})
+    return {"tasks": rh_store.list_tasks()}
+
+
 @app.post("/ui/api/runninghub/upload")
 async def ui_runninghub_upload(request: Request):
     """上传本地图片/音频/视频，返回站内 LoadImage 节点能用的 fileName。
