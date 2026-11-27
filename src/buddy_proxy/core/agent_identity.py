@@ -155,13 +155,21 @@ def neutralize_identity_text(text: str) -> tuple[str, str | None]:
 
     返回 ``(新文本, 命中的 marker)``；未命中时第二项为 ``None``，且**原样返回
     入参字符串**（调用方可靠 ``is`` 判断是否改动）。
+
+    **逐条都试，不是命中一条就收工**：同一段 system 里出现两个不同客户端身份
+    声明是可能的（用户把两个 CLI 的 prompt 拼在一起做对比、或某个编排层把
+    subagent 的 persona 也塞进来）。命中一条就返回会让第二条漏网，而上游只
+    要看到一条就拦——等于这次改动对那种请求完全无效，且日志里还写着「已中性化」，
+    排查时会被这条日志误导。
     """
     if not text:
         return text, None
+    hit_any: str | None = None
     for marker in COMPETITOR_IDENTITY_MARKERS:
         if marker in text:
-            return _mask_one(text, marker), marker
-    return text, None
+            text = _mask_one(text, marker)
+            hit_any = hit_any or marker
+    return (text, hit_any) if hit_any else (text, None)
 
 
 def _neutralize_content(content: Any) -> tuple[Any, str | None]:

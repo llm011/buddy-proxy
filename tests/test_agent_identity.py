@@ -348,6 +348,33 @@ def test_self_terminated_marker_alone_is_fully_masked():
     assert patched == MASK
 
 
+def test_multiple_distinct_markers_in_one_text():
+    """同一段 system 里两个**不同** marker，都必须被换掉。
+
+    命中一条就 ``return`` 的实现会漏掉第二条（实测踩过：``for marker: if in
+    text: return _mask_one(...)``）。上游只要看到一条就拦，所以那种实现让整个
+    改动对这种请求**完全无效**——而且日志里还写着「已中性化」，排查时会被
+    这条日志误导。
+
+    真实场景：用户把两个 CLI 的 prompt 拼在一起做对比，或编排层把 subagent
+    的 persona 也塞进同一条 system。
+    """
+    text = CLAUDE + "\n\n" + CODEX
+    patched, hit = neutralize_identity_text(text)
+    assert patched == MASK + "\n\n" + MASK
+    assert hit is not None
+    for marker in COMPETITOR_IDENTITY_MARKERS:
+        assert marker not in patched
+
+
+def test_multiple_distinct_markers_end_to_end():
+    """整条链路也要覆盖：不能只测纯函数。"""
+    original = _msgs(("system", CLAUDE + "\n\n" + CODEX))
+    out = neutralize_agent_identity(original)
+    assert out is not original
+    assert out[0]["content"] == MASK + "\n\n" + MASK
+
+
 # ---------------------------------------------------------------------------
 # 跨通道生效：这是本次重构的**核心目的**
 # ---------------------------------------------------------------------------
