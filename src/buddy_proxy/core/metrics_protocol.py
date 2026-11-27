@@ -78,7 +78,11 @@ def _credit_field(u: dict[str, Any]) -> Any:
     就会把另一家的数据整条丢掉（Qoder 的积分此前一直记成 null 就是这个原因，
     连 ``original_credits``/``billable`` 一起摆在 usage 里没人取）。
     两个都在时以 ``credit`` 为准（CodeBuddy 的实际扣费口径）。
+    Qoder 限免模型会同时给理论成本 ``credits`` 和 ``billable=false``；此时
+    实扣必须记 0，不能把并未扣除的理论成本写进用量日志。
     """
+    if u.get("billable") is False:
+        return 0.0
     for key in ("credit", "credits", "original_credits"):
         value = u.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -30,6 +31,11 @@ log = logging.getLogger(__name__)
 
 #: 目录缓存时长（秒）——目录变化很慢，避免每次 /v1/models 都签名请求。
 CACHE_TTL_S = 600
+
+#: App 与 CLI 看到的目录并不相同：ct=0 才下发 HungerG/Fast，ct=5 在国际版
+#: 仍保留 Cantus/Sonus。两路并集避免为了新活动模型把旧模型从网关抹掉；聊天
+#: 签名不受此常量影响，hmodel 已实测在现有 ct=5 聊天链路返回 200。
+CATALOG_CLIENT_TYPES = ("0", "5")
 
 #: 场景优先级：上游同一模型在多个场景重复出现，按此顺序取第一个。
 #: ``chat`` 是面向对话的主场景；``developer``/``assistant``/``app`` 与之
@@ -89,6 +95,10 @@ FALLBACK_MODELS: tuple[dict[str, Any], ...] = (
     # 2026-11-27 新增：实时目录 key=jmodel，面板倍率 0.3×，1M 上下文。
     {"key": "jmodel", "display_name": "Step-5-Preview", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.3, "is_free": False, "max_input_tokens": 1000000},
+    # 2026-11-27 五个真实账号的 ct=0 目录均返回 hmodel；最小请求实测 200，
+    # usage.billable=false，额度 600→600。它不是 CLI 不可调用，只是 ct=5 不展示。
+    {"key": "hmodel", "display_name": "HungerG", "is_reasoning": True,
+     "is_vl": True, "price_factor": 0.0, "is_free": True, "max_input_tokens": 1000000},
     {"key": "mmodel", "display_name": "MiniMax-M3.1-Flash", "is_reasoning": True,
      "is_vl": True, "price_factor": 0.1, "max_input_tokens": 180000},
 )
@@ -188,6 +198,7 @@ MODEL_IDS: dict[str, str] = {
     "kmodel_latest": "kimi-k3.1-pro",
     "kmodel": "kimi-k2.8-preview",
     "jmodel": "step-5-preview",
+    "hmodel": "hungerg",
     "mmodel": "minimax-m3.1-flash",
     "cmodel": "cantus",
     "smodel": "sonus",
@@ -207,8 +218,6 @@ MODEL_IDS: dict[str, str] = {
 #: 这里就不写——`to_openai_model` 会把这些留空，客户端按「未知」处理，
 #: 不会因为编了个数字导致长上下文请求被误判。
 #:
-#: 2026-11-27 面板里的 HungerG（0.0× 限免）**不要补进来**：它是官方 App/IDE
-#: 限时活动模型，当前 CLI 的 model/list 全场景都没有上游 key，无法经本代理调用。
 LOCAL_EXTRA_MODELS: tuple[dict[str, Any], ...] = ()
 
 
@@ -447,20 +456,40 @@ class Catalog:
 
     async def _fetch_remote(self, cred: Credential) -> list[dict[str, Any]]:
         url = self.region.model_list_url()
-        _, headers = sign(
-            url,
-            "",
-            cred.uid,
-            cred.token,
-            cred.machine_id,
-            encode=False,
-        )
+        requests = []
+        for client_type in CATALOG_CLIENT_TYPES:
+            _, headers = sign(
+                url,
+                "",
+                cred.uid,
+                cred.token,
+                cred.machine_id,
+                client_type=client_type,
+                encode=False,
+            )
+            requests.append((client_type, headers))
         async with httpx.AsyncClient(timeout=20) as client:
-            resp = await client.get(url, headers=headers)
-        if resp.status_code != 200:
-            raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:160]}")
-        data = resp.json()
-        return self._parse(data)
+            results = await asyncio.gather(
+                *(client.get(url, headers=headers) for _, headers in requests),
+                return_exceptions=True,
+            )
+
+        # ct=0 在前：同 key 以 App 当前元数据为准；ct=5 只补它缺的旧模型。
+        # 单一路径失败仍保留另一路，不让活动目录波动拖垮整个通道。
+        merged: dict[str, dict[str, Any]] = {}
+        errors = []
+        for (client_type, _), result in zip(requests, results, strict=True):
+            if isinstance(result, Exception):
+                errors.append(f"ct={client_type}: {result}")
+                continue
+            if result.status_code != 200:
+                errors.append(f"ct={client_type} HTTP {result.status_code}: {result.text[:160]}")
+                continue
+            for entry in self._parse(result.json()):
+                merged.setdefault(str(entry.get("key") or ""), entry)
+        if not merged and errors:
+            raise RuntimeError("；".join(errors))
+        return list(merged.values())
 
     def _parse(self, data: object) -> list[dict[str, Any]]:
         """按场景分组解析，按 key 去重（场景顺序即优先级）。"""

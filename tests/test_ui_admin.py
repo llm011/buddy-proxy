@@ -1814,6 +1814,21 @@ def test_normalize_usage_accepts_plural_credits():
     assert normalize_usage({})["credit"] is None
 
 
+def test_normalize_usage_billable_false_means_zero_not_theoretical_cost():
+    """HungerG 的 credits 是理论成本，billable=false 时实扣必须记 0。"""
+    usage = {
+        "billable": False,
+        "credits": 0.06972636,
+        "original_credits": 0.06972636,
+        "prompt_tokens": 207,
+        "completion_tokens": 6,
+    }
+    assert normalize_usage(usage)["credit"] == 0.0
+    assert normalize_usage({**usage, "billable": True})["credit"] == 0.06972636
+    # 老上游没有 billable 字段时仍沿用 credits，不能一律抹成 0。
+    assert normalize_usage({"credits": 0.5})["credit"] == 0.5
+
+
 def test_responses_converter_carries_credit_and_cache():
     """Responses 流式转换完成事件要带真实 cached_tokens 与 credit。"""
     from buddy_proxy.protocols.responses_adapter import ResponsesStreamConverter
