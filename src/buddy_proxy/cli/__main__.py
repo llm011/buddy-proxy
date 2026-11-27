@@ -62,6 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     doctor = sub.add_parser("doctor", help="体检：服务/配置/通道/指标/磁盘")
     doctor.add_argument("--port", type=int, default=None, help="代理端口（默认 8787）")
     _add_common(doctor)
+
+    from .proxy_cmd import build_parser as _build_proxy
+    _build_proxy(sub)
     return parser
 
 
@@ -74,6 +77,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         from . import usage as mod
     elif args.command == "logs":
         from . import logs as mod
+    elif args.command == "proxy":
+        from . import proxy_cmd as mod
     else:
         from . import doctor as mod
     try:

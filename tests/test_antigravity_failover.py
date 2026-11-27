@@ -129,6 +129,10 @@ def two_accounts():
     # 否则重发会打到真实网络。
     provider._retry_client = httpx.AsyncClient(
         transport=httpx.MockTransport(upstream), timeout=prov._TIMEOUT)
+    # 收尾的配额水位也有独立长连接；不注入会在成功后直连 Google。
+    # 与 upstream 分开，水位查询不能混进这些用例断言的转发调用序列。
+    probe = httpx.MockTransport(lambda request: httpx.Response(200, json={"models": {}}))
+    provider._probe_client = httpx.AsyncClient(transport=probe, timeout=prov._TIMEOUT)
     return provider, upstream
 
 

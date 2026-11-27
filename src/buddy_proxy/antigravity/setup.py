@@ -22,8 +22,12 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from ..core import net as core_net
 
 log = logging.getLogger(__name__)
+
+#: 通道 id，也是 ``settings.json`` 里 ``provider_proxy`` 的键。
+_PROVIDER_ID = "antigravity"
 
 #: 端点 fallback（daily 优先，参考实现同序）。
 ENDPOINTS = (
@@ -88,7 +92,7 @@ def _post(access_token: str, method: str, body: dict[str, Any], timeout: float =
             headers={**metadata_headers(), "Authorization": f"Bearer {access_token}"},
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with core_net.provider_urlopen(_PROVIDER_ID, req, timeout=timeout) as resp:
                 return resp.status, json.loads(resp.read())
         except urllib.error.HTTPError as exc:
             detail = ""
@@ -115,7 +119,7 @@ def _get_operation(access_token: str, name: str, timeout: float = 30.0) -> dict[
         headers={**metadata_headers(), "Authorization": f"Bearer {access_token}"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with core_net.provider_urlopen(_PROVIDER_ID, req, timeout=timeout) as resp:
             return json.loads(resp.read())
     except (urllib.error.HTTPError, urllib.error.URLError) as exc:
         raise SetupError(f"getOperation 失败: {exc}") from exc
