@@ -119,6 +119,26 @@ def test_content_blocks_only_text_is_masked():
     assert blocks[1] == img
 
 
+def test_content_blocks_signature_in_later_block():
+    """命中的 text 块排在干净块之后，仍必须被找到。
+
+    这是 ``content`` 为 blocks 时的**最容易写错**的分支：如果按「取第一个
+    text 块判一下、不中就返回」来写（字符串分支的直觉），签名在第二块时
+    会静默漏掉，而上游照样挂住——单测还得全绿。所以这里刻意把干净的块
+    放前面。
+    """
+    out = _neutralize_agent_signature([
+        {"role": "system", "content": [
+            {"type": "text", "text": "preamble"},
+            {"type": "text", "text": DSH},
+        ]},
+        {"role": "user", "content": "hi"},
+    ])
+    blocks = out[0]["content"]
+    assert blocks[0]["text"] == "preamble", "干净块不该被改动"
+    assert blocks[1]["text"] == MASK
+
+
 def test_clean_messages_return_same_object():
     """未命中的常见路径必须零拷贝：这条防线不该给每个请求加开销。"""
     original = _msgs(("system", "You are helpful."), ("user", "hi"))
