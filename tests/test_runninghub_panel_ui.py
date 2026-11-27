@@ -113,3 +113,35 @@ console.log(JSON.stringify({
     assert result["panelWrites"] == 1
     assert result["accountWrites"] == 2 and result["workflowWrites"] == 2
     assert result["accountUpdated"] and result["workflowUpdated"]
+
+
+def test_combo_list_uses_real_options_and_preserves_current_value():
+    """ComfyUI 的 ["COMBO", {options}] 不能把 COMBO 当成选项值提交。"""
+    result = _run_panel("""
+const data = JSON.stringify(['COMBO', {
+  default: '1:1 (Square)',
+  options: ['1:1 (Square)', '2:3 (Portrait Photo)', '9:16 (Portrait Widescreen)'],
+}]);
+const options = parseRunningHubListOptions(data, '9:16 (Portrait Widescreen)');
+console.log(JSON.stringify({
+  values: options.map(o => o.value),
+  currentSelected: options.some(o => o.value === '9:16 (Portrait Widescreen)'),
+}));
+""")
+    assert result == {
+        "values": ["1:1 (Square)", "2:3 (Portrait Photo)", "9:16 (Portrait Widescreen)"],
+        "currentSelected": True,
+    }
+
+
+def test_other_list_option_shapes_still_parse():
+    result = _run_panel("""
+const shapes = [
+  [['a', 'b'], {default: 'a'}],
+  ['a', 'b'],
+  [{index: 1, value: 'a', name: 'A'}, {index: 2, value: 'b', name: 'B'}],
+];
+const values = shapes.map((data, i) => parseRunningHubListOptions(JSON.stringify(data), i === 2 ? '2' : 'b').map(o => o.value));
+console.log(JSON.stringify({values}));
+""")
+    assert result["values"] == [["a", "b"], ["a", "b"], ["1", "2"]]
