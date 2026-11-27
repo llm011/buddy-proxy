@@ -51,6 +51,12 @@
     return data;
   }
 
+  function setHtmlIfChanged(el, html) {
+    if (el.innerHTML === html) return false;
+    el.innerHTML = html;
+    return true;
+  }
+
   function openRenameModal(title, currentName, onConfirm, extraHtml) {
     const titleEl = document.getElementById('modal-title');
     const bodyEl = document.getElementById('modal-body');
@@ -175,7 +181,7 @@
     const bodyEl = panel.querySelector('#rh-accounts-body');
     if (!bodyEl) return;
     if (!accounts || !accounts.length) {
-      bodyEl.innerHTML = '<div class="empty" style="padding:18px 0">暂无 RunningHub 账号，点击右上角「导入账号」添加 API Token</div>';
+      setHtmlIfChanged(bodyEl, '<div class="empty" style="padding:18px 0">暂无 RunningHub 账号，点击右上角「导入账号」添加 API Token</div>');
       return;
     }
 
@@ -230,7 +236,7 @@
         </div>`;
     }).join('');
 
-    bodyEl.innerHTML = `<div class="pat-quota-grid">${cards}</div>`;
+    if (!setHtmlIfChanged(bodyEl, `<div class="pat-quota-grid">${cards}</div>`)) return;
 
     bodyEl.querySelectorAll('button[data-rh-action]').forEach((btn) => {
       btn.addEventListener('click', async () => {
@@ -346,7 +352,10 @@
   window.renderRunningHubPanel = async function renderRunningHubPanel() {
     const panel = document.getElementById('runninghub-page-box');
     if (!panel) return;
-    panel.innerHTML = `
+    // 全局 30s 轮询也会进这里。外层骨架和事件只建一次，否则每次轮询都会
+    // 把三个卡片整块删掉，表现为页面闪烁、滚动位置跳动。
+    if (panel.dataset.rhInitialized !== '1') {
+      panel.innerHTML = `
       <div class="chart-card" style="margin-top:14px">
         <div class="pat-head">
           <span class="name">任务队列</span>
@@ -424,6 +433,8 @@
         window.alert(err.message || String(err));
       }
     });
+      panel.dataset.rhInitialized = '1';
+    }
 
     try {
       const [accRes, wfRes] = await Promise.all([
@@ -529,6 +540,7 @@
   async function renderTaskQueue(panel) {
     const bodyEl = panel && panel.querySelector('#rh-queue-body');
     if (!bodyEl) return;
+    if (_queueTimer) { clearTimeout(_queueTimer); _queueTimer = null; }
     let tasks = [];
     try {
       const res = await rhFetch('/ui/api/runninghub/tasks?limit=100');
@@ -540,10 +552,10 @@
     const cnt = panel.querySelector('#rh-queue-count');
     if (cnt) cnt.textContent = String(tasks.filter((t) => isTaskActive(t.status)).length);
     if (!tasks.length) {
-      bodyEl.innerHTML = '<div class="empty" style="padding:18px 0">暂无任务。在工作流卡片点「运行」提交一个。</div>';
+      setHtmlIfChanged(bodyEl, '<div class="empty" style="padding:18px 0">暂无任务。在工作流卡片点「运行」提交一个。</div>');
       return;
     }
-    bodyEl.innerHTML = `<div class="rh-queue">${tasks.map((t) => {
+    const queueChanged = setHtmlIfChanged(bodyEl, `<div class="rh-queue">${tasks.map((t) => {
       const active = isTaskActive(t.status);
       const thumb = (t.outputs && t.outputs[0]) || null;
       const thumbHtml = thumb
@@ -573,24 +585,25 @@
           </div>
           ${active ? `<button class="ghost rh-queue-cancel" data-id="${escapeHtml(t.taskId)}" title="不再等待（站内任务照跑，已扣币不退）">取消</button>` : ''}
         </div>`;
-    }).join('')}</div>`;
+    }).join('')}</div>`);
 
-    bodyEl.querySelectorAll('.rh-queue-row').forEach((row) => {
-      row.addEventListener('click', () => openTaskDetail(panel, row.getAttribute('data-task'), tasks));
-      row.addEventListener('keydown', (e) => { if (e.key === 'Enter') openTaskDetail(panel, row.getAttribute('data-task'), tasks); });
-    });
-    bodyEl.querySelectorAll('.rh-queue-cancel').forEach((btn) => {
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (!window.confirm('不再等待这个任务？（站内会继续跑完，已扣的过渡币不会退）')) return;
-        try {
-          await rhFetch('/ui/api/runninghub/tasks/cancel', { method: 'POST', body: JSON.stringify({ task_id: btn.getAttribute('data-id') }) });
-          renderTaskQueue(panel);
-        } catch (err) { window.alert(err.message || String(err)); }
+    if (queueChanged) {
+      bodyEl.querySelectorAll('.rh-queue-row').forEach((row) => {
+        row.addEventListener('click', () => openTaskDetail(panel, row.getAttribute('data-task'), tasks));
+        row.addEventListener('keydown', (e) => { if (e.key === 'Enter') openTaskDetail(panel, row.getAttribute('data-task'), tasks); });
       });
-    });
+      bodyEl.querySelectorAll('.rh-queue-cancel').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          if (!window.confirm('不再等待这个任务？（站内会继续跑完，已扣的过渡币不会退）')) return;
+          try {
+            await rhFetch('/ui/api/runninghub/tasks/cancel', { method: 'POST', body: JSON.stringify({ task_id: btn.getAttribute('data-id') }) });
+            renderTaskQueue(panel);
+          } catch (err) { window.alert(err.message || String(err)); }
+        });
+      });
+    }
     // 有进行中的任务就 4s 一刷；没有就停掉定时器
-    if (_queueTimer) { clearTimeout(_queueTimer); _queueTimer = null; }
     if (tasks.some((t) => isTaskActive(t.status))) {
       _queueTimer = setTimeout(() => { if (panel.isConnected) renderTaskQueue(panel); }, 4000);
     }
@@ -657,7 +670,7 @@
     const bodyEl = panel.querySelector('#rh-workflows-body');
     if (!bodyEl) return;
     if (!workflows || !workflows.length) {
-      bodyEl.innerHTML = '<div class="empty" style="padding:18px 0">暂无工作流，点击右上角「导入工作流」添加 webappId</div>';
+      setHtmlIfChanged(bodyEl, '<div class="empty" style="padding:18px 0">暂无工作流，点击右上角「导入工作流」添加 webappId</div>');
       return;
     }
 
@@ -684,7 +697,7 @@
         </div>`;
     }).join('');
 
-    bodyEl.innerHTML = `<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;">${cards}</div>`;
+    if (!setHtmlIfChanged(bodyEl, `<div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;">${cards}</div>`)) return;
 
     bodyEl.querySelectorAll('button[data-rh-wf-copy]').forEach((btn) => {
       btn.addEventListener('click', async () => {
