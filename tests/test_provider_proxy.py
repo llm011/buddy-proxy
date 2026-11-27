@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import json
 import pathlib
+import urllib.error
 import urllib.request
 
 import pytest
@@ -183,12 +184,13 @@ def test_provider_urlopen_direct_when_unconfigured(settings_file, monkeypatch):
     assert called == ["direct"]
 
 
-def test_provider_urlopen_socks_degrades_to_direct(settings_file, monkeypatch):
-    """urllib 不认 socks：别抛 unknown url type，退化成直连并在文档里说明。"""
+def test_provider_urlopen_rejects_socks(settings_file, monkeypatch):
+    """urllib 不认 socks：明确报错，不能静默直连绕过显式代理配置。"""
     _write(settings_file, '{"provider_proxy": {"antigravity": "socks5://127.0.0.1:7891"}}')
     monkeypatch.setattr(net._DIRECT_OPENER, "open", lambda r, timeout=None: "DIRECT")
     req = urllib.request.Request("https://example.invalid/")
-    assert net.provider_urlopen("antigravity", req) == "DIRECT"
+    with pytest.raises(urllib.error.URLError, match="SOCKS"):
+        net.provider_urlopen("antigravity", req)
 
 
 # ---- CLI -----------------------------------------------------------------
@@ -199,6 +201,8 @@ def test_cli_lists_antigravity_and_preserves_direct(settings_file, monkeypatch, 
     assert main(["proxy", "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)
     assert "antigravity" in listed
+    assert "gemini" not in listed
+    assert "codebuddy" not in listed
 
     monkeypatch.setenv(net.PROXY_ENV, "1")
     assert main(["proxy", "antigravity", "direct"]) == 0

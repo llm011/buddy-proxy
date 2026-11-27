@@ -9,7 +9,7 @@ token 刷新里，从 UI 上看不出来。手工编辑 settings.json 也能改�
 
 用法::
 
-    buddy proxy                          # 列出当前映射（未配置的通道也列出来）
+    buddy proxy                          # 列出当前映射及已接线的通道
     buddy proxy antigravity 127.0.0.1:7890
     buddy proxy antigravity direct       # 显式直连（覆盖通道默认）
     buddy proxy antigravity env          # 走环境变量里的代理
@@ -29,18 +29,15 @@ from ..core import settings as settings_mod
 
 
 def _known_providers() -> list[str]:
-    """设置里出现过的通道 + 项目认得的通道，去重保序。
+    """设置里出现过的通道 + 已接入 ``provider_*`` 的通道，去重保序。
 
-    前者让「已经配过但不在 KNOWN_PROVIDER_IDS 里」的通道（比如自建通道）也能
-    被看到；后者让用户知道还有哪些名字可用，不用去翻源码。
+    不能把 KNOWN_PROVIDER_IDS 全列出来：尚未接线的通道配置后不会生效，列出来
+    只会误导。自建通道仍可通过显式配置出现在这里。
     """
     seen: dict[str, None] = {}
     for provider in core_net.provider_proxy_map():
         seen.setdefault(provider, None)
-    for provider in ("antigravity", "gemini", "kiro", "qwenpc", "raccoon"):
-        seen.setdefault(provider, None)
-    for provider in sorted(settings_mod.KNOWN_PROVIDER_IDS):
-        seen.setdefault(provider, None)
+    seen.setdefault("antigravity", None)
     return list(seen)
 
 

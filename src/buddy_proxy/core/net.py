@@ -74,7 +74,7 @@ TTL 只有 60 秒，缓存几乎不命中，每次都要重新走那条慢路径
 2. ``BUDDY_UPSTREAM_USE_PROXY`` 打开 —— 走环境代理（旧行为）；
 3. 都没有 —— 直连。
 
-值支持三种写法：``http://host:port``（http/socks 都按 httpx 语义交给它）、
+值支持三种写法：``http://host:port``（``socks5://`` 仅支持 httpx 路径）、
 ``"direct"`` / ``""``（显式直连，用来覆盖「通道默认想走代理」的历史行为）、
 以及 ``"env"``（走环境代理）。表里没有该通道时按第 2/3 步处理。
 
@@ -85,6 +85,7 @@ TTL 只有 60 秒，缓存几乎不命中，每次都要重新走那条慢路径
 from __future__ import annotations
 
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -266,15 +267,18 @@ def provider_urlopen(provider: str, request: urllib.request.Request,
                      timeout: float | None = None):
     """``urllib`` 这条路的按通道代理版本，签名与 :func:`urlopen` 一致。
 
-    ``socks5://`` 在这里**降级为直连**：``urllib`` 的 ``ProxyHandler`` 只认
-    http 代理，塞 socks 进去会在运行期抛 ``unknown url type``。需要 socks 的
-    通道请走 :func:`provider_async_client`（httpx 支持）。
+    ``socks5://`` 在这里明确报错：``urllib`` 的 ``ProxyHandler`` 只认 http
+    代理。配置了代理就不能静默退回直连，否则必须走代理的上游仍会失败。
+    需要 socks 的通道请走 :func:`provider_async_client`（httpx 支持）。
     """
     target = provider_proxy(provider)
     if target == _PROXY_ENV_MARK:
         return urllib.request.urlopen(request, timeout=timeout)
     if target.lower().startswith("socks"):
-        return _DIRECT_OPENER.open(request, timeout=timeout)
+        raise urllib.error.URLError(
+            f"provider {provider!r} 配置了 SOCKS 代理，但 urllib 路径不支持；"
+            "请改用 http:// 代理或 httpx 路径"
+        )
     return _opener_for(target).open(request, timeout=timeout)
 
 
