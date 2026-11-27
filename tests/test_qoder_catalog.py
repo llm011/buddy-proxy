@@ -73,6 +73,10 @@ def test_new_models_have_stable_public_ids_and_measured_rates():
     assert hunger["is_reasoning"] is True
     assert hunger["is_vl"] is True
     assert hunger["max_input_tokens"] == 1000000
+    hunger_model = to_openai_model(hunger, "qoder")
+    assert hunger_model["images"] is True
+    assert hunger_model["tool_call"] is True
+    assert hunger_model["context_window"] == 1000000
     from buddy_proxy.qoder.config import REGIONS
 
     catalog = Catalog(REGIONS["cn"])
