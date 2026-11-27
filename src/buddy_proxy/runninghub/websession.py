@@ -303,18 +303,74 @@ async def get_point_summary(token: str, *, timeout: float = 30.0) -> dict[str, A
     return data.get("data") if isinstance(data.get("data"), dict) else {}
 
 
-async def get_balance(token: str, *, timeout: float = 30.0) -> dict[str, Any]:
+async def get_coin_gain_list(token: str, *, timeout: float = 30.0) -> list[dict[str, Any]]:
+    """``/api/product/coinGainList``：过渡币每一笔的获得时间 + **过期时间**。
+
+    过渡币的有效期只有这里有——point/summary 的 ``nearestExpireTime`` 是**积分**的，
+    不是币的（踩过：把它当成币的过期时间，报了「今天过期」其实是明年）。
+    """
+    data = await _post("/api/product/coinGainList", {"size": 10, "current": 1}, token=token, timeout=timeout)
+    inner = data.get("data")
+    recs = inner.get("records") if isinstance(inner, dict) else inner
+    return [r for r in (recs or []) if isinstance(r, dict)]
+
+
+async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool:
+    """``/api/welfare/daily-gift/claim``：领每日赠送的 30 积分（每天一次，站点时间 00:00 清零重置）。
+
+    2026-11-27 实测：新注册的号 ``activityPoint=0``、``dailyGift.granted=false``，直接
+    跑应用会 414 NOT_ENOUGH_POWER_VALUE——不是没币，是**没领当天的积分**。网页端登录
+    会自动触发（``loginCoinTriggered``），脚本登录不会，所以刷余额前先领一次。
+    """
+    try:
+        data = await _post("/api/welfare/daily-gift/claim", {}, token=token, timeout=timeout)
+        return bool(data.get("data"))
+    except WebSessionError:
+        return False
+
+
+async def get_balance(token: str, *, timeout: float = 30.0, claim_gift: bool = True) -> dict[str, Any]:
     """把站内余额整理成固定字段，给 store / UI 用。
 
-    - ``transitionCoins``：过渡币（本模块存在的意义——只有网页端能花）
-    - ``activityPoints`` / ``paidPoints``：活动 / 付费积分
+    - ``transitionCoins`` / ``transitionCoinExpireAt``：过渡币 + 最近一笔的过期时间（ISO，站内时间）
+    - ``activityPoints`` / ``pointsExpireAt``：活动 / 每日赠送积分 + 过期时间（每日 00:00 站点时间清零）
+    - ``paidPoints``：付费积分（不过期）
     - ``walletBalance`` / ``apiConsumableBalance``：钱包余额 / API 可用余额（USD）
+    - ``freeImageLeft`` / ``freeVideoLeft``：站内福利的免费次数（另算，不扣币不扣分）
+
+    ``claim_gift=True`` 时先尝试领当天赠送（已领过上游回 false，无副作用），再拉余额——
+    顺序反了 UI 会显示 0 积分而运行时报 414。
     """
+    if claim_gift:
+        await claim_daily_gift(token, timeout=timeout)
     info, pts = await asyncio.gather(
         get_user_info(token, timeout=timeout), get_point_summary(token, timeout=timeout)
     )
+    # 以下两个是「锦上添花」的字段，任何一个接口拉不到都不该让整个余额刷新失败
+    try:
+        coins = await get_coin_gain_list(token, timeout=timeout)
+    except WebSessionError:
+        coins = []
+    welfare: dict[str, Any] = {}
+    try:
+        w = await _post("/api/welfare/summary", {}, token=token, timeout=timeout)
+        welfare = w.get("data") if isinstance(w.get("data"), dict) else {}
+    except WebSessionError:
+        welfare = {}
     wallet = info.get("walletInfo") if isinstance(info.get("walletInfo"), dict) else {}
+    # 过渡币过期：取「还没过期」的记录里最早的一笔；拉失败 / 没记录就 None，不阻塞余额
+    coin_expire = None
+    try:
+        alive = [c for c in coins if c.get("expiredTime") and not _is_past(c["expiredTime"])]
+        coin_expire = min((c["expiredTime"] for c in alive), key=_parse_site_time) if alive else None
+    except Exception:
+        coin_expire = None
+    free_img = welfare.get("freeImage") if isinstance(welfare.get("freeImage"), dict) else {}
+    free_vid = welfare.get("freeVideo") if isinstance(welfare.get("freeVideo"), dict) else {}
     return {
+        "transitionCoinExpireAt": coin_expire,
+        "freeImageLeft": free_img.get("remaining"),
+        "freeVideoLeft": free_vid.get("remaining"),
         "userId": info.get("_userId") or info.get("id"),
         "email": info.get("email"),
         "nickName": info.get("nickName"),
@@ -322,7 +378,9 @@ async def get_balance(token: str, *, timeout: float = 30.0) -> dict[str, Any]:
         "activityPoints": _to_float(pts.get("activityPoint")),
         "paidPoints": _to_float(pts.get("paidPoint")),
         "balancePoints": _to_float(pts.get("balancePoint")),
+        # 积分过期（point/summary 原字段）+ 一个好认的别名
         "nearestExpireTime": pts.get("nearestExpireTime"),
+        "pointsExpireAt": pts.get("nearestExpireTime"),
         "walletBalance": _to_float(wallet.get("balance")),
         "apiConsumableBalance": _to_float(wallet.get("apiConsumableBalance")),
         "currency": wallet.get("currency"),
@@ -464,6 +522,23 @@ def normalize_inputs(node_info_list: list[dict[str, Any]]) -> list[dict[str, Any
             item["description"] = n["description"]
         out.append(item)
     return out
+
+
+def _parse_site_time(s: str) -> float:
+    """站内时间 → unix 秒。无时区的 ``YYYY-MM-DD HH:MM:SS`` 按站点本地（UTC+8）算。"""
+    from datetime import datetime, timezone, timedelta
+    s = str(s or "").strip()
+    try:
+        if "T" in s:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _is_past(s: str) -> bool:
+    t = _parse_site_time(s)
+    return t > 0 and t < time.time()
 
 
 def _to_float(v: Any) -> float | None:

@@ -1,6 +1,22 @@
 // RunningHub 生图/生视频账号与额度管理面板（复用原生 chart-card / pat-head / pat-quota-grid 样式）
 
 (function () {
+  if (!document.getElementById('rh-panel-style')) {
+    const st = document.createElement('style');
+    st.id = 'rh-panel-style';
+    st.textContent = [
+      '.rh-wallets { display:flex; flex-direction:column; gap:2px; }',
+      '.rh-wallet-row { display:grid; grid-template-columns:64px 1fr auto; align-items:center; gap:10px; font-size:12px; padding:4px 0; }',
+      '.rh-wallet-row + .rh-wallet-row { border-top:1px dashed var(--line); }',
+      '.rh-wallet-name { color:var(--muted, #9ca3af); }',
+      '.rh-wallet-val { font-weight:600; font-size:13px; }',
+      '.rh-exp { font-size:11px; padding:1px 7px; border-radius:999px; white-space:nowrap; }',
+      '.rh-exp-ok { background:rgba(16,185,129,.12); color:#10b981; }',
+      '.rh-exp-day { background:rgba(245,158,11,.10); color:#f59e0b; }',
+      '.rh-exp-soon { background:rgba(239,68,68,.12); color:#ef4444; }',
+    ].join('\n');
+    document.head.appendChild(st);
+  }
   function escapeHtml(s) {
     return String(s == null ? '' : s)
       .replace(/&/g, '&amp;')
@@ -89,6 +105,44 @@
     }
   }
 
+  // ---- 过期时间 / 钱包行 ----
+  // 站内时间 → 本地 Date。支持 "2026-11-27T16:00:00.000+00:00" 和无时区的 "2026-11-08 19:23:17"（站点 UTC+8）
+  function parseSiteTime(s) {
+    if (!s) return null;
+    const str = String(s).trim();
+    if (str.includes('T')) { const d = new Date(str.replace(' ', '+')); return isNaN(d) ? null : d; }
+    const m = str.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+    if (!m) return null;
+    return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5], +m[6]));
+  }
+  function fmtExpiry(s) {
+    const d = parseSiteTime(s);
+    if (!d) return null;
+    const ms = d.getTime() - Date.now();
+    if (ms <= 0) return { label: '已过期', cls: 'rh-exp-ok', title: d.toLocaleString() };
+    const hours = ms / 3.6e6;
+    const days = ms / 8.64e7;
+    const cls = hours < 6 ? 'rh-exp-soon' : (days < 2 ? 'rh-exp-day' : 'rh-exp-ok');
+    let label;
+    if (hours < 1) label = `${Math.max(1, Math.round(ms / 6e4))} 分钟后过期`;
+    else if (hours < 24) label = `${Math.round(hours)} 小时后过期`;
+    else if (days < 60) label = `${Math.round(days)} 天后过期`;
+    else label = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { label, cls, title: d.toLocaleString() };
+  }
+  function walletRow(name, value, expire, tip, expireNote) {
+    const ex = fmtExpiry(expire);
+    const exHtml = ex
+      ? `<span class="rh-exp ${ex.cls}" title="${escapeHtml(ex.title || '')}">${escapeHtml(ex.label)}</span>`
+      : `<span class="muted" style="font-size:11px">${escapeHtml(expireNote || '—')}</span>`;
+    return `
+      <div class="rh-wallet-row" data-tip="${escapeHtml(tip || '')}">
+        <span class="rh-wallet-name">${escapeHtml(name)}</span>
+        <span class="rh-wallet-val mono">${escapeHtml(value == null ? '—' : String(value))}</span>
+        <span class="rh-wallet-exp">${exHtml}</span>
+      </div>`;
+  }
+
   function renderAccounts(panel, accounts) {
     const bodyEl = panel.querySelector('#rh-accounts-body');
     if (!bodyEl) return;
@@ -103,9 +157,6 @@
       //   transitionCoins 过渡币（只有网页端登录态能花）/ activityPoints 活动积分 / walletBalance 钱包 $
       // 纯 key 账号（OpenAPI 模式）还是老的 remainCoins / remainMoney / remainPoint。
       const isWeb = !!(acc.email && acc.web_session_status && acc.web_session_status.logged_in);
-      const coins = isWeb ? (info.transitionCoins ?? '—') : (info.remainCoins ?? '—');
-      const point = isWeb ? (info.activityPoints ?? info.paidPoints ?? '—') : (info.remainPoint ?? '—');
-      const money = isWeb ? (info.walletBalance ?? '—') : (info.remainMoney ?? '—');
       const ss = acc.web_session_status || {};
       const tasks = info.currentTaskCounts ?? '0';
       const apiTypeRaw = String(info.apiType || (isWeb ? 'WEB' : 'NORMAL')).toUpperCase();
@@ -128,15 +179,24 @@
               <button class="ghost" title="删除" data-rh-action="delete" data-id="${escapeHtml(acc.account_id)}">✕</button>
             </span>
           </div>
-          <div class="muted mono" style="font-size:11px;margin:0 0 8px">${escapeHtml(acc.masked_email || acc.masked_key || '')}</div>
-          <div style="display:flex;gap:14px;font-size:12px;flex-wrap:wrap;align-items:center">
-            <span data-tip="${isWeb ? '过渡币：只有网页端登录态能花，API 通道不认' : '站内 RH 币：网页端可用，API 通道不认'}">${isWeb ? '过渡币' : '站内币'} <strong class="mono">${escapeHtml(String(coins))}</strong></span>
-            <span data-tip="${isWeb ? '活动 / 付费积分（站内）' : 'API 调用可用额度（remainPoint）'}">${isWeb ? '积分' : 'API 额度'} <strong class="mono">${escapeHtml(String(point))}</strong></span>
-            <span data-tip="钱包余额（USD）：闭源模型节点 / OpenAPI 只认这个">钱包 <strong class="mono">${escapeHtml(String(money))}</strong></span>
+          <div class="muted mono" style="font-size:11px;margin:0 0 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <span>${escapeHtml(acc.masked_email || acc.masked_key || '')}</span>
             ${ss.logged_in
-              ? `<span data-tip="${escapeHtml(ss.last_error || '登录态正常')}" style="${ss.last_error ? 'color:#ef4444' : ''}">登录态 <strong class="mono">${ss.expires_in_days != null ? ss.expires_in_days + 'd' : 'ok'}</strong></span>`
-              : (acc.email ? '<span style="color:#f59e0b">未登录</span>' : '')}
-            <span>运行中 <strong class="mono">${escapeHtml(String(tasks))}</strong></span>
+              ? `<span class="rh-exp ${ss.last_error ? 'rh-exp-soon' : 'rh-exp-ok'}" data-tip="${escapeHtml(ss.last_error || '登录态正常，到期前自动续')}" style="cursor:help">登录态 ${ss.expires_in_days != null ? ss.expires_in_days + 'd' : 'ok'}</span>`
+              : (acc.email ? '<span class="rh-exp rh-exp-soon">未登录</span>' : '')}
+            <span class="muted">运行中 <strong class="mono">${escapeHtml(String(tasks))}</strong></span>
+          </div>
+          <div class="rh-wallets">
+            ${isWeb
+              ? walletRow('过渡币', info.transitionCoins, info.transitionCoinExpireAt, '旧币体系的过渡币：只有网页端登录态能花，API 不认；有效期见右', '有效期未知')
+              : walletRow('站内币', info.remainCoins, null, '站内 RH 币（纯 key 账号拿不到有效期）', '有效期未知')}
+            ${isWeb
+              ? walletRow('积分', info.activityPoints, info.pointsExpireAt, '每日赠送 30 分，每天 00:00（站点时间）清零；应用里的「模型调用」扣这个', '有效期未知')
+              : walletRow('API 额度', info.remainPoint, null, 'API 调用可用额度（remainPoint）', '')}
+            ${walletRow('钱包 $', info.walletBalance, null, '充值余额：闭源模型节点 / OpenAPI 只认这个，不过期', '不过期')}
+            ${isWeb && (info.freeImageLeft != null || info.freeVideoLeft != null)
+              ? walletRow('免费次数', `图 ${info.freeImageLeft ?? 0} · 视频 ${info.freeVideoLeft ?? 0}`, null, '站内福利送的免费生成次数（另算，不扣币不扣分；每天重置）', '每日重置')
+              : ''}
           </div>
         </div>`;
     }).join('');
