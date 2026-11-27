@@ -47,6 +47,7 @@ CLAUDE = "You are Claude Code, Anthropic's official CLI for Claude."
 CLAUDE_SDK = ("You are Claude Code, Anthropic's official CLI for Claude, "
               "running within the Claude Agent SDK.")
 CODEX = "You are Codex, an agent based on GPT-6."
+KIMI = "You are Kimi Code CLI, an interactive general AI agent running on a user's computer."
 MASK = IDENTITY_MASK
 
 
@@ -55,12 +56,12 @@ def _msgs(*pairs):
 
 
 # ---------------------------------------------------------------------------
-# 三个已知会被拦的客户端，各自都要命中
+# 已知会被拦的客户端，各自都要命中
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("signature", [DSH, CLAUDE, CLAUDE_SDK, CODEX])
+@pytest.mark.parametrize("signature", [DSH, CLAUDE, CLAUDE_SDK, CODEX, KIMI])
 def test_known_competitor_signatures_are_masked(signature):
-    """dsh / Claude Code / Codex 的 system 首句都必须被换掉。
+    """dsh / Claude Code / Codex / Kimi Code CLI 的 system 首句都必须被换掉。
 
     Codex 与 Claude 是 2026-11-27 补测发现的：原先只挡 dsh 一句，于是这两个
     主流客户端的请求在 qoder 上**全部挂死**，且看起来像「模型坏了」。
@@ -465,3 +466,95 @@ def test_other_protocols_expose_signature_as_first_system(protocol, convert, pay
     out = neutralize_agent_identity(messages)
     assert CLAUDE not in out[0]["content"]
     assert MASK in out[0]["content"]
+
+
+# ---------------------------------------------------------------------------
+# Kimi：触发判据与另外三条**不同**（尾随空格，不是逗号）
+# ---------------------------------------------------------------------------
+
+def test_kimi_real_cli_prompt_is_masked():
+    """Kimi Code CLI 2.1.1 的真实 system 首句必须被换掉。
+
+    这条是 2026-11-28 抓真实请求拿到的（让 kimi 指向本地捕获端点，落盘
+    ``/v1/chat/completions`` 的 body，见 PR 说明）。**不要**凭印象改成
+    ``You are Kimi,``——Kimi 那句里根本没有逗号。
+
+    回放验证：真实 35K system prompt 掩码前挂死 90s 无首字节，掩码后 4.8s 200。
+    """
+    patched, hit = neutralize_identity_text(KIMI)
+    assert hit is not None
+    assert "Kimi" not in patched
+    assert patched == MASK
+
+    out = neutralize_agent_identity(_msgs(("system", KIMI), ("user", "hi")))
+    assert out[0]["content"] == MASK
+    assert out[1]["content"] == "hi"
+
+
+@pytest.mark.parametrize("text", [
+    "You are Kimi",          # 无尾随空格 → 放行
+    "You are Kimi.",         # 句号 → 放行
+    "You are Kimi\n\nhi",    # 换行 → 放行
+    "You are Kimi123",       # 数字紧跟 → 放行
+    # 制表符 ≠ 空格。这条**不是凑数的**：它防的是把判据放宽成
+    # `re.match(r"You are Kimi\s", text)` —— 那样 `You are Kimi\n\n# Role`
+    # 这种真实用户 prompt 里的正常排版就会被误改（实测 `You are Kimi\n` 200 放行）。
+    "You are Kimi\tagent",
+    "you are Kimi Code CLI",  # 小写 you → 放行
+])
+def test_kimi_marker_boundaries_are_exact(text):
+    """**尾随空格是必需的**，这是实测出来的，不是猜的。
+
+    2026-11-28 在 qoder/hungerg 上逐条二分的结果：
+
+        You are Kimi            → 200（放行）
+        You are Kimi.           → 200
+        You are Kimi\\n          → 200
+        You are Kimi123         → 200
+        You are Kimi\\t          → 200
+        You are Kimi<space>     → **挂住**
+        you are Kimi Code CLI   → 200（大小写敏感）
+
+    所以既不能放宽成「Kimi 后跟任意字符」（会误改用户 prompt），也不能收紧成
+    「必须带逗号」（Kimi 那句没有逗号，会漏掉真实客户端）。改这里之前请重跑矩阵。
+    """
+    patched, hit = neutralize_identity_text(text)
+    assert hit is None, f"{text!r} 上游放行（实测 200），不该被判为命中"
+    assert patched == text
+
+
+def test_kimi_masked_anywhere_in_prompt():
+    """Kimi 的身份句在 system 里不是首段也能命中（真实 prompt 就是这种形态）。
+
+    真实 system prompt 35349 字符，身份句在开头，但后面还有 ``Your primary
+    goal is ...`` 等段落。掩码只该吃掉身份那一句，后面全部保留。
+    """
+    text = KIMI + "\n\nYour primary goal is to help users with software engineering tasks."
+    patched, _ = neutralize_identity_text(text)
+    assert patched == MASK + "\n\nYour primary goal is to help users with software engineering tasks."
+    assert "primary goal" in patched, "真实指令被误吞了"
+
+
+def test_kimi_marker_keeps_trailing_space():
+    """尾随空格是这个 marker 的**判据本体**，不是排版噪声。
+
+    去尾随空格的工具链会静默删掉它：编辑器保存钩子、`prettier`、
+    某些 ruff/black 配置里的 W291 自动修复。删掉之后：
+
+    - Python 语法完全合法，ruff 不报错，CI 的 formatter 检查也不会红；
+    - `You are Kimi` 实测 200 放行，所以不会立刻出问题；
+    - 但 Kimi CLI 的请求**重新开始挂死**（无首字节、无报错）。
+
+    也就是说这是典型的「静默失效」——`test_kimi_marker_boundaries_are_exact`
+    能抓到，但它的报错是「`You are Kimi` 不该被判为命中」，读的人得先反推出
+    「哦 marker 被改了」才知道根因。这条断言直接把 marker 钉死，报错一眼可见。
+    """
+    kimi_markers = [m for m in COMPETITOR_IDENTITY_MARKERS if "Kimi" in m]
+    assert kimi_markers == ["You are Kimi "], (
+        "Kimi 的 marker 必须以**空格**结尾（不是逗号、不是句号、不是省略）。"
+        "实测 `You are Kimi` / `You are Kimi.` / `You are Kimi\\n` 都 200 放行，"
+        "只有 `You are Kimi ` 会挂住上游。"
+    )
+    # 显式断言「最后一个字符是空格」，让报错信息本身就说清问题。
+    assert kimi_markers[0].endswith(" "), "尾随空格被去掉了"
+    assert not kimi_markers[0].endswith("  "), "多了一个空格（复制粘贴常见）"
