@@ -418,3 +418,50 @@ def test_all_providers_get_masked_via_forward_chat():
     sent = seen["body"]["messages"][0]["content"]
     assert CLAUDE not in sent, "公共入口没有做身份脱敏"
     assert MASK in sent
+
+
+# ---------------------------------------------------------------------------
+# 三种协议的转换结果都要能被公共层看到
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("protocol,convert,payload", [
+    (
+        "anthropic",
+        lambda: __import__(
+            "buddy_proxy.protocols.anthropic_adapter", fromlist=["x"]
+        ).anthropic_request_to_chat,
+        {"model": "m", "system": CLAUDE, "messages": [{"role": "user", "content": "hi"}]},
+    ),
+    (
+        "responses",
+        lambda: __import__(
+            "buddy_proxy.protocols.responses_adapter", fromlist=["x"]
+        ).responses_request_to_chat,
+        {"model": "m", "instructions": CLAUDE, "input": [{"role": "user", "content": "hi"}]},
+    ),
+])
+def test_other_protocols_expose_signature_as_first_system(protocol, convert, payload):
+    """``/v1/messages`` 与 ``/v1/responses`` 转换后，签名必须落在**首条 system**。
+
+    公共层只扫 `body["messages"]` 的首条 system/developer。这两条协议把身份
+    放在别处（Anthropic 的 `system` 字段、Responses 的 `instructions` 字段），
+    全靠 adapter 转成置顶的 system message 才能被看到。
+
+    这条测试的价值不在「现在能过」——在于**adapter 改字段名时会立刻红**。
+    漏掉的后果是上游挂死（无首字节、无报错），不是报错，线上极难定位；
+    而现有测试只断言了公共入口调用了脱敏，没有断言转换后的形状。
+
+    实测三条协议都通（2026-11-27，qoder/hungerg）：
+    chat/completions 5.0s、messages 12.7s、responses 2.5s，均 200。
+    """
+    converted = convert()(payload)
+    messages = converted["messages"]
+    assert messages[0]["role"] == "system", (
+        f"{protocol} adapter 没把身份放成首条 system，公共层会扫不到"
+    )
+    assert CLAUDE in messages[0]["content"]
+
+    # 转换结果交给公共层，必须被换掉。
+    out = neutralize_agent_identity(messages)
+    assert CLAUDE not in out[0]["content"]
+    assert MASK in out[0]["content"]
