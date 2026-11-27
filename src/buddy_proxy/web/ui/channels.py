@@ -2106,7 +2106,9 @@ async def ui_runninghub_tasks_submit(request: Request):
         raise HTTPException(status_code=400, detail={"error": {"message": f"登录态不可用：{exc}"}})
 
     task_id = _new_local_task_id()
-    now = asyncio.get_running_loop().time()
+    # 必须是 unix 秒，不是 loop.time()——后者是进程启动起的单调时钟（4 万多的数），
+    # UI 的 fmtWhen 拿它 new Date(ts*1000) 会显示成 1970 年
+    now = time.time()
     rh_store.upsert_task({
         "taskId": task_id,
         "status": "SUBMITTING",

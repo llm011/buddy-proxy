@@ -286,6 +286,12 @@ def request_cancel(task_id: str) -> bool:
     return True
 
 
+#: 站内「算力 / 积分不够」：2026-11-27 实测 activityPoint 只剩 19、预估要 21 时
+#: webapp/create 回 414 TASK_CREATE_FAILED_BY_NOT_ENOUGH_POWER_VALUE——**不是**钱包、
+#: 不是闭源节点，是每日赠送的积分用完了（当天 16:00 UTC 清零重置）。
+POWER_INSUFFICIENT_MARKERS = ("NOT_ENOUGH_POWER", "POWER_VALUE", "INSUFFICIENT_POWER")
+
+
 def _finalize_hint(exc: WebSessionError) -> tuple[str, bool]:
     """把异常映射成 (status, 是否闭源 605)。"""
     msg = str(exc)
@@ -337,7 +343,7 @@ async def execute_task(
             sub = await submit_task(acc, webapp_id, inputs)
         except WebSessionError as exc:
             status, closed = _finalize_hint(exc)
-            rh_store.update_task(task_id, status=status, error=str(exc)[:400],
+            rh_store.update_task(task_id, status=status, error=_humanize_submit_error(exc),
                                  errorCode=str(exc.raw_code or ""), closedSource=closed,
                                  upstreamTaskId=None, submitted=False, finishedAt=time.time())
             return rh_store.get_task(task_id)
@@ -378,6 +384,15 @@ async def execute_task(
     finally:
         _running.discard(task_id)
         _cancel_flags.discard(task_id)
+
+
+def _humanize_submit_error(exc: WebSessionError) -> str:
+    """提交就被拒时把站内错误码翻成能看懂的话；其余原文透传。"""
+    msg = str(exc)
+    if str(exc.raw_code) == "414" or any(m in msg.upper() for m in POWER_INSUFFICIENT_MARKERS):
+        return ("站内积分（每日赠送的 activityPoint）不够支付这次预估，16:00 UTC 清零后重置；"
+                f"或换积分消耗更低的应用。上游原文：{exc}")
+    return msg[:400]
 
 
 def _slim_estimate(est: dict[str, Any]) -> dict[str, Any]:

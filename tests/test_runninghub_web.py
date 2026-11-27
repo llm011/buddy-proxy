@@ -681,3 +681,31 @@ def test_reap_orphans_marks_stale_running_but_not_inflight(isolated_store: Path)
     assert store.get_task("old-running")["status"] == "INTERRUPTED" and "重启" in store.get_task("old-running")["error"]
     assert store.get_task("live")["status"] == "RUNNING"
     assert store.get_task("done")["status"] == "SUCCESS"
+
+
+def test_ui_submit_records_unix_created_at(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """created_at 必须是 unix 秒。踩过：写成 loop.time()（单调时钟，4 万多），UI 显示成 1970 年。"""
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    rec = _Recorder({
+        "/uc/getUserInfo": {"code": 0, "data": {"id": "1", "walletInfo": {"balance": 0}}},
+        "/uc/point/summary": {"code": 0, "data": {"transitionCoinRemained": "100"}},
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"nodes": []}},
+        "/task/webapp/create": {"code": 414, "msg": "TASK_CREATE_FAILED_BY_NOT_ENOUGH_POWER_VALUE"},
+    })
+    rec.install(monkeypatch)
+    from fastapi.testclient import TestClient
+
+    from buddy_proxy import __main__ as m
+    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+    before = time.time()
+    with TestClient(m.app) as c:
+        t = c.post("/ui/api/runninghub/tasks/submit", json={"webapp_id": "w", "nodeInfoList": []}).json()["task"]
+        deadline = time.time() + 5
+        while time.time() < deadline and store.get_task(t["taskId"])["status"] not in ("FAILED", "SUCCESS"):
+            time.sleep(0.05)
+        cur = store.get_task(t["taskId"])
+    assert before <= cur["created_at"] <= time.time() + 1, "created_at 不是 unix 秒"
+    assert cur["status"] == "FAILED" and cur["submitted"] is False
+    assert "积分" in cur["error"] and "414" not in cur["error"] or "POWER" in cur["error"], "414 要翻成「积分不够」"
