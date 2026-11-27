@@ -413,6 +413,8 @@ class RaccoonProvider(BaseProvider):
                     failover.mark_cooldown(
                         acct.id, retry_after=str(int(failover._RISK_CONTROL_COOLDOWN_S)),
                         reason=f"账号风控: {detail}")
+                    await _drain(resp)
+                    raise _risk_control_stop(acct.id)
                 elif failover.is_credit_exhausted(resp.status_code, code, detail):
                     failover.mark_cooldown(acct.id, quota=True,
                                            reason=f"积分耗尽: {detail}")
@@ -447,6 +449,8 @@ class RaccoonProvider(BaseProvider):
                     failover.mark_cooldown(
                         acct.id, retry_after=str(int(failover._RISK_CONTROL_COOLDOWN_S)),
                         reason=f"账号风控: {gate.error_message}")
+                    await _drain(gate.resp)
+                    raise _risk_control_stop(acct.id)
                 elif failover.is_credit_exhausted(gate.error_code, code,
                                                   gate.error_message):
                     failover.mark_cooldown(acct.id, quota=True,
@@ -1447,6 +1451,34 @@ def _extract_code(detail: str) -> str:
         if isinstance(val, (str, int)) and not isinstance(val, bool):
             return str(val)
     return ""
+
+
+def _risk_control_stop(account_id: str) -> HTTPException:
+    """账号级风控（``200108``）时**终止整轮换号**，不再打下一个账号。
+
+    为什么不能继续换号：``200108`` 是账号级判定（见
+    ``failover.is_account_risk_control``），同一个请求换到别的账号打，等于
+    再赌一次「这个号会不会也被判异常」——而这正是把健康账号一个个拖下水
+    的路径。2026-11-28 02:07:28/29 实测：一个客户端请求在同一秒把两个号撞成
+    风控；随后 30 分钟冷却一到点，探路请求又把几个号重新锁住，5 个号全挂、
+    连续几小时无一可用。
+
+    与其它 4xx 的分工：模型级限流（``user_model_rate_limited``）只挡一个
+    模型、换个号确实可能成功，所以仍然 ``continue``；积分耗尽（402）是整号
+    停摆但换号有效（别的号有钱），也仍然 ``continue``。只有账号风控是
+    「继续试会扩大损失」，所以在这里硬停。
+    """
+    return HTTPException(
+        status_code=429,
+        detail={"error": {
+            "message": (f"raccoon 账号 {account_id} 触发上游账号风控（200108），"
+                        "已停止继续换号：风控是账号级判定，换号只会把其它账号"
+                        "也撞成风控。该账号冷却 30 分钟后自动恢复，期间请改用"
+                        "其它通道"),
+            "type": "rate_limit_error",
+            "retry_after_s": int(failover._RISK_CONTROL_COOLDOWN_S),
+        }},
+    )
 
 
 def _is_session_dead(status: int, detail: str) -> bool:

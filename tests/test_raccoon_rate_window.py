@@ -357,3 +357,117 @@ def test_forward_all_rechecks_fail_still_reports_rate_limit(monkeypatch):
     assert ei.value.status_code == 429
     assert "频率上限" in ei.value.detail["error"]["message"]
     assert spy.sent_tokens == []
+
+
+# ---------------------------------------------------------------------------
+# 集成：账号风控（200108）必须终止整轮换号
+# ---------------------------------------------------------------------------
+
+_RISK_BODY = (
+    '{"error":{"code":200108,"message":"系统检测到当前账号存在异常调用，'
+    '模型调用功能已暂时受限。请稍后重试；如仍未恢复，或你认为是误判，'
+    '请点击左下角头像，选择「问题反馈」提交说明。","type":"rate_limit_error"}}'
+)
+
+
+class _RiskControlClient:
+    """每次 send 都回 429 + ``200108``，并记录打了哪个账号。"""
+
+    def __init__(self):
+        self.sent_tokens: list[str] = []
+
+    def build_request(self, method, url, *, json=None, headers=None, timeout=None):
+        return {"headers": headers or {}}
+
+    async def send(self, req, *, stream=False):
+        tok = str((req.get("headers") or {}).get("Authorization", ""))
+        self.sent_tokens.append(tok)
+        import httpx
+
+        return httpx.Response(
+            429,
+            content=_RISK_BODY.encode(),
+            headers={"content-type": "application/json"},
+            request=httpx.Request("POST", "https://xiaohuanxiong.com/api/web/llm/v2/chat/completions"),
+        )
+
+
+def test_risk_control_stops_failover_instead_of_trying_next_account(monkeypatch):
+    """``200108`` 账号风控 → 立刻终止，**不再打下一个号**。
+
+    2026-11-28 实测：一个客户端请求在 02:07:28/29 同一秒把两个号撞成风控；
+    之后每 30 分钟冷却一到点，探路请求又把几个号重新锁住，5 个号连续几小时
+    全挂。风控是账号级判定，换号只是把健康账号也赌进去。
+
+    断言 ``len(sent_tokens) == 1`` 是关键——返回 429 还不够，只要还换了号
+    就算失败。
+    """
+    from fastapi import HTTPException
+
+    from buddy_proxy.raccoon import failover
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    cooled: list[str] = []
+    monkeypatch.setattr(failover, "mark_cooldown",
+                        lambda aid, **k: cooled.append(aid) or 0.0)
+
+    provider = RaccoonProvider()
+    spy = _RiskControlClient()
+    w = AccountRateWindow(per_minute=0, per_5min=100)
+    _patch_forward_env(monkeypatch, provider, [_acct("a1"), _acct("a2"), _acct("a3")],
+                       window=w, client=spy)
+    # _patch_forward_env 会把 mark_cooldown 换成 no-op，这里再盖回来
+    monkeypatch.setattr(failover, "mark_cooldown",
+                        lambda aid, **k: cooled.append(aid) or 0.0)
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(provider.forward(
+            {"model": "sn-glm-5-3", "stream": True, "messages": []}, "openai"))
+
+    assert ei.value.status_code == 429
+    assert len(spy.sent_tokens) == 1, (
+        f"账号风控后不该继续换号，实际打了 {len(spy.sent_tokens)} 个账号："
+        f"{spy.sent_tokens}")
+    assert "200108" in ei.value.detail["error"]["message"]
+    # 被风控的号要进冷却，且是整号级（不是模型级）
+    assert cooled == ["a1"]
+    assert ei.value.detail["error"]["retry_after_s"] == int(
+        failover._RISK_CONTROL_COOLDOWN_S)
+
+
+def test_model_rate_limit_still_fails_over(monkeypatch):
+    """对照：模型级 429（``user_model_rate_limited``）仍要换号。
+
+    与 200108 的分工——模型限流只挡一个模型，别的号/别的模型还能用，
+    终止整轮反而是错的。这条锁住「别把风控的硬停泛化到所有 429」。
+    """
+    from fastapi import HTTPException
+
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    class _ModelLimitClient(_RiskControlClient):
+        async def send(self, req, *, stream=False):
+            tok = str((req.get("headers") or {}).get("Authorization", ""))
+            self.sent_tokens.append(tok)
+            import httpx
+
+            body = ('{"error":{"code":200109,"message":'
+                    '"user_model_rate_limited","type":"rate_limit_error"}}')
+            return httpx.Response(
+                429, content=body.encode(),
+                headers={"content-type": "application/json"},
+                request=httpx.Request("POST", "https://x/y"))
+
+    provider = RaccoonProvider()
+    spy = _ModelLimitClient()
+    w = AccountRateWindow(per_minute=0, per_5min=100)
+    _patch_forward_env(monkeypatch, provider, [_acct("a1"), _acct("a2")],
+                       window=w, client=spy)
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(provider.forward(
+            {"model": "sn-glm-5-3", "stream": True, "messages": []}, "openai"))
+
+    assert ei.value.status_code == 429
+    assert len(spy.sent_tokens) == 2, (
+        f"模型级限流应当换号继续，实际只打了 {spy.sent_tokens}")
