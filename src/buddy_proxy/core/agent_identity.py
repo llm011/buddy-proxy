@@ -29,9 +29,17 @@ Codex / Claude Code 这两个主流客户端的请求会**全部挂死**，而�
 「模型坏了」。
 
 同时实测确认它**不是**「You are X,」通用规则：Cursor / Windsurf / Copilot /
-Kimi / Gemini / Qwen / Trae / OpenCode / Aider / Cline 等一律 200 放行，
-只有一份**竞品名单**会被拦。所以既不能只匹配一条完整句（漏），也不能
-匹配任意「You are X,」（误伤用户 prompt）。
+Gemini / Qwen / Trae / OpenCode / Aider / Cline 等一律 200 放行，只有一份
+**竞品名单**会被拦。所以既不能只匹配一条完整句（漏），也不能匹配任意
+「You are X,」（误伤用户 prompt）。
+
+**Kimi 是 2026-11-28 补进来的，也是上面这条「名单」结论的反面教材**：那天
+我用 ``You are Kimi, an AI assistant.`` 这个**自己编的**句式测出 200，就
+把 Kimi 归到「放行」那一栏——而 Kimi CLI 真实的身份句是
+``You are Kimi Code CLI, an interactive general AI agent…``，**没有逗号**，
+照样挂死。教训：**别用自己臆想的句式去探判据**。正确做法是让客户端真的跑
+一轮、把请求体抓下来回放（做法见 ``tests/test_agent_identity.py`` 的
+``test_kimi_real_cli_prompt_is_masked``）。
 
 ## 实测边界（qoder 通道，hungerg，流式）
 
@@ -70,7 +78,24 @@ system prompt                                      结果
    Qoder / Continue / Roo / OpenCode / Cody / Goose 等 22 个名字实测全部 200。
    写成通用正则会把正常客户端的 persona 全改掉。
 
-## 扫描范围
+## 怎么抓一个 CLI 的「真实身份句」
+
+不要靠 ``strings`` 翻二进制（Kimi 的 system prompt 压根不在二进制里，35K
+里绝大部分是运行时拼的），也不要靠臆想句式。可靠做法是**让客户端把请求发到
+你自己的端点上**：
+
+1. 起一个最小 OpenAI 兼容端点，把 ``/v1/chat/completions`` 的请求体原样落盘；
+2. 把该 CLI 的 ``base_url`` 临时指向它（Kimi 是
+   ``~/.kimi-code/config.toml`` 里 ``[providers."<id>"].base_url``，注意
+   新版读 ``~/.kimi-code/`` 而**不是** ``~/.kimi/``）；
+3. 跑一轮 ``kimi -p "say ok"``；
+4. 拿到 ``messages[0].content`` 之后，**先回放确认它会挂**，再改 marker。
+
+第 4 步不能省：直接照抄抓到的句子加进 marker，可能既没命中真正触发点、又
+多改了一堆正常 prompt。2026-11-28 的 Kimi 就是靠「回放 35349 字符原文 →
+挂死 90s；掩码后 → 4.8s 200」这条对照确定下来的。
+
+**收尾记得把 base_url 改回去**，别把自己的 CLI 一直指向临时端点。
 
 与 codebuddy 的 ``_neutralize_leading_system`` 不同，这里**只扫第一条**
 system/developer 消息，且该条**整条**都扫（不是只扫首段）：
