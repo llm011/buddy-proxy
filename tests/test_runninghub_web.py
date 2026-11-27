@@ -15,6 +15,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import json as json_lib
 import time
 from pathlib import Path
 from typing import Any
@@ -738,11 +739,74 @@ def test_get_balance_claims_daily_gift_before_reading_points(monkeypatch: pytest
         "/api/welfare/summary": {"code": 0, "data": {"freeImage": {"remaining": 3}, "freeVideo": {"remaining": 1}}},
     })
     rec.install(monkeypatch)
-    bal = asyncio.run(websession.get_balance("tok"))
+    bal = asyncio.run(websession.get_balance("tok", include_welfare=True))
     paths = [c[0] for c in rec.calls]
     assert paths[0] == "/api/welfare/daily-gift/claim", "领取必须在读余额之前"
+    assert "/api/welfare/summary" in paths
     assert bal["activityPoints"] == 30.0 and bal["transitionCoinExpireAt"] == "2027-11-05 08:25:08"
     assert bal["freeImageLeft"] == 3 and bal["freeVideoLeft"] == 1
+
+
+def test_get_balance_skips_welfare_by_default(monkeypatch: pytest.MonkeyPatch):
+    """submit 前的 refresh_balance 不拉 welfare/summary——省一个往返（5 个号 × 每次提交）。"""
+    rec = _Recorder({
+        "/api/welfare/daily-gift/claim": {"code": 0, "data": False},
+        "/uc/getUserInfo": {"code": 0, "data": {"id": "1", "walletInfo": {"balance": 0}}},
+        "/uc/point/summary": {"code": 0, "data": {"transitionCoinRemained": "1000"}},
+    })
+    rec.install(monkeypatch)
+    asyncio.run(websession.get_balance("tok"))
+    assert "/api/welfare/summary" not in [c[0] for c in rec.calls]
+
+
+def test_daily_gift_reset_hour_self_check(monkeypatch: pytest.MonkeyPatch):
+    """时区假设的自检：清零时间不是 16:00Z 只 warn 不阻塞。"""
+    rec = _Recorder({
+        "/api/welfare/daily-gift/claim": {"code": 0, "data": False},
+        "/uc/getUserInfo": {"code": 0, "data": {"id": "1"}},
+        "/uc/point/summary": {"code": 0, "data": {"transitionCoinRemained": "1", "nearestExpireTime": "2026-11-27T08:00:00Z"}},
+    })
+    rec.install(monkeypatch)
+    bal = asyncio.run(websession.get_balance("tok"))
+    assert bal["transitionCoins"] == 1.0
+    assert websession.daily_gift_reset_hour_utc({"nearestExpireTime": "2026-11-27T16:00:00Z"}) == 16
+    assert websession.daily_gift_reset_hour_utc({}) is None
+
+
+def test_accounts_refresh_parallel_keeps_free_counts_and_isolates_failures(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """accounts/refresh：多账号并行刷，带免费次数；一个号挂了不影响别的、不写脏数据。"""
+    import base64 as _b64
+    for i, e in enumerate(("a@x.com", "b@x.com", "c@x.com")):
+        acc = store.upsert_account(email=e, password="pw", label=e)
+        store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(sub=str(i)), refresh_token="r").to_dict())
+    rec = _Recorder({})
+    class _Client:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def post(self, url, headers=None, json=None, **kw):
+            tok = (headers or {}).get("Authorization", "").replace("Bearer ", "")
+            path = url.split("runninghub.ai", 1)[-1]
+            rec.calls.append((path, json or {}, dict(headers or {})))
+            sub = ""
+            if tok.count(".") == 2:
+                part = tok.split(".")[1]; part += "=" * (-len(part) % 4)
+                sub = json_lib.loads(_b64.urlsafe_b64decode(part)).get("sub", "")
+            if path == "/api/welfare/daily-gift/claim": return _Resp({"code": 0, "data": False})
+            if path == "/uc/getUserInfo": return _Resp({"code": 0, "data": {"id": "1", "walletInfo": {"balance": 0}}})
+            if path == "/uc/point/summary":
+                if sub == "2": return _Resp({"code": 500, "msg": "boom"})
+                return _Resp({"code": 0, "data": {"transitionCoinRemained": {"0": "1000", "1": "500"}[sub]}})
+            if path == "/api/product/coinGainList": return _Resp({"code": 0, "data": []})
+            if path == "/api/welfare/summary": return _Resp({"code": 0, "data": {"freeImage": {"remaining": 3}, "freeVideo": {"remaining": 1}}})
+            return _Resp({"code": 404, "msg": f"no route for {path}"})
+    monkeypatch.setattr(websession.httpx, "AsyncClient", lambda **kw: _Client())
+    r = _client(monkeypatch).post("/ui/api/runninghub/accounts/refresh", json={})
+    assert r.status_code == 200
+    by = {a["label"]: a for a in r.json()["accounts"]}
+    assert by["a@x.com"]["account_info"]["transitionCoins"] == 1000.0
+    assert by["b@x.com"]["account_info"]["transitionCoins"] == 500.0
+    assert by["a@x.com"]["account_info"]["freeImageLeft"] == 3
+    assert not by["c@x.com"].get("account_info"), "失败的号不该写脏数据"
 
 
 def test_get_balance_survives_claim_and_coin_list_failures(monkeypatch: pytest.MonkeyPatch):

@@ -113,6 +113,8 @@
     if (str.includes('T')) { const d = new Date(str.replace(' ', '+')); return isNaN(d) ? null : d; }
     const m = str.match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
     if (!m) return null;
+    // 站点本地时间按 UTC+8 解释——和后端 websession.SITE_TZ_OFFSET_HOURS 是同一个假设，
+    // 来源见那边的注释（point/summary 的 nearestExpireTime 是 16:00Z = 站点 00:00），要改一起改
     return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5], +m[6]));
   }
   function fmtExpiry(s) {

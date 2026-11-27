@@ -24,6 +24,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -329,14 +330,17 @@ async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool:
         return False
 
 
-async def get_balance(token: str, *, timeout: float = 30.0, claim_gift: bool = True) -> dict[str, Any]:
+async def get_balance(
+    token: str, *, timeout: float = 30.0, claim_gift: bool = True, include_welfare: bool = False
+) -> dict[str, Any]:
     """把站内余额整理成固定字段，给 store / UI 用。
 
     - ``transitionCoins`` / ``transitionCoinExpireAt``：过渡币 + 最近一笔的过期时间（ISO，站内时间）
     - ``activityPoints`` / ``pointsExpireAt``：活动 / 每日赠送积分 + 过期时间（每日 00:00 站点时间清零）
     - ``paidPoints``：付费积分（不过期）
     - ``walletBalance`` / ``apiConsumableBalance``：钱包余额 / API 可用余额（USD）
-    - ``freeImageLeft`` / ``freeVideoLeft``：站内福利的免费次数（另算，不扣币不扣分）
+    - ``freeImageLeft`` / ``freeVideoLeft``：站内福利的免费次数（另算，不扣币不扣分；只在
+      ``include_welfare=True`` 时拉——submit 前不需要，省一个往返）
 
     ``claim_gift=True`` 时先尝试领当天赠送（已领过上游回 false，无副作用），再拉余额——
     顺序反了 UI 会显示 0 积分而运行时报 414。
@@ -352,11 +356,19 @@ async def get_balance(token: str, *, timeout: float = 30.0, claim_gift: bool = T
     except WebSessionError:
         coins = []
     welfare: dict[str, Any] = {}
-    try:
-        w = await _post("/api/welfare/summary", {}, token=token, timeout=timeout)
-        welfare = w.get("data") if isinstance(w.get("data"), dict) else {}
-    except WebSessionError:
-        welfare = {}
+    if include_welfare:
+        try:
+            w = await _post("/api/welfare/summary", {}, token=token, timeout=timeout)
+            welfare = w.get("data") if isinstance(w.get("data"), dict) else {}
+        except WebSessionError:
+            welfare = {}
+    # 时区自检：每日清零不是 16:00Z 说明站点换时区了，SITE_TZ_OFFSET_HOURS 要跟着改
+    reset_hour = daily_gift_reset_hour_utc(pts)
+    if reset_hour is not None and reset_hour != DAILY_GIFT_RESET_HOUR_UTC:
+        logging.getLogger(__name__).warning(
+            "runninghub 每日积分清零时间不是 %shZ 而是 %shZ，站点时区可能变了（SITE_TZ_OFFSET_HOURS=%s）",
+            DAILY_GIFT_RESET_HOUR_UTC, reset_hour, SITE_TZ_OFFSET_HOURS,
+        )
     wallet = info.get("walletInfo") if isinstance(info.get("walletInfo"), dict) else {}
     # 过渡币过期：取「还没过期」的记录里最早的一笔；拉失败 / 没记录就 None，不阻塞余额
     coin_expire = None
@@ -524,16 +536,40 @@ def normalize_inputs(node_info_list: list[dict[str, Any]]) -> list[dict[str, Any
     return out
 
 
+#: 站内「无时区」时间（``YYYY-MM-DD HH:MM:SS``）的时区。**反推**出来的，不是文档写的：
+#: point/summary 的 ``nearestExpireTime`` 是 ``…T16:00:00Z``，而每日赠送在站点时间 00:00 清零
+#: → 16:00Z 就是站点 00:00 → UTC+8。前端 ``parseSiteTime`` 里同一个假设（``+m[4] - 8``），要改一起改。
+#: ``daily_gift_reset_hour_utc`` 用来在运行时自检：拿到的清零时间不是 16:00Z 就说明站点换时区了。
+SITE_TZ_OFFSET_HOURS = 8
+DAILY_GIFT_RESET_HOUR_UTC = 16
+
+
 def _parse_site_time(s: str) -> float:
-    """站内时间 → unix 秒。无时区的 ``YYYY-MM-DD HH:MM:SS`` 按站点本地（UTC+8）算。"""
+    """站内时间 → unix 秒。无时区的 ``YYYY-MM-DD HH:MM:SS`` 按 ``SITE_TZ_OFFSET_HOURS`` 算。"""
     from datetime import datetime, timezone, timedelta
     s = str(s or "").strip()
     try:
         if "T" in s:
             return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
-        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone(timedelta(hours=8))).timestamp()
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone(timedelta(hours=SITE_TZ_OFFSET_HOURS))
+        ).timestamp()
     except (ValueError, TypeError):
         return 0.0
+
+
+def daily_gift_reset_hour_utc(pts: dict[str, Any]) -> int | None:
+    """从 point/summary 的 nearestExpireTime 看每日清零是几点（UTC）。≠16 说明站点时区变了。"""
+    t = _parse_site_time(pts.get("nearestExpireTime") or "")
+    if t <= 0:
+        return None
+    from datetime import timezone
+    return int(datetime_from_unix(t).astimezone(timezone.utc).hour)
+
+
+def datetime_from_unix(t: float):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(t, tz=timezone.utc)
 
 
 def _is_past(s: str) -> bool:

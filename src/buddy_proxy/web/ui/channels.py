@@ -1746,7 +1746,8 @@ async def ui_runninghub_accounts_import(request: Request):
     # 站内余额（过渡币/积分/钱包）——拉失败不阻塞导入
     try:
         balance = await refresh_balance(
-            WebAccountSession(rh_store.get_account(acc["account_id"]), persist=rh_store.update_session)
+            WebAccountSession(rh_store.get_account(acc["account_id"]), persist=rh_store.update_session),
+            include_welfare=True,
         )
         rh_store.update_account_info(acc["account_id"], balance)
     except websession.WebSessionError:
@@ -1765,19 +1766,25 @@ async def ui_runninghub_accounts_refresh(request: Request):
 
     body = await request.json() if (await request.body()) else {}
     target_id = str(body.get("account_id") or "").strip()
-    for acc in rh_store.get_active_accounts():
+
+    async def _refresh_one(acc: dict) -> None:
         aid = acc.get("account_id")
-        if target_id and aid != target_id:
-            continue
         try:
             if acc.get("email") and acc.get("password"):
-                balance = await refresh_balance(WebAccountSession(acc, persist=rh_store.update_session))
+                # 账号卡刷新才拉免费次数（welfare/summary）；submit 前不拉，省一个往返
+                balance = await refresh_balance(
+                    WebAccountSession(acc, persist=rh_store.update_session), include_welfare=True
+                )
                 rh_store.update_account_info(aid, balance)
             elif acc.get("api_key"):
                 info = await rh_client.fetch_account_status(acc["api_key"])
                 rh_store.update_account_info(aid, info)
         except (rh_client.RunningHubError, websession.WebSessionError):
             pass
+
+    targets = [a for a in rh_store.get_active_accounts() if not target_id or a.get("account_id") == target_id]
+    # 并行：5 个号串行刷要 5 × 5 个往返，gather 一下快 5 倍；update_account_info 是原子写 + flock
+    await asyncio.gather(*(_refresh_one(a) for a in targets))
     return {"accounts": rh_store.list_accounts(include_secret=False)}
 
 
