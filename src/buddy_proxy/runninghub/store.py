@@ -327,6 +327,9 @@ def rename_workflow(webapp_id: str, name: str, billing_type: str | None = None) 
 # 表单值，没有敏感信息），失败原因存解析后的 exception_message（截断）。
 
 _TASKS_LIMIT = 200
+# 归档记录单独一份上限。归档的都是最老的任务、之后不会再被 upsert，如果和当前队列
+# 共用一个按 created_at 淘汰的上限，新任务一多先把归档的挤掉，归档就白做了。
+_ARCHIVED_LIMIT = 200
 
 
 def _tasks_path() -> Path:
@@ -386,7 +389,17 @@ def upsert_task(task: dict[str, Any]) -> dict[str, Any]:
         items[idx] = entry
     if len(items) > _TASKS_LIMIT:
         items.sort(key=lambda t: float(t.get("created_at") or 0), reverse=True)
-        del items[_TASKS_LIMIT:]
+        kept: list[dict[str, Any]] = []
+        n_live = n_archived = 0
+        for t in items:
+            if t.get("archived"):
+                if n_archived < _ARCHIVED_LIMIT:
+                    kept.append(t)
+                    n_archived += 1
+            elif n_live < _TASKS_LIMIT:
+                kept.append(t)
+                n_live += 1
+        items[:] = kept
     _write_tasks_raw(data)
     return entry
 

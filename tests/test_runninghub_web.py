@@ -498,6 +498,16 @@ def test_task_store_caps_records(isolated_store: Path):
     assert store.get_task(f"t{store._TASKS_LIMIT + 9}") is not None
 
 
+def test_task_store_caps_archived_separately(isolated_store: Path):
+    """归档记录不能被新任务挤掉——它们最老、又不会再被 upsert 一次。"""
+    store.upsert_task({"taskId": "old", "status": "SUCCESS", "created_at": 1.0})
+    store.update_task("old", archived=True)
+    for i in range(store._TASKS_LIMIT):
+        store.upsert_task({"taskId": f"n{i}", "status": "SUCCESS", "created_at": 100.0 + i})
+    assert [t["taskId"] for t in store.list_tasks(archived=True)] == ["old"]
+    assert len(store.list_tasks()) == store._TASKS_LIMIT
+
+
 def test_execute_task_success_records_outputs_and_cost(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
     acc = _acct(isolated_store)
     store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
