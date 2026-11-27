@@ -316,8 +316,13 @@ async def get_coin_gain_list(token: str, *, timeout: float = 30.0) -> list[dict[
     return [r for r in (recs or []) if isinstance(r, dict)]
 
 
-async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool:
+async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool | None:
     """``/api/welfare/daily-gift/claim``：领每日赠送的 30 积分（每天一次，站点时间 00:00 清零重置）。
+
+    返回三态，调用方必须分开处理：
+    - ``True``：这次真领到了
+    - ``False``：上游说「今天已领过」（网页上领了 / 之前刷余额时顺手领了）——**也算今天完成**
+    - ``None``：网络 / 上游错误，**不知道领没领**——自动领取循环要退避重试，不能当成「已领」
 
     2026-11-27 实测：新注册的号 ``activityPoint=0``、``dailyGift.granted=false``，直接
     跑应用会 414 NOT_ENOUGH_POWER_VALUE——不是没币，是**没领当天的积分**。网页端登录
@@ -326,8 +331,10 @@ async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool:
     try:
         data = await _post("/api/welfare/daily-gift/claim", {}, token=token, timeout=timeout)
         return bool(data.get("data"))
-    except WebSessionError:
-        return False
+    except WebSessionError as exc:
+        if exc.kind == "refresh":
+            raise  # 401/412 让上层续期重试，别吞
+        return None  # 其他（业务码非 0 / 网络）：交给调用方按「不知道领没领」处理
 
 
 async def get_balance(

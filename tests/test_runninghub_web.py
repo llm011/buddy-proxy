@@ -36,6 +36,8 @@ def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("RUNNINGHUB_WORKFLOWS_PATH", str(tmp_path / "runninghub_workflows.json"))
     # 任务队列也必须隔离——否则测试会往用户真实的 ~/.buddy-proxy/runninghub_tasks.json 里写
     monkeypatch.setenv("RUNNINGHUB_TASKS_PATH", str(tmp_path / "runninghub_tasks.json"))
+    # 自动领积分的状态文件也要隔离
+    monkeypatch.setenv("RUNNINGHUB_GIFT_STATE_PATH", str(tmp_path / "runninghub_gift.json"))
     return p
 
 

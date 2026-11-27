@@ -105,6 +105,32 @@
     }
   }
 
+  // ---- 每日积分自动领取 ----
+  // 后端 dailygift 循环每 10 分钟巡一轮，站点 00:00（UTC 16:00）清零后给每个号领一次。
+  // 这里只负责把状态画出来 + 手动「立即领取」。
+  let _giftState = { running: false, day: '', accounts: {} };
+  async function loadGiftState() {
+    try { _giftState = (await rhFetch('/ui/api/runninghub/daily-gift')).gift || _giftState; }
+    catch (e) { /* 拿不到状态不影响别的 */ }
+    return _giftState;
+  }
+  function giftBadge(acc) {
+    if (!acc.email) return '';
+    const g = _giftState.accounts || {};
+    const mine = g[acc.account_id];
+    const today = _giftState.day;
+    const claimed = mine && mine.day && mine.day === today;
+    if (claimed) {
+      const t = mine.claimed_at ? new Date(mine.claimed_at * 1000) : null;
+      return `<span class="rh-exp rh-exp-ok" data-tip="${escapeHtml(mine.already ? '今天已领过（网页上领的 / 刷余额时顺手领的）' : '自动领取成功')}${t ? ' · ' + escapeHtml(t.toLocaleTimeString()) : ''}" style="cursor:help">今日积分 ✓</span>`;
+    }
+    if (mine && mine.error) {
+      const mins = mine.next_try_in ? Math.ceil(mine.next_try_in / 60) : null;
+      return `<button class="rh-exp rh-exp-soon" data-tip="${escapeHtml(mine.error)}" data-rh-action="claim" data-id="${escapeHtml(acc.account_id)}" style="border:0;cursor:pointer">领取失败${mins ? ' · ' + mins + 'm 后重试' : ''}</button>`;
+    }
+    return `<button class="rh-exp rh-exp-day" data-tip="${_giftState.running ? '等自动领取（每 10 分钟巡一轮）；点这里立即领' : '自动领取循环没在跑；点这里手动领'}" data-rh-action="claim" data-id="${escapeHtml(acc.account_id)}" style="border:0;cursor:pointer">待领取</button>`;
+  }
+
   // ---- 过期时间 / 钱包行 ----
   // 站内时间 → 本地 Date。支持 "2026-11-27T16:00:00.000+00:00" 和无时区的 "2026-11-08 19:23:17"（站点 UTC+8）
   function parseSiteTime(s) {
@@ -187,6 +213,7 @@
               ? `<span class="rh-exp ${ss.last_error ? 'rh-exp-soon' : 'rh-exp-ok'}" data-tip="${escapeHtml(ss.last_error || '登录态正常，到期前自动续')}" style="cursor:help">登录态 ${ss.expires_in_days != null ? ss.expires_in_days + 'd' : 'ok'}</span>`
               : (acc.email ? '<span class="rh-exp rh-exp-soon">未登录</span>' : '')}
             <span class="muted">运行中 <strong class="mono">${escapeHtml(String(tasks))}</strong></span>
+            ${giftBadge(acc)}
           </div>
           <div class="rh-wallets">
             ${isWeb
@@ -213,6 +240,13 @@
           if (action === 'refresh') {
             const res = await rhFetch('/ui/api/runninghub/accounts/refresh', { method: 'POST', body: JSON.stringify({ account_id: id }) });
             renderAccounts(panel, res.accounts);
+          } else if (action === 'claim') {
+            btn.disabled = true;
+            const res = await rhFetch('/ui/api/runninghub/daily-gift/claim', { method: 'POST', body: JSON.stringify({ account_id: id }) });
+            _giftState = res.gift || _giftState;
+            renderAccounts(panel, res.accounts);
+            const failed = res.failed && res.failed[id];
+            if (failed) window.alert('领取失败：' + failed);
           } else if (action === 'relogin') {
             const res = await rhFetch('/ui/api/runninghub/accounts/relogin', { method: 'POST', body: JSON.stringify({ account_id: id }) });
             renderAccounts(panel, res.accounts);
@@ -345,8 +379,10 @@
       <div class="chart-card" style="margin-top:14px">
         <div class="pat-head">
           <span class="name">RunningHub 账号</span>
+          <span class="tag" id="rh-gift-loop-tag" data-tip="每日赠送 30 积分，站点 00:00（UTC 16:00）清零后自动给每个号领一次；每 10 分钟巡一轮">积分自动领取</span>
           <span class="pat-head-mid"></span>
           <span class="pat-head-actions">
+            <button class="ghost" id="rh-claim-all-btn" data-tip="立即给所有号领今天的积分（已领过的不影响）">全部领取</button>
             <button class="ghost" id="rh-refresh-all-btn">全部刷新</button>
             <button class="ghost" id="rh-import-btn">导入账号</button>
           </span>
@@ -366,10 +402,23 @@
         renderTaskQueue(panel);
       } catch (err) { window.alert(err.message || String(err)); }
     });
+    panel.querySelector('#rh-claim-all-btn').addEventListener('click', async () => {
+      const btn = panel.querySelector('#rh-claim-all-btn');
+      btn.disabled = true; btn.textContent = '领取中…';
+      try {
+        const res = await rhFetch('/ui/api/runninghub/daily-gift/claim', { method: 'POST', body: '{}' });
+        _giftState = res.gift || _giftState;
+        renderAccounts(panel, res.accounts);
+        const nOk = (res.claimed || []).length, nAlready = (res.already || []).length, nFail = Object.keys(res.failed || {}).length;
+        window.alert(`领取完成：新领到 ${nOk} 个，之前已领 ${nAlready} 个${nFail ? '，失败 ' + nFail + ' 个（看卡片上的红标）' : ''}`);
+      } catch (err) { window.alert(err.message || String(err)); }
+      finally { btn.disabled = false; btn.textContent = '全部领取'; }
+    });
     panel.querySelector('#rh-import-btn').addEventListener('click', () => openImportModal(panel));
     panel.querySelector('#rh-refresh-all-btn').addEventListener('click', async () => {
       try {
         const res = await rhFetch('/ui/api/runninghub/accounts/refresh', { method: 'POST', body: '{}' });
+        await loadGiftState();
         renderAccounts(panel, res.accounts);
       } catch (err) {
         window.alert(err.message || String(err));
@@ -380,7 +429,13 @@
       const [accRes, wfRes] = await Promise.all([
         rhFetch('/ui/api/runninghub/accounts'),
         rhFetch('/ui/api/runninghub/workflows'),
+        loadGiftState(),
       ]);
+      const loopTag = panel.querySelector('#rh-gift-loop-tag');
+      if (loopTag) {
+        loopTag.textContent = _giftState.running ? '积分自动领取 · 运行中' : '积分自动领取 · 未运行';
+        loopTag.className = 'tag ' + (_giftState.running ? 'tag-coins' : 'tag-money');
+      }
       renderAccounts(panel, accRes.accounts || []);
       renderWorkflows(panel, wfRes.workflows || []);
       renderTaskQueue(panel);
