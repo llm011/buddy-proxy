@@ -81,7 +81,6 @@ class DailyGiftManager:
         self._last_attempt: dict[str, float] = {}
         self._next_try: dict[str, float] = {}
         self._fails: dict[str, int] = {}
-        self._seen: set[str] = set()
 
     # ---- 状态查询（给 UI / 测试）----
     def claimed_day(self, account_id: str) -> str | None:
@@ -141,15 +140,15 @@ class DailyGiftManager:
 
         返回这一轮**成功领到**的 account_id。单号失败只记状态不影响其他号。
         """
-        claimed: list[str] = []
+        # 先决定要打哪些号（同步、不耗 IO），再并行打——和 accounts/refresh 对齐
+        targets: list[dict[str, Any]] = []
+        now = time.time()
         for acc in self._accounts():
             aid = str(acc.get("account_id") or "")
             if not aid:
                 continue
-            now = time.time()
-            first_run = aid not in self._seen
-            self._seen.add(aid)
-            # 已经领过站点今天的 → 跳（启动后首轮也跳：state 是落盘的，不是进程内记忆）
+            # 已经领过站点今天的 → 跳。状态是落盘的，启动后首轮靠这个就能判断，
+            # 不需要额外的「首轮补领」逻辑
             if not force and self.is_claimed_today(aid, now):
                 continue
             # 节流 / 退避
@@ -159,22 +158,28 @@ class DailyGiftManager:
                 if now < self._next_try.get(aid, 0.0):
                     continue
             self._last_attempt[aid] = now
-            try:
-                ok = await self._claim_one(acc)
-            except WebSessionError as exc:
-                self._fails[aid] = self._fails.get(aid, 0) + 1
-                backoff = min(BACKOFF_MAX_S, BACKOFF_BASE_S * (2 ** (self._fails[aid] - 1)))
-                self._next_try[aid] = now + backoff
-                self._state[aid] = {"day": self.claimed_day(aid), "error": str(exc)[:200],
-                                    "error_at": now, "backoff_s": backoff}
-                _write_state(self._state)
-                log.warning("runninghub 自动领积分失败 %s: %s（%d 分钟后重试）", acc.get("label") or aid, exc, backoff // 60)
-                continue
-            if ok:
-                claimed.append(aid)
-            self._fails[aid] = 0
-            self._next_try.pop(aid, None)
-        return claimed
+            targets.append(acc)
+        results = await asyncio.gather(*(self._claim_guarded(a) for a in targets))
+        return [aid for (aid, ok) in results if ok]
+
+    async def _claim_guarded(self, acc: dict[str, Any]) -> tuple[str, bool]:
+        """单个号的领取 + 失败记账。永不抛，让 gather 里的兄弟不受影响。"""
+        aid = str(acc.get("account_id") or "")
+        now = time.time()
+        try:
+            ok = await self._claim_one(acc)
+        except WebSessionError as exc:
+            self._fails[aid] = self._fails.get(aid, 0) + 1
+            backoff = min(BACKOFF_MAX_S, BACKOFF_BASE_S * (2 ** (self._fails[aid] - 1)))
+            self._next_try[aid] = now + backoff
+            self._state[aid] = {"day": self.claimed_day(aid), "error": str(exc)[:200],
+                                "error_at": now, "backoff_s": backoff}
+            _write_state(self._state)
+            log.warning("runninghub 自动领积分失败 %s: %s（%d 分钟后重试）", acc.get("label") or aid, exc, backoff // 60)
+            return aid, False
+        self._fails[aid] = 0
+        self._next_try.pop(aid, None)
+        return aid, ok
 
     async def _claim_one(self, acc: dict[str, Any]) -> bool:
         """领一个号并落状态。返回「这次是否领到」。"""
@@ -196,24 +201,31 @@ class DailyGiftManager:
         _write_state(self._state)
         if REFRESH_AFTER_CLAIM:
             try:
-                bal = await refresh_balance(ws, include_welfare=True)
+                # include_welfare=True 是有意的：领完账号卡要同时显示「今日积分 ✓」和免费次数，
+                # 这里一天只跑一次，多一个往返无所谓。claim_gift=False：就是本函数刚领过
+                bal = await refresh_balance(ws, include_welfare=True, claim_gift=False)
                 store.update_account_info(aid, bal)
             except WebSessionError:
                 pass  # 余额刷不出来不影响「已领」的事实
         return ok
 
     async def claim_now(self, account_id: str | None = None) -> dict[str, Any]:
-        """手动触发（UI 按钮）：不走退避，已经领过也照问一次上游。"""
+        """手动触发（UI 按钮）：不走退避，已经领过也照问一次上游。并行打所有目标号。"""
         targets = [a for a in self._accounts() if not account_id or a.get("account_id") == account_id]
-        out: dict[str, Any] = {"claimed": [], "already": [], "failed": {}}
-        for acc in targets:
+
+        async def _one(acc: dict[str, Any]) -> tuple[str, bool, str | None]:
             aid = str(acc.get("account_id") or "")
             try:
-                ok = await self._claim_one(acc)
+                return aid, await self._claim_one(acc), None
             except WebSessionError as exc:
-                out["failed"][aid] = str(exc)[:200]
-                continue
-            (out["claimed"] if ok else out["already"]).append(aid)
+                return aid, False, str(exc)[:200]
+
+        out: dict[str, Any] = {"claimed": [], "already": [], "failed": {}}
+        for aid, ok, err in await asyncio.gather(*(_one(a) for a in targets)):
+            if err:
+                out["failed"][aid] = err
+            else:
+                (out["claimed"] if ok else out["already"]).append(aid)
         return out
 
 

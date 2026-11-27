@@ -21,6 +21,7 @@ from buddy_proxy.runninghub import dailygift, runner, store, websession
 from buddy_proxy.runninghub.websession import WebSession, WebSessionError
 
 from test_runninghub_web import _Recorder, _fake_jwt
+from buddy_proxy.runninghub.runner import WebAccountSession
 
 
 @pytest.fixture
@@ -194,3 +195,14 @@ def test_ui_daily_gift_endpoints(iso: Path, monkeypatch: pytest.MonkeyPatch):
         assert r["claimed"] == [a["account_id"]]
         assert r["gift"]["accounts"][a["account_id"]]["day"] == dailygift.site_day_key()
         assert "password" not in json.dumps(r) and "access_token" not in json.dumps(r)
+
+
+def test_refresh_balance_does_not_claim_behind_manager(iso: Path, monkeypatch: pytest.MonkeyPatch):
+    """领积分收口到 manager：refresh_balance 默认不 claim，否则徽标显示「待领取」而积分已领。"""
+    a = _acct("a@x.com", "1")
+    rec = _install_routes(monkeypatch, {"1": True})
+    acc = store.get_account(a["account_id"])
+    asyncio.run(runner.refresh_balance(WebAccountSession(acc)))
+    assert [c for c in rec.calls if c[0] == "/api/welfare/daily-gift/claim"] == [], "refresh_balance 不该自己 claim"
+    asyncio.run(dailygift.DailyGiftManager().tick())
+    assert [c for c in rec.calls if c[0] == "/api/welfare/daily-gift/claim"], "manager 才是领的那条路"

@@ -349,8 +349,10 @@ async def get_balance(
     - ``freeImageLeft`` / ``freeVideoLeft``：站内福利的免费次数（另算，不扣币不扣分；只在
       ``include_welfare=True`` 时拉——submit 前不需要，省一个往返）
 
-    ``claim_gift=True`` 时先尝试领当天赠送（已领过上游回 false，无副作用），再拉余额——
-    顺序反了 UI 会显示 0 积分而运行时报 414。
+    ``claim_gift=True`` 时先尝试领当天赠送，再拉余额——顺序反了 UI 会显示 0 积分。
+    **注意**：自动领取循环（``dailygift``）有自己的状态文件，和这里互不知道；所以
+    走 manager 的路径（accounts/refresh、循环）传 ``claim_gift=False``，由 manager 统一领、
+    统一记状态，避免「刷了一下余额就把积分领了，徽标却还显示待领取」。
     """
     if claim_gift:
         await claim_daily_gift(token, timeout=timeout)

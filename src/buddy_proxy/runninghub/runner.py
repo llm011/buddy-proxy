@@ -160,12 +160,16 @@ class WebAccountSession:
         return await fn(token), token
 
 
-async def refresh_balance(acc: WebAccountSession, *, include_welfare: bool = False) -> dict[str, Any]:
+async def refresh_balance(
+    acc: WebAccountSession, *, include_welfare: bool = False, claim_gift: bool = False
+) -> dict[str, Any]:
     """拉站内余额，并把 token 带回（调用方据此写回 store）。
 
     ``include_welfare=True`` 多拉一次免费次数（账号卡刷新时用）；submit 前不要，省一个往返。
+    ``claim_gift`` 默认 False：领积分收口到 ``dailygift.DailyGiftManager``（它有状态文件），
+    这里顺手领会让徽标显示「待领取」而积分其实已经领了。只有 manager 自己传 True。
     """
-    balance, _ = await acc.call(lambda t: websession.get_balance(t, include_welfare=include_welfare))
+    balance, _ = await acc.call(lambda t: websession.get_balance(t, include_welfare=include_welfare, claim_gift=claim_gift))
     return balance
 
 
