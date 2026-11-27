@@ -564,6 +564,10 @@ def to_openai_model(entry: dict[str, Any], provider_id: str) -> dict[str, Any]:
         "max_input": entry.get("max_input_tokens"),
         "context_window": entry.get("max_input_tokens"),
         "reasoning": bool(entry.get("is_reasoning")),
+        "images": bool(entry.get("is_vl")),
+        # 上游目录没有工具能力字段；hmodel 已实测能返回标准 tool_calls，
+        # 必须显式透出，否则 DSH 等客户端会在本地禁用工具。
+        "tool_call": bool(entry.get("tool_call")) or key == "hmodel",
         "tags": tags,
     }
     if isinstance(price, (int, float)):
