@@ -160,9 +160,12 @@ class WebAccountSession:
         return await fn(token), token
 
 
-async def refresh_balance(acc: WebAccountSession) -> dict[str, Any]:
-    """拉站内余额，并把 token 带回（调用方据此写回 store）。"""
-    balance, _ = await acc.call(lambda t: websession.get_balance(t))
+async def refresh_balance(acc: WebAccountSession, *, include_welfare: bool = False) -> dict[str, Any]:
+    """拉站内余额，并把 token 带回（调用方据此写回 store）。
+
+    ``include_welfare=True`` 多拉一次免费次数（账号卡刷新时用）；submit 前不要，省一个往返。
+    """
+    balance, _ = await acc.call(lambda t: websession.get_balance(t, include_welfare=include_welfare))
     return balance
 
 

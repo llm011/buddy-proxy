@@ -24,6 +24,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -303,18 +304,85 @@ async def get_point_summary(token: str, *, timeout: float = 30.0) -> dict[str, A
     return data.get("data") if isinstance(data.get("data"), dict) else {}
 
 
-async def get_balance(token: str, *, timeout: float = 30.0) -> dict[str, Any]:
+async def get_coin_gain_list(token: str, *, timeout: float = 30.0) -> list[dict[str, Any]]:
+    """``/api/product/coinGainList``：过渡币每一笔的获得时间 + **过期时间**。
+
+    过渡币的有效期只有这里有——point/summary 的 ``nearestExpireTime`` 是**积分**的，
+    不是币的（踩过：把它当成币的过期时间，报了「今天过期」其实是明年）。
+    """
+    data = await _post("/api/product/coinGainList", {"size": 10, "current": 1}, token=token, timeout=timeout)
+    inner = data.get("data")
+    recs = inner.get("records") if isinstance(inner, dict) else inner
+    return [r for r in (recs or []) if isinstance(r, dict)]
+
+
+async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool:
+    """``/api/welfare/daily-gift/claim``：领每日赠送的 30 积分（每天一次，站点时间 00:00 清零重置）。
+
+    2026-11-27 实测：新注册的号 ``activityPoint=0``、``dailyGift.granted=false``，直接
+    跑应用会 414 NOT_ENOUGH_POWER_VALUE——不是没币，是**没领当天的积分**。网页端登录
+    会自动触发（``loginCoinTriggered``），脚本登录不会，所以刷余额前先领一次。
+    """
+    try:
+        data = await _post("/api/welfare/daily-gift/claim", {}, token=token, timeout=timeout)
+        return bool(data.get("data"))
+    except WebSessionError:
+        return False
+
+
+async def get_balance(
+    token: str, *, timeout: float = 30.0, claim_gift: bool = True, include_welfare: bool = False
+) -> dict[str, Any]:
     """把站内余额整理成固定字段，给 store / UI 用。
 
-    - ``transitionCoins``：过渡币（本模块存在的意义——只有网页端能花）
-    - ``activityPoints`` / ``paidPoints``：活动 / 付费积分
+    - ``transitionCoins`` / ``transitionCoinExpireAt``：过渡币 + 最近一笔的过期时间（ISO，站内时间）
+    - ``activityPoints`` / ``pointsExpireAt``：活动 / 每日赠送积分 + 过期时间（每日 00:00 站点时间清零）
+    - ``paidPoints``：付费积分（不过期）
     - ``walletBalance`` / ``apiConsumableBalance``：钱包余额 / API 可用余额（USD）
+    - ``freeImageLeft`` / ``freeVideoLeft``：站内福利的免费次数（另算，不扣币不扣分；只在
+      ``include_welfare=True`` 时拉——submit 前不需要，省一个往返）
+
+    ``claim_gift=True`` 时先尝试领当天赠送（已领过上游回 false，无副作用），再拉余额——
+    顺序反了 UI 会显示 0 积分而运行时报 414。
     """
+    if claim_gift:
+        await claim_daily_gift(token, timeout=timeout)
     info, pts = await asyncio.gather(
         get_user_info(token, timeout=timeout), get_point_summary(token, timeout=timeout)
     )
+    # 以下两个是「锦上添花」的字段，任何一个接口拉不到都不该让整个余额刷新失败
+    try:
+        coins = await get_coin_gain_list(token, timeout=timeout)
+    except WebSessionError:
+        coins = []
+    welfare: dict[str, Any] = {}
+    if include_welfare:
+        try:
+            w = await _post("/api/welfare/summary", {}, token=token, timeout=timeout)
+            welfare = w.get("data") if isinstance(w.get("data"), dict) else {}
+        except WebSessionError:
+            welfare = {}
+    # 时区自检：每日清零不是 16:00Z 说明站点换时区了，SITE_TZ_OFFSET_HOURS 要跟着改
+    reset_hour = daily_gift_reset_hour_utc(pts)
+    if reset_hour is not None and reset_hour != DAILY_GIFT_RESET_HOUR_UTC:
+        logging.getLogger(__name__).warning(
+            "runninghub 每日积分清零时间不是 %shZ 而是 %shZ，站点时区可能变了（SITE_TZ_OFFSET_HOURS=%s）",
+            DAILY_GIFT_RESET_HOUR_UTC, reset_hour, SITE_TZ_OFFSET_HOURS,
+        )
     wallet = info.get("walletInfo") if isinstance(info.get("walletInfo"), dict) else {}
+    # 过渡币过期：取「还没过期」的记录里最早的一笔；拉失败 / 没记录就 None，不阻塞余额
+    coin_expire = None
+    try:
+        alive = [c for c in coins if c.get("expiredTime") and not _is_past(c["expiredTime"])]
+        coin_expire = min((c["expiredTime"] for c in alive), key=_parse_site_time) if alive else None
+    except Exception:
+        coin_expire = None
+    free_img = welfare.get("freeImage") if isinstance(welfare.get("freeImage"), dict) else {}
+    free_vid = welfare.get("freeVideo") if isinstance(welfare.get("freeVideo"), dict) else {}
     return {
+        "transitionCoinExpireAt": coin_expire,
+        "freeImageLeft": free_img.get("remaining"),
+        "freeVideoLeft": free_vid.get("remaining"),
         "userId": info.get("_userId") or info.get("id"),
         "email": info.get("email"),
         "nickName": info.get("nickName"),
@@ -322,7 +390,9 @@ async def get_balance(token: str, *, timeout: float = 30.0) -> dict[str, Any]:
         "activityPoints": _to_float(pts.get("activityPoint")),
         "paidPoints": _to_float(pts.get("paidPoint")),
         "balancePoints": _to_float(pts.get("balancePoint")),
+        # 积分过期（point/summary 原字段）+ 一个好认的别名
         "nearestExpireTime": pts.get("nearestExpireTime"),
+        "pointsExpireAt": pts.get("nearestExpireTime"),
         "walletBalance": _to_float(wallet.get("balance")),
         "apiConsumableBalance": _to_float(wallet.get("apiConsumableBalance")),
         "currency": wallet.get("currency"),
@@ -464,6 +534,47 @@ def normalize_inputs(node_info_list: list[dict[str, Any]]) -> list[dict[str, Any
             item["description"] = n["description"]
         out.append(item)
     return out
+
+
+#: 站内「无时区」时间（``YYYY-MM-DD HH:MM:SS``）的时区。**反推**出来的，不是文档写的：
+#: point/summary 的 ``nearestExpireTime`` 是 ``…T16:00:00Z``，而每日赠送在站点时间 00:00 清零
+#: → 16:00Z 就是站点 00:00 → UTC+8。前端 ``parseSiteTime`` 里同一个假设（``+m[4] - 8``），要改一起改。
+#: ``daily_gift_reset_hour_utc`` 用来在运行时自检：拿到的清零时间不是 16:00Z 就说明站点换时区了。
+SITE_TZ_OFFSET_HOURS = 8
+DAILY_GIFT_RESET_HOUR_UTC = 16
+
+
+def _parse_site_time(s: str) -> float:
+    """站内时间 → unix 秒。无时区的 ``YYYY-MM-DD HH:MM:SS`` 按 ``SITE_TZ_OFFSET_HOURS`` 算。"""
+    from datetime import datetime, timezone, timedelta
+    s = str(s or "").strip()
+    try:
+        if "T" in s:
+            return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+        return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone(timedelta(hours=SITE_TZ_OFFSET_HOURS))
+        ).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def daily_gift_reset_hour_utc(pts: dict[str, Any]) -> int | None:
+    """从 point/summary 的 nearestExpireTime 看每日清零是几点（UTC）。≠16 说明站点时区变了。"""
+    t = _parse_site_time(pts.get("nearestExpireTime") or "")
+    if t <= 0:
+        return None
+    from datetime import timezone
+    return int(datetime_from_unix(t).astimezone(timezone.utc).hour)
+
+
+def datetime_from_unix(t: float):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(t, tz=timezone.utc)
+
+
+def _is_past(s: str) -> bool:
+    t = _parse_site_time(s)
+    return t > 0 and t < time.time()
 
 
 def _to_float(v: Any) -> float | None:
