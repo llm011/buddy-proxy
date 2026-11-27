@@ -496,7 +496,10 @@ def test_kimi_real_cli_prompt_is_masked():
     "You are Kimi.",         # 句号 → 放行
     "You are Kimi\n\nhi",    # 换行 → 放行
     "You are Kimi123",       # 数字紧跟 → 放行
-    "You are Kimi\tagent",   # 制表符 ≠ 空格 → 放行
+    # 制表符 ≠ 空格。这条**不是凑数的**：它防的是把判据放宽成
+    # `re.match(r"You are Kimi\s", text)` —— 那样 `You are Kimi\n\n# Role`
+    # 这种真实用户 prompt 里的正常排版就会被误改（实测 `You are Kimi\n` 200 放行）。
+    "You are Kimi\tagent",
     "you are Kimi Code CLI",  # 小写 you → 放行
 ])
 def test_kimi_marker_boundaries_are_exact(text):
@@ -530,3 +533,28 @@ def test_kimi_masked_anywhere_in_prompt():
     patched, _ = neutralize_identity_text(text)
     assert patched == MASK + "\n\nYour primary goal is to help users with software engineering tasks."
     assert "primary goal" in patched, "真实指令被误吞了"
+
+
+def test_kimi_marker_keeps_trailing_space():
+    """尾随空格是这个 marker 的**判据本体**，不是排版噪声。
+
+    去尾随空格的工具链会静默删掉它：编辑器保存钩子、`prettier`、
+    某些 ruff/black 配置里的 W291 自动修复。删掉之后：
+
+    - Python 语法完全合法，ruff 不报错，CI 的 formatter 检查也不会红；
+    - `You are Kimi` 实测 200 放行，所以不会立刻出问题；
+    - 但 Kimi CLI 的请求**重新开始挂死**（无首字节、无报错）。
+
+    也就是说这是典型的「静默失效」——`test_kimi_marker_boundaries_are_exact`
+    能抓到，但它的报错是「`You are Kimi` 不该被判为命中」，读的人得先反推出
+    「哦 marker 被改了」才知道根因。这条断言直接把 marker 钉死，报错一眼可见。
+    """
+    kimi_markers = [m for m in COMPETITOR_IDENTITY_MARKERS if "Kimi" in m]
+    assert kimi_markers == ["You are Kimi "], (
+        "Kimi 的 marker 必须以**空格**结尾（不是逗号、不是句号、不是省略）。"
+        "实测 `You are Kimi` / `You are Kimi.` / `You are Kimi\\n` 都 200 放行，"
+        "只有 `You are Kimi ` 会挂住上游。"
+    )
+    # 显式断言「最后一个字符是空格」，让报错信息本身就说清问题。
+    assert kimi_markers[0].endswith(" "), "尾随空格被去掉了"
+    assert not kimi_markers[0].endswith("  "), "多了一个空格（复制粘贴常见）"
