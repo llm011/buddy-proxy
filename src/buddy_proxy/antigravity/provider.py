@@ -33,6 +33,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from ..providers.base import BaseProvider
 from ..core.account_store import quota_epoch_from
 from ..core import load_balance as lb_mod
+from ..core import net as core_net
 from ..core.metrics import ACCOUNT_META
 
 from ..gemini.convert import gemini_response_to_chat
@@ -66,6 +67,11 @@ from .model_catalog import (
 from .fingerprint import auth_headers as _auth_headers  # 供 _gate_with_empty_retry 模块级使用
 
 log = logging.getLogger(__name__)
+
+#: 通道 id，同时是 ``settings.json`` 里 ``provider_proxy`` 的键。抽成常量是因为
+#: 多处出站客户端共用同一个 id，写字符串字面量迟早有一处拼错，而拼错的后果是
+#: 「代理配置静默不生效」——排查时完全看不出来。
+_PROVIDER_ID = "antigravity"
 
 ENDPOINTS = (
     "https://daily-cloudcode-pa.googleapis.com",
@@ -984,7 +990,8 @@ class AntigravityProvider(BaseProvider):
         池里影响后续请求。实例级缓存是为了让测试能注入 MockTransport。
         """
         if self._retry_client is None or self._retry_client.is_closed:
-            self._retry_client = httpx.AsyncClient(
+            self._retry_client = core_net.provider_async_client(
+                _PROVIDER_ID,
                 timeout=_TIMEOUT,
                 limits=httpx.Limits(max_keepalive_connections=0),
             )
@@ -1152,7 +1159,7 @@ class AntigravityProvider(BaseProvider):
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(timeout=_TIMEOUT)
+            self._client = core_net.provider_async_client(_PROVIDER_ID, timeout=_TIMEOUT)
         return self._client
 
     def health(self) -> dict[str, Any]:
@@ -1540,7 +1547,7 @@ class AntigravityProvider(BaseProvider):
         from .fingerprint import auth_headers
 
         token, _cred = await asyncio.to_thread(ensure_account_token, account_id)
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with core_net.provider_async_client(_PROVIDER_ID, timeout=_TIMEOUT) as client:
             resp = await self._send_with_fallback(
                 client, "fetchAvailableModels", {}, auth_headers(token), stream=False
             )
@@ -1578,7 +1585,7 @@ class AntigravityProvider(BaseProvider):
         token, _cred = await asyncio.to_thread(ensure_account_token, account_id)
         client = self._probe_client
         if client is None or client.is_closed:
-            client = httpx.AsyncClient(timeout=_TIMEOUT)
+            client = core_net.provider_async_client(_PROVIDER_ID, timeout=_TIMEOUT)
             self._probe_client = client
         resp = await self._send_with_fallback(
             client, "fetchAvailableModels", {}, auth_headers(token), stream=False

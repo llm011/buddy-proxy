@@ -342,7 +342,8 @@ class _FakeUrlopen:
         self.calls: list[tuple[str, dict]] = []
         self.headers: list[dict] = []
 
-    def __call__(self, req, timeout=30.0):
+    def __call__(self, provider, req, timeout=30.0):
+        assert provider == "antigravity"
         url = req.full_url
         body = json.loads(req.data.decode()) if req.data else {}
         self.calls.append((url, body))
@@ -378,7 +379,7 @@ def test_setup_already_onboarded(monkeypatch):
         "currentTier": {"id": "free-tier", "name": "Free"},
         "cloudaicompanionProject": {"id": "genai-managed"},
     })]})
-    monkeypatch.setattr(setup.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(setup.core_net, "provider_urlopen", fake)
 
     info = setup.setup_code_assist("tok")
     assert info["project_id"] == "genai-managed"
@@ -395,7 +396,7 @@ def test_post_sends_real_bearer_token(monkeypatch):
     fake = _FakeUrlopen({"loadCodeAssist": [(200, {
         "currentTier": {"id": "free-tier"},
         "cloudaicompanionProject": "proj-x"})]})
-    monkeypatch.setattr(setup.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(setup.core_net, "provider_urlopen", fake)
 
     setup.setup_code_assist("tok-real")
     assert fake.headers, "没有请求被发出"
@@ -418,7 +419,7 @@ def test_setup_onboard_free_tier_lro(monkeypatch):
         "ops/x": [(200, {"done": True,
                          "response": {"cloudaicompanionProject": {"id": "proj-1"}}})],
     })
-    monkeypatch.setattr(setup.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(setup.core_net, "provider_urlopen", fake)
     monkeypatch.setattr(setup.time, "sleep", lambda s: None)
 
     info = setup.setup_code_assist("tok")
@@ -436,7 +437,7 @@ def test_setup_fallback_to_prod_endpoint(monkeypatch):
     fake = _FakeUrlopen({"loadCodeAssist": [(500, {"error": "boom"}),
                                             (200, {"currentTier": {"id": "free-tier"},
                                                    "cloudaicompanionProject": "proj-2"})]})
-    monkeypatch.setattr(setup.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(setup.core_net, "provider_urlopen", fake)
 
     info = setup.setup_code_assist("tok")
     assert info["project_id"] == "proj-2"
@@ -455,7 +456,7 @@ def test_setup_ineligible_diag(monkeypatch):
                                  "reasonMessage": "region not supported"}]})],
         "onboardUser": [(200, {"done": True, "response": {}})],
     })
-    monkeypatch.setattr(setup.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(setup.core_net, "provider_urlopen", fake)
     monkeypatch.setattr(setup.time, "sleep", lambda s: None)
 
     with pytest.raises(setup.SetupError, match="UNSUPPORTED_LOCATION"):
@@ -469,7 +470,7 @@ def test_setup_lro_error_surface(monkeypatch):
         "loadCodeAssist": [(200, {"allowedTiers": [{"id": "free-tier", "isDefault": True}]})],
         "onboardUser": [(200, {"done": True, "error": {"code": 7, "message": "permission denied"}})],
     })
-    monkeypatch.setattr(setup.urllib.request, "urlopen", fake)
+    monkeypatch.setattr(setup.core_net, "provider_urlopen", fake)
     monkeypatch.setattr(setup.time, "sleep", lambda s: None)
 
     with pytest.raises(setup.SetupError, match="permission denied"):

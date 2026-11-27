@@ -33,6 +33,20 @@ buddy login antigravity     # Google OAuth 登录（检测到本机 agy 登录�
 curl http://127.0.0.1:8787/v1/chat/completions -d '{"model":"antigravity/claude-sonnet-4-6","messages":[...]}'
 ```
 
+### 出站代理
+
+OAuth 刷新、onboarding、模型转发和配额请求统一走 `core.net` 的按通道代理封装。
+上游在墙外，本机可访问代理时配置：
+
+```bash
+buddy proxy antigravity 127.0.0.1:7890
+buddy restart
+```
+
+配置存在 `settings.json` 的 `provider_proxy` 映射中，适用于任意已接线的 provider。
+值为 `direct` 时显式直连，`env` 时使用环境代理，`buddy proxy antigravity --unset`
+删除该通道配置；未配置时按 `BUDDY_UPSTREAM_USE_PROXY` 决定，默认直连。
+
 凭证存放 `~/.buddy-proxy/antigravity/`：`index.json`（账号清单，priority 即
 failover 顺位——登录顺序初始化，管理页可调）+ 每账号一份 `<account_id>.json`（0600 原子写，account_id 由
 email 规范化，email 缺失时退 `acct-<token hash 前 12 位>`）。access_token

@@ -64,12 +64,15 @@ from buddy_proxy.core.account_store import (
     AccountStore,
     is_valid_account_id,
 )
+from buddy_proxy.core import net as core_net
 from buddy_proxy.core.paths import state_dir, state_file
 
 log = logging.getLogger(__name__)
 
 CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 CLIENT_SECRET = "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"
+#: 通道 id，也是 ``settings.json`` 里 ``provider_proxy`` 的键。
+_PROVIDER_ID = "antigravity"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://www.googleapis.com/oauth2/v1/userinfo?alt=json"
 
@@ -404,7 +407,11 @@ def _token_request(data: dict[str, str], timeout: float = 30.0) -> dict[str, Any
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # 走 provider_urlopen 而不是裸 urlopen：Google 的 OAuth 端点在墙外，
+        # 本机没有全局代理时必须靠 settings.json 里 provider_proxy.antigravity
+        # 指定的代理，否则连 TLS 握手都过不去（2026-11-28 实测：三个账号一起
+        # SSL EOF / timeout，日志里表现为「所有账号均不可用」）。
+        with core_net.provider_urlopen(_PROVIDER_ID, req, timeout=timeout) as resp:
             payload = json.loads(resp.read())
     except Exception as exc:  # noqa: BLE001 - urllib 报错种类多，统一转 AuthError
         raise AuthError(f"Google token 接口请求失败: {exc}") from exc
@@ -445,7 +452,7 @@ def fetch_user_email(access_token: str, timeout: float = 15.0) -> str:
         USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with core_net.provider_urlopen(_PROVIDER_ID, req, timeout=timeout) as resp:
             data = json.loads(resp.read())
     except Exception:  # noqa: BLE001 - 展示字段，拿不到就算了
         return ""
