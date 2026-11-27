@@ -365,6 +365,7 @@
           </span>
           <span class="pat-head-actions">
             <button class="ghost" id="rh-queue-refresh">刷新</button>
+            <button class="ghost" id="rh-queue-archived">归档</button>
             <button class="ghost" id="rh-queue-clear">清空已完成</button>
           </span>
         </div>
@@ -402,6 +403,7 @@
 
     panel.querySelector('#rh-wf-import-btn').addEventListener('click', () => openImportWorkflowModal(panel));
     panel.querySelector('#rh-queue-refresh').addEventListener('click', () => renderTaskQueue(panel));
+    panel.querySelector('#rh-queue-archived').addEventListener('click', () => openArchivedTasks(panel));
     panel.querySelector('#rh-queue-clear').addEventListener('click', async () => {
       if (!window.confirm('清掉所有已完成 / 失败 / 取消的任务记录？（不影响站内产出文件）')) return;
       try {
@@ -537,22 +539,22 @@
       renderAccounts(panel, accRes.accounts || []);
     } catch (e) { /* 面板可能已经切走 */ }
   }
-  async function renderTaskQueue(panel) {
-    const bodyEl = panel && panel.querySelector('#rh-queue-body');
+  async function renderTaskQueue(panel, archived = false, targetBody = null) {
+    const bodyEl = targetBody || (panel && panel.querySelector('#rh-queue-body'));
     if (!bodyEl) return;
-    if (_queueTimer) { clearTimeout(_queueTimer); _queueTimer = null; }
+    if (!archived && _queueTimer) { clearTimeout(_queueTimer); _queueTimer = null; }
     let tasks = [];
     try {
-      const res = await rhFetch('/ui/api/runninghub/tasks?limit=100');
+      const res = await rhFetch(`/ui/api/runninghub/tasks?limit=100${archived ? '&archived=1' : ''}`);
       tasks = res.tasks || [];
     } catch (err) {
       bodyEl.innerHTML = `<div class="empty" style="padding:18px 0;color:#ef4444">加载失败: ${escapeHtml(err.message || err)}</div>`;
       return;
     }
     const cnt = panel.querySelector('#rh-queue-count');
-    if (cnt) cnt.textContent = String(tasks.filter((t) => isTaskActive(t.status)).length);
+    if (!archived && cnt) cnt.textContent = String(tasks.filter((t) => isTaskActive(t.status)).length);
     if (!tasks.length) {
-      setHtmlIfChanged(bodyEl, '<div class="empty" style="padding:18px 0">暂无任务。在工作流卡片点「运行」提交一个。</div>');
+      setHtmlIfChanged(bodyEl, `<div class="empty" style="padding:18px 0">${archived ? '暂无归档任务' : '暂无任务。在工作流卡片点「运行」提交一个。'}</div>`);
       return;
     }
     const queueChanged = setHtmlIfChanged(bodyEl, `<div class="rh-queue">${tasks.map((t) => {
@@ -583,14 +585,29 @@
               ${t.error ? `<span style="color:#ef4444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px;" title="${escapeHtml(t.error)}">${escapeHtml(t.error)}</span>` : ''}
             </div>
           </div>
-          ${active ? `<button class="ghost rh-queue-cancel" data-id="${escapeHtml(t.taskId)}" title="不再等待（站内任务照跑，已扣币不退）">取消</button>` : ''}
+          ${active ? `<button class="ghost rh-queue-cancel" data-id="${escapeHtml(t.taskId)}" title="不再等待（站内任务照跑，已扣币不退）">取消</button>`
+            : `<button class="ghost rh-queue-archive" data-id="${escapeHtml(t.taskId)}">${archived ? '恢复' : '归档'}</button>`}
         </div>`;
     }).join('')}</div>`);
 
     if (queueChanged) {
       bodyEl.querySelectorAll('.rh-queue-row').forEach((row) => {
-        row.addEventListener('click', () => openTaskDetail(panel, row.getAttribute('data-task'), tasks));
-        row.addEventListener('keydown', (e) => { if (e.key === 'Enter') openTaskDetail(panel, row.getAttribute('data-task'), tasks); });
+        row.addEventListener('click', () => openTaskDetail(panel, row.getAttribute('data-task'), tasks, archived));
+        row.addEventListener('keydown', (e) => { if (e.key === 'Enter') openTaskDetail(panel, row.getAttribute('data-task'), tasks, archived); });
+      });
+      bodyEl.querySelectorAll('.rh-queue-archive').forEach((btn) => {
+        btn.addEventListener('click', async (e) => {
+          e.stopPropagation();
+          btn.disabled = true;
+          try {
+            await rhFetch('/ui/api/runninghub/tasks/archive', {
+              method: 'POST',
+              body: JSON.stringify({ task_id: btn.getAttribute('data-id'), archived: !archived }),
+            });
+            renderTaskQueue(panel, archived, targetBody);
+            if (archived) renderTaskQueue(panel);
+          } catch (err) { window.alert(err.message || String(err)); btn.disabled = false; }
+        });
       });
       bodyEl.querySelectorAll('.rh-queue-cancel').forEach((btn) => {
         btn.addEventListener('click', async (e) => {
@@ -604,11 +621,23 @@
       });
     }
     // 有进行中的任务就 4s 一刷；没有就停掉定时器
-    if (tasks.some((t) => isTaskActive(t.status))) {
+    if (!archived && tasks.some((t) => isTaskActive(t.status))) {
       _queueTimer = setTimeout(() => { if (panel.isConnected) renderTaskQueue(panel); }, 4000);
     }
   }
-  function openTaskDetail(panel, taskId, tasks) {
+  function openArchivedTasks(panel) {
+    const titleEl = document.getElementById('modal-title');
+    const bodyEl = document.getElementById('modal-body');
+    const footEl = document.getElementById('modal-foot');
+    const overlayEl = document.getElementById('overlay');
+    if (!titleEl || !bodyEl || !footEl || !overlayEl) return;
+    titleEl.textContent = '归档任务';
+    bodyEl.innerHTML = '<div class="empty" style="padding:18px 0">加载中…</div>';
+    footEl.innerHTML = '<button class="ghost" onclick="closeModal()">关闭</button>';
+    overlayEl.classList.add('show');
+    renderTaskQueue(panel, true, bodyEl);
+  }
+  function openTaskDetail(panel, taskId, tasks, archived = false) {
     const t = tasks.find((x) => String(x.taskId) === String(taskId));
     if (!t) return;
     const titleEl = document.getElementById('modal-title');
@@ -643,7 +672,8 @@
       </div>`;
     footEl.innerHTML = `
       <button class="ghost" onclick="closeModal()">关闭</button>
-      ${isTaskActive(t.status) ? `<button class="ghost" id="rh-task-detail-cancel">不再等待</button>` : ''}
+      ${isTaskActive(t.status) ? `<button class="ghost" id="rh-task-detail-cancel">不再等待</button>`
+        : `<button class="ghost" id="rh-task-detail-archive">${archived ? '恢复到队列' : '归档'}</button>`}
       <button class="ghost" id="rh-task-detail-del">删除记录</button>`;
     overlayEl.classList.add('show');
     renderTaskOutputs(document.getElementById('rh-task-detail-outputs'), t);
@@ -652,6 +682,16 @@
       if (!window.confirm('删除这条记录？（不影响站内产出文件）')) return;
       try {
         await rhFetch('/ui/api/runninghub/tasks/delete', { method: 'POST', body: JSON.stringify({ task_id: t.taskId }) });
+        if (typeof closeModal === 'function') closeModal(); else overlayEl.classList.remove('show');
+        renderTaskQueue(panel);
+      } catch (err) { window.alert(err.message || String(err)); }
+    });
+    const archiveBtn = document.getElementById('rh-task-detail-archive');
+    if (archiveBtn) archiveBtn.addEventListener('click', async () => {
+      try {
+        await rhFetch('/ui/api/runninghub/tasks/archive', {
+          method: 'POST', body: JSON.stringify({ task_id: t.taskId, archived: !archived }),
+        });
         if (typeof closeModal === 'function') closeModal(); else overlayEl.classList.remove('show');
         renderTaskQueue(panel);
       } catch (err) { window.alert(err.message || String(err)); }
