@@ -253,6 +253,21 @@
     panel.innerHTML = `
       <div class="chart-card" style="margin-top:14px">
         <div class="pat-head">
+          <span class="name">任务队列</span>
+          <span class="tag" id="rh-queue-count">0</span>
+          <span class="pat-head-mid">
+            <span class="muted" style="font-size:11px">提交后在后台跑，关掉页面也继续；点击查看参数 / 结果 / 成本</span>
+          </span>
+          <span class="pat-head-actions">
+            <button class="ghost" id="rh-queue-refresh">刷新</button>
+            <button class="ghost" id="rh-queue-clear">清空已完成</button>
+          </span>
+        </div>
+        <div id="rh-queue-body"><div class="empty" style="padding:18px 0">暂无任务</div></div>
+      </div>
+
+      <div class="chart-card" style="margin-top:14px">
+        <div class="pat-head">
           <span class="name">工作流 / AI 应用</span>
           <span class="tag">ai-app</span>
           <span class="pat-head-mid">
@@ -279,6 +294,16 @@
     `;
 
     panel.querySelector('#rh-wf-import-btn').addEventListener('click', () => openImportWorkflowModal(panel));
+    panel.querySelector('#rh-queue-refresh').addEventListener('click', () => renderTaskQueue(panel));
+    panel.querySelector('#rh-queue-clear').addEventListener('click', async () => {
+      if (!window.confirm('清掉所有已完成 / 失败 / 取消的任务记录？（不影响站内产出文件）')) return;
+      try {
+        const res = await rhFetch('/ui/api/runninghub/tasks', {});
+        const done = (res.tasks || []).filter((t) => !isTaskActive(t.status));
+        for (const t of done) await rhFetch('/ui/api/runninghub/tasks/delete', { method: 'POST', body: JSON.stringify({ task_id: t.taskId }) });
+        renderTaskQueue(panel);
+      } catch (err) { window.alert(err.message || String(err)); }
+    });
     panel.querySelector('#rh-import-btn').addEventListener('click', () => openImportModal(panel));
     panel.querySelector('#rh-refresh-all-btn').addEventListener('click', async () => {
       try {
@@ -296,6 +321,7 @@
       ]);
       renderAccounts(panel, accRes.accounts || []);
       renderWorkflows(panel, wfRes.workflows || []);
+      renderTaskQueue(panel);
     } catch (err) {
       panel.querySelector('#rh-accounts-body').innerHTML = `<div class="empty" style="padding:18px 0;color:#ef4444">加载失败: ${escapeHtml(err.message)}</div>`;
     }
@@ -334,6 +360,175 @@
     const container = document.createElement('div');
     doc.body.childNodes.forEach((child) => container.appendChild(cleanNode(child)));
     return container.innerHTML;
+  }
+
+  // ---- 任务队列 ----
+  const TASK_ACTIVE = new Set(['SUBMITTING', 'RUNNING', 'QUEUED']);
+  function isTaskActive(s) { return TASK_ACTIVE.has(String(s || '').toUpperCase()); }
+  function statusLabel(s) {
+    return ({ SUBMITTING: '提交中', RUNNING: '生成中', QUEUED: '排队中', SUCCESS: '已完成',
+      FAILED: '失败', TIMEOUT: '超时', CANCELLED: '已取消' })[String(s || '').toUpperCase()] || String(s || '?');
+  }
+  function statusColor(s) {
+    s = String(s || '').toUpperCase();
+    if (s === 'SUCCESS') return '#10b981';
+    if (s === 'FAILED' || s === 'TIMEOUT') return '#ef4444';
+    if (s === 'CANCELLED') return '#9ca3af';
+    return '#f59e0b';
+  }
+  function renderTaskOutputs(el, t) {
+    if (!el) return;
+    const outs = Array.isArray(t.outputs) ? t.outputs : [];
+    el.innerHTML = outs.length
+      ? outs.map((o) => o.type === 'video'
+          ? `<div style="margin-top:6px;"><video src="${escapeHtml(o.url)}" controls style="max-width:100%;border-radius:8px;"></video><div><a href="${escapeHtml(o.url)}" target="_blank">打开视频链接</a></div></div>`
+          : o.type === 'audio'
+            ? `<div style="margin-top:6px;"><audio src="${escapeHtml(o.url)}" controls style="max-width:100%;"></audio><div><a href="${escapeHtml(o.url)}" target="_blank">打开音频链接</a></div></div>`
+            : `<div style="margin-top:6px;"><img src="${escapeHtml(o.url)}" loading="lazy" style="max-width:100%;border-radius:8px;" /><div><a href="${escapeHtml(o.url)}" target="_blank">打开图片链接</a></div></div>`).join('')
+      : '<div class="muted" style="margin-top:6px;">任务完成，但没有产出文件。</div>';
+  }
+  function fmtWhen(ts) {
+    if (!ts) return '';
+    const d = new Date(ts * 1000);
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+  }
+  function fmtDuration(t) {
+    if (t.status === 'SUCCESS' && t.costTime != null) return `${Math.round(t.costTime)}s`;
+    const start = t.created_at || 0;
+    const end = t.finishedAt || (isTaskActive(t.status) ? Date.now() / 1000 : start);
+    const s = Math.max(0, Math.round(end - start));
+    return s >= 60 ? `${Math.floor(s / 60)}m${s % 60}s` : `${s}s`;
+  }
+  let _queueTimer = null;
+  async function refreshWorkflows(panel) {
+    try {
+      const wfRes = await rhFetch('/ui/api/runninghub/workflows');
+      renderWorkflows(panel, wfRes.workflows || []);
+      const accRes = await rhFetch('/ui/api/runninghub/accounts');
+      renderAccounts(panel, accRes.accounts || []);
+    } catch (e) { /* 面板可能已经切走 */ }
+  }
+  async function renderTaskQueue(panel) {
+    const bodyEl = panel && panel.querySelector('#rh-queue-body');
+    if (!bodyEl) return;
+    let tasks = [];
+    try {
+      const res = await rhFetch('/ui/api/runninghub/tasks?limit=100');
+      tasks = res.tasks || [];
+    } catch (err) {
+      bodyEl.innerHTML = `<div class="empty" style="padding:18px 0;color:#ef4444">加载失败: ${escapeHtml(err.message || err)}</div>`;
+      return;
+    }
+    const cnt = panel.querySelector('#rh-queue-count');
+    if (cnt) cnt.textContent = String(tasks.filter((t) => isTaskActive(t.status)).length);
+    if (!tasks.length) {
+      bodyEl.innerHTML = '<div class="empty" style="padding:18px 0">暂无任务。在工作流卡片点「运行」提交一个。</div>';
+      return;
+    }
+    bodyEl.innerHTML = `<div class="rh-queue">${tasks.map((t) => {
+      const active = isTaskActive(t.status);
+      const thumb = (t.outputs && t.outputs[0]) || null;
+      const thumbHtml = thumb
+        ? (thumb.type === 'video'
+            ? `<video src="${escapeHtml(thumb.url)}" muted preload="metadata" style="width:56px;height:56px;object-fit:cover;border-radius:6px;background:#000"></video>`
+            : `<img src="${escapeHtml(thumb.url)}" loading="lazy" style="width:56px;height:56px;object-fit:cover;border-radius:6px;background:#111" />`)
+        : `<div style="width:56px;height:56px;border-radius:6px;background:var(--bg2,#1a1a1a);display:flex;align-items:center;justify-content:center;font-size:20px;color:${statusColor(t.status)}">${t.status === 'SUCCESS' ? '✓' : (active ? '⏳' : '✕')}</div>`;
+      const cost = t.coinsSpent != null ? `<span class="muted">实扣 <strong class="mono">${escapeHtml(String(t.coinsSpent))}</strong> 币</span>` : '';
+      return `
+        <div class="rh-queue-row" data-task="${escapeHtml(t.taskId)}" role="button" tabindex="0"
+             style="display:flex;align-items:center;gap:12px;padding:10px 12px;border-bottom:1px solid var(--line);cursor:pointer;">
+          ${thumbHtml}
+          <div style="flex:1;min-width:0;">
+            <div style="display:flex;align-items:center;gap:8px;min-width:0;">
+              <span class="mono" style="font-size:11px;color:${statusColor(t.status)};flex-shrink:0;">● ${escapeHtml(statusLabel(t.status))}</span>
+              <span style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(t.webappName || t.webappId)}</span>
+            </div>
+            <div class="muted" style="font-size:11px;margin-top:3px;display:flex;gap:10px;flex-wrap:wrap;">
+              <span class="mono">${escapeHtml(fmtWhen(t.created_at))}</span>
+              <span>${escapeHtml(fmtDuration(t))}</span>
+              ${cost}
+              ${active && t.cancelRequested ? '<span style="color:#f59e0b">取消中…</span>' : ''}
+              ${t.error ? `<span style="color:#ef4444;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:420px;" title="${escapeHtml(t.error)}">${escapeHtml(t.error)}</span>` : ''}
+            </div>
+          </div>
+          ${active ? `<button class="ghost rh-queue-cancel" data-id="${escapeHtml(t.taskId)}" title="不再等待（站内任务照跑，已扣币不退）">取消</button>` : ''}
+        </div>`;
+    }).join('')}</div>`;
+
+    bodyEl.querySelectorAll('.rh-queue-row').forEach((row) => {
+      row.addEventListener('click', () => openTaskDetail(panel, row.getAttribute('data-task'), tasks));
+      row.addEventListener('keydown', (e) => { if (e.key === 'Enter') openTaskDetail(panel, row.getAttribute('data-task'), tasks); });
+    });
+    bodyEl.querySelectorAll('.rh-queue-cancel').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        if (!window.confirm('不再等待这个任务？（站内会继续跑完，已扣的过渡币不会退）')) return;
+        try {
+          await rhFetch('/ui/api/runninghub/tasks/cancel', { method: 'POST', body: JSON.stringify({ task_id: btn.getAttribute('data-id') }) });
+          renderTaskQueue(panel);
+        } catch (err) { window.alert(err.message || String(err)); }
+      });
+    });
+    // 有进行中的任务就 4s 一刷；没有就停掉定时器
+    if (_queueTimer) { clearTimeout(_queueTimer); _queueTimer = null; }
+    if (tasks.some((t) => isTaskActive(t.status))) {
+      _queueTimer = setTimeout(() => { if (panel.isConnected) renderTaskQueue(panel); }, 4000);
+    }
+  }
+  function openTaskDetail(panel, taskId, tasks) {
+    const t = tasks.find((x) => String(x.taskId) === String(taskId));
+    if (!t) return;
+    const titleEl = document.getElementById('modal-title');
+    const bodyEl = document.getElementById('modal-body');
+    const footEl = document.getElementById('modal-foot');
+    const overlayEl = document.getElementById('overlay');
+    if (!titleEl || !bodyEl || !footEl || !overlayEl) return;
+    const inputs = Array.isArray(t.inputs) ? t.inputs : [];
+    const est = t.estimate || {};
+    titleEl.textContent = `${t.webappName || t.webappId} · ${statusLabel(t.status)}`;
+    bodyEl.innerHTML = `
+      <div style="display:flex;flex-direction:column;gap:12px;">
+        <div class="muted" style="font-size:12px;display:flex;gap:14px;flex-wrap:wrap;">
+          <span>本地 ID <span class="mono">${escapeHtml(t.taskId)}</span></span>
+          ${t.upstreamTaskId ? `<span>站内 ID <span class="mono">${escapeHtml(t.upstreamTaskId)}</span></span>` : ''}
+          <span>提交 <span class="mono">${escapeHtml(fmtWhen(t.created_at))}</span></span>
+          <span>用时 <span class="mono">${escapeHtml(fmtDuration(t))}</span></span>
+          ${t.coinsSpent != null ? `<span>实扣 <strong class="mono">${escapeHtml(String(t.coinsSpent))}</strong> 过渡币</span>` : ''}
+          ${est.priceText || est.estimatedPoint != null ? `<span>预估 ${escapeHtml(est.priceText || '—')} / ${escapeHtml(String(est.estimatedPoint ?? '—'))} 积分</span>` : ''}
+          ${t.closedSource ? '<span class="tag tag-money">闭源 · 扣钱包</span>' : ''}
+        </div>
+        ${t.error ? `<div style="color:#ef4444;font-size:12px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(t.error)}</div>` : ''}
+        <details ${inputs.length && !(t.outputs && t.outputs.length) ? 'open' : ''}>
+          <summary class="muted" style="cursor:pointer;font-size:12px;">输入参数（${inputs.length}）</summary>
+          <div style="margin-top:8px;display:flex;flex-direction:column;gap:6px;">
+            ${inputs.map((i) => `<div style="display:grid;grid-template-columns:110px 1fr;gap:8px;font-size:12px;"><span class="muted mono">${escapeHtml(i.fieldName || i.nodeId)}</span><span class="mono" style="word-break:break-all;white-space:pre-wrap;">${escapeHtml(String(i.fieldValue ?? ''))}</span></div>`).join('') || '<div class="muted">无</div>'}
+          </div>
+        </details>
+        <div id="rh-task-detail-outputs">${t.status === 'SUCCESS' ? '' : '<div class="muted">尚无产出。</div>'}</div>
+      </div>`;
+    footEl.innerHTML = `
+      <button class="ghost" onclick="closeModal()">关闭</button>
+      ${isTaskActive(t.status) ? `<button class="ghost" id="rh-task-detail-cancel">不再等待</button>` : ''}
+      <button class="ghost" id="rh-task-detail-del">删除记录</button>`;
+    overlayEl.classList.add('show');
+    renderTaskOutputs(document.getElementById('rh-task-detail-outputs'), t);
+    const delBtn = document.getElementById('rh-task-detail-del');
+    if (delBtn) delBtn.addEventListener('click', async () => {
+      if (!window.confirm('删除这条记录？（不影响站内产出文件）')) return;
+      try {
+        await rhFetch('/ui/api/runninghub/tasks/delete', { method: 'POST', body: JSON.stringify({ task_id: t.taskId }) });
+        if (typeof closeModal === 'function') closeModal(); else overlayEl.classList.remove('show');
+        renderTaskQueue(panel);
+      } catch (err) { window.alert(err.message || String(err)); }
+    });
+    const cBtn = document.getElementById('rh-task-detail-cancel');
+    if (cBtn) cBtn.addEventListener('click', async () => {
+      try {
+        await rhFetch('/ui/api/runninghub/tasks/cancel', { method: 'POST', body: JSON.stringify({ task_id: t.taskId }) });
+        if (typeof closeModal === 'function') closeModal(); else overlayEl.classList.remove('show');
+        renderTaskQueue(panel);
+      } catch (err) { window.alert(err.message || String(err)); }
+    });
   }
 
   function renderWorkflows(panel, workflows) {
@@ -670,6 +865,8 @@
 
     const runBtn = document.getElementById('rh-wf-run-btn');
     if (runBtn) {
+      // 提交后立刻返回，任务进队列；弹窗只做「轻跟踪」：每 4s 刷一次这条任务，
+      // 完成就把结果渲染出来。关掉弹窗任务也照跑，去队列页看。
       const doRun = async (force) => {
         const updatedNodes = nodes.map((n, idx) => {
           const input = bodyEl.querySelector(`.rh-wf-field[data-idx="${idx}"]`);
@@ -678,51 +875,42 @@
         const statusEl = document.getElementById('rh-run-status');
         const resultEl = document.getElementById('rh-run-result');
         runBtn.disabled = true;
-        runBtn.textContent = '执行中…';
-        if (statusEl) statusEl.textContent = '已提交任务，正在轮询生成结果（可能需要数十秒）…';
+        runBtn.textContent = '提交中…';
+        if (statusEl) statusEl.textContent = '正在提交到站内队列…';
         if (resultEl) resultEl.innerHTML = '';
-
         try {
-          const res = await rhFetch('/ui/api/runninghub/workflows/run', {
+          const res = await rhFetch('/ui/api/runninghub/tasks/submit', {
             method: 'POST',
-            body: JSON.stringify({ webapp_id: wf.webappId, nodeInfoList: updatedNodes, force: !!force }),
+            body: JSON.stringify({ webapp_id: wf.webappId, nodeInfoList: updatedNodes }),
           });
-          const est = res.estimate || {};
-          const closedNodes = Array.isArray(res.closedSourceNodes) ? res.closedSourceNodes.filter((n) => n !== '?') : [];
-          const estTxt = est.priceText || est.totalPrice != null ? `${est.totalPrice} ${est.currency || ''}`.trim() : '—';
-          if (statusEl) {
-            statusEl.innerHTML = `任务完成 (taskId=${escapeHtml(res.taskId)})`
-              + `<span class="muted" style="margin-left:8px">预估 ${escapeHtml(estTxt)} / ${escapeHtml(String(est.estimatedPoint ?? '—'))} 积分</span>`
-              + (res.balance && res.balance.transitionCoins != null ? `<span class="muted" style="margin-left:8px">剩余过渡币 <strong class="mono">${escapeHtml(String(res.balance.transitionCoins))}</strong></span>` : '')
-              + (closedNodes.length ? `<div style="color:#f59e0b;font-size:12px;margin-top:4px">注意：预估节点里有闭源模型 ${escapeHtml(closedNodes.join(', '))}，站内也扣钱包 $，这次能跑通说明是钱包/付费积分付的。</div>` : '');
-          }
-          const outs = Array.isArray(res.outputs) ? res.outputs : [];
-          if (resultEl) {
-            resultEl.innerHTML = outs.length
-              ? outs.map((o) => o.type === 'video'
-                  ? `<div style="margin-top:6px;"><video src="${escapeHtml(o.url)}" controls style="max-width:100%;border-radius:8px;"></video><div><a href="${escapeHtml(o.url)}" target="_blank">打开视频链接</a></div></div>`
-                  : `<div style="margin-top:6px;"><img src="${escapeHtml(o.url)}" style="max-width:100%;border-radius:8px;" /><div><a href="${escapeHtml(o.url)}" target="_blank">打开图片链接</a></div></div>`).join('')
-              : '<div class="muted">任务完成，但未返回媒体文件。</div>';
-          }
+          const taskId = res.task && res.task.taskId;
+          if (statusEl) statusEl.innerHTML = `已提交 <span class="mono">${escapeHtml(taskId || '')}</span>，正在生成（可关闭弹窗，任务在队列里继续跑）`
+            + (res.balance && res.balance.transitionCoins != null ? `<span class="muted" style="margin-left:8px">剩余过渡币 <strong class="mono">${escapeHtml(String(res.balance.transitionCoins))}</strong></span>` : '');
+          if (typeof renderTaskQueue === 'function' && panel) renderTaskQueue(panel);
+          if (!taskId) return;
+          // 轻跟踪：终态就渲染结果，否则每 4s 刷一次
+          const t0 = Date.now();
+          const tick = async () => {
+            let t = null;
+            try { t = (await rhFetch(`/ui/api/runninghub/tasks/${encodeURIComponent(taskId)}`)).task; } catch (e) { return; }
+            if (!t || !document.getElementById('rh-run-status')) return; // 弹窗关了
+            const el = Math.round((Date.now() - t0) / 1000);
+            if (t.status === 'SUCCESS') {
+              if (statusEl) statusEl.innerHTML = `任务完成 <span class="mono">${escapeHtml(t.upstreamTaskId || taskId)}</span> · ${el}s`
+                + (t.coinsSpent != null ? `<span class="muted" style="margin-left:8px">实扣 <strong class="mono">${escapeHtml(String(t.coinsSpent))}</strong> 过渡币</span>` : '');
+              renderTaskOutputs(resultEl, t);
+            } else if (['FAILED', 'TIMEOUT', 'CANCELLED'].includes(t.status)) {
+              if (statusEl) statusEl.innerHTML = `<span style="color:#ef4444">${escapeHtml(statusLabel(t.status))}${t.error ? '：' + escapeHtml(t.error) : ''}</span>`;
+              if (t.closedSource && panel) refreshWorkflows(panel);
+            } else {
+              if (statusEl) statusEl.textContent = `${statusLabel(t.status)} · ${el}s`;
+              setTimeout(tick, 4000);
+            }
+          };
+          setTimeout(tick, 1500);
         } catch (err) {
           if (statusEl) statusEl.innerHTML = `<span style="color:#ef4444">${escapeHtml(err.message || String(err))}</span>`;
-          // 预检拦下时给一个「仍然提交」：预检依据的是本地学的计费标签（本质是
-          // 「那个号当时付不起」），不是上游判决，得让用户能绕过它拿上游原文。
-          if (resultEl && err && err.detail && err.detail.can_force) {
-            const forceBtn = document.createElement('button');
-            forceBtn.className = 'ghost';
-            forceBtn.style.marginTop = '8px';
-            forceBtn.textContent = '仍然提交（绕过本地预检）';
-            forceBtn.addEventListener('click', () => {
-              forceBtn.remove();
-              doRun(true);
-            });
-            resultEl.appendChild(forceBtn);
-          }
-          // 提交被上游以「余额不足」拒掉时，后端已把该工作流的真实计费类型写回本地
-          // 并随错误带回最新列表——刷新卡片，让标签立刻从「RH 金币 / 余额」变成「钱包余额」。
-          const updated = err && err.detail && Array.isArray(err.detail.workflows) ? err.detail.workflows : null;
-          if (updated && panel) renderWorkflows(panel, updated);
+          if (err && err.detail && Array.isArray(err.detail.workflows) && panel) renderWorkflows(panel, err.detail.workflows);
         } finally {
           runBtn.disabled = false;
           runBtn.textContent = '发起调用';

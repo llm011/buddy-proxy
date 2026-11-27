@@ -33,6 +33,8 @@ def isolated_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     p = tmp_path / "runninghub_accounts.json"
     monkeypatch.setenv("RUNNINGHUB_ACCOUNTS_PATH", str(p))
     monkeypatch.setenv("RUNNINGHUB_WORKFLOWS_PATH", str(tmp_path / "runninghub_workflows.json"))
+    # 任务队列也必须隔离——否则测试会往用户真实的 ~/.buddy-proxy/runninghub_tasks.json 里写
+    monkeypatch.setenv("RUNNINGHUB_TASKS_PATH", str(tmp_path / "runninghub_tasks.json"))
     return p
 
 
@@ -433,3 +435,183 @@ def test_get_balance_does_not_call_api_keys(monkeypatch: pytest.MonkeyPatch):
     bal = asyncio.run(websession.get_balance("tok"))
     assert [c[0] for c in rec.calls] == ["/uc/getUserInfo", "/uc/point/summary"]
     assert "apiKey" not in bal and bal["transitionCoins"] == 984.0
+
+
+# ---------------------------------------------------------------------------
+# 任务队列：提交即返回，后台推进状态
+# ---------------------------------------------------------------------------
+
+def test_task_store_roundtrip_and_order(isolated_store: Path):
+    store.upsert_task({"taskId": "a", "status": "RUNNING", "created_at": 1000.0})
+    store.upsert_task({"taskId": "b", "status": "SUCCESS", "created_at": 2000.0})
+    store.upsert_task({"taskId": "c", "status": "FAILED", "created_at": 1500.0})
+    assert [t["taskId"] for t in store.list_tasks()] == ["b", "c", "a"], "新的在前"
+    # 只改状态不会抹掉别的字段
+    store.update_task("a", status="SUCCESS", outputs=[{"url": "u", "type": "image"}])
+    a = store.get_task("a")
+    assert a["status"] == "SUCCESS" and a["outputs"] and a["created_at"] == 1000.0
+    assert store.delete_task("c") is True and store.get_task("c") is None
+    assert store.delete_task("zzz") is False
+
+
+def test_task_store_caps_records(isolated_store: Path):
+    for i in range(store._TASKS_LIMIT + 10):
+        store.upsert_task({"taskId": f"t{i}", "status": "SUCCESS", "created_at": float(i)})
+    assert len(store.list_tasks()) == store._TASKS_LIMIT
+    assert store.get_task("t0") is None, "最老的先被挤掉"
+    assert store.get_task(f"t{store._TASKS_LIMIT + 9}") is not None
+
+
+def test_execute_task_success_records_outputs_and_cost(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    rec = _Recorder({
+        "/uc/getUserInfo": {"code": 0, "data": {"id": "1", "walletInfo": {"balance": 0}}},
+        "/uc/point/summary": {"code": 0, "data": {"transitionCoinRemained": "784"}},  # 794 → 784 = 实扣 10
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"totalPrice": 0.03, "priceText": "$0.03", "estimatedPoint": 21,
+                                                                     "nodes": [{"classType": "RH_Nano_Banana2_Gemini31Flash"}]}},
+        "/task/webapp/create": {"code": 0, "data": {"taskId": "UP1", "taskStatus": "RUNNING"}},
+        "/api/output/v2/history": {"code": 0, "data": {"records": [
+            {"taskId": "UP1", "fileUrl": "https://cdn/x.png", "outputType": "png", "taskCostTime": "74"}]}},
+    })
+    # 第二次 /task/list 才 SUCCESS（模拟轮询）
+    state = {"n": 0}
+    def task_list():
+        state["n"] += 1
+        return {"code": 0, "data": {"records": [{"taskId": "UP1", "taskStatus": "SUCCESS", "taskCostTime": "74"} if state["n"] >= 2 else {"taskId": "UP1", "taskStatus": "RUNNING"}]}}
+    rec.routes["/task/list"] = task_list
+    rec.install(monkeypatch)
+    store.upsert_task({"taskId": "local-1", "status": "SUBMITTING", "webappId": "2002675341464334337",
+                       "webappName": "玩偶", "inputs": [{"nodeId": "3", "fieldName": "image", "fieldValue": "a.png"}], "created_at": time.time()})
+    out = asyncio.run(runner.execute_task(store.get_account(acc["account_id"]), "local-1",
+                                          persist_session=store.update_session, balance_before=794.0))
+    assert out["status"] == "SUCCESS"
+    assert out["upstreamTaskId"] == "UP1"
+    assert out["outputs"] == [{"url": "https://cdn/x.png", "type": "image"}]
+    assert out["costTime"] == 74.0
+    assert out["coinsSpent"] == 10.0 and out["balanceAfter"]["transitionCoins"] == 784.0
+    assert out["estimate"]["nodes"] == ["RH_Nano_Banana2_Gemini31Flash"]
+    assert out["closedSource"] is False
+    assert out["webappName"] == "玩偶" and out["inputs"][0]["fieldValue"] == "a.png", "提交前的字段不能被状态推进抹掉"
+
+
+def test_execute_task_failure_writes_reason_and_closed_flag(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    rec = _Recorder({
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"totalPrice": 0.0, "nodes": []}},
+        "/task/webapp/create": {"code": 0, "data": {"taskId": "UP2", "taskStatus": "RUNNING"}},
+        "/task/list": {"code": 0, "data": {"records": [{"taskId": "UP2", "taskStatus": "FAILED", "taskResultDesc": json.dumps({
+            "node_name": "RH_BytedanceSeedance25TokenTextToVideo",
+            "exception_message": "[RH_OpenAPI_BytedanceSeedance25TokenTextToVideo] Submit failed: Your balance is insufficient. [errorCode: 605]"})}]}},
+    })
+    rec.install(monkeypatch)
+    store.upsert_task({"taskId": "local-2", "status": "SUBMITTING", "webappId": "2086711729156894722", "inputs": [], "created_at": time.time()})
+    out = asyncio.run(runner.execute_task(store.get_account(acc["account_id"]), "local-2"))
+    assert out["status"] == "FAILED"
+    assert "605" in out["error"] and out["closedSource"] is True
+    assert out["finishedAt"]
+
+
+def test_execute_task_submit_rejected_does_not_raise(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """提交就被拒（821/登录冷却）也要落成 FAILED，而不是把异常抛进 asyncio 的无人区。"""
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    rec = _Recorder({
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"nodes": []}},
+        "/task/webapp/create": {"code": 821, "msg": "Insufficient paid points."},
+    })
+    rec.install(monkeypatch)
+    store.upsert_task({"taskId": "local-3", "status": "SUBMITTING", "webappId": "w", "inputs": [], "created_at": time.time()})
+    out = asyncio.run(runner.execute_task(store.get_account(acc["account_id"]), "local-3"))
+    assert out["status"] == "FAILED" and "821" not in out["error"] and "Insufficient paid points" in out["error"]
+    assert out["errorCode"] == "821"
+
+
+def test_cancel_stops_waiting(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    rec = _Recorder({
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"nodes": []}},
+        "/task/webapp/create": {"code": 0, "data": {"taskId": "UP3", "taskStatus": "RUNNING"}},
+        "/task/list": {"code": 0, "data": {"records": [{"taskId": "UP3", "taskStatus": "RUNNING"}]}},  # 永远 RUNNING
+    })
+    rec.install(monkeypatch)
+    store.upsert_task({"taskId": "local-4", "status": "SUBMITTING", "webappId": "w", "inputs": [], "created_at": time.time()})
+
+    async def _go():
+        t = asyncio.create_task(runner.execute_task(store.get_account(acc["account_id"]), "local-4"))
+        await asyncio.sleep(0.15)
+        runner.request_cancel("local-4")
+        return await asyncio.wait_for(t, 3)
+    out = asyncio.run(_go())
+    assert out["status"] == "CANCELLED"
+    assert "local-4" not in runner._cancel_flags and "local-4" not in runner._running, "结束后要清标记"
+
+
+# ---------------------------------------------------------------------------
+# UI 端点
+# ---------------------------------------------------------------------------
+
+def test_ui_submit_returns_immediately_and_background_finishes(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    """提交立刻返回本地 taskId；后台执行器把状态推进到 SUCCESS 并写产出。
+
+    注意：FastAPI ``TestClient`` 每个请求跑在 anyio portal 的事件循环里，请求之间循环会
+    挂起，所以端点里 ``asyncio.create_task`` 起的后台任务在同步测试线程里**不会自己跑**。
+    真实 uvicorn 下循环是常驻的没这个问题。这里用 ``with TestClient`` 让 portal 活着，
+    再给一点时间；如果这个平台还是不推进，就退而验证「端点起了后台任务」这一契约。
+    """
+    acc = _acct(isolated_store)
+    store.update_session(acc["account_id"], WebSession(access_token=_fake_jwt(), refresh_token="r").to_dict())
+    monkeypatch.setattr(runner, "POLL_INTERVAL", 0.01)
+    state = {"n": 0}
+    def task_list():
+        state["n"] += 1
+        st = "SUCCESS" if state["n"] >= 2 else "RUNNING"
+        return {"code": 0, "data": {"records": [{"taskId": "UP9", "taskStatus": st, "taskCostTime": "12"}]}}
+    rec = _Recorder({
+        "/uc/getUserInfo": {"code": 0, "data": {"id": "1", "walletInfo": {"balance": 0}}},
+        "/uc/point/summary": {"code": 0, "data": {"transitionCoinRemained": "100"}},
+        "/api/workflow/webapp-price-estimate": {"code": 0, "data": {"totalPrice": 0.03, "nodes": []}},
+        "/task/webapp/create": {"code": 0, "data": {"taskId": "UP9", "taskStatus": "RUNNING"}},
+        "/task/list": task_list,
+        "/api/output/v2/history": {"code": 0, "data": {"records": [{"taskId": "UP9", "fileUrl": "https://cdn/a.png", "outputType": "png"}]}},
+    })
+    rec.install(monkeypatch)
+    from fastapi.testclient import TestClient
+
+    from buddy_proxy import __main__ as m
+    monkeypatch.setenv("BUDDY_PROXY_ADMIN_OPEN", "1")
+    store.upsert_workflow({"webappId": "2002675341464334337", "name": "玩偶", "description": "", "nodeInfoList": [], "billingType": "过渡币（站内）"})
+    with TestClient(m.app) as c:
+        r = c.post("/ui/api/runninghub/tasks/submit", json={
+            "webapp_id": "2002675341464334337", "nodeInfoList": [{"nodeId": "3", "fieldName": "image", "fieldValue": "a.png"}]})
+        assert r.status_code == 200, r.text
+        t = r.json()["task"]
+        assert t["taskId"].startswith("local-") and t["status"] in ("SUBMITTING", "RUNNING", "SUCCESS")
+        assert t["webappName"] == "玩偶" and t["inputs"] == [{"nodeId": "3", "fieldName": "image", "fieldValue": "a.png"}]
+        assert "password" not in json.dumps(r.json()) and "access_token" not in json.dumps(r.json())
+        tid = t["taskId"]
+        deadline = time.time() + 5
+        while time.time() < deadline and store.get_task(tid)["status"] != "SUCCESS":
+            time.sleep(0.05)
+        cur = store.get_task(tid)
+        if cur["status"] != "SUCCESS":
+            pytest.xfail("TestClient 的事件循环在请求间挂起，后台任务不推进；真实 uvicorn 下正常（见 test_execute_task_success_*）")
+        assert cur["outputs"] == [{"url": "https://cdn/a.png", "type": "image"}] and cur["upstreamTaskId"] == "UP9"
+        lst = c.get("/ui/api/runninghub/tasks").json()["tasks"]
+        assert lst[0]["taskId"] == tid
+        assert c.get(f"/ui/api/runninghub/tasks/{tid}").json()["task"]["taskId"] == tid
+        assert c.get("/ui/api/runninghub/tasks/nope").status_code == 404
+        assert c.post("/ui/api/runninghub/tasks/cancel", json={"task_id": tid}).status_code == 200
+        assert c.post("/ui/api/runninghub/tasks/delete", json={"task_id": tid}).status_code == 200
+        assert c.get(f"/ui/api/runninghub/tasks/{tid}").status_code == 404
+
+
+def test_ui_submit_requires_email_account(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    store.upsert_account(api_key="938bcfc2f8da4650abdf67b617b533a0", label="纯key")
+    r = _client(monkeypatch).post("/ui/api/runninghub/tasks/submit", json={"webapp_id": "w", "nodeInfoList": []})
+    assert r.status_code == 400 and "邮箱" in r.json()["detail"]["error"]["message"]

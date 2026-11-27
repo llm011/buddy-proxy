@@ -315,3 +315,93 @@ def rename_workflow(webapp_id: str, name: str, billing_type: str | None = None) 
             atomic_write_json(_workflows_path(), data)
             return True
     return False
+
+
+# ---- 任务队列存储 ----
+#
+# 一次站内运行 = 一条记录：提交即落盘（status=SUBMITTING），后台执行器负责把状态往前推
+# （RUNNING → SUCCESS / FAILED / TIMEOUT / CANCELLED），UI 轮询列表就能看到进度，
+# 不用像以前那样在弹窗里挂着一个 HTTP 请求等到出图。
+#
+# 记录里**不放**账号密码 / token，只放 account_id；参数原样存（nodeInfoList 是用户填的
+# 表单值，没有敏感信息），失败原因存解析后的 exception_message（截断）。
+
+_TASKS_LIMIT = 200
+
+
+def _tasks_path() -> Path:
+    env = os.environ.get("RUNNINGHUB_TASKS_PATH", "").strip()
+    return Path(env) if env else (Path.home() / ".buddy-proxy" / "runninghub_tasks.json")
+
+
+def _read_tasks_raw() -> dict[str, Any]:
+    data = read_json_dict(_tasks_path())
+    if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
+        return {"tasks": []}
+    return data
+
+
+def _write_tasks_raw(data: dict[str, Any]) -> None:
+    atomic_write_json(_tasks_path(), data)
+
+
+def list_tasks(*, limit: int | None = None) -> list[dict[str, Any]]:
+    """按创建时间倒序（新的在前）。``limit`` 为 None 时全量。"""
+    items = [dict(t) for t in _read_tasks_raw().get("tasks", []) if isinstance(t, dict)]
+    items.sort(key=lambda t: float(t.get("created_at") or 0), reverse=True)
+    return items if limit is None else items[:limit]
+
+
+def get_task(task_id: str) -> dict[str, Any] | None:
+    for t in _read_tasks_raw().get("tasks", []):
+        if isinstance(t, dict) and str(t.get("taskId")) == str(task_id):
+            return dict(t)
+    return None
+
+
+def upsert_task(task: dict[str, Any]) -> dict[str, Any]:
+    """新增或按 ``taskId`` 更新一条任务记录；只保留最近 ``_TASKS_LIMIT`` 条。"""
+    tid = str(task.get("taskId") or "").strip()
+    if not tid:
+        raise ValueError("taskId 不能为空")
+    data = _read_tasks_raw()
+    items: list[dict[str, Any]] = data["tasks"]
+    now = time.time()
+    entry = dict(task)
+    entry["taskId"] = tid
+    entry["updated_at"] = now
+
+    idx = next((i for i, t in enumerate(items) if str(t.get("taskId")) == tid), None)
+    if idx is None:
+        entry.setdefault("created_at", now)
+        items.append(entry)
+    else:
+        entry["created_at"] = items[idx].get("created_at", now)
+        # 展示用的字段（名字 / 缩略图 / 成本）累计合并，别被一次只改状态的写入抹掉
+        for k, v in items[idx].items():
+            entry.setdefault(k, v)
+        items[idx] = entry
+    if len(items) > _TASKS_LIMIT:
+        items.sort(key=lambda t: float(t.get("created_at") or 0), reverse=True)
+        del items[_TASKS_LIMIT:]
+    _write_tasks_raw(data)
+    return entry
+
+
+def update_task(task_id: str, **fields: Any) -> dict[str, Any] | None:
+    """只改几个字段（状态推进时用），其余保留。"""
+    cur = get_task(task_id)
+    if cur is None:
+        return None
+    cur.update(fields)
+    return upsert_task(cur)
+
+
+def delete_task(task_id: str) -> bool:
+    data = _read_tasks_raw()
+    before = len(data["tasks"])
+    data["tasks"] = [t for t in data["tasks"] if str(t.get("taskId")) != str(task_id)]
+    if len(data["tasks"]) == before:
+        return False
+    _write_tasks_raw(data)
+    return True
