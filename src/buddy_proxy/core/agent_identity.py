@@ -33,7 +33,7 @@ Kimi / Gemini / Qwen / Trae / OpenCode / Aider / Cline 等一律 200 放行，
 只有一份**竞品名单**会被拦。所以既不能只匹配一条完整句（漏），也不能
 匹配任意「You are X,」（误伤用户 prompt）。
 
-## 实测边界（2026-11-27，qoder 通道，hungerg / qwen3.8-max，流式）
+## 实测边界（qoder 通道，hungerg，流式）
 
 ==================================================  ======
 system prompt                                      结果
@@ -43,20 +43,32 @@ system prompt                                      结果
 ``You are Claude Code,``                               挂住
 ``You are Codex,``                                     挂住
 ``You are Codex, an agent based on GPT-6.``            挂住
+``You are Kimi Code CLI, an interactive…``             挂住 ★
+``You are Kimi ``（尾随空格）                          挂住 ★
 ``You are Claude Code``（无逗号）                       200
 ``you are codex,``（全小写）                            200
 ``YOU ARE CLAUDE CODE, …``（全大写）                    200
 ``You are Cursor, an AI code editor.``                 200
 ``You are Kimi, an AI assistant.``                     200
+``You are Kimi``（无尾随空格）                          200
+``You are Kimi.`` / ``You are Kimi\\n``                 200
+``You are Kimi123``                                    200
 ``You are Gemini, an AI assistant.``                   200
 ==================================================  ======
 
-两个关键结论：
+（★ = 2026-11-28 抓 Kimi Code CLI 2.1.1 的真实请求补测。）
 
-1. **逗号是必要条件**。``You are Codex`` 放行、``You are Codex,`` 挂住。
-   所以匹配串必须带逗号，否则会平白改写大量正常 prompt。
+三个关键结论：
+
+1. **逗号对前三家是必要条件，对 Kimi 不是**。``You are Codex`` 放行、
+   ``You are Codex,`` 挂住；但 ``You are Kimi Code CLI``（无逗号）照样挂。
+   所以 marker 的尾部形状只能逐条按实测定，不能统一。
 2. **大小写敏感**。全大写/全小写都放行，只有原样大小写会拦。故用精确匹配，
    ``.lower()`` 之类的「更宽容」写法反而会把放行的请求也改掉。
+3. **判据是「竞品名单」，不是「You are X,」通用规则**：Cursor / Windsurf /
+   Copilot / Cline / Aider / Gemini / Qwen / Grok / Devin / Amp / Zed / Trae /
+   Qoder / Continue / Roo / OpenCode / Cody / Goose 等 22 个名字实测全部 200。
+   写成通用正则会把正常客户端的 persona 全改掉。
 
 ## 扫描范围
 
@@ -79,7 +91,14 @@ log = logging.getLogger(__name__)
 
 #: 会触发上游拦截的竞品身份声明（精确、大小写敏感）。
 #:
-#: 每条都带逗号——见模块 docstring 的实测矩阵，逗号是必要条件。
+#: **尾部形状逐条不同，别照抄**——这是本模块最容易写错的地方：
+#:
+#: - DSH / Claude / Codex 靠**逗号**触发（``You are Codex`` 放行、
+#:   ``You are Codex,`` 挂住）；
+#: - Kimi 靠**尾随空格**触发（``You are Kimi`` 放行、``You are Kimi `` 挂住），
+#:   逗号反而无关（``You are Kimi Code CLI`` 无逗号照样挂）。
+#:
+#: 所以 marker 的「边界」是按实测逐条确定的，不能统一加逗号也不能统一去掉。
 #: **只加实测确认会拦的**：未测过的名字往里加，只会平白篡改用户的 prompt。
 #: 加新条目之前先跑一遍 ``tests/test_agent_identity.py`` 里记录的探针方法。
 COMPETITOR_IDENTITY_MARKERS: tuple[str, ...] = (
@@ -89,6 +108,11 @@ COMPETITOR_IDENTITY_MARKERS: tuple[str, ...] = (
     "You are Claude Code,",
     # Codex CLI
     "You are Codex,",
+    # Kimi Code CLI。**尾随空格是必需的**，见下面 test_marker_boundaries 的矩阵：
+    # ``You are Kimi`` / ``You are Kimi.`` / ``You are Kimi\n`` 都 200 放行，
+    # 只有 ``You are Kimi `` 起头的形态挂住；且 ``You are Kimi123`` 放行，
+    # 所以不能用「Kimi 后面跟任意字符」的表。
+    "You are Kimi ",
 )
 
 #: 命中处的替换文本。不含任何 Agent 品牌字样，也不会被上面的 marker 二次命中。
