@@ -924,6 +924,35 @@
     }
   }
 
+  function parseListOptions(fieldData, currentValue) {
+    if (!fieldData) return null;
+    let parsed;
+    try { parsed = typeof fieldData === 'string' ? JSON.parse(fieldData) : fieldData; }
+    catch (_) { return null; }
+    if (!Array.isArray(parsed) || !parsed.length) return null;
+
+    // ComfyUI 的 LIST 是 ["COMBO", {options:[...]}]；COMBO 是类型名，不是选项。
+    // 否则会只剩一个 COMBO 下拉项，提交后上游报 value_not_in_list。
+    let raw = parsed;
+    if (Array.isArray(parsed[0])) raw = parsed[0];
+    else if (parsed[1] && typeof parsed[1] === 'object' && Array.isArray(parsed[1].options)) raw = parsed[1].options;
+
+    const options = raw.map((opt) => {
+      if (opt && typeof opt === 'object') {
+        const value = opt.index !== undefined ? String(opt.index)
+          : (opt.value !== undefined ? String(opt.value) : String(opt.name || ''));
+        return { value, label: opt.name !== undefined ? String(opt.name) : value };
+      }
+      return { value: String(opt), label: String(opt) };
+    }).filter((o) => o.value);
+    if (!options.length) return null;
+
+    const current = currentValue !== undefined && currentValue !== null ? String(currentValue) : '';
+    if (current && !options.some((o) => o.value === current)) options.unshift({ value: current, label: current });
+    return options;
+  }
+  window.parseRunningHubListOptions = parseListOptions;
+
   function openRunWorkflowModal(wf, panel) {
     const titleEl = document.getElementById('modal-title');
     const bodyEl = document.getElementById('modal-body');
@@ -943,31 +972,7 @@
             ? `<button type="button" class="ghost rh-upload-btn" data-idx="${idx}" data-ftype="${ftype.toLowerCase()}" style="flex:none;white-space:nowrap;">上传${ftype === 'IMAGE' ? '图片' : ftype === 'AUDIO' ? '音频' : '视频'}</button><input type="file" class="rh-upload-input" data-idx="${idx}" accept="${accept}" style="display:none;" />`
             : '';
 
-          let listOptions = null;
-          if (ftype === 'LIST' && n.fieldData) {
-            try {
-              const parsed = typeof n.fieldData === 'string' ? JSON.parse(n.fieldData) : n.fieldData;
-              // 上游 fieldData 实际有三种形状，都要兼容：
-              //   1. [["a","b","c"], {default:"a"}]   ← 最常见，首元素是选项值数组
-              //   2. ["a","b","c"]                     ← 纯字符串数组
-              //   3. [{index:1,value:"a",name:"A"},…]  ← 对象数组
-              let raw = parsed;
-              if (Array.isArray(parsed) && parsed.length && Array.isArray(parsed[0])) {
-                raw = parsed[0];
-              }
-              if (Array.isArray(raw) && raw.length) {
-                listOptions = raw.map(opt => {
-                  if (opt && typeof opt === 'object') {
-                    const ov = opt.index !== undefined ? String(opt.index)
-                      : (opt.value !== undefined ? String(opt.value) : String(opt.name || ''));
-                    const ol = opt.name !== undefined ? String(opt.name) : ov;
-                    return { value: ov, label: ol };
-                  }
-                  return { value: String(opt), label: String(opt) };
-                }).filter(o => o.value);
-              }
-            } catch (_) {}
-          }
+          const listOptions = ftype === 'LIST' ? parseListOptions(n.fieldData, val) : null;
 
           const controlHtml = listOptions
             ? `<select class="rh-wf-field" data-idx="${idx}" style="flex:1;min-width:0;">${listOptions.map(o => `<option value="${escapeHtml(o.value)}"${o.value === val ? ' selected' : ''}>${escapeHtml(o.label)}</option>`).join('')}</select>`
