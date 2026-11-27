@@ -38,6 +38,7 @@ from buddy_proxy.core.state import (
     diagnostic,
     get_state,
 )
+from buddy_proxy.core.agent_identity import neutralize_agent_identity
 from buddy_proxy.core import settings as settings_mod
 from buddy_proxy.core import cooldown as cooldown_mod
 from buddy_proxy.core import context_guard
@@ -645,6 +646,25 @@ async def forward_chat(
     # 只对 openai/anthropic 这类带 ``tools`` 数组的协议生效；不是列表就原样放过，
     # 绝不为「修重复」引入新的 500。
     body = _dedupe_tools(body)
+
+    # ---- 竞品客户端身份声明脱敏（所有通道统一兜底）----
+    # 上游渠道方会挡「别的 Agent 借我的额度跑」，但**每个通道的表现不同**：
+    # codebuddy 是 400/11128 秒回，qoder 是长时间无首字节（软性挂起）。后者尤其
+    # 难查——客户端只看到自己卡死、没有任何报错。2026-11-27 的 dsh + hungerg
+    # 事故就是这样排了一轮无效方向才定位到 system prompt 里的一句话。
+    #
+    # 放在这里而不是各 provider 内部：这是**跨通道的同一件事**，逐个通道加
+    # 必然漏（codebuddy 有、qoder 没有，于是同一个 dsh 会话在两个通道上一个
+    # 报错、一个挂死）。与 ``_dedupe_tools`` 同层：都是「出站前把客户端特征
+    # 抹平」的兜底，且都对 body 做无副作用浅拷贝。
+    #
+    # provider 内部已有的同类处理（codebuddy 的 ``_neutralize_leading_system``）
+    # 保留不动：它的扫描面更宽（所有 system/assistant 消息、逐 text 块），
+    # 覆盖本函数刻意不碰的位置。两者幂等，重复命中只是把占位再替换一次。
+    if isinstance(body.get("messages"), list):
+        neutralized = neutralize_agent_identity(body["messages"])
+        if neutralized is not body["messages"]:
+            body = {**body, "messages": neutralized}
 
     # ---- 默认模型：客户端未指定 model 时补齐 ----
     requested_model = body.get("model")
