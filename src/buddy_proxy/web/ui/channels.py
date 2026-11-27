@@ -1752,6 +1752,13 @@ async def ui_runninghub_accounts_import(request: Request):
         rh_store.update_account_info(acc["account_id"], balance)
     except websession.WebSessionError:
         pass
+    # 刚导入的号今天多半还没领（新号 activityPoint=0 会 414）：让 manager 立刻给它领一次，
+    # 不等循环的 10 分钟。领不到（登录冷却 / 上游）不阻塞导入。
+    try:
+        from ...runninghub import dailygift
+        await dailygift.get_manager().tick()
+    except Exception:  # noqa: BLE001
+        pass
     return {"accounts": rh_store.list_accounts(include_secret=False)}
 
 
@@ -1785,7 +1792,66 @@ async def ui_runninghub_accounts_refresh(request: Request):
     targets = [a for a in rh_store.get_active_accounts() if not target_id or a.get("account_id") == target_id]
     # 并行：5 个号串行刷要 5 × 5 个往返，gather 一下快 5 倍；update_account_info 是原子写 + flock
     await asyncio.gather(*(_refresh_one(a) for a in targets))
+    # 刷完顺手让 manager 巡一轮：今天还没领的号会在这一步领掉（状态由 manager 记，
+    # 这样徽标和实际一致；refresh_balance 本身不再 claim）
+    from ...runninghub import dailygift
+    try:
+        await dailygift.get_manager().tick()
+    except Exception:  # noqa: BLE001 — 领取失败不影响「刷新余额」本身
+        pass
     return {"accounts": rh_store.list_accounts(include_secret=False)}
+
+
+@app.get("/ui/api/runninghub/daily-gift")
+async def ui_runninghub_daily_gift_status(request: Request):
+    """自动领积分的状态：循环在不在跑、每个号站点今天领没领、下次重试时间。"""
+    _ensure_local(request)
+    from ...runninghub import dailygift
+
+    return {"gift": dailygift.get_manager().status()}
+
+
+@app.post("/ui/api/runninghub/daily-gift/claim")
+async def ui_runninghub_daily_gift_claim(request: Request):
+    """手动「立即领取」：不走退避、已领过也照问一次上游；不传 account_id 就是全部。"""
+    _ensure_local(request)
+    from ...runninghub import dailygift
+    from ...runninghub import store as rh_store
+
+    body = await request.json() if (await request.body()) else {}
+    aid = str(body.get("account_id") or "").strip() or None
+    try:
+        out = await dailygift.get_manager().claim_now(aid)
+    except Exception as exc:  # noqa: BLE001 — 把上游原文带回前端，别 500
+        raise HTTPException(status_code=502, detail={"error": {"message": str(exc)[:300]}})
+    return {
+        "claimed": out["claimed"],
+        "already": out["already"],
+        "failed": out["failed"],
+        "gift": dailygift.get_manager().status(),
+        "accounts": rh_store.list_accounts(include_secret=False),
+    }
+
+
+async def _rh_start_daily_gift_loop() -> None:
+    """自动领积分循环随应用启停（uvicorn 生命周期）。启动失败只记日志，不阻断代理。"""
+    try:
+        from ...runninghub import dailygift
+        dailygift.get_manager().start()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("runninghub 每日积分自动领取循环启动失败: %s", exc)
+
+
+async def _rh_stop_daily_gift_loop() -> None:
+    try:
+        from ...runninghub import dailygift
+        await dailygift.get_manager().stop()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+app.router.on_startup.append(_rh_start_daily_gift_loop)
+app.router.on_shutdown.append(_rh_stop_daily_gift_loop)
 
 
 @app.post("/ui/api/runninghub/accounts/relogin")

@@ -316,8 +316,13 @@ async def get_coin_gain_list(token: str, *, timeout: float = 30.0) -> list[dict[
     return [r for r in (recs or []) if isinstance(r, dict)]
 
 
-async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool:
+async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool | None:
     """``/api/welfare/daily-gift/claim``：领每日赠送的 30 积分（每天一次，站点时间 00:00 清零重置）。
+
+    返回三态，调用方必须分开处理：
+    - ``True``：这次真领到了
+    - ``False``：上游说「今天已领过」（网页上领了 / 之前刷余额时顺手领了）——**也算今天完成**
+    - ``None``：网络 / 上游错误，**不知道领没领**——自动领取循环要退避重试，不能当成「已领」
 
     2026-11-27 实测：新注册的号 ``activityPoint=0``、``dailyGift.granted=false``，直接
     跑应用会 414 NOT_ENOUGH_POWER_VALUE——不是没币，是**没领当天的积分**。网页端登录
@@ -326,8 +331,10 @@ async def claim_daily_gift(token: str, *, timeout: float = 30.0) -> bool:
     try:
         data = await _post("/api/welfare/daily-gift/claim", {}, token=token, timeout=timeout)
         return bool(data.get("data"))
-    except WebSessionError:
-        return False
+    except WebSessionError as exc:
+        if exc.kind == "refresh":
+            raise  # 401/412 让上层续期重试，别吞
+        return None  # 其他（业务码非 0 / 网络）：交给调用方按「不知道领没领」处理
 
 
 async def get_balance(
@@ -342,8 +349,10 @@ async def get_balance(
     - ``freeImageLeft`` / ``freeVideoLeft``：站内福利的免费次数（另算，不扣币不扣分；只在
       ``include_welfare=True`` 时拉——submit 前不需要，省一个往返）
 
-    ``claim_gift=True`` 时先尝试领当天赠送（已领过上游回 false，无副作用），再拉余额——
-    顺序反了 UI 会显示 0 积分而运行时报 414。
+    ``claim_gift=True`` 时先尝试领当天赠送，再拉余额——顺序反了 UI 会显示 0 积分。
+    **注意**：自动领取循环（``dailygift``）有自己的状态文件，和这里互不知道；所以
+    走 manager 的路径（accounts/refresh、循环）传 ``claim_gift=False``，由 manager 统一领、
+    统一记状态，避免「刷了一下余额就把积分领了，徽标却还显示待领取」。
     """
     if claim_gift:
         await claim_daily_gift(token, timeout=timeout)
