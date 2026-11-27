@@ -41,7 +41,7 @@ const PANEL = new Element('runninghub-page-box');
 const PANEL_CHILDREN = {};
 for (const id of [
   'rh-queue-body', 'rh-queue-count', 'rh-workflows-body', 'rh-accounts-body',
-  'rh-gift-loop-tag', 'rh-wf-import-btn', 'rh-queue-refresh', 'rh-queue-clear',
+  'rh-gift-loop-tag', 'rh-wf-import-btn', 'rh-queue-refresh', 'rh-queue-archived', 'rh-queue-clear',
   'rh-claim-all-btn', 'rh-import-btn', 'rh-refresh-all-btn',
 ]) PANEL_CHILDREN[id] = new Element(id);
 globalThis.window = globalThis;

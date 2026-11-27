@@ -470,6 +470,26 @@ def test_task_store_roundtrip_and_order(isolated_store: Path):
     assert store.delete_task("zzz") is False
 
 
+def test_task_archive_separates_lists_without_losing_details(isolated_store: Path, monkeypatch: pytest.MonkeyPatch):
+    store.upsert_task({"taskId": "done", "status": "SUCCESS", "outputs": [{"url": "u", "type": "image"}]})
+    store.upsert_task({"taskId": "running", "status": "RUNNING"})
+    c = _client(monkeypatch)
+
+    r = c.post("/ui/api/runninghub/tasks/archive", json={"task_id": "done"})
+    assert r.status_code == 200 and r.json()["task"]["archived"] is True
+    assert [t["taskId"] for t in c.get("/ui/api/runninghub/tasks").json()["tasks"]] == ["running"]
+    archived = c.get("/ui/api/runninghub/tasks?archived=1").json()["tasks"]
+    assert [t["taskId"] for t in archived] == ["done"]
+    assert archived[0]["outputs"] == [{"url": "u", "type": "image"}]
+
+    rejected = c.post("/ui/api/runninghub/tasks/archive", json={"task_id": "running"})
+    assert rejected.status_code == 400
+    restored = c.post("/ui/api/runninghub/tasks/archive", json={"task_id": "done", "archived": False})
+    assert restored.status_code == 200
+    assert {t["taskId"] for t in store.list_tasks()} == {"done", "running"}
+    assert store.list_tasks(archived=True) == []
+
+
 def test_task_store_caps_records(isolated_store: Path):
     for i in range(store._TASKS_LIMIT + 10):
         store.upsert_task({"taskId": f"t{i}", "status": "SUCCESS", "created_at": float(i)})

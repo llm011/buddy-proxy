@@ -345,9 +345,12 @@ def _write_tasks_raw(data: dict[str, Any]) -> None:
     atomic_write_json(_tasks_path(), data)
 
 
-def list_tasks(*, limit: int | None = None) -> list[dict[str, Any]]:
+def list_tasks(*, limit: int | None = None, archived: bool = False) -> list[dict[str, Any]]:
     """按创建时间倒序（新的在前）。``limit`` 为 None 时全量。"""
-    items = [dict(t) for t in _read_tasks_raw().get("tasks", []) if isinstance(t, dict)]
+    items = [
+        dict(t) for t in _read_tasks_raw().get("tasks", [])
+        if isinstance(t, dict) and bool(t.get("archived")) is archived
+    ]
     items.sort(key=lambda t: float(t.get("created_at") or 0), reverse=True)
     return items if limit is None else items[:limit]
 

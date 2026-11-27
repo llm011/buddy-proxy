@@ -2201,7 +2201,7 @@ async def ui_runninghub_tasks_submit(request: Request):
 
 @app.get("/ui/api/runninghub/tasks")
 async def ui_runninghub_tasks(request: Request):
-    """任务列表（新的在前）。``?limit=N`` 限制条数，默认 100。"""
+    """任务列表（新的在前）。``?archived=1`` 查看归档，默认只返回当前队列。"""
     _ensure_local(request)
     from ...runninghub import store as rh_store
 
@@ -2209,7 +2209,8 @@ async def ui_runninghub_tasks(request: Request):
         limit = int(request.query_params.get("limit") or 100)
     except ValueError:
         limit = 100
-    return {"tasks": rh_store.list_tasks(limit=limit)}
+    archived = request.query_params.get("archived") == "1"
+    return {"tasks": rh_store.list_tasks(limit=limit, archived=archived)}
 
 
 @app.get("/ui/api/runninghub/tasks/{task_id}")
@@ -2241,6 +2242,24 @@ async def ui_runninghub_tasks_cancel(request: Request):
     # 执行器下一轮轮询会看到标记并写 CANCELLED；这里先把意图落下来，UI 立刻能反馈
     rh_store.update_task(tid, cancelRequested=True)
     return {"task": rh_store.get_task(tid)}
+
+
+@app.post("/ui/api/runninghub/tasks/archive")
+async def ui_runninghub_tasks_archive(request: Request):
+    """归档或恢复已结束的任务；进行中的任务不能从队列中隐藏。"""
+    _ensure_local(request)
+    from ...runninghub import store as rh_store
+
+    body = await request.json()
+    tid = str(body.get("task_id") or "").strip()
+    t = rh_store.get_task(tid) if tid else None
+    if not t:
+        raise HTTPException(status_code=404, detail={"error": {"message": "任务不存在"}})
+    archived = bool(body.get("archived", True))
+    if archived and t.get("status") in ("SUBMITTING", "RUNNING", "QUEUED"):
+        raise HTTPException(status_code=400, detail={"error": {"message": "进行中的任务不能归档"}})
+    task = rh_store.update_task(tid, archived=archived, archived_at=time.time() if archived else None)
+    return {"task": task}
 
 
 @app.post("/ui/api/runninghub/tasks/delete")
