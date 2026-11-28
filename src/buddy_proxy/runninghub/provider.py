@@ -138,8 +138,25 @@ class RunningHubProvider:
         }
 
     def quota(self) -> dict[str, Any]:
+        """**不声称**支持额度查询（``supported: False``）。
+
+        RunningHub 不是「模型」通道：它跑的是工作流/任务，余额是钱包（$）和
+        站内过渡币，账号卡上还带每日积分、任务队列、工作流配置——这些都在它
+        自己的「🎨 RunningHub」页里（``benefits_runninghub.js``）。
+
+        以前这里返回不带 ``supported`` 的 dict，而 ``benefits.py`` 的
+        ``entry["quota"] = {"supported": True, **quota}`` 是「provider 实现了
+        quota() 就当支持」——于是额度页末尾凭空多出一张「RunningHub / 无额度
+        数据」的空卡，什么信息也没有（用户 2026-11-29 报障：它不是模型，不该
+        出现在额度页）。
+
+        显式给 ``supported: False``：``**quota`` 会覆盖掉外层那个 True。
+        ``accounts`` / ``items`` 字段留着——排查和 CLI 诊断还会读它，去掉只是
+        让这条路径少一个可用信息源。
+        """
         accounts = get_active_accounts()
         return {
+            "supported": False,
             "provider": self.id,
             "accounts": len(accounts),
             "items": [],
