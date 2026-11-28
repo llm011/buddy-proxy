@@ -25,6 +25,8 @@ codebuddy 流式把上游非 200 做成**带内错误 chunk**（``pipeline.strea
 
 from __future__ import annotations
 
+import asyncio
+import collections.abc
 import functools
 import json
 import pathlib
@@ -452,6 +454,53 @@ def _retryable_failure(resp: StreamingResponse | JSONResponse) -> int | None:
     return status if status in _RETRYABLE_STATUS else None
 
 
+_RACCOON_KEEPALIVE_INTERVAL_S = 5.0
+
+
+def _raccoon_keepalive_response(
+    factory: collections.abc.Awaitable[StreamingResponse | JSONResponse],
+    protocol: str,
+) -> StreamingResponse:
+    """等待 Raccoon 完整上游响应时先给下游发注释帧，避免客户端首包超时。"""
+
+    async def generate():
+        task = asyncio.ensure_future(factory)
+        try:
+            while not task.done():
+                done, _ = await asyncio.wait({task}, timeout=_RACCOON_KEEPALIVE_INTERVAL_S)
+                if task not in done:
+                    yield ": keepalive\n\n"
+            try:
+                resp = task.result()
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {
+                    "error": {"message": str(exc.detail), "type": "bad_gateway"}}
+                if protocol == "anthropic":
+                    error = detail.get("error", detail)
+                    yield f"event: error\ndata: {json.dumps({'type': 'error', 'error': error}, ensure_ascii=False)}\n\n"
+                else:
+                    yield f"data: {json.dumps(detail, ensure_ascii=False)}\n\n"
+                    yield "data: [DONE]\n\n"
+                return
+            if isinstance(resp, StreamingResponse):
+                async for chunk in resp.body_iterator:
+                    yield chunk
+            else:
+                yield resp.body
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+    return StreamingResponse(
+        generate(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "Connection": "close"},
+    )
+
+
 async def _forward_with_order(
     state: Any,
     key: str,
@@ -766,24 +815,34 @@ async def forward_chat(
                     break
             if targets:
                 diagnostic("model_order_try", model=key, targets=len(targets))
-                return await _forward_with_order(
+                forwarding = _forward_with_order(
                     state, key, list(targets), body, protocol, original)
+                if body.get("stream") and any(
+                        _split_target(target)[0] == "raccoon" for target in targets):
+                    return _raccoon_keepalive_response(forwarding, protocol)
+                return await forwarding
 
     # 3) 自动匹配模型 id（仅在未显式指定前缀时；前缀路由的结果不能被覆盖）
     if provider is None:
         provider = _resolve_auto(state, requested_model)
 
     if provider is not None:
-        return await _dispatch_once(
+        forwarding = _dispatch_once(
             state, provider.id, requested_model, body, protocol, original)
+        if provider.id == "raccoon" and body.get("stream"):
+            return _raccoon_keepalive_response(forwarding, protocol)
+        return await forwarding
 
     # 4) 兜底通道：未命中任何 provider 模型列表时，按配置的默认通道转发
     default_provider_id = getattr(state, "default_provider", "codebuddy")
     if default_provider_id in providers:
         diagnostic("provider_route", provider=default_provider_id,
                    model=requested_model, protocol=protocol, via="default")
-        return await _dispatch_once(
+        forwarding = _dispatch_once(
             state, default_provider_id, requested_model, body, protocol, original)
+        if default_provider_id == "raccoon" and body.get("stream"):
+            return _raccoon_keepalive_response(forwarding, protocol)
+        return await forwarding
 
     # 默认 CodeBuddy 路径（对称封装，与其它 provider 一致）
     return await _dispatch_once(
