@@ -1294,3 +1294,159 @@ def test_no_orphan_stream_timeout_constant():
     assert provider._TIMEOUT_NONSTREAM.read == 300.0, (
         "非流式 read 超时 300s 是「整条响应」上限，客户端流式的首字延迟"
         "也受它约束——改这个值要想清楚")
+
+
+# ---------------------------------------------------------------------------
+# 工具调用：截断的半截参数必须丢弃
+# ---------------------------------------------------------------------------
+def _tool_frames(payload):
+    """跑合成器，收集所有 tool_call 帧和 finish_reason。"""
+    import json as _json
+
+    from buddy_proxy.raccoon import provider
+
+    async def _run():
+        tools, finishes = [], []
+        async for frame in provider._synthesize_openai_stream(payload, "m"):
+            if not frame.startswith("data: "):
+                continue
+            body = frame[len("data: "):].strip()
+            if body == "[DONE]":
+                break
+            for choice in _json.loads(body).get("choices") or []:
+                delta = choice.get("delta") or {}
+                tools.extend(delta.get("tool_calls") or [])
+                if choice.get("finish_reason"):
+                    finishes.append(choice["finish_reason"])
+        return tools, finishes
+
+    return asyncio.run(_run())
+
+
+def _payload(args: str, finish_reason: str):
+    return {
+        "id": "x", "created": 1, "model": "m",
+        "choices": [{
+            "message": {"content": "", "tool_calls": [{
+                "index": 0, "id": "c1", "type": "function",
+                "function": {"name": "Grep", "arguments": args},
+            }]},
+            "finish_reason": finish_reason,
+        }],
+        "usage": {},
+    }
+
+
+def test_truncated_tool_arguments_are_dropped():
+    """被 max_tokens 截断时，半截 JSON 参数不能发给客户端。
+
+    实测 sn-kimi-k3-1-pro：``max_tokens=40`` 返回 ``'{"path":"src'``、
+    ``max_tokens=50`` 返回 ``'{"path":"src'``——都是**不完整 JSON**。原样发出
+    后，客户端（Kimi）解析失败，报的就是用户看到的
+    ``invalid_tool_arguments: Tool call "Grep" ... must have required
+    property 'pattern'``。看着像代理丢了参数，其实上游根本没传完。
+    """
+    tools, finishes = _tool_frames(_payload('{"path":"src', "length"))
+    assert tools == [], "半截参数的 tool_call 必须整条丢弃"
+    assert finishes == ["length"], "截断语义要保留，客户端据此重试"
+
+
+def test_truncated_but_complete_arguments_are_kept():
+    """参数恰好完整（只是后面没输出了）时不能误丢。"""
+    tools, finishes = _tool_frames(_payload('{"pattern":"foo"}', "length"))
+    assert len(tools) == 1, "参数是合法 JSON 就该照常发"
+    assert tools[0]["function"]["arguments"] == '{"pattern":"foo"}'
+    assert finishes == ["length"]
+
+
+def test_complete_tool_call_is_unaffected():
+    """正常（未截断）的工具调用行为不变。"""
+    tools, finishes = _tool_frames(_payload('{"pattern":"foo"}', "tool_calls"))
+    assert len(tools) == 1
+    assert finishes == ["tool_calls"]
+
+
+def test_tool_index_is_enumeration_order():
+    """index 按枚举序号重新编号。
+
+    上游实测**会**自己编号（两个调用返回 0/1），所以这不是修上游的 bug；
+    但 index 是流式协议的聚合键，让「发出的 index」与「帧顺序」严格对应，
+    参数才不会落到错误的工具上。
+    """
+    import json as _json
+
+    from buddy_proxy.raccoon import provider
+
+    payload = {
+        "id": "x", "created": 1, "model": "m",
+        "choices": [{
+            "message": {"content": "", "tool_calls": [
+                # 故意让上游给的 index 与顺序不一致
+                {"index": 5, "id": "a", "type": "function",
+                 "function": {"name": "Grep", "arguments": '{"pattern":"x"}'}},
+                {"index": 2, "id": "b", "type": "function",
+                 "function": {"name": "Glob", "arguments": '{"pattern":"y"}'}},
+            ]},
+            "finish_reason": "tool_calls",
+        }],
+        "usage": {},
+    }
+
+    async def _run():
+        out = []
+        async for frame in provider._synthesize_openai_stream(payload, "m"):
+            if not frame.startswith("data: "):
+                continue
+            body = frame[len("data: "):].strip()
+            if body == "[DONE]":
+                break
+            for choice in _json.loads(body).get("choices") or []:
+                for tc in (choice.get("delta") or {}).get("tool_calls") or []:
+                    out.append(tc)
+        return out
+
+    calls = asyncio.run(_run())
+    assert [c["index"] for c in calls] == [0, 1], "index 必须重编号成 0、1"
+    assert [c["function"]["name"] for c in calls] == ["Grep", "Glob"]
+
+
+def test_both_synthesis_paths_share_tool_call_filtering():
+    """两条合成路径必须共用 _iter_usable_tool_calls。
+
+    review 时发现：第一版只在 OpenAI 合成路径里做了截断丢弃，anthropic
+    合成路径照样把半截参数发出去（实测非流式 max_tokens=55 直接返回
+    ``'{"'``）。这种「修一条漏一条」最容易复发，所以直接锁两条路径的
+    公共入口，并验证行为一致。
+    """
+    import json as _json
+
+    from buddy_proxy.raccoon import provider
+
+    # 半截参数：两条路径都必须丢掉
+    truncated = [{
+        "index": 0, "id": "c1", "type": "function",
+        "function": {"name": "Grep", "arguments": '{"'},
+    }]
+    assert provider._iter_usable_tool_calls(truncated, "length") == []
+
+    # 完整参数：保留并重编号
+    good = [
+        {"index": 7, "id": "a", "type": "function",
+         "function": {"name": "Grep", "arguments": '{"pattern":"x"}'}},
+        {"index": 3, "id": "b", "type": "function",
+         "function": {"name": "Glob", "arguments": '{"pattern":"y"}'}},
+    ]
+    out = provider._iter_usable_tool_calls(good, "tool_calls")
+    assert [c["index"] for c in out] == [0, 1]
+
+    # 非 tool_calls 的元素直接跳过，不能 AttributeError
+    assert provider._iter_usable_tool_calls(["junk", None], "length") == []
+
+    # 源码层面确认两个合成函数都调用了它
+    import inspect
+
+    for fn in (provider._synthesize_openai_stream,
+               provider._synthesize_anthropic_stream):
+        src = inspect.getsource(fn)
+        assert "_iter_usable_tool_calls(" in src, (
+            f"{fn.__name__} 没走公共过滤，截断参数会从这里漏出去")

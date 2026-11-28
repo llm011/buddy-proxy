@@ -875,13 +875,21 @@ class QoderProvider(BaseProvider):
         if not accounts:
             other = failover.available_accounts()
             if other:
+                # 这是**配置问题**（账号在别的区域），不是凭据失效。
+                #
+                # 原来报 401 + ``authentication_error``，客户端会当成登录过期：
+                # Kimi 直接弹 ``provider.auth_error`` 让人重新登录，而真正该做的
+                # 是「去管理页把账号加到对应区域」或「换用其它区域的子通道」。
+                # 改成 400 + ``invalid_request``：确定性错误（换号/重试都没用），
+                # 也不该触发客户端的鉴权重试流程。
                 raise HTTPException(
-                    status_code=401,
+                    status_code=400,
                     detail={"error": {
                         "message": (f"qoder 无 {self._region.label} 区域的可用账号"
                                     f"（已有 {len(other)} 个账号属于其它区域，"
-                                    f"跨区账号间不自动切换）"),
-                        "type": "authentication_error"}},
+                                    f"跨区账号间不自动切换；请在管理页把账号导入到"
+                                    f"{self._region.label} 子通道）"),
+                        "type": "invalid_request"}},
                 )
             raise HTTPException(
                 status_code=429,
