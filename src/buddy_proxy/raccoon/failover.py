@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -132,10 +133,71 @@ def is_model_rate_limited(code: int, error_code: str = "", message: str = "") ->
     return code == 429 and "model" in text
 
 
-#: 账号级风控（``200108``）的冷却时长。上游提示「稍后重试」，实测短时间高频
-#: 调用会触发；给 30 分钟——3 小时太长（正常使用等不了），30 分钟足够让
-#: 风控窗口过去，也不会因为马上重试而把账号彻底打废。
-_RISK_CONTROL_COOLDOWN_S = 1800.0
+#: 账号级风控（``200108``）的冷却时长。
+#:
+#: **这个值原先写的是 30 分钟，没有实测依据**（2026-11-23 引入时只是凭感觉取的
+#: 「够长但等得起」）。2026-11-29 用 11-23 ~ 11-29 的真实 metrics 反查了 52 次
+#: 风控事件，量出上游实际封多久：从命中到该账号下一次真正成功请求的间隔——
+#:
+#:     min=116min  25%=279min  中位=408min  75%=719min  max=870min
+#:
+#: 也就是说 30 分钟只覆盖了 0/52 的情况，**每一次**都是在账号仍被封着的时候
+#: 就把请求打上去，又被拒一次。日志里能直接看到这个循环：同一账号的 200108
+#: 间隔精确等于冷却时长（30.1 / 30.2 / 30.7 / 31.0 / 32.2 分钟），像节拍器。
+#:
+#: 取 12 小时（720min）：覆盖 41/52，剩下 11 次长尾由下面的递进兜住。不再取更长
+#: 是因为中位数只有 6.8h，固定 14h 会让一半账号在其实已经恢复的情况下白白闲置。
+_RISK_CONTROL_COOLDOWN_S = 43200.0
+
+#: 同一账号**连续**被风控时的递进档位（秒）。第一次 12h，之后逐级翻倍到 24h 封顶。
+#:
+#: 为什么需要递进：12h 覆盖 41/52，剩下 11 次（最长 870min = 14.5h）会在冷却
+#: 到期后立刻再撞一次。真实日志里这种「解封即再犯」是成串出现的——一个账号在
+#: 14h 内被连打 3 次，说明它已经进了更长的惩罚窗口，继续按 12h 试只是在浪费一次
+#: 请求额度。递进让第二次起自动退到更保守的档位。
+#:
+#: 键是「连续命中次数」，任何一次成功请求都会把计数清零（见 ``note_risk_recovered``）。
+_RISK_CONTROL_ESCALATION_S = (43200.0, 86400.0)
+
+#: 判定「连续」的窗口：距上次风控命中不超过这么久，才算同一轮连续风控。
+#: 取 24h——比最长的单次封禁（870min≈14.5h）宽，但又不至于把隔天的偶发命中
+#: 串成一次。
+_RISK_CONTROL_STREAK_WINDOW_S = 86400.0
+
+#: 每个账号最近一次风控命中的时刻（单调递增的 wall clock 秒）。用于判断「连续」，
+#: 只放内存：重启后计数清零可以接受——重启本身已经让账号歇了一会儿，重新从
+#: 12h 起算不会更糟。
+_risk_last_hit: dict[str, float] = {}
+_risk_streak: dict[str, int] = {}
+_risk_lock = threading.Lock()
+
+
+def _risk_cooldown_seconds(account_id: str) -> float:
+    """按该账号的连续命中次数给出本次风控冷却时长（并推进计数）。"""
+    now = time.time()
+    with _risk_lock:
+        last = _risk_last_hit.get(account_id, 0.0)
+        if now - last > _RISK_CONTROL_STREAK_WINDOW_S:
+            streak = 0
+        else:
+            streak = _risk_streak.get(account_id, 0)
+        idx = min(streak, len(_RISK_CONTROL_ESCALATION_S) - 1)
+        _risk_last_hit[account_id] = now
+        _risk_streak[account_id] = streak + 1
+    return _RISK_CONTROL_ESCALATION_S[idx]
+
+
+def note_risk_recovered(account_id: str) -> None:
+    """该账号成功请求了一次：清掉连续风控计数，下次命中重新从最短档起算。"""
+    with _risk_lock:
+        _risk_streak.pop(account_id, None)
+        _risk_last_hit.pop(account_id, None)
+
+
+def risk_streak(account_id: str) -> int:
+    """当前连续风控次数（诊断/面板用）。"""
+    with _risk_lock:
+        return _risk_streak.get(account_id, 0)
 
 
 def is_account_risk_control(code: int, error_code: str = "",
@@ -173,6 +235,12 @@ def mark_cooldown(account_id: str, *, retry_after: str | None = None,
     都显示成同一种「账号冷却」；这个类别也会随长冷却一起落盘。
     """
     kind = "risk_control" if risk_control else "quota" if quota else "account"
+    if risk_control and not retry_after:
+        # 风控走递进档位（12h → 24h）。``retry_after`` 若上游明确给了
+        # Retry-After 就尊重它——那是更可信的一手信息。
+        seconds = _risk_cooldown_seconds(account_id)
+        return _tracker.mark(account_id, retry_after=str(int(seconds)),
+                             kind=kind, reason=reason, log=log)
     return _tracker.mark(account_id, retry_after=retry_after,
                          kind=kind, reason=reason, log=log)
 

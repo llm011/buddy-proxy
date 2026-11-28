@@ -411,8 +411,8 @@ class RaccoonProvider(BaseProvider):
                     # 账号级风控：整号长冷却，**不能**降级成模型级——否则
                     # 每个模型都去撞一次，持续给上游发「异常调用」信号。
                     failover.mark_cooldown(
-                        acct.id, retry_after=str(int(failover._RISK_CONTROL_COOLDOWN_S)),
-                        risk_control=True, reason=f"账号风控: {detail}")
+                        acct.id, risk_control=True,
+                        reason=f"账号风控: {detail}")
                     await _drain(resp)
                     raise _risk_control_stop(acct.id)
                 elif failover.is_credit_exhausted(resp.status_code, code, detail):
@@ -447,8 +447,8 @@ class RaccoonProvider(BaseProvider):
                 if failover.is_account_risk_control(gate.error_code, code,
                                                     gate.error_message):
                     failover.mark_cooldown(
-                        acct.id, retry_after=str(int(failover._RISK_CONTROL_COOLDOWN_S)),
-                        risk_control=True, reason=f"账号风控: {gate.error_message}")
+                        acct.id, risk_control=True,
+                        reason=f"账号风控: {gate.error_message}")
                     await _drain(gate.resp)
                     raise _risk_control_stop(acct.id)
                 elif failover.is_credit_exhausted(gate.error_code, code,
@@ -481,6 +481,11 @@ class RaccoonProvider(BaseProvider):
                 last_detail = "上游空流（首事件前断流）"
                 await _drain(gate.resp)
                 continue
+
+            # 该账号这次真成功了：清掉「连续风控」计数，下次万一再中从最短档
+            # （12h）重新起算。放在这里是因为它已经过了首事件闸门、错误分支全
+            # 部走完——此时才敢说这是一次成功。
+            failover.note_risk_recovered(acct.id)
 
             frame = ACCOUNT_META.get()
             if isinstance(frame, dict):
@@ -1471,15 +1476,19 @@ def _risk_control_stop(account_id: str) -> HTTPException:
     停摆但换号有效（别的号有钱），也仍然 ``continue``。只有账号风控是
     「继续试会扩大损失」，所以在这里硬停。
     """
+    # 冷却时长按该账号的连续命中次数递进（12h → 24h），不是固定值——见
+    # failover._RISK_CONTROL_ESCALATION_S 的实测注释。
+    left, _kind = failover.cooldown_left(account_id)
+    hours = max(1.0, round(left / 3600.0, 1))
     return HTTPException(
         status_code=429,
         detail={"error": {
             "message": (f"raccoon 账号 {account_id} 触发上游账号风控（200108），"
                         "已停止继续换号：风控是账号级判定，换号只会把其它账号"
-                        "也撞成风控。该账号冷却 30 分钟后自动恢复，期间请改用"
-                        "其它通道"),
+                        f"也撞成风控。该账号冷却约 {hours:g} 小时后自动恢复，"
+                        "期间请改用其它通道"),
             "type": "rate_limit_error",
-            "retry_after_s": int(failover._RISK_CONTROL_COOLDOWN_S),
+            "retry_after_s": int(left or failover._RISK_CONTROL_COOLDOWN_S),
         }},
     )
 
