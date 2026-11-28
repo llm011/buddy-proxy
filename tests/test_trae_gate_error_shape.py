@@ -77,3 +77,19 @@ def test_detail_message_survives():
     exc = _account_error_from_frame(
         _frame(message="Trae plan 权益不足", code=1005))
     assert "权益不足" in exc.detail["error"]["message"]
+
+
+def test_model_overflow_error_uses_context_length_type():
+    """「全员 4026 上下文超限」也必须用标准形状。
+
+    review 时发现这是漏掉的一处：``provider_forward`` 里这条仍写裸字符串。
+    客户端读到裸字符串只能显示「没权限」，不会去压缩上下文——而这条错误的
+    正确处置恰恰就是压缩后重试。
+    """
+    import inspect
+
+    from buddy_proxy.trae import provider_forward
+
+    src = inspect.getsource(provider_forward)
+    assert '"type": "context_length_exceeded"' in src, (
+        "4026 溢出错误没用 context_length_exceeded，客户端不会压缩上下文")
