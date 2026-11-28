@@ -173,18 +173,31 @@ def _account_error_from_frame(stripped_frame: str) -> "HTTPException | None":
         code = int(err.get("code"))
     except (TypeError, ValueError):
         return None
-    detail = str(err.get("message") or "trae upstream error")
+    # detail 必须是 **OpenAI 口径的对象** ``{"error": {"message", "type"}}``。
+    #
+    # 原来给的是裸字符串，后果是**下游所有按 error.type 的判定全部失效**：
+    # ``_exc_is_channel_unavailable`` 读 ``detail["error"]["type"]`` 拿到 None
+    # → 1005「本通道账号都没这个模型权益」被当成确定性错误直接上抛，model_order
+    # 里排在后面的候选一次都不试（2026-11-29 用户报障：trae 连续 8 次 403 全部
+    # 返回给客户端）。流式请求走的正是这条闸门路径，所以只修
+    # ``_sse_error_exception``（非流式）是修不到的。
+    message = str(err.get("message") or "trae upstream error")
     # 两种 code 形态都认：HTTP 形态（``_stream`` 把自己的 HTTPException
     # yield 成 error chunk 时传的是 e.status_code）与上游 SSE 码形态
     # （``event:error`` 帧原样透传的 4008/4011 等）。后者此前不认——额度
     # 错误放行成假成功，闸门形同虚设（2026-10-06 双账号实测撞上）。
+    def _detail(status: int) -> dict[str, Any]:
+        return {"error": {"message": message,
+                          "type": hooks._openai_error_type(status, code=code)}}
+
     if code in hooks._ACCOUNT_ERROR_CODES:
-        return hooks.HTTPException(status_code=code, detail=detail)
+        return hooks.HTTPException(status_code=code, detail=_detail(code))
     status = hooks._sse_error_status(code)
     if status == 502:
         return None
     # 保留上游原始码：1005 权益类在 forward 里按「账号+模型」跳过，不整账号冷却。
-    return hooks._attach_sse_code(hooks.HTTPException(status_code=status, detail=detail), code)
+    return hooks._attach_sse_code(
+        hooks.HTTPException(status_code=status, detail=_detail(status)), code)
 
 def _lb_state():
     """当前运行态（负载均衡开关读它）。未初始化时返回 None。"""

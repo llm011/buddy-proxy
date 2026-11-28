@@ -80,10 +80,15 @@ class ForwardMixin:
         # 本模型近期全员 4026（上下文太大）：TTL 内不再 fan-out，直接抛让客户端压缩。
         # 放在选号过滤之前——跳过表全满时过滤会回退全量，每个请求都白打 N 次。
         if hooks._model_overflow_recently(entitlement_model):
+            # detail 用 OpenAI 形状：客户端靠 error.type 决定**动作**。裸字符串
+            # 只能让它看到一句「没权限」，不会去压缩上下文——而这条错误的正确
+            # 处置恰恰就是压缩后重试。
             raise hooks._attach_sse_code(
-                hooks.HTTPException(status_code=403, detail=(
-                    "Trae 错误: 本模型近期所有账号均上下文超限（4026），"
-                    "请压缩上下文后重试")), hooks._CONTEXT_OVERFLOW_SSE_CODE)
+                hooks.HTTPException(status_code=403, detail={"error": {
+                    "message": ("Trae 错误: 本模型近期所有账号均上下文超限（4026），"
+                                "请压缩上下文后重试"),
+                    "type": "context_length_exceeded",
+                }}), hooks._CONTEXT_OVERFLOW_SSE_CODE)
         if len(accounts) > 1:
             eligible = [a for a in accounts
                         if not hooks._entitlement_skipped(a.id, entitlement_model)]
