@@ -257,7 +257,7 @@ def test_disabling_default_provider_falls_back_to_codebuddy(tmp_path, monkeypatc
     monkeypatch.setenv("BUDDY_PROXY_SETTINGS", str(tmp_path / "settings.json"))
     state = SimpleNamespace(
         providers={"trae": SimpleNamespace(name="Trae")},
-        disabled_providers=set(), default_model=None, default_provider="trae",
+        disabled_providers=set(), default_model="trae/gpt-test", default_provider="trae",
         load_balance=set(), session_rotation=set(), disabled_accounts=set(),
     )
     monkeypatch.setattr(state_mod, "proxy_state", state)
@@ -268,7 +268,9 @@ def test_disabling_default_provider_falls_back_to_codebuddy(tmp_path, monkeypatc
     })
     assert response.status_code == 200
     assert state.default_provider == "codebuddy"
+    assert state.default_model is None
     assert settings_mod.load_settings()["default_provider"] == "codebuddy"
+    assert settings_mod.load_settings()["default_model"] == ""
 
     response = client.post("/ui/api/settings", json={"default_provider": "trae"})
     assert response.status_code == 400
