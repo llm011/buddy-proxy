@@ -37,11 +37,19 @@ def test_quota_error_maps_to_rate_limit_type():
     assert exc.detail["error"]["type"] == "rate_limit_error"
 
 
-def test_context_overflow_is_permission_error_not_auth():
-    """4026 上下文超限：403 但不该被当成鉴权失败。"""
+def test_context_overflow_gets_its_own_type():
+    """4026 上下文超限：403，但 type 必须是 context_length_exceeded。
+
+    与 1005（权益不足）同为 403，语义却相反：4026 客户端该**压缩上下文重试**，
+    1005 压缩也没用。都报 permission_error 的话客户端只会显示「没权限」，
+    不会去压缩——用户看到的就是反复失败。
+    """
     exc = _sse_error_exception({"code": 4026, "message": "too long"})
     assert exc.status_code == 403
-    assert exc.detail["error"]["type"] == "permission_error"
+    assert exc.detail["error"]["type"] == "context_length_exceeded"
+    # 和权益不足要能区分开
+    entitlement = _sse_error_exception({"code": 1005, "message": "no"})
+    assert entitlement.detail["error"]["type"] != exc.detail["error"]["type"]
 
 
 @pytest.mark.parametrize("status,expected", [
