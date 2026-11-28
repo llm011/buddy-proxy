@@ -83,7 +83,10 @@ def _credit_field(u: dict[str, Any]) -> Any:
     """
     if u.get("billable") is False:
         return 0.0
-    for key in ("credit", "credits", "original_credits"):
+    # ``points_consumed`` 是 Loomy（讯飞 iModel 网关）的单次实扣积分，名字与
+    # 上面几家都不同。不列进来，Loomy 的用量日志 credit 列恒为 null，面板上
+    # 就只剩 token 没有花费。
+    for key in ("credit", "credits", "original_credits", "points_consumed"):
         value = u.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return value

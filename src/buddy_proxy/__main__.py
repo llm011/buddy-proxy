@@ -427,6 +427,12 @@ def main():
                              "鉴权经 CDP 从 App 抓 OAuth JWT → mint token → 自刷新，"
                              "全程不读 Keychain；首次配置会请求重启千问（需你确认）。"
                              "模型名统一小写：qwen3.8-max。显式走用 qwenpc/<模型>")
+    parser.add_argument("--loomy", action="store_true", default=os.getenv("LOOMY_ENABLED", "") == "1",
+                        help="启用 loomy provider（科大讯飞 Loomy 桌面 Agent 的 iModel 网关，"
+                             "openai 协议 + 流式 + 工具调用）。凭据复用桌面端登录态"
+                             "（~/Library/Application Support/loomy/auth-session.json），"
+                             "按积分计费（usage.points_consumed 落日志）；"
+                             "签到为 pet-work 每日奖励。显式走用 loomy/<模型>")
     parser.add_argument("--kiro", action="store_true", default=os.getenv("KIRO_ENABLED", "") == "1",
                         help="启用 kiro provider（AWS CodeWhisperer / Kiro IDE 直连，"
                              "openai + anthropic 双协议、多账号、额度可查）。"
@@ -764,6 +770,24 @@ def main():
               f"凭证在首个请求时按需获取)")
     else:
         print("[qwenpc] Disabled (pass --qwenpc or QWENPC_ENABLED=1 to enable)")
+
+    if args.loomy:
+        from buddy_proxy.loomy.provider import LoomyProvider
+
+        loomy = LoomyProvider()
+        try:
+            if not provider_disabled(loomy.id):
+                loomy.ensure_auth()  # 校验登录态 + 预热模型目录，给出清晰提示
+        except HTTPException as exc:
+            logger.warning("loomy provider 认证未就绪: %s", exc.detail)
+        providers[loomy.id] = loomy
+        _lh = loomy.health()
+        logger.info("Loomy provider enabled (%s / %s 个模型)",
+                    _lh.get("base_url"), _lh.get("models"))
+        print(f"[Loomy] Enabled ({_lh.get('models')} 个模型; "
+              f"账号 {_lh.get('account') or '未登录'})")
+    else:
+        print("[Loomy] Disabled (pass --loomy or LOOMY_ENABLED=1 to enable)")
 
     if args.kiro:
         from buddy_proxy.kiro.provider import KiroProvider

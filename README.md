@@ -57,7 +57,7 @@ backups and version control. Startup prints the resolved path as `[State] ...`.
 # After installation, use buddy from any directory.
 buddy start                # start (if not running) and open http://127.0.0.1:8787/ui
 buddy stop / restart / status / logs
-buddy login [provider]     # upstream login/check (codebuddy(=workbuddy, =codebuddyintl global)/trae(=traeintl global)/zcode/glm/ark/doubao/dumate/qwenpc/mimo/qoder(=qoderintl global)/gemini/antigravity/kimi/raccoon/codex/copilot/deepseek/yuntoken/kiro)
+buddy login [provider]     # upstream login/check (codebuddy(=workbuddy, =codebuddyintl global)/trae(=traeintl global)/zcode/glm/ark/doubao/dumate/qwenpc/mimo/qoder(=qoderintl global)/gemini/antigravity/kimi/raccoon/codex/copilot/deepseek/yuntoken/kiro/loomy)
                            # trae/qoder/codebuddy accept --region cn|global (accounts differ per region); other providers ignore it
                            # traeintl/qoderintl/codebuddyintl are login aliases meaning --region global; logging in a global account also enables the
                            # traeintl/qoderintl/codebuddyintl channels — separate quota cards in the UI
