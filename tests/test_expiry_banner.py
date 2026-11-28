@@ -804,8 +804,7 @@ def test_refresh_api_requires_provider(monkeypatch):
 # snapshot(disabled_providers)：整通道停用的呈现（2026-10-06 模型页开关）
 # ---------------------------------------------------------------------------
 def test_snapshot_marks_disabled_providers_and_filters_alerts(tmp_path, monkeypatch):
-    """停用通道：entry 带 disabled 标记、不再上告警横幅；额度数据仍照带——
-    前端只是隐藏展示，开关一开原样回来，不用重查上游。"""
+    """停用通道带 disabled 标记，不查询额度，也不进入告警横幅。"""
     import asyncio
     from types import SimpleNamespace
 
@@ -829,7 +828,7 @@ def test_snapshot_marks_disabled_providers_and_filters_alerts(tmp_path, monkeypa
     # _providers() 会把 codebuddy 塞在首位，按 id 取目标条目
     entry = next(e for e in snap["providers"] if e["id"] == "p1")
     assert entry["disabled"] is True
-    assert entry["quota"]["supported"] is True, "数据照带"
+    assert entry["quota"]["supported"] is False, "停用通道不查询额度"
     assert snap["low_quota"] == [] and snap["expiring"] == [], "停用通道不上告警"
 
     snap2 = asyncio.run(mgr.snapshot(set()))

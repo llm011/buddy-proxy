@@ -215,9 +215,13 @@ async def _qoder_model_refresh_loop(provider) -> None:
     失败只 log 不退出——下一轮目录刷新自会补上；循环随进程生命周期常驻。
     """
     from buddy_proxy.qoder.catalog import CACHE_TTL_S
+    from buddy_proxy.core.state import get_state
 
     log = _log
     while True:
+        if getattr(provider, "id", "") in getattr(get_state(), "disabled_providers", set()):
+            await asyncio.sleep(CACHE_TTL_S)
+            continue
         try:
             models = await provider.refresh_models()
             log.info("qoder 模型目录已刷新（%d 个模型）", len(models))
@@ -227,13 +231,17 @@ async def _qoder_model_refresh_loop(provider) -> None:
 
 
 async def _kiro_model_warmup_once(provider) -> None:
-    """启动时拉一次 kiro 模型目录（fire-and-forget）。
+    """启动时拉一次 kiro 模型目录（fire-and-forget，停用通道不拉）。
 
     为什么需要：kiro 的目录**纯内存**、没有静态兜底表（模型表完全来自上游
     ``ListAvailableModels``）。不预热的话，进程重启后到第一次「刷新模型」
     之间目录是空的——表现是 ``/v1/models`` 里没有 kiro，且调用 ``kiro/xxx``
     直接报 ``INVALID_MODEL_ID``（踩过一次：改完代码重启，测试全挂）。
     """
+    from buddy_proxy.core.state import get_state
+
+    if provider.id in getattr(get_state(), "disabled_providers", set()):
+        return
     log = _log
     try:
         models = await provider.refresh_models()
@@ -249,6 +257,10 @@ async def _copilot_model_warmup_once(provider) -> None:
     ``/models`` 说了算。不预热的话，重启后到第一次请求之间用户看到的是过期的
     静态表，模型已下线时会先撞一次 400 才反应过来。
     """
+    from buddy_proxy.core.state import get_state
+
+    if provider.id in getattr(get_state(), "disabled_providers", set()):
+        return
     log = _log
     try:
         count = await provider.refresh_models()
@@ -406,6 +418,12 @@ def main():
     args.log_file = args.log_file.expanduser()
     # provider 别名归一：workbuddy 是 codebuddy 的旧称，用户配置/命令行都可能敲
     args.default_provider = {"workbuddy": "codebuddy"}.get(args.default_provider, args.default_provider)
+    saved_settings = settings_mod.load_settings()
+    startup_disabled_providers = settings_mod.configured_disabled_providers(
+        saved_settings, settings_mod.KNOWN_PROVIDER_IDS)
+
+    def provider_disabled(provider_id: str) -> bool:
+        return provider_id in startup_disabled_providers
 
     # 设置日志
     log_dir = args.log_file.parent if args.log_file else pathlib.Path("logs")
@@ -429,7 +447,8 @@ def main():
 
         zcode = ZcodeProvider()
         try:
-            zcode.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(zcode.id):
+                zcode.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("zcode provider 认证未就绪: %s", exc.detail)
         providers[zcode.id] = zcode
@@ -445,7 +464,8 @@ def main():
 
         glm = GlmProvider()
         try:
-            glm.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(glm.id):
+                glm.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("glm provider 认证未就绪: %s", exc.detail)
         providers[glm.id] = glm
@@ -461,7 +481,8 @@ def main():
 
         ark = ArkProvider()
         try:
-            ark.ensure_auth()  # 启动时校验 key 与模型表，给出清晰的配置提示
+            if not provider_disabled(ark.id):
+                ark.ensure_auth()  # 启动时校验 key 与模型表，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("ark provider 认证未就绪: %s", exc.detail)
         providers[ark.id] = ark
@@ -479,7 +500,8 @@ def main():
 
         mimo = MimoProvider()
         try:
-            mimo.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(mimo.id):
+                mimo.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("mimo provider 认证未就绪: %s", exc.detail)
         providers[mimo.id] = mimo
@@ -493,7 +515,8 @@ def main():
 
         qoder = QoderProvider()
         try:
-            qoder.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(qoder.id):
+                qoder.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("qoder provider 认证未就绪: %s", exc.detail)
         providers[qoder.id] = qoder
@@ -518,7 +541,8 @@ def main():
         elif intl_enabled():
             qoder_intl = QoderIntlProvider()
             try:
-                qoder_intl.ensure_auth()
+                if not provider_disabled(qoder_intl.id):
+                    qoder_intl.ensure_auth()
             except HTTPException as exc:
                 logger.warning("qoderintl provider 认证未就绪: %s", exc.detail)
             providers[qoder_intl.id] = qoder_intl
@@ -532,7 +556,8 @@ def main():
 
         gemini = GeminiProvider()
         try:
-            gemini.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(gemini.id):
+                gemini.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("gemini provider 认证未就绪: %s", exc.detail)
         providers[gemini.id] = gemini
@@ -548,7 +573,8 @@ def main():
 
         antigravity = AntigravityProvider()
         try:
-            antigravity.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(antigravity.id):
+                antigravity.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("antigravity provider 认证未就绪: %s", exc.detail)
         providers[antigravity.id] = antigravity
@@ -564,7 +590,8 @@ def main():
 
         kimi = KimiProvider()
         try:
-            kimi.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(kimi.id):
+                kimi.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("kimi provider 认证未就绪: %s", exc.detail)
         providers[kimi.id] = kimi
@@ -580,7 +607,8 @@ def main():
 
         raccoon = RaccoonProvider()
         try:
-            raccoon.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(raccoon.id):
+                raccoon.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("raccoon provider 认证未就绪: %s", exc.detail)
         providers[raccoon.id] = raccoon
@@ -595,7 +623,8 @@ def main():
 
         codex = CodexProvider()
         try:
-            codex.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(codex.id):
+                codex.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("codex provider 认证未就绪: %s", exc.detail)
         providers[codex.id] = codex
@@ -612,7 +641,8 @@ def main():
 
         copilot = CopilotProvider()
         try:
-            copilot.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(copilot.id):
+                copilot.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("copilot provider 认证未就绪: %s", exc.detail)
         providers[copilot.id] = copilot
@@ -648,7 +678,8 @@ def main():
 
         zcode_start = ZCodeStartPlanProvider()
         try:
-            zcode_start.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
+            if not provider_disabled(zcode_start.id):
+                zcode_start.ensure_auth()  # 启动时校验凭证，给出清晰的配置提示
         except HTTPException as exc:
             logger.warning("zcode-start provider 认证未就绪：%s", exc.detail)
         providers[zcode_start.id] = zcode_start
@@ -664,7 +695,8 @@ def main():
 
         deepseek = DeepSeekProvider()
         try:
-            deepseek.ensure_auth()
+            if not provider_disabled(deepseek.id):
+                deepseek.ensure_auth()
         except HTTPException as exc:
             logger.warning("deepseek provider 认证未就绪: %s", exc.detail)
         providers[deepseek.id] = deepseek
@@ -684,7 +716,8 @@ def main():
 
         yuntoken = YuntokenProvider()
         try:
-            yuntoken.ensure_auth()
+            if not provider_disabled(yuntoken.id):
+                yuntoken.ensure_auth()
         except HTTPException as exc:
             logger.warning("yuntoken provider 认证未就绪: %s", exc.detail)
         providers[yuntoken.id] = yuntoken
@@ -715,7 +748,8 @@ def main():
 
         kiro = KiroProvider()
         try:
-            kiro.ensure_auth()
+            if not provider_disabled(kiro.id):
+                kiro.ensure_auth()
         except HTTPException as exc:
             logger.warning("kiro provider 认证未就绪: %s", exc.detail)
         providers[kiro.id] = kiro
@@ -749,7 +783,8 @@ def main():
         if intl_enabled():
             trae_intl = TraeIntlProvider()
             try:
-                trae_intl.ensure_auth()  # 同 qoderintl：认证未就绪只告警不拦注册
+                if not provider_disabled(trae_intl.id):
+                    trae_intl.ensure_auth()  # 同 qoderintl：认证未就绪只告警不拦注册
             except HTTPException as exc:
                 logger.warning("traeintl provider 认证未就绪: %s", exc.detail)
             providers[trae_intl.id] = trae_intl
@@ -764,7 +799,8 @@ def main():
 
             trae_pat = TraePatProvider()
             try:
-                trae_pat.ensure_auth()  # 本地配置校验 + 拉起后台凭证自愈循环
+                if not provider_disabled(trae_pat.id):
+                    trae_pat.ensure_auth()  # 本地配置校验 + 拉起后台凭证自愈循环
             except HTTPException as exc:
                 logger.warning("trae PAT provider 认证未就绪: %s", exc.detail)
             providers[trae_pat.id] = trae_pat
@@ -785,7 +821,8 @@ def main():
     if _cb_intl_enabled():
         cb_intl = CodeBuddyIntlProvider()
         try:
-            cb_intl.ensure_auth()  # 同 qoderintl/traeintl：认证未就绪只告警不拦注册
+            if not provider_disabled(cb_intl.id):
+                cb_intl.ensure_auth()  # 同 qoderintl/traeintl：认证未就绪只告警不拦注册
         except HTTPException as exc:
             logger.warning("codebuddyintl provider 认证未就绪: %s", exc.detail)
         providers[cb_intl.id] = cb_intl
@@ -793,7 +830,6 @@ def main():
         print("[CodeBuddy Intl] Enabled (codebuddyintl/*)")
 
     # 管理页设置文件里的兜底通道优先于 CLI/环境变量（UI 改动跨重启生效）
-    saved_settings = settings_mod.load_settings()
     if saved_settings.get("default_provider"):
         saved_default = normalize_default_model(saved_settings["default_provider"])
         # 两处配置不一致时必须喊出来。这个覆盖是**静默**的：plist/proxy.sh 里写着
@@ -809,9 +845,10 @@ def main():
         args.default_provider = saved_default
 
     # 校验兜底通道：必须是 codebuddy 或已启用的 provider id
-    if args.default_provider != "codebuddy" and args.default_provider not in providers:
+    if (args.default_provider != "codebuddy"
+            and (args.default_provider not in providers or provider_disabled(args.default_provider))):
         logger.warning(
-            "default-provider '%s' 未启用，回退为 codebuddy（已启用: %s）",
+            "default-provider '%s' 未启用，回退为 codebuddy（已注册: %s）",
             args.default_provider, list(providers) or "无",
         )
         args.default_provider = "codebuddy"
@@ -849,10 +886,7 @@ def main():
 
     # 整通道停用：settings.json 的 provider id 列表，命中通道转发 403、/ui 各处
     # 隐藏或置灰（模型页开关写入，用户 2026-10-06 需求）
-    disabled_providers = {
-        k.strip() for k in (saved_settings.get("disabled_providers") or [])
-        if isinstance(k, str) and k.strip()
-    }
+    disabled_providers = settings_mod.configured_disabled_providers(saved_settings, providers)
     if disabled_providers:
         print(f"[Disabled Providers] {len(disabled_providers)} 个通道已停用: "
               f"{', '.join(sorted(disabled_providers))}")

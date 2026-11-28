@@ -671,7 +671,8 @@ class BenefitsManager:
             "calendar": calendar_out,
             "auto_checkin": checkin_cfg["auto_checkin"],
             "checkin_time": checkin_cfg["checkin_time"],
-            "checkin_enabled_providers": sorted(self.checkin_providers()),
+            "checkin_enabled_providers": sorted(
+                pid for pid in self.checkin_providers() if pid not in disabled),
             # 到期告警明细（见 _expiring）。放后端算而不是前端：阈值与「积分类
             # 才做量过滤」的规则集中一处，pytest 直接覆盖；前端只渲染不判规则，
             # 免得两边各写一份慢慢走偏。空列表＝无告警，前端据此隐藏横幅。
@@ -699,12 +700,15 @@ class BenefitsManager:
         entry: dict[str, Any] = {
             "id": pid,
             "name": getattr(p, "name", pid),
-            # 整通道停用标记（模型页 provider 开关）：前端额度卡/专属面板
-            # 据此隐藏；数据照查照带，开关一开就能原样回来
+            # 整通道停用标记：前端据此隐藏卡片，这里不查询上游，保留账号配置。
             "disabled": pid in disabled,
             "checkin": {"supported": supports_checkin},
             "quota": {"supported": False},
         }
+        # 设置页关闭的通道不做任何额度/签到上游查询，不只是把卡片藏起来。
+        if pid in disabled:
+            entry["checkin"]["inactive"] = True
+            return entry
         if supports_checkin:
             ckey = f"checkin:{pid}"
             # 「冷缓存」要连「过期的失败缓存」一起算，理由见 _stale_failure。
@@ -1037,6 +1041,7 @@ class BenefitsManager:
     async def _warm_load_balance_once(self) -> None:
         """预热一轮:给每个开着开关的通道刷新额度读数并喂权重表。"""
         enabled = set(getattr(self._state, "load_balance", None) or ())
+        enabled -= set(getattr(self._state, "disabled_providers", set()) or ())
         if not enabled:
             return
         providers = self._providers()
@@ -1100,7 +1105,10 @@ class BenefitsManager:
         now = datetime.now()
         due_today = (now.hour, now.minute) >= (hh, mm)
         done = self.history.ok_dates_by_provider()
+        disabled = set(getattr(self._state, "disabled_providers", set()) or ())
         for pid, provider in self.checkin_providers().items():
+            if pid in disabled:
+                continue
             first_run = pid not in self._startup_seen
             self._startup_seen.add(pid)
             # 启动后首轮视为补签窗口（不管是否到点）；之后只在到达设定时刻后打

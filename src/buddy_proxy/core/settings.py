@@ -233,8 +233,23 @@ def save_settings(update: dict[str, Any]) -> dict[str, Any]:
 KNOWN_PROVIDER_IDS = frozenset(
     {"codebuddy", "codebuddyintl", "zcode", "glm", "ark", "mimo", "qoder", "qoderintl",
      "doubao", "dumate", "trae", "traepat", "traeintl", "kimi", "codex", "deepseek",
-     "yuntoken", "copilot"}
+     "yuntoken", "copilot", "zcode-start", "gemini", "antigravity", "raccoon", "qwenpc",
+     "kiro", "runninghub"}
 )
+
+DEFAULT_ENABLED_PROVIDERS = frozenset({"codebuddy", "trae"})
+
+
+def configured_disabled_providers(saved: dict[str, Any], registered: Any) -> set[str]:
+    """读取整通道开关；首次升级默认只开放 CodeBuddy 和 Trae。
+
+    已存在 disabled_providers 配置时尊重用户选择，包括显式保存的空列表。
+    registered 只需是可迭代的通道 id，避免这里依赖具体 provider 类型。
+    """
+    if "disabled_providers" in saved:
+        raw = saved.get("disabled_providers")
+        return {k.strip() for k in raw or [] if isinstance(k, str) and k.strip()}
+    return set(registered) - DEFAULT_ENABLED_PROVIDERS - {"runninghub"}
 
 #: 通道没启用时，告诉用户**怎么启用**。值是要打印给用户看的短句。
 #:

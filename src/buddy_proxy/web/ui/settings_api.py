@@ -23,7 +23,16 @@ async def ui_settings_get(request: Request):
     _ensure_local(request)
     state = get_state()
     cfg = read_checkin_settings()
+    disabled = getattr(state, "disabled_providers", set()) or set()
+    providers = [{"id": "codebuddy", "name": "CodeBuddy", "enabled": True}]
+    providers.extend({
+        "id": pid,
+        "name": getattr(provider, "name", pid),
+        "enabled": pid not in disabled,
+    } for pid, provider in (getattr(state, "providers", {}) or {}).items()
+        if pid != "runninghub")
     return {
+        "providers": providers,
         "default_model": getattr(state, "default_model", None),
         "default_provider": getattr(state, "default_provider", "codebuddy"),
         "auto_checkin": cfg["auto_checkin"],
