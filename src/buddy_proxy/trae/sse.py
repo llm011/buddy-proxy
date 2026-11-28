@@ -103,6 +103,14 @@ def _openai_error_type(status: int, *, code: Any = None) -> str:
     """
     if code in _ACCOUNT_CONTEXT_SSE_CODES:
         return "context_length_exceeded"
+    # 1005 权益不足 = 「**这条通道的现有账号**都没这个模型的权益」，换条通道
+    # 完全可能成功，所以给一个专属 type，让 model_order 换档。
+    #
+    # 不能复用 permission_error：copilot 把上游真实的 403 也映射成
+    # permission_error（见 copilot/provider.py::_error_type），复用会让 copilot
+    # 的账号级拒绝被当成「通道不可用」静默跳过，把真故障掩盖成换档成功。
+    if code in _ACCOUNT_ENTITLEMENT_SSE_CODES:
+        return "model_not_available_in_channel"
     if status == 401:
         return "authentication_error"
     if status == 403:

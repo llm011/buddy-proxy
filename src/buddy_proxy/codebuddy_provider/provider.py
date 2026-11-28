@@ -634,6 +634,46 @@ def _exc_is_channel_block(exc: HTTPException) -> bool:
     return _upstream_error_code(text) in _CHANNEL_BLOCK_CODES
 
 
+#: 「该通道自身用不了」的 ``error.type``——与「请求本身有问题」区分开。
+#:
+#: 这类错误的共同点：**换一条通道就能成功**，所以必须让 model_order 继续试下一个
+#: 候选，而不是把整个模型的请求判死。
+#:
+#: 典型触发：qoder 的账号都在别的区域（``invalid_request``）、
+#: ``provider_disabled`` / ``model_disabled`` / ``model_scheduled``（管理页停用或
+#: 不在可用时段）。这些都不是「参数错」，换个通道完全可能成功。
+#:
+#: 反例（**不能**放进来）：
+#:
+#: - ``invalid_request_body`` / 上游参数校验失败：请求本身不合法，换谁都不会成功。
+#: - ``permission_error``：看着像「没权益」，但 **copilot 把上游真实的 403 也映射成
+#:   这个 type**（见 ``copilot/provider.py::_error_type``）。放进来会让 copilot 的
+#:   真实拒绝被当成「通道不可用」静默跳过，把账号级故障掩盖成换档成功。
+#:   trae 1005 另走 ``_exc_is_channel_block`` 之外的分支处理，不靠这个白名单。
+_CHANNEL_UNAVAILABLE_TYPES = frozenset({
+    "invalid_request",       # 通道侧配置/区域问题（qoder 跨区等）
+    "model_not_available_in_channel",  # 本通道账号都没该模型权益（trae 1005）
+    "provider_disabled",     # 整通道被管理页停用
+    "model_disabled",        # 该模型被停用
+    "model_scheduled",       # 不在可用时段
+})
+
+
+def _exc_is_channel_unavailable(exc: HTTPException) -> bool:
+    """该异常是否「这条通道自己用不了」——换下一个候选有意义。
+
+    与 :func:`_exc_is_channel_block` 的区别：那个是**上游风控封禁**（要打冷却），
+    这个是**本通道当前不可用**（不该冷却，换个通道就行）。
+    """
+    detail = exc.detail
+    if not isinstance(detail, dict):
+        return False
+    err = detail.get("error")
+    if not isinstance(err, dict):
+        return False
+    return str(err.get("type") or "") in _CHANNEL_UNAVAILABLE_TYPES
+
+
 def _mark_channel_block(provider_id: str) -> None:
     """把整条通道标成「暂时被风控挡」。见 ``_CHANNEL_BLOCK_MODEL`` 的说明。
 

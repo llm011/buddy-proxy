@@ -48,6 +48,7 @@ from .observability import _instrument
 from .provider import (
     _default_codebuddy,
     _exc_is_channel_block,
+    _exc_is_channel_unavailable,
     _note_channel_block,
     _target_blocked,
 )
@@ -495,6 +496,17 @@ async def _forward_with_order(
             resp = await _dispatch_once(state, provider_id, model, body, protocol, original)
         except HTTPException as exc:
             if exc.status_code not in _RETRYABLE_STATUS:
+                # 「本通道自己用不了」（qoder 跨区、管理页停用、不在可用时段、
+                # trae 1005 无权益）：换下一个候选**正是解法**。
+                # 不打冷却——通道没坏，是配置/时机问题，冷却只会让它在窗口过后
+                # 还要多等一轮。必须放在下面 channel_block 之前判断：两者都是
+                # 400/403，但一个该冷却、一个不该。
+                if _exc_is_channel_unavailable(exc):
+                    last_exc = exc
+                    last_note = f"HTTP {exc.status_code} channel_unavailable"
+                    diagnostic("model_order_failover", model=key, target=target,
+                               status=exc.status_code, reason="channel_unavailable")
+                    continue
                 # 渠道风控拦截（400 + 业务码，如 codebuddy 11128「unapproved
                 # channel」）：换账号、换模型都没用，但**换通道**正是解法——
                 # 与 405 同理。不标记的话，被风控挡死的那一档会一直排在首位，
