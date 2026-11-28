@@ -86,6 +86,27 @@ def test_keepalive_reports_pre_response_error_in_band(monkeypatch):
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
+def test_keepalive_cancels_pending_request_on_disconnect(monkeypatch):
+    monkeypatch.setattr(forward_mod, "_RACCOON_KEEPALIVE_INTERVAL_S", 0.001)
+    cancelled = asyncio.Event()
+
+    async def respond():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    async def run():
+        resp = forward_mod._raccoon_keepalive_response(respond(), "openai")
+        stream = resp.body_iterator
+        assert await anext(stream) == ": keepalive\n\n"
+        await stream.aclose()
+        await asyncio.wait_for(cancelled.wait(), timeout=0.1)
+
+    asyncio.run(run())
+
+
 def test_forward_chat_enables_keepalive_for_raccoon_model_order(monkeypatch):
     monkeypatch.setattr(forward_mod, "_RACCOON_KEEPALIVE_INTERVAL_S", 0.001)
     state = SimpleNamespace(
