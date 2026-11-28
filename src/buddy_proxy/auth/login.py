@@ -53,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "glm", "ark", "doubao", "dumate", "qwenpc", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "copilot", "raccoon")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "glm", "ark", "doubao", "dumate", "qwenpc", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "loomy", "copilot", "raccoon")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -644,6 +644,61 @@ def _login_mimo(open_browser: bool = True, **_kwargs) -> int:
     return 0
 
 
+def _login_loomy(open_browser: bool = True, **_kwargs) -> int:
+    """loomy 登录：**复用桌面端登录态**，不在这里做账号登录。
+
+    为什么不实现自动登录：Loomy 的 session 由讯飞账号体系签发（短信/微信/密码
+    三条路，客户端里带 ``generateRequestHeaders`` 签名 + RSA 加密），而
+    session 有效期 14 天——用户重登桌面端一次的成本，远低于维护一套签名登录
+    链路的成本，而且登录授权本来就该发生在官方客户端里。
+
+    本命令做三件事：读 ``auth-session.json``、确认网关可用（拉一次 ``/models``）、
+    打印积分余额。登录态失效时明确提示「去桌面端重新登录」。
+    """
+    from buddy_proxy.loomy import credentials as loomy_creds
+    from buddy_proxy.loomy.provider import LoomyProvider
+
+    path = loomy_creds.session_file()
+    try:
+        session = loomy_creds.load_session()
+    except loomy_creds.AuthError as exc:
+        print(f"[X] {exc}")
+        print(f"     登录态文件: {path}")
+        print("     请在 Loomy 桌面端完成登录后重试。")
+        return 1
+
+    base_url = loomy_creds.resolve_base_url()
+    print(f"[OK] 读到 Loomy 登录态: {session.display}")
+    print(f"     文件: {path}")
+    print(f"     网关: {base_url}")
+
+    provider = LoomyProvider()
+    try:
+        provider.ensure_auth()
+    except Exception as exc:  # noqa: BLE001 - 命令里给完整可读原因
+        detail = getattr(exc, "detail", None) or str(exc)
+        print(f"[X] 网关校验失败: {detail}")
+        print("     若提示登录失效，请重新登录 Loomy 桌面端。")
+        return 1
+
+    health = provider.health()
+    print(f"[OK] 网关可用，{health.get('models')} 个模型")
+
+    try:
+        balance = provider.quota()
+    except Exception:  # noqa: BLE001 - 余额查不到不影响登录结论
+        balance = None
+    if balance:
+        items = balance.get("items") or []
+        if items:
+            first = items[0]
+            print(f"     可用积分: {first.get('remaining')} / {first.get('total')}")
+
+    print("     启动代理时加 --loomy（或 LOOMY_ENABLED=1）即可启用该通道。")
+    print("     若网关正在运行，需 `buddy restart` 才会加载新凭据。")
+    return 0
+
+
 def _login_qoder(open_browser: bool = True, region: str | None = None, **_kwargs) -> int:
     """Qoder 登录：官方 device flow（PKCE），全球版/CN 版通用。
 
@@ -1210,6 +1265,7 @@ _DISPATCH = {
     "deepseek": _login_deepseek,
     "yuntoken": _login_yuntoken,
     "kiro": _login_kiro,
+    "loomy": _login_loomy,
     "copilot": _login_copilot,
 }
 

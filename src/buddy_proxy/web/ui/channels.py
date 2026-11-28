@@ -600,6 +600,63 @@ async def ui_codebuddy_usage_logs(request: Request):
                 "page_size": page_size}
 
 
+@app.get("/ui/api/loomy/usage-logs")
+async def ui_loomy_usage_logs(request: Request):
+    """拉取 Loomy 官方积分消耗流水（``/api/v1/points/records``）。
+
+    Loomy 是**单账号**通道（复用桌面端登录态），所以 ``id`` 可省略；给了也
+    只用于校验。
+
+    上游有两种口径，这里都给：
+
+    - **逐笔流水**（默认，``view=ledger``）：``/api/v1/points/records``，每笔
+      一次模型调用，字段有 ``modelName`` / ``pointsActual`` / ``balanceBefore``
+      / ``balanceAfter`` / ``consumeSource`` / ``dailyCycleDate``。这是最细的
+      粒度，生图与 chat 都在里面。
+    - **分类汇总**（``view=purpose``）：``/api/v2/points/records`` +
+      ``granularity=purpose``，按 ``purpose``（``chat.message`` /
+      ``image.generate``）聚合出「这个功能花了多少」，附 ``ledger_count``。
+      用户想知道「钱花在哪类调用上」时看这个比翻几百笔流水有用。
+
+    offset 分页（有 total）。只展示、不回写 metrics——粒度与本地日志对不上
+    （Loomy 一笔可能对应多个内部步骤），回写会重复记账。
+    """
+    _ensure_local(request)
+    view = (request.query_params.get("view") or "ledger").strip().lower()
+    page = _query_int(request, "page", 1)
+    page_size = _query_int(request, "page_size", 30, maximum=100)
+
+    try:
+        from ...loomy import credentials as creds
+        from ...loomy.points import PointsClient
+    except Exception:
+        raise HTTPException(status_code=503,
+                            detail={"error": {"message": "loomy 通道不可用"}})
+
+    def _fetch() -> dict[str, Any]:
+        session = creds.load_session()
+        origin = creds.resolve_origin(creds.resolve_base_url())
+        client = PointsClient(origin, session.token, version=creds.client_version())
+        if view == "purpose":
+            rows, total = client.records_by_purpose(page=page, size=page_size)
+        else:
+            rows, total = client.records_with_total(page=page, size=page_size)
+        return {
+            "rows": rows,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "currency": "credits",
+            "view": view,
+        }
+
+    try:
+        return await asyncio.to_thread(_fetch)
+    except Exception as exc:
+        return {"error": str(exc)[:400], "rows": [], "total": 0, "page": page,
+                "page_size": page_size, "view": view}
+
+
 @app.get("/ui/api/kimi/accounts")
 async def ui_kimi_accounts(request: Request):
     """kimi 各账号本地凭证/冷却状态（纯本地，不触网，不含秘密）。"""
