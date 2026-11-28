@@ -18,7 +18,10 @@
 - ``channels``    通道专属接口（qoder/traepat/codebuddy）
 - ``models_api``  模型目录与停用/限时/顺序管理 + 一键测试
 - ``settings_api`` settings.json 读写
+- ``release_api``  版本检测（右下角「有新版本」提示）
 - ``page``        页面与前端静态文件 serve
 """
 
-from . import channels, models_api, page, queries, settings_api  # noqa: F401
+from . import (  # noqa: F401
+    channels, models_api, page, queries, release_api, settings_api,
+)

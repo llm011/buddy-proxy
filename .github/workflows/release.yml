@@ -1,0 +1,115 @@
+name: Release
+
+# 每次 push 到 main 自动发一个新版本：patch 位 +1，回提交 pyproject.toml 与
+# uv.lock，并打 v<版本> 标签。
+#
+# 大版本/小版本由人决定：直接改 pyproject.toml 的 version（或本地跑
+# `uv version --bump minor`）后合进 main 即可，本工作流只负责在人工设的
+# 版本之上继续递增 patch。判断依据是「上次发布时的版本」，见下方 RELEASE_*。
+on:
+  push:
+    branches: [main]
+
+# 需要写回提交 + 打标签，所以 contents 必须是 write。
+permissions:
+  contents: write
+
+# 避免两次快速合并各跑一遍、互相覆盖：同一分支只保留最新一个，
+# 且不取消正在跑的（取消可能留下「版本已 bump 但没 push」的中间态）。
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    # 自动升版提交本身也会触发 push 事件。用提交信息前缀挡住，否则会无限循环。
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 用内置 token 推回本仓库，无需额外 secret
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 配置提交身份
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: 判断是否需要发版
+        id: guard
+        run: |
+          set -euo pipefail
+          cur="$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')"
+          echo "current=$cur" >> "$GITHUB_OUTPUT"
+          # 已有同名 tag = 这个版本已经发布过（比如人工改了版本号并打了 tag），
+          # 不再重复 bump，避免「一个版本号发两次」。
+          if git rev-parse "v$cur" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "v$cur 已存在，跳过自动升版"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 升版并提交
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          set -euo pipefail
+          # uv version 同时改 pyproject.toml 并同步 uv.lock，比手写 sed 可靠
+          uv version --bump patch
+          new="$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+          git add pyproject.toml uv.lock
+          git commit -m "chore(release): v$new"
+
+          # 两次合并靠得很近时，checkout 之后远端可能已经前进（另一个 release
+          # 跑完并推了它的 chore(release) 提交），直接 push 会被拒。这里 rebase
+          # 到最新远端再推，最多重试 5 次。
+          #
+          # 冲突时**放弃本次发版**而不是硬来：pyproject 的 version 行两边都改了，
+          # rebase 必然冲突。下一次 push 会重新触发本工作流，那时起点已是最新，
+          # 版本号自然接上——比在 CI 里猜该保留哪个版本号安全。
+          #
+          # 标签必须在 push **成功之后**才打：rebase 会重写提交 sha，先打的标签
+          # 会指向被丢弃的旧提交，指向的 commit 根本不在 main 上。
+          for i in 1 2 3 4 5; do
+            git fetch origin main --quiet
+            if git push origin HEAD:main 2>/dev/null; then
+              git tag "v$new"
+              git push origin "v$new"
+              echo "pushed v$new (attempt $i)"
+              exit 0
+            fi
+            echo "push 被拒，rebase 到最新 main 后重试（第 $i 次）"
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              echo "::warning::rebase 冲突，放弃本次自动发版，等下一次 push 重新触发"
+              exit 0
+            fi
+          done
+          echo "::error::连续 5 次推送失败，本次未发版"
+          exit 1
+
+      - name: 生成 Release Notes
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          new="$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')"
+          prev="$(git describe --tags --abbrev=0 "v$new^" 2>/dev/null || true)"
+          range="${prev:+$prev..}v$new"
+          # 标题按「提交 → 分类」整理成几点，别把几十条 commit 原样贴上去。
+          {
+            echo "## v$new"
+            echo
+            git log --no-merges --pretty=format:'%s' "$range" \
+              | sed -E 's/^(feat|fix|perf|refactor|docs|test|chore|style|build|ci)(\([^)]*\))?: /\1: /' \
+              | grep -v '^chore(release)' \
+              | head -40 \
+              | sed 's/^/- /'
+          } > /tmp/notes.md
+          gh release create "v$new" --title "v$new" --notes-file /tmp/notes.md

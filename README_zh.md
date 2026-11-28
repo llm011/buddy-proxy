@@ -714,6 +714,20 @@ curl -s http://127.0.0.1:8787/v1/tools/fetch \
 
 浏览器打开 <http://127.0.0.1:8787/ui>（或 `buddy start` / `buddy ui` 自动打开）：
 
+- **新版本提示** — 页面右下角会在有新版本时弹窗，列出几点改动，可「知道了」或
+  「不再提示」。**检测在服务端做，浏览器一次都不出网**：本地进程每 5 分钟跑一次
+  `git fetch origin main`（实测增量 3–5 秒），页面只问本机 `/ui/api/release`。
+  仓库虽然是公开的，但国内直连 GitHub 又慢又不可靠，让浏览器去轮询 GitHub API
+  会卡、要处理 CORS，私有场景还要 token——所以整条检测链留在了本地。
+  `fetch` 失败（断网/墙/凭据过期）只算「本次没检测到」，**绝不误报有新版本**。
+  「不再提示」按**版本号**记在 localStorage，所以忽略 2.0.5 之后，2.0.6 出来
+  照样提示（用布尔值会让它变成永久静音），点过之后同时停掉轮询。
+- **自动发版** — 每次合并进 `main`，CI 自动把 `pyproject.toml` 的 patch 位 +1、
+  同步 `uv.lock`、回提交并打 `v<版本>` tag，同时用提交标题生成 Release Notes。
+  要发大版本/小版本时，直接改 `pyproject.toml` 的 `version`（或本地
+  `uv version --bump minor`）合进 main 即可，CI 在你设的版本之上继续递增 patch；
+  已存在同名 tag 时跳过，不会一个版本号发两次。
+
 - **默认启用模型** — 按 provider 分组浏览所有模型，点「设为默认」即可把某个模型设为默认；
   客户端请求**不带 `model` 字段**时自动用它补齐。设置持久化在 `~/.buddy-proxy/settings.json`
   （可用 `BUDDY_PROXY_SETTINGS` 覆盖），重启后仍生效；启动时 `--default-model zcode/glm-5.3`
