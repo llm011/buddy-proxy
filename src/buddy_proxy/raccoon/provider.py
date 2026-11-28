@@ -530,6 +530,9 @@ class RaccoonProvider(BaseProvider):
                             "type": "bad_gateway"}},
                     )
                 await gate.resp.aclose()
+                # 截断的半截参数必须在**这里**清掉：非流式直接回上游 JSON，
+                # 不经过 _synthesize_* 那两条合成路径（见 _sanitize_payload_tool_calls）。
+                payload = _sanitize_payload_tool_calls(payload)
                 if protocol == "anthropic":
                     from ..protocols.anthropic_adapter import (
                         chat_completion_to_anthropic_message,
@@ -1526,14 +1529,76 @@ def _iter_usable_tool_calls(
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
-        if truncated:
-            raw = ((tc.get("function") or {}).get("arguments")) or ""
-            try:
-                json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                continue  # 半截参数，整条丢弃
+        if truncated and not _tool_arguments_complete(tc):
+            continue  # 半截参数，整条丢弃
         usable.append({**tc, "index": len(usable)})
     return usable
+
+
+def _tool_arguments_complete(tc: dict[str, Any]) -> bool:
+    """这条 tool_call 的参数是否**完整**（可以安全发给客户端）。
+
+    三种「看起来可疑、其实完整」的情况不能误杀：
+
+    1. ``arguments`` 是 **dict**：少数兼容实现不按 OpenAI 规范给字符串。
+       ``json.loads(dict)`` 抛 TypeError，按「解析失败 = 半截」处理会把一条
+       本来合法的调用丢掉。
+    2. ``arguments`` 是**空字符串**：零参工具（``NoArg`` 这类）上游常给
+       ``""`` 而不是 ``"{}"``，语义是「没有参数」而非「参数没传完」。
+       实测截断到 0 字符时上游压根不返回 tool_call，所以空串只可能是零参。
+    3. ``arguments`` 缺失或 None：同上，等价于 ``{}``。
+    """
+    raw = ((tc.get("function") or {}).get("arguments"))
+    if raw is None or isinstance(raw, dict):
+        return True
+    if not isinstance(raw, str):
+        return False
+    if not raw.strip():
+        return True  # 零参工具："" / "   "
+    try:
+        json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return True
+
+
+def _sanitize_payload_tool_calls(payload: Any) -> Any:
+    """**非流式**返回前清洗 tool_calls：截断的半截参数一律删掉。
+
+    非流式路径（``forward`` 里 ``return JSONResponse(content=payload)``）直接
+    把上游 JSON 原样回给客户端，**根本不经过** ``_synthesize_*`` 那两条合成
+    路径。所以只在合成路径里加过滤是不够的——实测复现：``max_tokens=40/50/55``
+    时非流式仍然返回 ``arguments: '{'``，客户端照旧报
+    ``invalid_tool_arguments: must have required property 'pattern'``。
+
+    两条路径的判定必须一致，都走 :func:`_iter_usable_tool_calls`；区别只是
+    这里改的是完整 payload（``choices[i].message.tool_calls``），不是流式帧。
+    """
+    if not isinstance(payload, dict):
+        return payload
+    choices = payload.get("choices")
+    if not isinstance(choices, list):
+        return payload
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        message = choice.get("message")
+        if not isinstance(message, dict):
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        finish_reason = choice.get("finish_reason") or ""
+        usable = _iter_usable_tool_calls(tool_calls, finish_reason)
+        if len(usable) == len(tool_calls):
+            continue  # 没有需要丢的，保持上游原样
+        if usable:
+            message["tool_calls"] = usable
+        else:
+            # 全被丢了：删掉字段而不是留空数组——空数组会让部分客户端
+            # 认为「有工具调用但内容为空」，删掉才等价于「这轮没有工具调用」。
+            message.pop("tool_calls", None)
+    return payload
 
 
 async def _synthesize_openai_stream(

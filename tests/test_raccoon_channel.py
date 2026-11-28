@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import time
 
 import pytest
@@ -1450,3 +1451,136 @@ def test_both_synthesis_paths_share_tool_call_filtering():
         src = inspect.getsource(fn)
         assert "_iter_usable_tool_calls(" in src, (
             f"{fn.__name__} 没走公共过滤，截断参数会从这里漏出去")
+
+
+def test_nonstream_payload_drops_truncated_tool_arguments():
+    """**非流式**返回前必须清掉半截参数。
+
+    这是漏掉的那条路径：``forward`` 里非流式直接
+    ``return JSONResponse(content=payload)``，**不经过** ``_synthesize_*``
+    那两条合成函数。所以第一版只在合成路径加过滤时，非流式实测仍然返回
+    ``arguments: '{'``，用户看到的还是
+    ``invalid_tool_arguments: must have required property 'pattern'``。
+
+    修复前后实测（``sn-kimi-k3-1-pro``，同一句 prompt）：
+
+        修复前 mt=40 → finish=length, arguments='{'
+        修复后 mt=40 → finish=length, 无 tool_calls
+    """
+    from buddy_proxy.raccoon.provider import _sanitize_payload_tool_calls
+
+    payload = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {
+                "role": "assistant", "content": "",
+                "tool_calls": [{
+                    "index": 0, "id": "c1", "type": "function",
+                    "function": {"name": "Grep", "arguments": "{"},
+                }],
+            },
+        }],
+    }
+    out = _sanitize_payload_tool_calls(payload)
+    assert "tool_calls" not in out["choices"][0]["message"], (
+        "半截参数必须整条删掉；留空数组会让客户端以为「有调用但内容为空」")
+    assert out["choices"][0]["finish_reason"] == "length"
+
+
+def test_nonstream_payload_keeps_complete_tool_calls():
+    """完整参数要原样保留（含上游给的 index）。"""
+    from buddy_proxy.raccoon.provider import _sanitize_payload_tool_calls
+
+    payload = {
+        "choices": [{
+            "finish_reason": "tool_calls",
+            "message": {"tool_calls": [{
+                "index": 0, "id": "a", "type": "function",
+                "function": {"name": "Grep", "arguments": '{"pattern":"x"}'},
+            }]},
+        }],
+    }
+    out = _sanitize_payload_tool_calls(payload)
+    tcs = out["choices"][0]["message"]["tool_calls"]
+    assert len(tcs) == 1
+    assert json.loads(tcs[0]["function"]["arguments"]) == {"pattern": "x"}
+
+
+def test_nonstream_payload_partial_drop_keeps_the_good_one():
+    """一条截断一条完整时，只丢坏的那条。"""
+    from buddy_proxy.raccoon.provider import _sanitize_payload_tool_calls
+
+    payload = {
+        "choices": [{
+            "finish_reason": "length",
+            "message": {"tool_calls": [
+                {"index": 0, "id": "a", "type": "function",
+                 "function": {"name": "Grep", "arguments": '{"pattern":"x"}'}},
+                {"index": 1, "id": "b", "type": "function",
+                 "function": {"name": "Glob", "arguments": '{"patt'}},
+            ]},
+        }],
+    }
+    out = _sanitize_payload_tool_calls(payload)
+    tcs = out["choices"][0]["message"]["tool_calls"]
+    assert [t["function"]["name"] for t in tcs] == ["Grep"]
+
+
+@pytest.mark.parametrize("payload", [
+    None, {}, {"choices": None}, {"choices": []},
+    {"choices": [{}]}, {"choices": [{"message": None}]},
+    {"choices": [{"message": {"tool_calls": "not-a-list"}}]},
+])
+def test_nonstream_sanitize_tolerates_odd_payloads(payload):
+    """畸形 payload 不能崩——错误处理本身变成 500 就本末倒置了。"""
+    from buddy_proxy.raccoon.provider import _sanitize_payload_tool_calls
+
+    _sanitize_payload_tool_calls(payload)  # 不抛即通过
+
+
+@pytest.mark.parametrize("label,arguments,should_keep", [
+    # 完整的三种形态，都不能误杀
+    ("标准 JSON 字符串", '{"pattern":"x"}', True),
+    ("dict 形态（少数兼容实现）", {"pattern": "x"}, True),
+    ("零参工具空字符串", "", True),
+    ("零参工具空对象", "{}", True),
+    ("零参工具空白串", "   ", True),
+    ("arguments 缺失", None, True),
+    # 真正半截的必须丢
+    ("只有左花括号", "{", False),
+    ("截断的键值", '{"path":"src', False),
+    ("截断的字符串值", '{"pattern": "TO', False),
+])
+def test_truncated_args_detection_does_not_over_drop(label, arguments, should_keep):
+    """截断判定要**只丢真的半截**，不能顺手丢合法的。
+
+    review 时发现原实现有两个过度丢弃：
+
+    1. ``arguments`` 是 dict 时，``json.loads(dict)`` 抛 TypeError → 被当成
+       半截丢掉。可这是少数兼容实现的正常输出，丢掉等于吞了一条合法调用。
+    2. 零参工具上游常给 ``""`` 而不是 ``"{}"``，原实现也把它当半截丢掉。
+
+    两种都会让「明明有工具调用，客户端却收不到」——比原 bug 更难查。
+    """
+    from buddy_proxy.raccoon.provider import _iter_usable_tool_calls
+
+    tc = {"index": 0, "id": "a", "type": "function",
+          "function": {"name": "T", "arguments": arguments}}
+    kept = bool(_iter_usable_tool_calls([tc], "length"))
+    assert kept is should_keep, f"{label}: 期望 {'保留' if should_keep else '丢弃'}"
+
+
+def test_nonstream_payload_keeps_dict_arguments():
+    """非流式清洗同样不能把 dict 形态的参数删掉。"""
+    from buddy_proxy.raccoon.provider import _sanitize_payload_tool_calls
+
+    payload = {"choices": [{
+        "finish_reason": "length",
+        "message": {"tool_calls": [{
+            "index": 0, "id": "a", "type": "function",
+            "function": {"name": "Grep", "arguments": {"pattern": "x"}},
+        }]},
+    }]}
+    out = _sanitize_payload_tool_calls(payload)
+    tcs = out["choices"][0]["message"]["tool_calls"]
+    assert tcs[0]["function"]["arguments"] == {"pattern": "x"}
