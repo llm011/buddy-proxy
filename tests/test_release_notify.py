@@ -295,5 +295,34 @@ def test_workflow_bumps_patch_and_guards_loop():
 
 
 def test_workflow_skips_already_tagged_version():
-    """人工改版本号并打过 tag 后，CI 不该再 bump 一次。"""
-    assert 'git rev-parse "v$cur"' in WORKFLOW
+    """跳过条件必须按 **HEAD** 判断，不能按「同名 tag 是否存在」。
+
+    按 tag 存在与否判断会让版本号永久卡死：自动发版完成后 main 上
+    pyproject 已是 2.0.5、tag v2.0.5 也在，下次合并时两个条件依旧成立，
+    于是永远 skip。实测 v2.0.5 之后正是这个状态。
+    """
+    assert "git tag --points-at HEAD" in WORKFLOW
+    assert 'git rev-parse "v$cur"' not in WORKFLOW
+
+
+def test_workflow_does_not_add_ignored_uv_lock():
+    """uv.lock 被 .gitignore 忽略，git add 会直接失败并把发版判红。
+
+    实测 v2.0.5 第一次发版就挂在这里：
+    ``The following paths are ignored by one of your .gitignore files: uv.lock``
+    """
+    assert "git add -- pyproject.toml" in WORKFLOW
+    assert "git add pyproject.toml uv.lock" not in WORKFLOW
+
+
+def test_release_notes_step_survives_pipe_truncation():
+    """生成 notes 不能因 SIGPIPE 把整次发版判成失败。
+
+    ``git log | ... | head -40`` 里 head 读够就关管道，上游 sed/grep 收到
+    SIGPIPE 后非 0 退出，``set -euo pipefail`` 下整个步骤失败（实测报
+    ``grep: write error: Broken pipe`` / exit 2），而版本其实已经发出去了。
+    """
+    assert "continue-on-error: true" in WORKFLOW
+    # 只看真正执行的那一行（注释里会提到 head -40 作为反面例子）
+    assert "| sed -n '1,40p' |" in WORKFLOW
+    assert not re.search(r"^\s*\|\s*head -40", WORKFLOW, re.MULTILINE)
