@@ -150,6 +150,31 @@ def test_known_model_resolves_with_or_without_prefix():
     assert provider._resolve_model(bare)["id"] == first
 
 
+def test_model_capacity_reflects_account_and_model_cooldowns(monkeypatch):
+    from buddy_proxy.raccoon.provider import RaccoonProvider
+
+    provider = RaccoonProvider()
+    model = provider.models()[0]["id"]
+    upstream = provider._resolve_model(model)["upstream"]
+    other_model = next(m["id"] for m in provider.models() if m["id"] != model)
+    monkeypatch.setattr(failover, "list_accounts", lambda: [
+        creds.AccountRef(id="acct-1", name="a", priority=0, added_at=0),
+        creds.AccountRef(id="acct-2", name="b", priority=1, added_at=0),
+    ])
+    failover._clear_all_cooldowns()
+    assert provider.has_model_capacity(model) is True
+
+    failover.mark_model_cooldown("acct-1", upstream)
+    assert provider.has_model_capacity(model) is True
+    failover.mark_model_cooldown("acct-2", upstream)
+    assert provider.has_model_capacity(model) is False
+    assert provider.has_model_capacity(other_model) is True
+
+    failover.mark_cooldown("acct-1", risk_control=True)
+    failover.mark_cooldown("acct-2", risk_control=True)
+    assert provider.has_model_capacity(other_model) is False
+
+
 def test_model_echo_mismatch_detected():
     """首帧 model 回显不一致必须被识别（这是「问 A 答 B」的唯一硬证据）。"""
     assert upstream.model_echo_matches({"model": "sn-glm-5-3"}, "sn-glm-5-3") is True

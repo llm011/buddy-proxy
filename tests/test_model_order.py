@@ -451,6 +451,19 @@ def test_marked_target_is_skipped(tmp_path, monkeypatch):
     assert len(b.calls) == 1
 
 
+def test_provider_account_cooldown_skips_candidate(tmp_path, monkeypatch):
+    client, _, a, b = _client_env(tmp_path, monkeypatch, ["pa/m1", "pb/m1"])
+    a.has_model_capacity = mock.Mock(return_value=False)
+    b.has_model_capacity = mock.Mock(return_value=True)
+
+    r = _post(client)
+
+    assert r.status_code == 200, r.text
+    a.has_model_capacity.assert_called_once_with("m1")
+    assert a.calls == []
+    assert len(b.calls) == 1
+
+
 def test_all_targets_gated_reports_disabled_not_cooldown(tmp_path, monkeypatch):
     """全部候选都被停用 → 502 要明说「被停用」，而不是「均处于冷却」。
 

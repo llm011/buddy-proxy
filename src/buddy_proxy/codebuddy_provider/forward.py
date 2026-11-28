@@ -569,6 +569,13 @@ async def _forward_with_order(
             diagnostic("model_order_skip", model=key, target=target, reason="gated")
             skipped_by_reason.setdefault("gated", []).append(target)
             continue
+        provider = state.providers.get(provider_id)
+        has_capacity = getattr(provider, "has_model_capacity", None)
+        if callable(has_capacity) and not has_capacity(model):
+            # 通道自己的账号冷却可能远长于通用目标冷却，重复尝试不能缩短它。
+            diagnostic("model_order_skip", model=key, target=target, reason="cooldown")
+            skipped_by_reason.setdefault("cooldown", []).append(target)
+            continue
         if _target_blocked(provider_id, model):
             diagnostic("model_order_skip", model=key, target=target,
                        reason="channel_blocked",
