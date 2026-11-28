@@ -50,12 +50,28 @@ def test_qoder_region_mismatch_fails_over():
 
 
 def test_trae_entitlement_fails_over():
-    """trae 1005 权益不足：403 + permission_error，也要换档。
+    """trae 1005 权益不足：403 + 专属 type，要换档。
 
     账号没这个模型的权益 ≠ 请求有问题。实测：trae 排第二、codebuddy 排第四时，
     不换档就会停在 trae 的 403 上。
     """
-    assert _exc_is_channel_unavailable(_exc(403, "permission_error")) is True
+    assert _exc_is_channel_unavailable(
+        _exc(403, "model_not_available_in_channel")) is True
+
+
+def test_copilot_real_403_is_not_treated_as_channel_unavailable():
+    """copilot 把上游真实 403 也映射成 permission_error，**不能**被跳过。
+
+    review 时发现：白名单第一版直接放了 ``permission_error``。但
+    ``copilot/provider.py::_error_type`` 对 403 返回的就是这个 type——那可能是
+    账号级故障（凭据/订阅问题），静默跳过会把真故障掩盖成「换档成功」。
+
+    所以 trae 1005 用专属 type ``model_not_available_in_channel`` 表达，
+    ``permission_error`` 一律保持原样上抛。
+    """
+    exc = _exc(403, "permission_error")
+    assert _exc_is_channel_unavailable(exc) is False
+    assert "permission_error" not in _CHANNEL_UNAVAILABLE_TYPES
 
 
 @pytest.mark.parametrize("err_type", [

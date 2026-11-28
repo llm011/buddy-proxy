@@ -643,11 +643,16 @@ def _exc_is_channel_block(exc: HTTPException) -> bool:
 #: ``provider_disabled`` / ``model_disabled`` / ``model_scheduled``（管理页停用或
 #: 不在可用时段）。这些都不是「参数错」，换个通道完全可能成功。
 #:
-#: 反例（**不能**放进来）：``invalid_request_body``、上游参数校验失败——那是请求
-#: 本身不合法，换谁都不会成功，重试只会拖时间并掩盖真因。
+#: 反例（**不能**放进来）：
+#:
+#: - ``invalid_request_body`` / 上游参数校验失败：请求本身不合法，换谁都不会成功。
+#: - ``permission_error``：看着像「没权益」，但 **copilot 把上游真实的 403 也映射成
+#:   这个 type**（见 ``copilot/provider.py::_error_type``）。放进来会让 copilot 的
+#:   真实拒绝被当成「通道不可用」静默跳过，把账号级故障掩盖成换档成功。
+#:   trae 1005 另走 ``_exc_is_channel_block`` 之外的分支处理，不靠这个白名单。
 _CHANNEL_UNAVAILABLE_TYPES = frozenset({
     "invalid_request",       # 通道侧配置/区域问题（qoder 跨区等）
-    "permission_error",      # 该通道现有账号都没这个模型的权益（trae 1005 等）
+    "model_not_available_in_channel",  # 本通道账号都没该模型权益（trae 1005）
     "provider_disabled",     # 整通道被管理页停用
     "model_disabled",        # 该模型被停用
     "model_scheduled",       # 不在可用时段

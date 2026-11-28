@@ -496,20 +496,22 @@ async def _forward_with_order(
             resp = await _dispatch_once(state, provider_id, model, body, protocol, original)
         except HTTPException as exc:
             if exc.status_code not in _RETRYABLE_STATUS:
-                # 渠道风控拦截（400 + 业务码，如 codebuddy 11128「unapproved
-                # channel」）：换账号、换模型都没用，但**换通道**正是解法——
-                # 与 405 同理。不标记的话，被风控挡死的那一档会一直排在首位，
-                # 每个请求都白撞一次（dsh 2026-11-07 事故：02:05 之后每条请求
-                # 都先 400，model_order 里配的另外 5 档一次都没试过）。
-                # 「本通道自己用不了」（qoder 跨区、管理页停用、不在可用时段）：
-                # 换下一个候选**正是解法**。不打冷却——通道没坏，是配置/时机问题，
-                # 冷却只会让它在窗口过后还要多等一轮。
+                # 「本通道自己用不了」（qoder 跨区、管理页停用、不在可用时段、
+                # trae 1005 无权益）：换下一个候选**正是解法**。
+                # 不打冷却——通道没坏，是配置/时机问题，冷却只会让它在窗口过后
+                # 还要多等一轮。必须放在下面 channel_block 之前判断：两者都是
+                # 400/403，但一个该冷却、一个不该。
                 if _exc_is_channel_unavailable(exc):
                     last_exc = exc
                     last_note = f"HTTP {exc.status_code} channel_unavailable"
                     diagnostic("model_order_failover", model=key, target=target,
                                status=exc.status_code, reason="channel_unavailable")
                     continue
+                # 渠道风控拦截（400 + 业务码，如 codebuddy 11128「unapproved
+                # channel」）：换账号、换模型都没用，但**换通道**正是解法——
+                # 与 405 同理。不标记的话，被风控挡死的那一档会一直排在首位，
+                # 每个请求都白撞一次（dsh 2026-11-07 事故：02:05 之后每条请求
+                # 都先 400，model_order 里配的另外 5 档一次都没试过）。
                 if not _exc_is_channel_block(exc):
                     raise  # 确定性错误（参数/模型不存在等）：换谁都没用，原样上抛
                 last_exc = exc

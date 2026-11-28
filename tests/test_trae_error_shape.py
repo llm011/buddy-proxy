@@ -26,8 +26,10 @@ def test_entitlement_error_uses_openai_error_shape():
         "客户端读不到 error.type")
     assert "error" in exc.detail
     err = exc.detail["error"]
-    assert err["type"] == "permission_error", (
-        "403 应归 permission_error；用 authentication_error 会让客户端弹重新登录")
+    assert err["type"] == "model_not_available_in_channel", (
+        "1005 是「本通道账号都没这个模型的权益」，换条通道可能成功，"
+        "所以用专属 type 让 model_order 换档；不能复用 permission_error"
+        "（copilot 的真实 403 也用它，会被误判成通道不可用）")
     assert "权益不足" in err["message"]
 
 
@@ -75,4 +77,4 @@ def test_detail_is_json_serializable_under_fastapi():
     exc = _sse_error_exception({"code": 1005, "message": "x"})
     body = json.dumps({"detail": exc.detail}, ensure_ascii=False)
     parsed = json.loads(body)
-    assert parsed["detail"]["error"]["type"] == "permission_error"
+    assert parsed["detail"]["error"]["type"] == "model_not_available_in_channel"
