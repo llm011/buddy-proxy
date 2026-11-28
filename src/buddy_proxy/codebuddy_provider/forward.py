@@ -48,6 +48,7 @@ from .observability import _instrument
 from .provider import (
     _default_codebuddy,
     _exc_is_channel_block,
+    _CHANNEL_UNAVAILABLE_TYPES,
     _exc_is_channel_unavailable,
     _note_channel_block,
     _target_blocked,
@@ -449,7 +450,40 @@ def _retryable_failure(resp: StreamingResponse | JSONResponse) -> int | None:
     if isinstance(resp, StreamingResponse):
         return None
     status = getattr(resp, "status_code", 200)
-    return status if status in _RETRYABLE_STATUS else None
+    if status in _RETRYABLE_STATUS:
+        return status
+    # 「本通道自己用不了」也是**未提交即失败**：JSONResponse 已经构造好但字节
+    # 还没流向客户端，换下一档完全安全。
+    #
+    # 漏这条的后果（2026-11-29 用户报障）：trae 的 403（1005 无权益）走的是
+    # JSONResponse 而不是异常，``_exc_is_channel_unavailable`` 那段代码根本没
+    # 机会执行——换档循环把它当成功直接 ``return resp``。metrics 里能看到
+    # trae 连续 8 次 403、每次都返回给客户端，codebuddy 排在后面一次都没试。
+    if 400 <= status < 500 and _response_is_channel_unavailable(resp):
+        return status
+    return None
+
+
+def _response_is_channel_unavailable(resp: JSONResponse) -> bool:
+    """该错误响应是否表示「本通道自己用不了」（可换档）。
+
+    只看 ``body`` 里的 ``error.type``，与 :func:`_exc_is_channel_unavailable`
+    共用同一份白名单——两条路径（异常 / 响应对象）判定必须一致，否则又是
+    「修一条漏一条」。
+    """
+    try:
+        body = json.loads(bytes(resp.body).decode("utf-8", "replace"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if not isinstance(body, dict):
+        return False
+    detail = body.get("detail", body)
+    if not isinstance(detail, dict):
+        return False
+    err = detail.get("error")
+    if not isinstance(err, dict):
+        return False
+    return str(err.get("type") or "") in _CHANNEL_UNAVAILABLE_TYPES
 
 
 async def _forward_with_order(
