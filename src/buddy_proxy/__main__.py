@@ -433,6 +433,11 @@ def main():
                              "（~/Library/Application Support/loomy/auth-session.json），"
                              "按积分计费（usage.points_consumed 落日志）；"
                              "签到为 pet-work 每日奖励。显式走用 loomy/<模型>")
+    parser.add_argument("--inkstone", action="store_true", default=os.getenv("INKSTONE_ENABLED", "") == "1",
+                        help="启用 inkstone provider（书生·端砚桌面端的私有推理网关，"
+                             "适配成 openai + anthropic 双协议、流式、工具调用）。凭据复用桌面端"
+                             "SSO 登录态（Electron safeStorage 加密，14 天有效），"
+                             "额度为 Token Plan 双窗口（5 小时 + 7 天）。显式走用 inkstone/<模型>")
     parser.add_argument("--kiro", action="store_true", default=os.getenv("KIRO_ENABLED", "") == "1",
                         help="启用 kiro provider（AWS CodeWhisperer / Kiro IDE 直连，"
                              "openai + anthropic 双协议、多账号、额度可查）。"
@@ -788,6 +793,24 @@ def main():
               f"账号 {_lh.get('account') or '未登录'})")
     else:
         print("[Loomy] Disabled (pass --loomy or LOOMY_ENABLED=1 to enable)")
+
+    if args.inkstone:
+        from buddy_proxy.inkstone.provider import InkstoneProvider
+
+        inkstone = InkstoneProvider()
+        try:
+            if not provider_disabled(inkstone.id):
+                inkstone.ensure_auth()  # 校验登录态 + 预热模型目录，给出清晰提示
+        except HTTPException as exc:
+            logger.warning("inkstone provider 认证未就绪: %s", exc.detail)
+        providers[inkstone.id] = inkstone
+        _ih = inkstone.health()
+        logger.info("Inkstone provider enabled (%s / %s 个模型)",
+                    _ih.get("base_url"), _ih.get("models"))
+        print(f"[Inkstone] Enabled ({_ih.get('models')} 个模型; "
+              f"账号 {_ih.get('account') or '未登录'})")
+    else:
+        print("[Inkstone] Disabled (pass --inkstone or INKSTONE_ENABLED=1 to enable)")
 
     if args.kiro:
         from buddy_proxy.kiro.provider import KiroProvider

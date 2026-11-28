@@ -234,7 +234,7 @@ KNOWN_PROVIDER_IDS = frozenset(
     {"codebuddy", "codebuddyintl", "zcode", "glm", "ark", "mimo", "qoder", "qoderintl",
      "doubao", "dumate", "trae", "traepat", "traeintl", "kimi", "codex", "deepseek",
      "yuntoken", "copilot", "zcode-start", "gemini", "antigravity", "raccoon", "qwenpc",
-     "kiro", "runninghub", "loomy"}
+     "kiro", "runninghub", "loomy", "inkstone"}
 )
 
 DEFAULT_ENABLED_PROVIDERS = frozenset({"codebuddy", "trae"})
@@ -284,6 +284,7 @@ PROVIDER_ENABLE_HINTS: dict[str, str] = {
                 "yuntoken.json 的 base_url）",
     # codebuddy 是默认通道，进到这里只可能是「认得但没注册」的异常态
     "loomy": "加 --loomy（或设 LOOMY_ENABLED=1），先在 Loomy 桌面端完成登录",
+    "inkstone": "加 --inkstone（或设 INKSTONE_ENABLED=1），先在书生·端砚里完成登录",
     "codebuddy": "检查启动参数（codebuddy 是默认通道，不应缺失）",
 }
 

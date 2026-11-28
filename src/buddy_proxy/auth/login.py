@@ -53,7 +53,7 @@ PROVIDER_ALIASES: dict[str, str] = {
     "codebuddyintl": "codebuddy",
 }
 
-KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "glm", "ark", "doubao", "dumate", "qwenpc", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "loomy", "copilot", "raccoon")
+KNOWN_PROVIDERS = ("codebuddy", "trae", "zcode", "glm", "ark", "doubao", "dumate", "qwenpc", "mimo", "qoder", "gemini", "antigravity", "kimi", "codex", "deepseek", "yuntoken", "kiro", "loomy", "inkstone", "copilot", "raccoon")
 
 #: ``--region`` 的取值归一：国内/海外的各种常见写法都认。
 _REGION_ALIASES = {
@@ -699,6 +699,62 @@ def _login_loomy(open_browser: bool = True, **_kwargs) -> int:
     return 0
 
 
+def _login_inkstone(open_browser: bool = True, **_kwargs) -> int:
+    """inkstone 登录：**复用桌面端登录态**，不在这里做账号登录。
+
+    为什么不实现自动登录：端砚走 OpenXLab SSO（微信扫码/手机号），要复刻 OAuth
+    流程 + 客户端签名；而 token 有效期 14 天——重登桌面端一次的成本远低于维护
+    登录链路，且授权本就该发生在官方客户端里（与 loomy 同口径）。
+
+    本命令做四件事：解 Electron safeStorage 里的凭据、确认网关可用（拉一次模型
+    目录）、打印 Token Plan 双窗口余量、提示怎么启用。
+    """
+    from buddy_proxy.inkstone import credentials as ink_creds
+    from buddy_proxy.inkstone.provider import InkstoneProvider
+
+    path = ink_creds.credential_file()
+    try:
+        session = ink_creds.load_session()
+    except ink_creds.AuthError as exc:
+        print(f"[X] {exc}")
+        if path:
+            print(f"     凭据文件: {path}")
+        else:
+            print(f"     凭据目录: {ink_creds.credentials_dir()}")
+        print("     请在书生·端砚里完成登录后重试。")
+        return 1
+
+    base_url = ink_creds.resolve_base_url()
+    print(f"[OK] 读到端砚登录态: {session.display}")
+    print(f"     文件: {path}")
+    print(f"     网关: {base_url}")
+    print(f"     环境: {session.environment}")
+
+    provider = InkstoneProvider()
+    try:
+        provider.ensure_auth()
+    except Exception as exc:  # noqa: BLE001 - 命令里给完整可读原因
+        detail = getattr(exc, "detail", None) or str(exc)
+        print(f"[X] 网关校验失败: {detail}")
+        print("     若提示登录失效，请重新登录书生·端砚。")
+        return 1
+
+    health = provider.health()
+    print(f"[OK] 网关可用，{health.get('models')} 个模型")
+
+    try:
+        quota = provider.quota()
+    except Exception:  # noqa: BLE001 - 余额查不到不影响登录结论
+        quota = None
+    if quota:
+        for item in quota.get("items") or []:
+            print(f"     {item.get('label')}: 剩余 {item.get('remaining')} / {item.get('total')}")
+
+    print("     启动代理时加 --inkstone（或 INKSTONE_ENABLED=1）即可启用该通道。")
+    print("     若网关正在运行，需 `buddy restart` 才会加载新凭据。")
+    return 0
+
+
 def _login_qoder(open_browser: bool = True, region: str | None = None, **_kwargs) -> int:
     """Qoder 登录：官方 device flow（PKCE），全球版/CN 版通用。
 
@@ -1266,6 +1322,7 @@ _DISPATCH = {
     "yuntoken": _login_yuntoken,
     "kiro": _login_kiro,
     "loomy": _login_loomy,
+    "inkstone": _login_inkstone,
     "copilot": _login_copilot,
 }
 
