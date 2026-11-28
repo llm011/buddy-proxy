@@ -680,6 +680,15 @@ function checkinCardHtml(p) {
 
 /** 额度条目里出现的账号分组数（形如「ZCode #2 · …」的 #N 前缀去重计数）。
  *  没有分组前缀 = 单账号通道，返回 1。用于判断要不要显示负载均衡开关。 */
+// Loomy 的「📜 明细」按钮：走通用额度卡（没有专属面板），所以按钮在这里
+// 按 provider 内联。只有 loomy 有——它的官方积分流水能拉到逐笔粒度，其它
+// 通用卡通道（zcode/glm/ark/mimo）没有对应的明细接口。
+function loomyLogsButton(pid) {
+  if (pid !== 'loomy') return '';
+  return `<button class="ghost" title="查看 Loomy 官方积分消耗明细（逐笔流水 / 按功能汇总）" ` +
+    `onclick="openLoomyUsageLogs()">📜 明细</button>`;
+}
+
 function _quota_account_count(items) {
   const ids = new Set();
   for (const it of items || []) {
@@ -748,7 +757,7 @@ function renderBenefits(opts) {
         ${p.id === 'zcode' && q.reset_tickets && q.reset_tickets.supported && q.reset_tickets.total_count > 0
           ? `<button type="button" class="tag" style="cursor:pointer;border:1px solid var(--accent,#3ecf8e);color:var(--accent,#3ecf8e);background:transparent" onclick="openZcodeResetModal()" title="查看并使用 ZCode 重置券">🎫 ${q.reset_tickets.total_count} 张重置券</button>`
           : ''}
-        ${headSum}<span style="flex:1"></span>${fold.toggle}${providerLoadBalanceToggle(p.id, accN > 1)}${providerRefreshButton(p.id)}
+        ${headSum}<span style="flex:1"></span>${fold.toggle}${providerLoadBalanceToggle(p.id, accN > 1)}${providerRefreshButton(p.id)}${loomyLogsButton(p.id)}
       </div>${fold.bodyStart}${items || '<div class="empty" style="padding:12px 0">无额度数据</div>'}${fold.bodyEnd}</div>`;
   }).join('') : '<div class="chart-card"><div class="empty" style="padding:14px 0">当前通道均不支持额度查询</div></div>';
   if (quiet) {

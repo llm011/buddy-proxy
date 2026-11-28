@@ -45,6 +45,7 @@ function setModalFoot(html) {
 
 function closeModal() {
   if (typeof resetUsageLogs === 'function') resetUsageLogs();
+  if (typeof resetLoomyUsageLogs === 'function') resetLoomyUsageLogs();
   document.getElementById('overlay').classList.remove('show');
   setModalFoot('');  // 复位：下次直接打开「测试」弹窗时不会看到上个弹窗的按钮
 }
