@@ -61,7 +61,14 @@ def _provider_models(provider: Any) -> list[dict[str, Any]]:
             # ``credits`` 是模型页那个 tag 位：raccoon 用它显示积分倍率
             # （x0 = 限免）。其它通道的 credits 语义也是「计价倍率」，
             # 口径一致，不需要为它单开字段。
-            "credits": m.get("credits") or _multiplier_label(m),
+            #
+            # **不能写 ``m.get("credits") or ...``**：qwenpc 的 chat-modes 目录里
+            # ``price_factor: 0`` 是真实免费（会员限免），0.0 是假值，会被 ``or``
+            # 吞掉换成 ``_multiplier_label`` 的 None，界面就显示成「倍率未知」——
+            # 恰好把最重要的「免费」信息弄丢。按「键存在且是数字」判断。
+            "credits": (m["credits"] if isinstance(m.get("credits"), (int, float))
+                        and not isinstance(m.get("credits"), bool)
+                        else _multiplier_label(m)),
             "tier": m.get("tier"),
             "tags": m.get("tags", []),
             "context_window": m.get("context_window") or m.get("max_input"),

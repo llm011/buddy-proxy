@@ -472,7 +472,10 @@ class QwenpcProvider(BaseProvider):
         return {
             "id": self.id,
             "name": self.name,
-            "models": [str(m["id"]) for m in provider_models()],
+            # 用 ``self.models()`` 而不是 ``provider_models()``：刷新过目录后
+            # health 还报静态表，前端拿它做「已选模型是否仍存在」的判断时会
+            # 认为刚拉到的 flash/pro 不存在。
+            "models": [str(m["id"]) for m in self.models()],
             "cached_token": bool(cached.get("token")),
             "token_expires_in_s": (
                 int(float(expires) - time.time())

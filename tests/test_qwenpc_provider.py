@@ -21,6 +21,7 @@ from buddy_proxy.qwenpc import credentials as creds
 from buddy_proxy.qwenpc.provider import (
     FALLBACK_MODELS,
     QwenpcProvider,
+    models_from_catalog,
     provider_models,
     resolve_model,
 )
@@ -774,3 +775,21 @@ def test_provider_is_marked_refreshable():
     """
     p = QwenpcProvider()
     assert callable(getattr(p, "refresh_models", None))
+
+
+def test_zero_credits_survive_models_api_layer():
+    """``credits=0.0`` 必须原样到模型页，不能变成 ``None``。
+
+    复现过的 bug：``models_api._provider_models`` 原本写
+    ``m.get("credits") or _multiplier_label(m)``。qwenpc 的 chat-modes 里
+    ``price_factor: 0`` 是**真实免费**（会员限免），0.0 是假值被 ``or`` 吞掉，
+    回退成 ``_multiplier_label`` 的 None，界面显示「倍率未知」——恰好把用户最
+    关心的「免费」弄丢了。
+    """
+    from buddy_proxy.web.ui.models_api import _provider_models
+
+    p = QwenpcProvider()
+    p._models = models_from_catalog(_CATALOG_SAMPLE)  # noqa: SLF001
+    rows = {r["id"]: r for r in _provider_models(p)}
+    assert rows["flash"]["credits"] == 0.0, "0.0 被当假值吞掉了"
+    assert rows["flash"]["credits"] is not None
