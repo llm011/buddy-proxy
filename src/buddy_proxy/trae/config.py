@@ -14,8 +14,6 @@ log = logging.getLogger(__name__)
 
 BASE_URL_CN = "https://trae-api-cn.mchost.guru"
 BASE_URL_SG = "https://a0ai-api-sg.byteintlapi.com"
-IDE_VERSION = "3.3.67"
-IDE_VERSION_CODE = "20260401"
 X_APP_ID = "6eefa01c-1036-4c7e-9ca5-d891f63bfcd8"
 
 
