@@ -1529,14 +1529,37 @@ def _iter_usable_tool_calls(
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
-        if truncated:
-            raw = ((tc.get("function") or {}).get("arguments")) or ""
-            try:
-                json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                continue  # 半截参数，整条丢弃
+        if truncated and not _tool_arguments_complete(tc):
+            continue  # 半截参数，整条丢弃
         usable.append({**tc, "index": len(usable)})
     return usable
+
+
+def _tool_arguments_complete(tc: dict[str, Any]) -> bool:
+    """这条 tool_call 的参数是否**完整**（可以安全发给客户端）。
+
+    三种「看起来可疑、其实完整」的情况不能误杀：
+
+    1. ``arguments`` 是 **dict**：少数兼容实现不按 OpenAI 规范给字符串。
+       ``json.loads(dict)`` 抛 TypeError，按「解析失败 = 半截」处理会把一条
+       本来合法的调用丢掉。
+    2. ``arguments`` 是**空字符串**：零参工具（``NoArg`` 这类）上游常给
+       ``""`` 而不是 ``"{}"``，语义是「没有参数」而非「参数没传完」。
+       实测截断到 0 字符时上游压根不返回 tool_call，所以空串只可能是零参。
+    3. ``arguments`` 缺失或 None：同上，等价于 ``{}``。
+    """
+    raw = ((tc.get("function") or {}).get("arguments"))
+    if raw is None or isinstance(raw, dict):
+        return True
+    if not isinstance(raw, str):
+        return False
+    if not raw.strip():
+        return True  # 零参工具："" / "   "
+    try:
+        json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return True
 
 
 def _sanitize_payload_tool_calls(payload: Any) -> Any:
