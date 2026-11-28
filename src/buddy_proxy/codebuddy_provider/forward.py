@@ -48,6 +48,7 @@ from .observability import _instrument
 from .provider import (
     _default_codebuddy,
     _exc_is_channel_block,
+    _CHANNEL_UNAVAILABLE_TYPES,
     _exc_is_channel_unavailable,
     _note_channel_block,
     _target_blocked,
@@ -449,7 +450,40 @@ def _retryable_failure(resp: StreamingResponse | JSONResponse) -> int | None:
     if isinstance(resp, StreamingResponse):
         return None
     status = getattr(resp, "status_code", 200)
-    return status if status in _RETRYABLE_STATUS else None
+    if status in _RETRYABLE_STATUS:
+        return status
+    # 「本通道自己用不了」也是**未提交即失败**：JSONResponse 已经构造好但字节
+    # 还没流向客户端，换下一档完全安全。
+    #
+    # 漏这条的后果（2026-11-29 用户报障）：trae 的 403（1005 无权益）走的是
+    # JSONResponse 而不是异常，``_exc_is_channel_unavailable`` 那段代码根本没
+    # 机会执行——换档循环把它当成功直接 ``return resp``。metrics 里能看到
+    # trae 连续 8 次 403、每次都返回给客户端，codebuddy 排在后面一次都没试。
+    if 400 <= status < 500 and _response_is_channel_unavailable(resp):
+        return status
+    return None
+
+
+def _response_is_channel_unavailable(resp: JSONResponse) -> bool:
+    """该错误响应是否表示「本通道自己用不了」（可换档）。
+
+    只看 ``body`` 里的 ``error.type``，与 :func:`_exc_is_channel_unavailable`
+    共用同一份白名单——两条路径（异常 / 响应对象）判定必须一致，否则又是
+    「修一条漏一条」。
+    """
+    try:
+        body = json.loads(bytes(resp.body).decode("utf-8", "replace"))
+    except (ValueError, TypeError, AttributeError):
+        return False
+    if not isinstance(body, dict):
+        return False
+    detail = body.get("detail", body)
+    if not isinstance(detail, dict):
+        return False
+    err = detail.get("error")
+    if not isinstance(err, dict):
+        return False
+    return str(err.get("type") or "") in _CHANNEL_UNAVAILABLE_TYPES
 
 
 async def _forward_with_order(
@@ -533,7 +567,10 @@ async def _forward_with_order(
             if empty_content:
                 # 上游 200 但没产出真负载：账号/通道本身健康，只走软退避。
                 cooldown_mod.mark_empty_content(provider_id, model)
-            elif not dns_failure:
+            elif not dns_failure and not _exc_is_channel_unavailable(exc):
+                # 同上：通道不可用不打冷却。这个分支在 channel_unavailable 的
+                # continue 之后本不该被走到，但 _RETRYABLE_STATUS 里若有 4xx
+                # 就会先落到这里——留个显式判断，别依赖执行顺序。
                 cooldown_mod.mark_failed(provider_id, model, status=exc.status_code)
             diagnostic("model_order_failover", model=key, target=target,
                        status=exc.status_code, cooldown_skipped=dns_failure,
@@ -561,8 +598,14 @@ async def _forward_with_order(
             cooldown_mod.note_success(provider_id, model)
             return resp  # 成功，或已提交语义的流（不换档）
         last_note = f"HTTP {status}"
-        cooldown_mod.mark_failed(provider_id, model, status=status)
-        diagnostic("model_order_failover", model=key, target=target, status=status)
+        # 「本通道自己用不了」（跨区/无权益/停用）**不打冷却**：通道没坏，是配置
+        # 或权益问题，冷却只会让它在窗口过后还要多等一轮，而换档已经解决了这次
+        # 请求。真正需要冷却的是上游过载/限流那类（429/5xx）。
+        channel_unavailable = _response_is_channel_unavailable(resp)
+        if not channel_unavailable:
+            cooldown_mod.mark_failed(provider_id, model, status=status)
+        diagnostic("model_order_failover", model=key, target=target,
+                   status=status, cooldown_skipped=channel_unavailable)
 
     if last_exc is not None:
         raise last_exc
