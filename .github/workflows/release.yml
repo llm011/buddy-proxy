@@ -1,11 +1,11 @@
 name: Release
 
-# 每次 push 到 main 自动发一个新版本：patch 位 +1，回提交 pyproject.toml 与
-# uv.lock，并打 v<版本> 标签。
+# 每次 push 到 main 自动发一个新版本：patch 位 +1，回提交 pyproject.toml，
+# 打 v<版本> 标签并生成 Release Notes。
 #
 # 大版本/小版本由人决定：直接改 pyproject.toml 的 version（或本地跑
 # `uv version --bump minor`）后合进 main 即可，本工作流只负责在人工设的
-# 版本之上继续递增 patch。判断依据是「上次发布时的版本」，见下方 RELEASE_*。
+# 版本之上继续递增 patch。
 on:
   push:
     branches: [main]
@@ -62,7 +62,11 @@ jobs:
           uv version --bump patch
           new="$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')"
           echo "new=$new" >> "$GITHUB_OUTPUT"
-          git add pyproject.toml uv.lock
+          # **只提交 pyproject.toml**：本仓库的 .gitignore 忽略了 uv.lock
+          # （按平台解析的产物，不入库），`git add uv.lock` 会直接报
+          # 「paths are ignored」并让整个 job 失败——实测 v2.0.5 就是这么
+          # 发版失败的（uv version 本身仍会顺带改写本地 uv.lock，无妨）。
+          git add -- pyproject.toml
           git commit -m "chore(release): v$new"
 
           # 两次合并靠得很近时，checkout 之后远端可能已经前进（另一个 release
