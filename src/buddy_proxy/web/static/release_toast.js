@@ -43,28 +43,12 @@ function releaseHide() {
   if (el) el.style.display = 'none';
 }
 
-// 「知道了」的语义是「这一版我看到了，别再拿同一版烦我」，所以必须记住，
-// 否则下一次轮询（5 分钟后）会把同一个弹窗原样画回来——用户点了等于没点。
-// 与「不再提示」的区别：这个只记在**当前标签页的会话**里（sessionStorage），
-// 关掉页面重开还会提醒一次；「不再提示」记 localStorage，永久生效。
-const RELEASE_DISMISS_KEY = 'buddy_release_dismissed_version';
-
-function releaseDismissed() {
-  try { return sessionStorage.getItem(RELEASE_DISMISS_KEY) || ''; } catch (e) { return ''; }
-}
-
-function releaseDismiss(version) {
-  try { sessionStorage.setItem(RELEASE_DISMISS_KEY, version || ''); } catch (e) { /* 隐私模式 */ }
-}
-
 function releaseShow(data) {
   const el = document.getElementById('release-toast');
   if (!el) return;
   const latest = data.latest || '';
   // 已经点过「不再提示」的版本就别再弹（刷新页面也不该回来）
   if (latest && releaseMuted() === latest) { releaseHide(); return; }
-  // 本次会话里点过「知道了」的同版本也不再弹
-  if (latest && releaseDismissed() === latest) { releaseHide(); return; }
   RELEASE_CURRENT_LATEST = latest;
 
   const title = el.querySelector('.rel-title');
@@ -114,12 +98,6 @@ function releaseMuteCurrent() {
   releaseHide();
   // 用户说了不用提醒：停掉轮询，别再每 5 分钟打一次接口
   if (RELEASE_TIMER) { clearInterval(RELEASE_TIMER); RELEASE_TIMER = null; }
-}
-
-// 「知道了」：只关掉这一版，保留轮询（下一版出来还要提醒）
-function releaseDismissCurrent() {
-  releaseDismiss(RELEASE_CURRENT_LATEST);
-  releaseHide();
 }
 
 function releaseStartPolling() {
