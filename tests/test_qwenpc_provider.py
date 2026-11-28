@@ -614,3 +614,163 @@ def test_qwenpc_usage_credit_is_derived():
         del mod._quota_after
     assert payload["usage"]["credit"] == 0.0031
     assert payload["usage"]["credit_derived"] is True
+
+
+# ---------------------------------------------------------------------------
+# 从上游 /api/desktop/chat-modes 刷新目录
+#
+# 这条链的坑全在「目录长得不像模型表」上：catalog 里混着 flash/pro 这种模式
+# 档位，key 和对外 id 对不上（qwen3.8-max-preview vs qwen3.8-max），展示名在
+# i18n 里而不是 key，is_vl 还会写错。任何一条漏处理，刷新一次就把用户已有的
+# model_order 配置打散。
+# ---------------------------------------------------------------------------
+
+#: 上游 catalog 的真实形状（2026-11-29 实测，截取有代表性的几条）。
+_CATALOG_SAMPLE = [
+    {"key": "flash", "i18n": {"display_name": {"zh": "标准", "en": "Standard"}},
+     "price_factor": 0, "is_vl": True, "enable": True, "max_input_tokens": 1000000},
+    {"key": "pro", "i18n": {"display_name": {"zh": "高级", "en": "Pro"}},
+     "price_factor": 1, "is_vl": False, "enable": True, "max_input_tokens": 1000000},
+    {"key": "qwen3.8-max-preview",
+     "i18n": {"display_name": {"zh": "Qwen3.8-Max", "en": "Qwen3.8-Max"}},
+     "price_factor": 1.8, "is_vl": True, "enable": True, "max_input_tokens": 1000000},
+    {"key": "deepseek-flash",
+     "i18n": {"display_name": {"zh": "DeepSeek-V4.1-Flash"}},
+     "price_factor": 0.1, "is_vl": True, "enable": True, "max_input_tokens": 1000000},
+    {"key": "glm-5.4", "i18n": {"display_name": {"zh": "GLM-5.4"}},
+     "price_factor": 1.2, "is_vl": False, "enable": True, "max_input_tokens": 1000000},
+    {"key": "disabled-model", "i18n": {"display_name": {"zh": "已停用"}},
+     "price_factor": 0.5, "is_vl": False, "enable": False, "max_input_tokens": 1000000},
+]
+
+
+def test_catalog_maps_internal_key_to_public_id():
+    """``qwen3.8-max-preview`` 必须映射回 ``qwen3.8-max``。
+
+    不映射的后果不是「多一个模型」，而是**原有配置集体失效**：``model_order``
+    里写的是 ``qwenpc/qwen3.8-max``，刷新后这个 id 从目录消失，那条路由直接
+    失去候选。
+    """
+    from buddy_proxy.qwenpc.provider import models_from_catalog
+
+    ids = {m["id"] for m in models_from_catalog(_CATALOG_SAMPLE)}
+    assert "qwen3.8-max" in ids
+    assert "qwen3.8-max-preview" not in ids, "内部 key 泄漏到对外 id 了"
+    assert "deepseek-v4.1-flash" in ids
+    assert "deepseek-flash" not in ids
+
+
+def test_catalog_uses_i18n_display_name_not_key():
+    """展示名取 ``i18n.display_name.zh``。
+
+    ``flash`` / ``pro`` 这种 key 直接当名字显示，用户在模型列表里看到的是
+    「flash」「pro」，根本不知道那是什么。
+    """
+    from buddy_proxy.qwenpc.provider import models_from_catalog
+
+    by_id = {m["id"]: m for m in models_from_catalog(_CATALOG_SAMPLE)}
+    assert by_id["flash"]["name"] == "标准"
+    assert by_id["pro"]["name"] == "高级"
+
+
+def test_catalog_drops_disabled_entries():
+    """``enable: false`` 不能进目录——选了就报错，比不显示更糟。"""
+    from buddy_proxy.qwenpc.provider import models_from_catalog
+
+    ids = {m["id"] for m in models_from_catalog(_CATALOG_SAMPLE)}
+    assert "disabled-model" not in ids
+
+
+def test_catalog_keeps_zero_price_factor():
+    """``price_factor: 0`` 是**真实免费**（会员限免），不是缺省值。
+
+    写成 ``if pf:`` 会把 0 当假值丢掉，免费模型显示成「倍率未知」。
+    """
+    from buddy_proxy.qwenpc.provider import models_from_catalog
+
+    by_id = {m["id"]: m for m in models_from_catalog(_CATALOG_SAMPLE)}
+    assert by_id["flash"]["credits"] == 0.0
+    # 0 必须是「有这个键且值为 0」，不是「键缺失」——两者在下游表现不同：
+    # 缺键时界面显示「倍率未知」，有键才是「免费」。
+    assert "credits" in by_id["flash"]
+
+
+def test_catalog_fixes_glm_54_images():
+    """``glm-5.4`` 目录写 ``is_vl: false``，实测能读图——必须修正成 True。
+
+    不修正的代价：pi-ai 按 ``input:[text]`` 把图片剥掉，用户发图**直接丢内容
+    还不报错**，比报错难查得多。
+    """
+    from buddy_proxy.qwenpc.provider import models_from_catalog
+
+    by_id = {m["id"]: m for m in models_from_catalog(_CATALOG_SAMPLE)}
+    assert by_id["glm-5.4"]["images"] is True
+
+
+def test_catalog_ignores_garbage_entries():
+    """上游给脏数据（非 dict / 无 key）时跳过，不能整个刷新失败。"""
+    from buddy_proxy.qwenpc.provider import models_from_catalog
+
+    out = models_from_catalog([None, {}, {"key": ""}, {"key": "ok-model"}])
+    assert [m["id"] for m in out] == ["ok-model"]
+
+
+def test_refresh_models_replaces_directory(monkeypatch):
+    """刷新成功后 ``models()`` 换成新目录。"""
+    from buddy_proxy.qwenpc import provider as prov
+
+    monkeypatch.setattr(prov.creds, "chat_modes", lambda *a, **k: _CATALOG_SAMPLE)
+    p = QwenpcProvider()
+    before = {m["id"] for m in p.models()}
+    assert "flash" not in before, "静态表里不该有模式档位"
+
+    import asyncio
+    models = asyncio.run(p.refresh_models())
+    assert "flash" in {m["id"] for m in models}
+    assert {m["id"] for m in p.models()} == {m["id"] for m in models}
+
+
+def test_refresh_models_failure_keeps_old_directory(monkeypatch):
+    """拉取失败必须**保留旧目录**，不能清空。
+
+    目录是 ``model_order`` 的路由依据，清空等于所有请求同时失去候选——比
+    刷新失败本身严重得多。
+    """
+    from buddy_proxy.qwenpc import provider as prov
+
+    def _boom(*a, **k):
+        raise prov.creds.CredentialError("JWT 过期")
+
+    p = QwenpcProvider()
+    # 先成功刷一次，拿到「旧目录」
+    monkeypatch.setattr(prov.creds, "chat_modes", lambda *a, **k: _CATALOG_SAMPLE)
+    import asyncio
+    asyncio.run(p.refresh_models())
+    good = [m["id"] for m in p.models()]
+
+    monkeypatch.setattr(prov.creds, "chat_modes", _boom)
+    with pytest.raises(RuntimeError, match="JWT"):
+        asyncio.run(p.refresh_models())
+    assert [m["id"] for m in p.models()] == good, "刷新失败把目录清空了"
+
+
+def test_refresh_models_empty_catalog_raises(monkeypatch):
+    """上游全 disable 时抛错，而不是把目录刷成空表。"""
+    from buddy_proxy.qwenpc import provider as prov
+
+    monkeypatch.setattr(prov.creds, "chat_modes",
+                        lambda *a, **k: [{"key": "x", "enable": False}])
+    p = QwenpcProvider()
+    import asyncio
+    with pytest.raises(RuntimeError, match="没有可用条目"):
+        asyncio.run(p.refresh_models())
+
+
+def test_provider_is_marked_refreshable():
+    """``/ui/api/models`` 靠 ``refresh_models`` 可调用来决定是否显示按钮。
+
+    这个断言锁的是「模型 tab 里有重新拉取按钮」这件事本身——方法名改了或
+    被删了，按钮会静默消失，没人会发现。
+    """
+    p = QwenpcProvider()
+    assert callable(getattr(p, "refresh_models", None))

@@ -318,6 +318,72 @@ def provider_models() -> list[dict[str, Any]]:
     return out
 
 
+#: ``chat-modes`` 里 key 与对外 id 不一致的映射（实测）。
+#:
+#: 上游目录用的是「内部 key」，而客户端选择器和我们的历史配置用的是对外名。
+#: 不映射的话刷新一次会把 ``qwen3.8-max`` 变没、多出一个 ``qwen3.8-max-preview``，
+#: 所有指着前者的 ``model_order`` 配置集体失效。
+_CATALOG_ID_OVERRIDES: dict[str, str] = {
+    "qwen3.8-max-preview": "qwen3.8-max",
+    "deepseek-flash": "deepseek-v4.1-flash",
+}
+
+
+def models_from_catalog(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把 ``chat-modes`` 的 ``catalog`` 转成 :data:`FALLBACK_MODELS` 同形的表。
+
+    几个必须处理的坑（都是实测踩出来的）：
+
+    * ``key`` 不等于对外 id —— 见 :data:`_CATALOG_ID_OVERRIDES`；
+    * 展示名要用 ``i18n.display_name.zh``，``key`` 是 ``flash``/``pro`` 这种内部
+      名，直接显示用户看不懂；
+    * ``enable: false`` 的条目上游已停用，不能进目录（否则选择器里选了就报错）；
+    * ``price_factor`` 为 0 是**真实免费**（会员限免），不是「没填」——不能
+      当缺省值丢掉；
+    * ``is_vl`` 不可信：``glm-5.4`` 目录写着 ``false`` 但实测能读图。已知修正见
+      :data:`_IMAGES_OVERRIDES`。
+    """
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in catalog:
+        if not isinstance(item, dict):
+            continue
+        if item.get("enable") is False:
+            continue
+        raw_key = str(item.get("key") or "").strip()
+        if not raw_key:
+            continue
+        mid = _CATALOG_ID_OVERRIDES.get(raw_key, raw_key).lower()
+        if mid in seen:
+            continue
+        seen.add(mid)
+        i18n = item.get("i18n") if isinstance(item.get("i18n"), dict) else {}
+        names = i18n.get("display_name") if isinstance(i18n.get("display_name"), dict) else {}
+        name = str(names.get("zh") or names.get("en") or mid)
+        pf = item.get("price_factor")
+        entry: dict[str, Any] = {"id": mid, "name": name}
+        if isinstance(pf, (int, float)) and not isinstance(pf, bool):
+            entry["credits"] = float(pf)
+        if "is_vl" in item:
+            entry["images"] = _IMAGES_OVERRIDES.get(mid, bool(item.get("is_vl")))
+        max_in = item.get("max_input_tokens")
+        if isinstance(max_in, int) and max_in > 0:
+            entry["context_window"] = max_in
+        out.append(entry)
+    return out
+
+
+#: 目录里 ``is_vl`` 写错、但实测能读图的模型。
+#:
+#: ``glm-5.4``：目录 ``is_vl: false``，实测 128px 纯色图红/绿/黄/蓝四种全答对
+#: （prompt 里没有任何颜色暗示）；同门 ``glm-5.3`` 传同样四张图全部 400
+#: ``invalid_request``——所以这不是「GLM 系都能读图」，是 5.4 独有而目录没跟上。
+#: 漏标的代价：pi-ai 会按 ``input:[text]`` 把图片剥掉，用户发图直接丢内容还不报错。
+_IMAGES_OVERRIDES: dict[str, bool] = {
+    "glm-5.4": True,
+}
+
+
 def resolve_model(model: str) -> str:
     """客户端给的模型名 → 上游名。
 
@@ -344,11 +410,35 @@ class QwenpcProvider(BaseProvider):
 
     def __init__(self) -> None:
         self._client: httpx.AsyncClient | None = None
+        #: 从上游拉到的目录；``None`` = 还没拉过，用静态表 ``FALLBACK_MODELS``。
+        #: 只在 ``refresh_models`` 里赋值，重启后回到静态表——静态表是保底，
+        #: 不能因为某次刷新失败就永久丢掉。
+        self._models: list[dict[str, Any]] | None = None
 
     # -- 目录 ---------------------------------------------------------------
 
     def models(self) -> Sequence[dict[str, Any]]:
-        return provider_models()
+        return self._models if self._models is not None else provider_models()
+
+    async def refresh_models(self, force: bool = False) -> list[dict[str, Any]]:
+        """从官方 ``/api/desktop/chat-modes`` 强拉模型目录。
+
+        ``force`` 只为统一刷新接口保留：本通道没有 TTL 缓存，每次调用都请求上游。
+
+        拉取失败**抛错并保留旧目录**（``self._models`` 不动），由管理页转成可读
+        502。这条很重要：目录是 ``model_order`` 的路由依据，清空等于所有请求
+        同时失去候选。
+        """
+        del force
+        try:
+            catalog = await asyncio.to_thread(creds.chat_modes)
+        except creds.CredentialError as exc:
+            raise RuntimeError(str(exc)) from exc
+        models = models_from_catalog(catalog)
+        if not models:
+            raise RuntimeError("模型目录里没有可用条目（catalog 全被 disable 或解析失败）")
+        self._models = models
+        return list(models)
 
     #: 不在 ``/v1/models`` 展示、但实测上游仍接且老配置/``chat-modes`` 可能用到的名。
     _HIDDEN_MODELS = frozenset({

@@ -555,6 +555,50 @@ def account_context(jwt: str | None = None, *, timeout: float = 20.0
     return payload if isinstance(payload, dict) else {}
 
 
+#: 模型目录端点。MaaS 侧**没有** ``/v1/models``（实测 404），官方目录只有这一个
+#: 入口，且要 **OAuth JWT**（和 account-context 一样，MaaS token 打它 401）。
+#:
+#: 返回的 ``catalog`` 是「对话模式」而非纯模型表：除了 ``qwen4-max`` 这类真模型，
+#: 还混着 ``flash`` / ``pro`` 这种**模式档位**（``price_factor`` 为 0/1、
+#: ``i18n.display_name`` 是「标准」「高级」）。两者都能直通
+#: ``/v1/chat/completions``，所以都收进目录——但不能拿 key 当展示名，展示名
+#: 要用 ``i18n.display_name.zh``。
+CHAT_MODES_PATH = "/api/desktop/chat-modes"
+
+
+def chat_modes(jwt: str | None = None, *, timeout: float = 20.0) -> list[dict[str, Any]]:
+    """拉官方模型/模式目录（``GET {GATEWAY}/api/desktop/chat-modes``）。
+
+    失败抛 :class:`CredentialError`——调用方（``refresh_models``）靠它保留旧目录，
+    不会把模型表清空。
+    """
+    token = jwt or str(_load_cache().get("jwt") or "")
+    if not token:
+        raise CredentialError("没有可用的 OAuth JWT，无法拉取模型目录")
+    req = urllib.request.Request(
+        f"{GATEWAY}{CHAT_MODES_PATH}",
+        headers={"Authorization": f"Bearer {token}",
+                 "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8", "replace")[:160]
+        except Exception:  # noqa: BLE001
+            pass
+        raise CredentialError(
+            f"拉取模型目录失败 HTTP {exc.code}: {body}") from exc
+    except Exception as exc:  # noqa: BLE001
+        raise CredentialError(
+            f"拉取模型目录失败：{type(exc).__name__}") from exc
+    catalog = data.get("catalog") if isinstance(data, dict) else None
+    if not isinstance(catalog, list):
+        raise CredentialError("模型目录响应里没有 catalog 数组")
+    return [it for it in catalog if isinstance(it, dict)]
+
+
 def remaining_quota(jwt: str | None = None) -> float | None:
     """当前剩余额度（拿不到返回 None）。"""
     try:
