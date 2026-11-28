@@ -80,3 +80,25 @@ def test_malformed_error_bodies_do_not_crash(body):
     resp.body = body
     assert _response_is_channel_unavailable(resp) is False
     assert _retryable_failure(resp) is None
+
+
+def test_channel_unavailable_response_does_not_mark_cooldown():
+    """通道不可用换档时**不能**打冷却标记。
+
+    review 时发现：换档分支里统一 `cooldown_mod.mark_failed(...)`，可「本通道
+    用不了」不是通道坏了（跨区配置 / 账号没权益），冷却只会让它在窗口过后还要
+    多等一轮。真正需要冷却的是 429/5xx 那类上游过载。
+
+    用源码断言守住：删掉 `channel_unavailable` 判断就会红。
+    """
+    import inspect
+
+    from buddy_proxy.codebuddy_provider import forward
+
+    src = inspect.getsource(forward._forward_with_order)
+    assert "channel_unavailable = _response_is_channel_unavailable(resp)" in src, (
+        "响应路径没区分通道不可用，会给它打冷却")
+    assert "if not channel_unavailable:" in src
+    # 异常路径也要有对应保护
+    assert "not _exc_is_channel_unavailable(exc)" in src, (
+        "异常路径没区分通道不可用，会给它打冷却")

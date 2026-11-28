@@ -567,7 +567,10 @@ async def _forward_with_order(
             if empty_content:
                 # 上游 200 但没产出真负载：账号/通道本身健康，只走软退避。
                 cooldown_mod.mark_empty_content(provider_id, model)
-            elif not dns_failure:
+            elif not dns_failure and not _exc_is_channel_unavailable(exc):
+                # 同上：通道不可用不打冷却。这个分支在 channel_unavailable 的
+                # continue 之后本不该被走到，但 _RETRYABLE_STATUS 里若有 4xx
+                # 就会先落到这里——留个显式判断，别依赖执行顺序。
                 cooldown_mod.mark_failed(provider_id, model, status=exc.status_code)
             diagnostic("model_order_failover", model=key, target=target,
                        status=exc.status_code, cooldown_skipped=dns_failure,
@@ -595,8 +598,14 @@ async def _forward_with_order(
             cooldown_mod.note_success(provider_id, model)
             return resp  # 成功，或已提交语义的流（不换档）
         last_note = f"HTTP {status}"
-        cooldown_mod.mark_failed(provider_id, model, status=status)
-        diagnostic("model_order_failover", model=key, target=target, status=status)
+        # 「本通道自己用不了」（跨区/无权益/停用）**不打冷却**：通道没坏，是配置
+        # 或权益问题，冷却只会让它在窗口过后还要多等一轮，而换档已经解决了这次
+        # 请求。真正需要冷却的是上游过载/限流那类（429/5xx）。
+        channel_unavailable = _response_is_channel_unavailable(resp)
+        if not channel_unavailable:
+            cooldown_mod.mark_failed(provider_id, model, status=status)
+        diagnostic("model_order_failover", model=key, target=target,
+                   status=status, cooldown_skipped=channel_unavailable)
 
     if last_exc is not None:
         raise last_exc
