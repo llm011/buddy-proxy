@@ -48,11 +48,31 @@ def _attach_sse_code(exc: HTTPException, code: Any) -> HTTPException:
     return exc
 
 def _sse_error_exception(data: dict[str, Any]) -> HTTPException:
-    """上游 SSE 错误事件 → HTTPException（状态按 ``_sse_error_status``，保留原始码）。"""
+    """上游 SSE 错误事件 → HTTPException（状态按 ``_sse_error_status``，保留原始码）。
+
+    ``detail`` 用 **OpenAI 的错误形状** ``{"error": {"message", "type"}}``，不能
+    用裸字符串。
+
+    裸字符串经 FastAPI 序列化成 ``{"detail": "Trae plan 权益不足…"}``——既不是
+    OpenAI 口径也不是 Anthropic 口径，客户端只能靠 HTTP 状态码猜。Kimi 就把
+    403 归成 ``provider.auth_error``，弹出「请重新登录」，而真因是「这个模型
+    该账号没权益」。包成标准形状后，客户端能读到 ``type``/``message``。
+    """
     from . import provider as hooks
     code = (data or {}).get("code")
+    status = hooks._sse_error_status(code)
     return hooks._attach_sse_code(
-        hooks.HTTPException(status_code=hooks._sse_error_status(code), detail=hooks._trae_error_text(data)),
+        hooks.HTTPException(
+            status_code=status,
+            detail={"error": {
+                "message": hooks._trae_error_text(data),
+                # 4026 与 1005 都是 403，但语义完全不同：4026 是「这次请求的
+                # 上下文太长」，客户端该压缩上下文重试；1005 是「这个账号没这个
+                # 模型的权益」，压缩也没用。都报 permission_error 的话，客户端
+                # 只会显示「没权限」，不会去压缩——用户看到的就是反复失败。
+                "type": hooks._openai_error_type(status, code=code),
+            }},
+        ),
         code,
     )
 
