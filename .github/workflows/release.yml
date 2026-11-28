@@ -45,11 +45,19 @@ jobs:
           set -euo pipefail
           cur="$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"(.*)".*/\1/')"
           echo "current=$cur" >> "$GITHUB_OUTPUT"
-          # 已有同名 tag = 这个版本已经发布过（比如人工改了版本号并打了 tag），
-          # 不再重复 bump，避免「一个版本号发两次」。
-          if git rev-parse "v$cur" >/dev/null 2>&1; then
+          # 只在「**当前这个提交**已经被打过 v<cur> 标签」时跳过。
+          #
+          # 不能用「v<cur> 这个标签是否存在」来判断：自动发版完成后，main 上
+          # pyproject 已经是 2.0.5 且 tag v2.0.5 也存在；下一次合并进来时
+          # pyproject 仍是 2.0.5、tag 仍在——于是永远 skip，版本号从此卡死。
+          # 实测 v2.0.5 之后就是这个状态。
+          #
+          # 按 HEAD 判断则正好：自动发版提交本身已被上面的 job `if` 挡掉；
+          # 人工改版本号并打了 tag 的提交也是 HEAD 带 tag，跳过不重复发；
+          # 而任何**新的合并提交**都不带 tag，于是正常 bump。
+          if git tag --points-at HEAD | grep -qx "v$cur"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "v$cur 已存在，跳过自动升版"
+            echo "当前提交已打 v$cur 标签，跳过自动升版"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
@@ -98,6 +106,9 @@ jobs:
           exit 1
 
       - name: 生成 Release Notes
+        # 发版（bump + push + tag）已经在上一步完成，这一步失败不该把整次发版
+        # 判成失败——实测就因为这个把 v2.0.5 报成红叉，而版本其实已经发出去了。
+        continue-on-error: true
         if: steps.guard.outputs.skip == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -107,13 +118,20 @@ jobs:
           prev="$(git describe --tags --abbrev=0 "v$new^" 2>/dev/null || true)"
           range="${prev:+$prev..}v$new"
           # 标题按「提交 → 分类」整理成几点，别把几十条 commit 原样贴上去。
+          #
+          # **先落到变量再写文件**，不要 `git log | ... | head -40 > file`：
+          # head 读够就关闭管道，上游 sed/grep 收到 SIGPIPE 后以非 0 退出，
+          # 在 `set -euo pipefail` 下整个步骤直接失败（实测报
+          # 「grep: write error: Broken pipe」+ exit code 2）。提交数本来就不多，
+          # 一次性取回再截断即可。
+          commits="$(git log --no-merges --pretty=format:'%s' "$range" \
+            | sed -E 's/^(feat|fix|perf|refactor|docs|test|chore|style|build|ci)(\([^)]*\))?: /\1: /' \
+            | grep -v '^chore(release)' || true)"
           {
             echo "## v$new"
             echo
-            git log --no-merges --pretty=format:'%s' "$range" \
-              | sed -E 's/^(feat|fix|perf|refactor|docs|test|chore|style|build|ci)(\([^)]*\))?: /\1: /' \
-              | grep -v '^chore(release)' \
-              | head -40 \
-              | sed 's/^/- /'
+            # 用 sed -n '1,40p' 而不是 head -40：sed 会读完输入，不会因为
+            # 提前关闭管道让上游吃 SIGPIPE。
+            printf '%s\n' "$commits" | sed -n '1,40p' | sed 's/^/- /'
           } > /tmp/notes.md
           gh release create "v$new" --title "v$new" --notes-file /tmp/notes.md
