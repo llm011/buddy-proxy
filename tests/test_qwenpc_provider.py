@@ -793,3 +793,27 @@ def test_zero_credits_survive_models_api_layer():
     rows = {r["id"]: r for r in _provider_models(p)}
     assert rows["flash"]["credits"] == 0.0, "0.0 被当假值吞掉了"
     assert rows["flash"]["credits"] is not None
+
+
+def test_catalog_drops_disabled_entries_in_any_falsy_form():
+    """``enable`` 无论写成布尔/0/字符串都要判成停用。
+
+    实测 2026-11-29 的 14 条全是布尔 ``true``，所以这条是**防御性**的：哪天
+    上游把布尔换成 0/1 或字符串，``is False`` 判不出来，已停用的模型会静默
+    混进列表——用户选中后请求直接 400，且不会说「模型已停用」。
+
+    反面同样重要：**不能**写成 ``not enable``。上游某次不给这个字段时，
+    ``not None`` 为真，整个目录会被清空，比放行一个停用模型严重得多。
+    """
+    from buddy_proxy.qwenpc.provider import models_from_catalog
+
+    for falsy in (False, 0, "false"):
+        out = models_from_catalog([
+            {"key": "live", "enable": True},
+            {"key": "dead", "enable": falsy},
+        ])
+        assert [m["id"] for m in out] == ["live"], f"enable={falsy!r} 没被当成停用"
+
+    # 字段缺失 = 当作可用（不能整目录清空）
+    out = models_from_catalog([{"key": "no-flag"}])
+    assert [m["id"] for m in out] == ["no-flag"]

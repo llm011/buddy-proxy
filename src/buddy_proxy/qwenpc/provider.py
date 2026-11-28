@@ -348,7 +348,14 @@ def models_from_catalog(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for item in catalog:
         if not isinstance(item, dict):
             continue
-        if item.get("enable") is False:
+        # 停用条目不能进目录——用户选中后请求直接 400，且不会说「模型已停用」。
+        #
+        # 判定要同时覆盖三种假值：实测 2026-11-29 的 14 条**全是布尔 true**，
+        # 但这字段哪天变成 ``0`` 或字符串 ``"false"`` 时，``is False`` 判不出来，
+        # 停用模型会静默混进列表。反过来**不能**写 ``not enable``：上游不给这个
+        # 字段时 ``not None`` 为真，会把整个目录清空，比放行一个停用模型严重得多。
+        enable = item.get("enable")
+        if enable is False or enable == 0 or enable == "false":
             continue
         raw_key = str(item.get("key") or "").strip()
         if not raw_key:
