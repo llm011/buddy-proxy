@@ -1063,7 +1063,7 @@ def test_account_risk_control_is_account_level_not_model_level():
     同一秒打出 4 条 429（每个模型都去撞一次）——持续给上游发「异常调用」
     信号，风控窗口越拉越长。
 
-    正确行为：整号冷却 30 分钟，所有模型都不再尝试。
+    正确行为：整号长冷却，所有模型都不再尝试。
     """
     from buddy_proxy.raccoon import failover
 
@@ -1076,8 +1076,12 @@ def test_account_risk_control_is_account_level_not_model_level():
     assert failover.is_account_risk_control(
         429, "user_model_rate_limited", "") is False
 
-    # 冷却时长：30 分钟（不是模型级那种 60 秒）
-    assert failover._RISK_CONTROL_COOLDOWN_S == 1800.0
+    # 冷却时长：12 小时起（不是模型级那种 60 秒）。
+    # 原来这里是 1800（30 分钟），但那是 2026-11-23 凭感觉取的，没有实测依据。
+    # 2026-11-29 用 52 次真实风控事件反查，上游实际封 min=116 / 中位=408 /
+    # max=870 分钟——30 分钟覆盖 0/52，每次都必然再撞一次。
+    assert failover._RISK_CONTROL_COOLDOWN_S == 43200.0
+    assert failover._RISK_CONTROL_COOLDOWN_S > 3600.0, "风控是账号级长封，不能是小时级以下"
 
 
 # ---------------------------------------------------------------------------
@@ -1584,3 +1588,103 @@ def test_nonstream_payload_keeps_dict_arguments():
     out = _sanitize_payload_tool_calls(payload)
     tcs = out["choices"][0]["message"]["tool_calls"]
     assert tcs[0]["function"]["arguments"] == {"pattern": "x"}
+
+
+# ---------------------------------------------------------------------------
+# 风控冷却递进：12h -> 24h，成功一次清零
+# ---------------------------------------------------------------------------
+
+def test_risk_control_cooldown_escalates_and_resets():
+    """连续风控要递进，成功后回到最短档。
+
+    实测依据（2026-11-29 反查 11-23~11-29 共 52 次风控）：从命中到该账号下次
+    真正成功的间隔是 min=116 / 中位=408 / max=870 分钟。固定 12h 覆盖 41/52，
+    剩下 11 次会在冷却刚过期时再撞一次——日志里这种「解封即再犯」是成串出现的
+    （同一账号 14h 内连打 3 次），说明它进了更长的惩罚窗口，继续按 12h 试只是
+    白费一次请求额度。
+    """
+    from buddy_proxy.raccoon import failover
+
+    acct = "test-acct-escalation"
+    failover.note_risk_recovered(acct)   # 从干净状态开始
+
+    first = failover._risk_cooldown_seconds(acct)
+    second = failover._risk_cooldown_seconds(acct)
+    third = failover._risk_cooldown_seconds(acct)
+
+    assert first == 43200.0, "第一次风控应是 12h"
+    assert second == 86400.0, "连续第二次应翻到 24h"
+    assert third == 86400.0, "封顶 24h，不能无限涨"
+    assert failover.risk_streak(acct) == 3
+
+    # 成功一次就清零：下次再中重新从 12h 起算
+    failover.note_risk_recovered(acct)
+    assert failover.risk_streak(acct) == 0
+    assert failover._risk_cooldown_seconds(acct) == 43200.0
+
+
+def test_risk_streak_does_not_carry_across_long_gaps():
+    """隔了很久再中，不算「连续」——不能因为上个月被封过就跳到 24h。"""
+    from buddy_proxy.raccoon import failover
+
+    acct = "test-acct-gap"
+    failover.note_risk_recovered(acct)
+    failover._risk_cooldown_seconds(acct)          # streak=1
+    # 手动把上次命中时刻推到窗口之外
+    with failover._risk_lock:
+        failover._risk_last_hit[acct] -= (
+            failover._RISK_CONTROL_STREAK_WINDOW_S + 60)
+    assert failover._risk_cooldown_seconds(acct) == 43200.0, (
+        "超过连续窗口应重新从最短档起算")
+    failover.note_risk_recovered(acct)
+
+
+def test_mark_cooldown_risk_control_uses_escalation():
+    """``mark_cooldown(risk_control=True)`` 必须走递进，而不是固定常量。"""
+    from buddy_proxy.raccoon import failover
+
+    acct = "test-acct-mark"
+    failover.note_risk_recovered(acct)
+    try:
+        first = failover.mark_cooldown(acct, risk_control=True, reason="t")
+        assert first == 43200.0
+        failover.clear_cooldown(acct)
+        second = failover.mark_cooldown(acct, risk_control=True, reason="t")
+        assert second == 86400.0, "连续第二次风控应退到 24h"
+    finally:
+        failover.note_risk_recovered(acct)
+        failover.clear_cooldown(acct)
+
+
+def test_risk_streak_advances_even_with_retry_after():
+    """上游给了 ``Retry-After`` 时也必须推进连续计数。
+
+    review 时发现的坑：第一版写成 ``if risk_control and not retry_after``，
+    带了 Retry-After 就整条跳过计数。而 200108 的响应是**可能**带这个头的——
+    一旦带，那些「解封即再犯」的账号会永远停在 12h、按 12h 周期反复撞，递进
+    等于没做。
+    """
+    from buddy_proxy.raccoon import failover
+
+    acct = "test-acct-retry-after"
+    failover.note_risk_recovered(acct)
+    try:
+        # 上游给 600s：时长用它，但计数要涨
+        first = failover.mark_cooldown(acct, risk_control=True,
+                                       retry_after="600", reason="t")
+        assert first == 600.0
+        assert failover.risk_streak(acct) == 1
+        failover.clear_cooldown(acct)
+
+        second = failover.mark_cooldown(acct, risk_control=True,
+                                        retry_after="600", reason="t")
+        assert second == 600.0
+        assert failover.risk_streak(acct) == 2, "带 Retry-After 时计数没推进"
+
+        failover.clear_cooldown(acct)
+        # 第三次上游没给 Retry-After → 用递进值，此时应已到 24h 档
+        third = failover.mark_cooldown(acct, risk_control=True, reason="t")
+        assert third == 86400.0
+    finally:
+        failover.note_risk_recovered(acct)
+        failover.clear_cooldown(acct)
