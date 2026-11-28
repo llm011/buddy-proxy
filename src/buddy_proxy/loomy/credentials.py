@@ -68,10 +68,68 @@ DEFAULT_ORIGIN = "https://loomyad.xunfei.cn"
 DEFAULT_CLIENT_VERSION = "0.9.39"
 
 #: 上游业务码：登录态失效。**HTTP 状态码是 200**，必须看 body。
+#:
+#: ⚠ ``100002`` 是**复合码**，同一个码至少有两种含义，只能靠 ``desc`` 区分：
+#:
+#: ====================================  ====================================
+#: desc                                  真实含义
+#: ====================================  ====================================
+#: ``登录已失效，请重新登录``            登录态真过期了（该提示用户重登）
+#: ``缺少 token``                        我们发错了鉴权头（是**代码 bug**）
+#: ====================================  ====================================
+#:
+#: 实测（2026-11-29）：``/models`` 只认 ``token: <jwt>`` 头，用
+#: ``Authorization: Bearer`` 去打就回 ``code=100002 desc=缺少 token``。早先按码
+#: 一律报「登录态已失效」，结果用户明明能用却被告知去重登桌面端——所以判失效
+#: 必须再核 ``desc``，见 :func:`is_auth_failure`。
 AUTH_ERROR_CODE = "100002"
 
 #: 上游业务码：成功。
 OK_CODE = "000000"
+
+#: 判「登录真的失效了」用的**语义**匹配，不是固定短语。
+#:
+#: 一开始写的是短语白名单（"登录已失效" 等），但上游文案会变：换个说法
+#: （"登录已过期" / "凭证失效"）白名单就失效，又退回「一律不算登录失效」的
+#: 另一个极端。所以改成「提到登录/凭证」且「提到失效/过期/重登」两个条件同时
+#: 成立——两个方向都比白名单稳，也仍然挡得住 ``缺少 token``（不含"登录"）。
+_AUTH_SUBJECT_HINTS = ("登录", "凭证", "会话", "token", "Token", "TOKEN")
+_AUTH_STATE_HINTS = ("失效", "过期", "超时", "无效", "重新登录", "重登")
+
+
+def is_auth_failure(code: str, desc: str) -> bool:
+    """``100002`` 到底是「登录失效」还是别的（如「缺少 token」）。
+
+    只有 ``desc`` 明确说了登录失效才当真；说不清时不冒充登录问题——把一个
+    我们自己的请求头 bug 报成「请重新登录桌面端」，会让用户白忙一场。
+    """
+    if str(code or "").strip() != AUTH_ERROR_CODE:
+        return False
+    text = str(desc or "")
+    if not text:
+        return False
+    has_subject = any(hint in text for hint in _AUTH_SUBJECT_HINTS)
+    has_state = any(hint in text for hint in _AUTH_STATE_HINTS)
+    return has_subject and has_state
+
+
+def describe_auth_code(code: str, desc: str, action: str = "") -> str:
+    """把 ``100002`` 的两种含义翻成各自可操作的说法。"""
+    text = str(desc or "").strip()
+    where = f"Loomy {action}：" if action else ""
+    if is_auth_failure(code, desc):
+        return (
+            f"Loomy 登录态已失效（上游 {AUTH_ERROR_CODE}：{text or '登录已失效'}）。"
+            "请重新登录 Loomy 桌面端，然后重启 buddy。"
+        )
+    if "token" in text.lower():
+        # 走到这里说明是**我们**发错了鉴权头，不是用户该做什么。
+        return (
+            f"{where}上游报「{text}」（code={code}）。这是鉴权头不匹配，"
+            "不是登录态过期——各端点认的头不同（chat 两种都收、/models 只认 "
+            "token 头、/images 只认 Bearer），请按接口文档核对，不要重登桌面端。"
+        )
+    return f"{where}上游返回 code={code}：{text or '未知错误'}"
 
 
 class AuthError(Exception):

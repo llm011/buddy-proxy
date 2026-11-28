@@ -314,36 +314,35 @@ class LoomyProvider(BaseProvider):
             log.warning("Loomy 积分余额查询失败：%s", describe_exception(exc))
             return None
 
+        # ``unit="currency"`` 是「纯余额」口径：上游只给「还剩多少积分」，**没有**
+        # 发放总量这个分母。早先给 ``total=balance`` 等于把余额同时当分子分母，
+        # 界面上每条都渲染成「19055 / 19055 · 已用 0%」——用户立刻发现不对：
+        # 用了一整天，剩余和总数一模一样。前端对 currency 有条专属分支，只显示
+        # 一个「N 可用」，不画水位条、也不算已用百分比，正是这个形状该有的样子。
         items: list[dict[str, Any]] = [
             {
                 "label": "可用积分",
-                "used": 0,
-                "total": balance.total,
                 "remaining": balance.available,
                 "percent": None,
-                "unit": "credit",
+                "unit": "currency",
             }
         ]
         if balance.balance:
             items.append(
                 {
                     "label": "套餐额度",
-                    "used": 0,
-                    "total": balance.balance,
                     "remaining": balance.balance,
                     "percent": None,
-                    "unit": "credit",
+                    "unit": "currency",
                 }
             )
         if balance.daily_balance:
             items.append(
                 {
                     "label": "每日额度",
-                    "used": 0,
-                    "total": balance.daily_balance,
                     "remaining": balance.daily_balance,
                     "percent": None,
-                    "unit": "credit",
+                    "unit": "currency",
                 }
             )
         # 三项是**并存的口径**（套餐 + 每日 = 可用），相加会重复计算 → 不置 sum_items
@@ -851,14 +850,16 @@ def _raise_for_envelope(resp: httpx.Response, action: str) -> None:
         return  # 非 JSON 交给调用方处理
     if isinstance(payload, dict):
         code = str(payload.get("code") or "").strip()
-        if code == AUTH_ERROR_CODE:
-            raise AuthError(
-                "Loomy 登录态已失效（上游 code=100002）。"
-                "请重新登录 Loomy 桌面端，然后重启 buddy。"
-            )
+        desc = str(payload.get("desc") or "").strip()
+        # 100002 是复合码：「登录已失效」和「缺少 token」是同一个码，必须看 desc。
+        # 按码一律报登录失效，会让用户去重登桌面端，而真正的问题是我们发错了头。
+        if creds.is_auth_failure(code, desc):
+            raise AuthError(creds.describe_auth_code(code, desc))
         if code and code != points_mod.OK_CODE:
-            desc = str(payload.get("desc") or "").strip() or "未知错误"
-            raise RuntimeError(f"Loomy {action} 失败：{desc}（code={code}）")
+            raise RuntimeError(
+                creds.describe_auth_code(code, desc, action) if desc
+                else f"Loomy {action} 失败：未知错误（code={code}）"
+            )
 
 
 def _raise_for_body(payload: Any) -> None:
@@ -866,17 +867,17 @@ def _raise_for_body(payload: Any) -> None:
     if not isinstance(payload, dict):
         return
     code = str(payload.get("code") or "").strip()
-    if code == AUTH_ERROR_CODE:
+    desc = str(payload.get("desc") or "").strip()
+    if creds.is_auth_failure(code, desc):
         raise HTTPException(
-            status_code=401,
-            detail=(
-                "Loomy 登录态已失效（上游 code=100002）。"
-                "请重新登录 Loomy 桌面端，然后重启 buddy。"
-            ),
+            status_code=401, detail=creds.describe_auth_code(code, desc)
         )
     if code and code != points_mod.OK_CODE and "choices" not in payload:
-        desc = str(payload.get("desc") or "").strip() or "未知错误"
-        raise HTTPException(status_code=502, detail=f"Loomy 上游错误：{desc}（code={code}）")
+        raise HTTPException(
+            status_code=502,
+            detail=creds.describe_auth_code(code, desc) if desc
+            else f"Loomy 上游错误：未知错误（code={code}）",
+        )
 
 
 def _log_points_usage(payload: dict[str, Any], model: str, multiplier: float | None = None) -> None:

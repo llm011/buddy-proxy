@@ -201,14 +201,15 @@ def _check_envelope(payload: Any, action: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise RuntimeError(f"Loomy {action}：响应不是 JSON 对象")
     code = str(payload.get("code") or "").strip()
-    if code == AUTH_ERROR_CODE:
-        raise AuthError(
-            "Loomy 登录态已失效（上游 code=100002）。"
-            "请重新登录 Loomy 桌面端，然后重启 buddy。"
-        )
+    desc = str(payload.get("desc") or "").strip()
+    # 100002 是复合码：「登录已失效」与「缺少 token」同码，必须看 desc 才能区分
+    if credentials.is_auth_failure(code, desc):
+        raise AuthError(credentials.describe_auth_code(code, desc))
     if code and code != OK_CODE:
-        desc = str(payload.get("desc") or "").strip() or "未知错误"
-        raise RuntimeError(f"Loomy {action} 失败：{desc}（code={code}）")
+        raise RuntimeError(
+            credentials.describe_auth_code(code, desc, action) if desc
+            else f"Loomy {action} 失败：未知错误（code={code}）"
+        )
     data = payload.get("data")
     return data if isinstance(data, dict) else {}
 

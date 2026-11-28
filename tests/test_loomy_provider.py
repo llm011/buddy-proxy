@@ -313,6 +313,55 @@ def test_check_envelope_success():
     assert pts._check_envelope({"code": "000000", "data": {"a": 1}}, "test") == {"a": 1}
 
 
+def test_check_envelope_missing_token_is_not_auth_failure():
+    """``100002`` 是复合码：``缺少 token`` 是**我们发错头**，不该让用户去重登。
+
+    实测（2026-11-29）：``/models`` 只认 ``token`` 头，用 Bearer 去打就回
+    ``code=100002 desc=缺少 token``。早先按码一律报「登录态已失效」，用户
+    明明能用却被告知重登桌面端。
+    """
+    with pytest.raises(RuntimeError) as exc:
+        pts._check_envelope({"code": "100002", "desc": "缺少 token"}, "test")
+    msg = str(exc.value)
+    assert "登录态已失效" not in msg
+    assert "鉴权头" in msg or "token" in msg
+
+
+def test_is_auth_failure_distinguishes_desc():
+    assert cred.is_auth_failure("100002", "登录已失效，请重新登录") is True
+    assert cred.is_auth_failure("100002", "缺少 token") is False
+    assert cred.is_auth_failure("000000", "登录已失效") is False
+    assert cred.is_auth_failure("", "") is False
+
+
+@pytest.mark.parametrize(
+    ("desc", "expected"),
+    [
+        # 上游文案会变，判据是语义（主语 + 状态）而不是固定短语
+        ("登录已失效，请重新登录", True),
+        ("登录已过期", True),
+        ("凭证失效", True),
+        ("token 已过期", True),
+        ("token 无效", True),
+        # 同一个码但不是登录问题：我们发错了鉴权头
+        ("缺少 token", False),
+        ("", False),
+        ("内部错误", False),
+        ("ok", False),
+    ],
+)
+def test_is_auth_failure_semantic_not_phrase_list(desc, expected):
+    assert cred.is_auth_failure("100002", desc) is expected
+
+
+def test_describe_auth_code_two_meanings():
+    auth = cred.describe_auth_code("100002", "登录已失效，请重新登录")
+    assert "重新登录 Loomy 桌面端" in auth
+    header = cred.describe_auth_code("100002", "缺少 token", "/models")
+    assert "重新登录 Loomy 桌面端" not in header
+    assert "不是登录态过期" in header
+
+
 def _status(
     score: int, rewarded: tuple[str, ...] = (), capped: bool = False, source: str = "local"
 ) -> pts.PetWorkStatus:
