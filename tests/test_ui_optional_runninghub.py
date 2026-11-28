@@ -251,3 +251,25 @@ def test_settings_api_returns_provider_switches_and_toggle_updates_runtime(
     assert state.disabled_providers == set()
     assert settings_mod.load_settings()["disabled_providers"] == []
     assert client.get("/ui/api/settings").json()["providers"][-1]["enabled"] is True
+
+
+def test_disabling_default_provider_falls_back_to_codebuddy(tmp_path, monkeypatch):
+    monkeypatch.setenv("BUDDY_PROXY_SETTINGS", str(tmp_path / "settings.json"))
+    state = SimpleNamespace(
+        providers={"trae": SimpleNamespace(name="Trae")},
+        disabled_providers=set(), default_model=None, default_provider="trae",
+        load_balance=set(), session_rotation=set(), disabled_accounts=set(),
+    )
+    monkeypatch.setattr(state_mod, "proxy_state", state)
+    client = TestClient(main.app)
+
+    response = client.post("/ui/api/provider-toggle", json={
+        "provider": "trae", "disabled": True,
+    })
+    assert response.status_code == 200
+    assert state.default_provider == "codebuddy"
+    assert settings_mod.load_settings()["default_provider"] == "codebuddy"
+
+    response = client.post("/ui/api/settings", json={"default_provider": "trae"})
+    assert response.status_code == 400
+    assert state.default_provider == "codebuddy"

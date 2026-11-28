@@ -56,6 +56,7 @@ async def ui_settings_post(request: Request):
     _ensure_local(request)
     state = get_state()
     body = await request.json()
+    disabled = getattr(state, "disabled_providers", set()) or set()
 
     update: dict[str, Any] = {}
     if "default_model" in body:
@@ -82,6 +83,11 @@ async def ui_settings_post(request: Request):
             raise HTTPException(
                 status_code=400,
                 detail={"error": {"message": f"provider {pid} 未启用"}},
+            )
+        if pid in disabled:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": {"message": f"provider {pid} 已停用，请先启用再设为兜底通道"}},
             )
         update["default_provider"] = pid
     if "auto_checkin" in body:
