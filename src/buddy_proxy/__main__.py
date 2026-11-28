@@ -280,6 +280,28 @@ def _install_qoder_model_warmup(provider) -> None:
     app.router.on_startup.append(_start)
 
 
+def _install_release_poll() -> None:
+    """把「有新版本」检测挂到应用启动（常驻轮询，随进程生命周期）。
+
+    单独一个循环而不是复用目录预热：版本检测要活一整个进程周期，而且**失败
+    必须继续**（断网时跳过这一轮即可），见 core/release.py 的 poll_forever。
+
+    用普通 daemon 线程而不是 ``_spawn_bg``：后者进的是事件循环默认线程池，
+    而 ``poll_forever`` 里是 ``time.sleep`` 的长循环——占住一个池线程会让
+    其它 ``to_thread`` 调用（健康检查等）少一个可用位。daemon 线程随进程退出，
+    不需要额外回收。
+    """
+    import threading
+
+    from buddy_proxy.core import release as _release
+
+    async def _start() -> None:
+        threading.Thread(
+            target=_release.poll_forever, name="release-poll", daemon=True).start()
+
+    app.router.on_startup.append(_start)
+
+
 def main():
     import buddy_proxy.core.state as _state
 
@@ -731,6 +753,9 @@ def main():
 
     runninghub = RunningHubProvider()
     providers[runninghub.id] = runninghub
+
+    # 版本检测轮询：与 provider 无关（纯本地 git），无条件挂上。
+    _install_release_poll()
 
     if args.trae:
         from buddy_proxy.trae.provider import TraeProvider

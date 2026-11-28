@@ -809,6 +809,34 @@
            background: var(--card2); border: 1px solid var(--line); color: var(--text);
            padding: 9px 18px; border-radius: 10px; font-size: 13px; display: none; z-index: 99; }
   #toast.err { border-color: rgba(255,107,107,.5); color: #ffb3b3; }
+  /* 右下角「有新版本」提示。z-index 高于 #toast(99)，低于弹窗遮罩，
+     避免提示被 toast 盖住、又不至于压在模态框上面。 */
+  .release-toast { position: fixed; right: 22px; bottom: 22px; width: 340px;
+      max-width: calc(100vw - 44px); background: var(--card);
+      border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px;
+      font-size: 13px; color: var(--text); z-index: 98;
+      box-shadow: 0 10px 30px rgba(0,0,0,.45); }
+  [data-theme="light"] .release-toast { box-shadow: 0 10px 30px rgba(0,0,0,.14); }
+  .release-toast .rel-head { display: flex; align-items: center; gap: 8px; }
+  .release-toast .rel-title { font-weight: 600; flex: 1; }
+  .release-toast .rel-close { border: none; background: transparent; color: var(--muted);
+      font-size: 18px; line-height: 1; cursor: pointer; padding: 0 2px; }
+  .release-toast .rel-close:hover { color: var(--text); }
+  .release-toast .rel-cur { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .release-toast .rel-body { margin-top: 8px; }
+  .release-toast .rel-notes { margin: 0; padding-left: 18px; max-height: 190px;
+      overflow-y: auto; }
+  .release-toast .rel-notes li { margin: 3px 0; line-height: 1.45;
+      word-break: break-word; }
+  .release-toast .rel-more { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .release-toast .rel-foot { display: flex; justify-content: flex-end; gap: 8px;
+      margin-top: 10px; }
+  .release-toast .rel-foot button { font-size: 12px; padding: 4px 10px;
+      border-radius: 7px; border: 1px solid var(--line); background: var(--card2);
+      color: var(--text); cursor: pointer; }
+  .release-toast .rel-foot .rel-ok { border-color: transparent;
+      background: var(--accent); color: var(--bg); font-weight: 600; }
+  [data-theme="light"] .release-toast .rel-foot .rel-ok { color: #fff; }
   #cal-tip, #chart-tip { position: fixed; z-index: 60; display: none; pointer-events: none;
              background: var(--card); border: 1px solid var(--line); color: var(--text);
              padding: 8px 11px; border-radius: 8px; font-size: 12px;

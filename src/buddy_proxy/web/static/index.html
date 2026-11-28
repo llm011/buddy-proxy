@@ -265,6 +265,20 @@
   </div>
 </div>
 <div id="toast"></div>
+<!-- 右下角「有新版本」提示：数据来自本机 /ui/api/release（服务端后台 git fetch），
+     浏览器不出网。常驻 DOM、默认隐藏，内容由 release_toast.js 填。 -->
+<div id="release-toast" class="release-toast" style="display:none;">
+  <div class="rel-head">
+    <span class="rel-title">有新版本</span>
+    <button class="rel-close" onclick="releaseMuteCurrent()" title="不再提示这个版本">×</button>
+  </div>
+  <div class="rel-cur"></div>
+  <div class="rel-body"></div>
+  <div class="rel-foot">
+    <button class="rel-mute" onclick="releaseMuteCurrent()">不再提示</button>
+    <button class="rel-ok" onclick="releaseHide()">知道了</button>
+  </div>
+</div>
 <div id="cal-tip"></div>
 <div id="chart-tip"></div>
 <script src="/ui/ui_format.js"></script>
@@ -300,5 +314,8 @@
 <script src="/ui/app_order_rows.js"></script>
 <script src="/ui/app.js"></script>
 <script src="/ui/app_run_test.js"></script>
+<!-- 版本提示放最后：它只读 /ui/api/release，不参与首屏渲染，
+     挂在 app.js 之后可确保 api()/DOM 都已就绪。 -->
+<script src="/ui/release_toast.js"></script>
 </body>
 </html>
