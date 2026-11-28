@@ -1502,6 +1502,40 @@ def _is_session_dead(status: int, detail: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _iter_usable_tool_calls(
+    tool_calls: list[Any], finish_reason: str
+) -> list[dict[str, Any]]:
+    """挑出可以发给客户端的 tool_call，并把 ``index`` 重编号成 0、1、…
+
+    **两条合成路径都必须走这里**，否则修了一条另一条照样漏。
+
+    1. 截断丢弃：被 ``max_tokens`` 截断时上游会把**半截 JSON** 当参数返回
+       （实测 sn-kimi-k3-1-pro：``max_tokens=40/50/55`` 都返回 ``'{"path":"src'``
+       或 ``'{'``）。原样发给客户端，客户端解析失败后看到的就是
+       ``invalid_tool_arguments: must have required property 'pattern'``
+       ——像是代理把参数弄丢了，其实根本没传完。丢掉后只剩
+       ``finish_reason=length``，客户端按「输出被截断」正常重试。
+
+    2. index 重编号：上游实测**会**自己编号（两个调用返回 0/1），这不是在修
+       上游的 bug；但 index 是流式协议里的**聚合键**，客户端按它把增量拼进
+       同一个 tool_call，用枚举序号能保证「发出的 index」与「帧顺序」严格
+       对应，参数不会落到错误的工具上。
+    """
+    usable: list[dict[str, Any]] = []
+    truncated = finish_reason == "length"
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        if truncated:
+            raw = ((tc.get("function") or {}).get("arguments")) or ""
+            try:
+                json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                continue  # 半截参数，整条丢弃
+        usable.append({**tc, "index": len(usable)})
+    return usable
+
+
 async def _synthesize_openai_stream(
     payload: dict[str, Any],
     model: str,
@@ -1555,32 +1589,11 @@ async def _synthesize_openai_stream(
         if content:
             yield _chunk({"content": content})
 
-        # 4. tool_calls
+        # 4. tool_calls（截断丢弃 + index 重编号都在 _iter_usable_tool_calls 里）
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list):
-            # 被 max_tokens 截断时，上游会把**半截 JSON** 当参数返回
-            # （实测 sn-kimi-k3-1-pro：max_tokens=40/50 返回 '{"path":"src'）。
-            # 这种调用必须丢掉：原样发给客户端，客户端解析失败后看到的就是
-            # ``invalid_tool_arguments: must have required property 'pattern'``
-            # ——像是代理把参数弄丢了，其实根本没传完。丢掉后只剩
-            # finish_reason=length，客户端按「输出被截断」正常重试。
-            truncated = finish_reason == "length"
-            for i, tc in enumerate(tool_calls):
-                if truncated:
-                    raw = ((tc.get("function") or {}).get("arguments")) or ""
-                    try:
-                        json.loads(raw)
-                    except (json.JSONDecodeError, TypeError):
-                        continue  # 半截参数，整条丢弃
-                # index 用枚举序号覆盖（先展开 tc 再覆盖，顺序不能反）。
-                #
-                # 上游实测**会**自己编号（两个工具调用返回 0/1），所以这不是在
-                # 修上游的 bug；但 index 是流式协议里的**聚合键**，客户端按它把
-                # 增量拼进同一个 tool_call。客户端（Kimi/DSH）重建请求时编号
-                # 未必与上游一致，用枚举序号能让「发给客户端的 index」与
-                # 「本代理发出的帧顺序」严格对应，避免参数落到错误的工具上。
-                delta_tc = {**tc, "index": i}
-                yield _chunk({"tool_calls": [delta_tc]})
+            for tc in _iter_usable_tool_calls(tool_calls, finish_reason):
+                yield _chunk({"tool_calls": [tc]})
 
         # 5. finish_reason
         yield _chunk({}, fr=finish_reason)
@@ -1669,9 +1682,9 @@ async def _synthesize_anthropic_stream(
             chunks.append(_chunk({"content": content}))
         tool_calls = message.get("tool_calls")
         if isinstance(tool_calls, list):
-            for i, tc in enumerate(tool_calls):
-                # 同 _synthesize_openai_stream：index 用枚举序号覆盖。
-                chunks.append(_chunk({"tool_calls": [{**tc, "index": i}]}))
+            # 与 _synthesize_openai_stream 共用同一份判定：截断丢弃 + index 重编号。
+            for tc in _iter_usable_tool_calls(tool_calls, finish_reason):
+                chunks.append(_chunk({"tool_calls": [tc]}))
         chunks.append(_chunk({}, fr=finish_reason))
         # usage 必须单独成帧喂进去：``AnthropicStreamConverter.feed_chunk`` 是从
         # ``chunk["usage"]`` 里取的（见 anthropic_adapter.py:535），不喂的话

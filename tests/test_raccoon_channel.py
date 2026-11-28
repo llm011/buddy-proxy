@@ -1408,3 +1408,45 @@ def test_tool_index_is_enumeration_order():
     calls = asyncio.run(_run())
     assert [c["index"] for c in calls] == [0, 1], "index 必须重编号成 0、1"
     assert [c["function"]["name"] for c in calls] == ["Grep", "Glob"]
+
+
+def test_both_synthesis_paths_share_tool_call_filtering():
+    """两条合成路径必须共用 _iter_usable_tool_calls。
+
+    review 时发现：第一版只在 OpenAI 合成路径里做了截断丢弃，anthropic
+    合成路径照样把半截参数发出去（实测非流式 max_tokens=55 直接返回
+    ``'{"'``）。这种「修一条漏一条」最容易复发，所以直接锁两条路径的
+    公共入口，并验证行为一致。
+    """
+    import json as _json
+
+    from buddy_proxy.raccoon import provider
+
+    # 半截参数：两条路径都必须丢掉
+    truncated = [{
+        "index": 0, "id": "c1", "type": "function",
+        "function": {"name": "Grep", "arguments": '{"'},
+    }]
+    assert provider._iter_usable_tool_calls(truncated, "length") == []
+
+    # 完整参数：保留并重编号
+    good = [
+        {"index": 7, "id": "a", "type": "function",
+         "function": {"name": "Grep", "arguments": '{"pattern":"x"}'}},
+        {"index": 3, "id": "b", "type": "function",
+         "function": {"name": "Glob", "arguments": '{"pattern":"y"}'}},
+    ]
+    out = provider._iter_usable_tool_calls(good, "tool_calls")
+    assert [c["index"] for c in out] == [0, 1]
+
+    # 非 tool_calls 的元素直接跳过，不能 AttributeError
+    assert provider._iter_usable_tool_calls(["junk", None], "length") == []
+
+    # 源码层面确认两个合成函数都调用了它
+    import inspect
+
+    for fn in (provider._synthesize_openai_stream,
+               provider._synthesize_anthropic_stream):
+        src = inspect.getsource(fn)
+        assert "_iter_usable_tool_calls(" in src, (
+            f"{fn.__name__} 没走公共过滤，截断参数会从这里漏出去")
