@@ -48,6 +48,7 @@ from .observability import _instrument
 from .provider import (
     _default_codebuddy,
     _exc_is_channel_block,
+    _exc_is_channel_unavailable,
     _note_channel_block,
     _target_blocked,
 )
@@ -500,6 +501,15 @@ async def _forward_with_order(
                 # 与 405 同理。不标记的话，被风控挡死的那一档会一直排在首位，
                 # 每个请求都白撞一次（dsh 2026-11-07 事故：02:05 之后每条请求
                 # 都先 400，model_order 里配的另外 5 档一次都没试过）。
+                # 「本通道自己用不了」（qoder 跨区、管理页停用、不在可用时段）：
+                # 换下一个候选**正是解法**。不打冷却——通道没坏，是配置/时机问题，
+                # 冷却只会让它在窗口过后还要多等一轮。
+                if _exc_is_channel_unavailable(exc):
+                    last_exc = exc
+                    last_note = f"HTTP {exc.status_code} channel_unavailable"
+                    diagnostic("model_order_failover", model=key, target=target,
+                               status=exc.status_code, reason="channel_unavailable")
+                    continue
                 if not _exc_is_channel_block(exc):
                     raise  # 确定性错误（参数/模型不存在等）：换谁都没用，原样上抛
                 last_exc = exc
