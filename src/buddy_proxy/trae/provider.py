@@ -61,7 +61,7 @@ from .native_tools import (
     _stream_native_chat_events,
 )
 from .sse import (_parse_sse, _trae_error_text, _wrap_anthropic_stream,
-                  _sse_error_status)
+                  _sse_error_status, _openai_error_type)
 from .text_protocol import _extract_prompt, _looks_like_agent_request
 from .transport import _send_trae_work_chat
 from .text_toolcall import _StreamToolCallSplitter, _parse_tool_calls, _tool_names

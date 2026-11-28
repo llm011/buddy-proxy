@@ -88,6 +88,30 @@ def _trae_error_text(data: dict[str, Any]) -> str:
         text = f"{text} (code: {code})"
     return text
 
+
+def _openai_error_type(status: int) -> str:
+    """HTTP 状态码 → OpenAI 口径的 ``error.type``。
+
+    错误体必须是 ``{"error": {"message", "type"}}``：客户端（Kimi / DSH /
+    OpenAI SDK）靠 ``type`` 分类，靠状态码只能猜。裸字符串 detail 会被序列化
+    成 ``{"detail": "..."}``，Kimi 直接归成 ``provider.auth_error`` 弹重新登录
+    ——而真因往往是「这个模型该账号没权益」这种和登录无关的事。
+    """
+    if status == 401:
+        return "authentication_error"
+    if status == 403:
+        return "permission_error"
+    if status == 429:
+        return "rate_limit_error"
+    if status == 402:
+        return "insufficient_quota"
+    if status in (400, 404, 422):
+        return "invalid_request_error"
+    if status == 504:
+        return "timeout"
+    return "api_error"
+
+
 class _SSEDecoder:
     """增量解码 SSE，允许 UTF-8、行和事件跨任意传输块边界。"""
 
