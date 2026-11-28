@@ -65,3 +65,20 @@ def test_collect_upstream_drops_truncated_when_finish_length():
     assert '_arguments_complete(' in src, (
         "collect_upstream 没有走截断过滤，半截参数会从这里漏给客户端")
     assert 'finish_reason == "length"' in src
+
+
+def test_dsml_fallback_does_not_mask_length():
+    """DSML 兜底不能把 ``finish_reason=length`` 盖成 ``tool_calls``。
+
+    DSML 是从正文里抠出来的工具调用，和「输出被 max_tokens 截断」是两件
+    独立的事。盖成 tool_calls 会让客户端以为这轮输出完整、不去重试，截断的
+    正文就静默丢了——用户看到的是「回答莫名其妙断掉，但没报错」。
+    """
+    import inspect
+
+    from buddy_proxy.codebuddy_provider import pipeline
+
+    src = inspect.getsource(pipeline.collect_upstream)
+    # 覆盖条件里必须显式排除 length
+    assert 'finish_reason != "length"' in src, (
+        "DSML 兜底会盖掉 length，截断信息丢失")

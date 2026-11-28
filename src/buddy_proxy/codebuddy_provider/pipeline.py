@@ -741,7 +741,12 @@ async def collect_upstream(
         tool_calls = [tc for tc in tool_calls if _arguments_complete(tc)]
 
     # 如果检测到 DSML tool_calls，修改 finish_reason
-    if tool_calls and dsml_buffer.should_emit_tool_calls():
+    #
+    # 但**不能盖掉 length**：DSML 是从正文里抠出来的工具调用，和「输出被
+    # max_tokens 截断」是两件独立的事。盖成 tool_calls 会让客户端以为这轮
+    # 输出完整，不去重试——截断的正文就静默丢了。
+    if (tool_calls and dsml_buffer.should_emit_tool_calls()
+            and finish_reason != "length"):
         finish_reason = "tool_calls"
 
     # 【日志】收集完成
