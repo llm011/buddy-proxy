@@ -408,6 +408,7 @@ def test_risk_control_stops_failover_instead_of_trying_next_account(monkeypatch)
     from buddy_proxy.raccoon.provider import RaccoonProvider
 
     cooled: list[str] = []
+    risk_flags: list[bool] = []
     monkeypatch.setattr(failover, "mark_cooldown",
                         lambda aid, **k: cooled.append(aid) or 0.0)
 
@@ -417,8 +418,11 @@ def test_risk_control_stops_failover_instead_of_trying_next_account(monkeypatch)
     _patch_forward_env(monkeypatch, provider, [_acct("a1"), _acct("a2"), _acct("a3")],
                        window=w, client=spy)
     # _patch_forward_env 会把 mark_cooldown 换成 no-op，这里再盖回来
-    monkeypatch.setattr(failover, "mark_cooldown",
-                        lambda aid, **k: cooled.append(aid) or 0.0)
+    def _capture_risk(aid, **kwargs):
+        cooled.append(aid)
+        risk_flags.append(bool(kwargs.get("risk_control")))
+        return 0.0
+    monkeypatch.setattr(failover, "mark_cooldown", _capture_risk)
 
     with pytest.raises(HTTPException) as ei:
         asyncio.run(provider.forward(
@@ -431,6 +435,7 @@ def test_risk_control_stops_failover_instead_of_trying_next_account(monkeypatch)
     assert "200108" in ei.value.detail["error"]["message"]
     # 被风控的号要进冷却，且是整号级（不是模型级）
     assert cooled == ["a1"]
+    assert risk_flags == [True], "200108 必须落成独立风控类别，面板才能正确展示"
     assert ei.value.detail["error"]["retry_after_s"] == int(
         failover._RISK_CONTROL_COOLDOWN_S)
 

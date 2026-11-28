@@ -25,7 +25,8 @@ def test_cooldown_survives_real_process_restart(tmp_path):
 
     old = textwrap.dedent("""
         from buddy_proxy.raccoon import failover
-        failover.mark_cooldown("pu-live", retry_after="1800", reason="账号风控")
+        failover.mark_cooldown("pu-live", retry_after="1800", risk_control=True,
+                               reason="账号风控")
         print("marked", "pu-live" in failover._cooldowns)
     """)
     new = textwrap.dedent("""
@@ -44,6 +45,6 @@ def test_cooldown_survives_real_process_restart(tmp_path):
 
     out_new = subprocess.run([sys.executable, "-c", new], env=env, capture_output=True,
                               text=True, check=True)
-    # int(True) 打印成 1：锁的是「恢复出 >1700s 且类别是 account」
-    assert "restored 1 account" in out_new.stdout, (
+    # int(True) 打印成 1：锁的是「恢复出 >1700s 且类别是 risk_control」
+    assert "restored 1 risk_control" in out_new.stdout, (
         f"新进程启动时没恢复冷却：stdout={out_new.stdout!r} stderr={out_new.stderr[-400:]!r}")

@@ -412,7 +412,7 @@ class RaccoonProvider(BaseProvider):
                     # 每个模型都去撞一次，持续给上游发「异常调用」信号。
                     failover.mark_cooldown(
                         acct.id, retry_after=str(int(failover._RISK_CONTROL_COOLDOWN_S)),
-                        reason=f"账号风控: {detail}")
+                        risk_control=True, reason=f"账号风控: {detail}")
                     await _drain(resp)
                     raise _risk_control_stop(acct.id)
                 elif failover.is_credit_exhausted(resp.status_code, code, detail):
@@ -448,7 +448,7 @@ class RaccoonProvider(BaseProvider):
                                                     gate.error_message):
                     failover.mark_cooldown(
                         acct.id, retry_after=str(int(failover._RISK_CONTROL_COOLDOWN_S)),
-                        reason=f"账号风控: {gate.error_message}")
+                        risk_control=True, reason=f"账号风控: {gate.error_message}")
                     await _drain(gate.resp)
                     raise _risk_control_stop(acct.id)
                 elif failover.is_credit_exhausted(gate.error_code, code,
