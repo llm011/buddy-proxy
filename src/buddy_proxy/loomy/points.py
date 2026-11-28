@@ -344,6 +344,98 @@ class PointsClient:
             )
         return out
 
+    # -- 明细（UI「📜 明细」弹窗用）------------------------------------
+
+    def records_with_total(
+        self, page: int = 1, size: int = 30
+    ) -> tuple[list[dict[str, Any]], int]:
+        """逐笔积分流水（``/api/v1/points/records``），返回 ``(行, 总数)``。
+
+        每笔一次模型调用。字段见 :meth:`records`，这里转成 UI 的通用行形状
+        （与 trae / codebuddy 的 usage-logs 同构，前端一套渲染逻辑复用）。
+
+        ``direction`` 有 ``debit``（扣分）/ ``credit``（发放，如兑换码），两类
+        都要——只显示扣分会让人以为「兑换的 5000 分凭空消失」。
+        """
+        data = self._get(
+            "/api/v1/points/records",
+            {"pageNo": max(1, page), "pageSize": max(1, min(size, 100))},
+        )
+        items = data.get("list")
+        total = _to_int(data.get("total"))
+        rows: list[dict[str, Any]] = []
+        if not isinstance(items, list):
+            return rows, total
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            ts = _to_int(item.get("createdAt"))
+            points = _to_int(item.get("pointsActual"))
+            direction = str(item.get("direction") or "")
+            before = _to_int(item.get("balanceBefore"))
+            after = _to_int(item.get("balanceAfter"))
+            rows.append({
+                # 发放是正向：UI 用正负号区分收支，比多一列「方向」直观
+                "credits": points if direction != "credit" else points,
+                "currency": "credits",
+                "direction": direction,
+                "model": str(item.get("modelName") or ""),
+                "event": str(item.get("description") or ""),
+                "ts": ts or None,
+                "time_raw": "",
+                "balance_before": before,
+                "balance_after": after,
+                "source": str(item.get("consumeSource") or ""),
+                "cycle_date": str(item.get("dailyCycleDate") or ""),
+                "ledger_id": str(item.get("ledgerId") or ""),
+            })
+        return rows, total
+
+    def records_by_purpose(
+        self, page: int = 1, size: int = 30
+    ) -> tuple[list[dict[str, Any]], int]:
+        """按功能分类的消耗汇总（``/api/v2/points/records`` + ``granularity=purpose``）。
+
+        比逐笔流水更适合回答「钱花在哪类调用上」：``chat.message`` /
+        ``image.generate`` 各一行，带 ``ledger_count``（这行聚合了多少笔）。
+
+        注意上游 v2 的 ``total`` 是**聚合后的组数**，不是流水笔数。
+        """
+        data = self._get(
+            "/api/v2/points/records",
+            {
+                "pageNo": max(1, page),
+                "pageSize": max(1, min(size, 100)),
+                "direction": "debit",
+                "granularity": "purpose",
+            },
+        )
+        items = data.get("list")
+        total = _to_int(data.get("total"))
+        rows: list[dict[str, Any]] = []
+        if not isinstance(items, list):
+            return rows, total
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            first = _to_int(item.get("firstCreatedAt"))
+            last = _to_int(item.get("lastCreatedAt"))
+            rows.append({
+                "credits": _to_int(item.get("points")),
+                "currency": "credits",
+                "direction": str(item.get("direction") or "debit"),
+                "event": str(item.get("purpose") or ""),
+                "model": str(item.get("sourceEndpoint") or ""),
+                "ts": last or first or None,
+                "time_raw": "",
+                "ledger_count": _to_int(item.get("ledger_count")),
+                "first_ts": first or None,
+                "last_ts": last or None,
+            })
+        return rows, total
+
     # -- pet-work ------------------------------------------------------
 
     def pet_work_status(self) -> PetWorkStatus:
