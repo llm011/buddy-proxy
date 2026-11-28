@@ -796,20 +796,26 @@ def chat_completion_to_anthropic_message(
     for call in message.get("tool_calls") or []:
         fn = call.get("function") or {}
         raw_args = fn.get("arguments", "{}")
-        try:
-            arguments = json.loads(raw_args)
-        except json.JSONDecodeError:
-            # 参数是**半截 JSON**（上游 max_tokens 截断，finish_reason=length）。
-            #
-            # 原来把原始字符串直接塞进 ``input``，可 Anthropic 协议里 ``input``
-            # 必须是**对象**。客户端拿到 ``"input": "{\"path\":\"src"`` 后解析不出
-            # 任何字段，报的就是「must have required property 'pattern'」——
-            # 看着像代理把参数弄丢了，其实参数本来就没传完（实测
-            # max_tokens=40/50 时上游返回 '{"path":"src'）。
-            #
-            # 给 {} 而不是原字符串：形状合法、客户端按「没传参数」处理并重试；
-            # 真因（被截断）由 stop_reason=length 表达，不该伪装成工具参数错误。
-            arguments = {}
+        if isinstance(raw_args, dict):
+            # 少数兼容实现直接把参数给成对象（OpenAI 规范要求是 JSON 字符串）。
+            # 不能无脑 json.loads：dict 会抛 TypeError（不是 JSONDecodeError），
+            # 一路冒到顶层变成 500。gemini 通道早就这样防御了，这里对齐。
+            arguments = raw_args
+        else:
+            try:
+                arguments = json.loads(raw_args)
+            except (json.JSONDecodeError, TypeError):
+                # 参数是**半截 JSON**（上游 max_tokens 截断，finish_reason=length）。
+                #
+                # 原来把原始字符串直接塞进 ``input``，可 Anthropic 协议里 ``input``
+                # 必须是**对象**。客户端拿到 ``"input": "{\"path\":\"src"`` 后解析不出
+                # 任何字段，报的就是「must have required property 'pattern'」——
+                # 看着像代理把参数弄丢了，其实参数本来就没传完（实测
+                # max_tokens=40/50 时上游返回 '{"path":"src'）。
+                #
+                # 给 {} 而不是原字符串：形状合法、客户端按「没传参数」处理并重试；
+                # 真因（被截断）由 stop_reason=max_tokens 表达，不该伪装成工具参数错误。
+                arguments = {}
         content_blocks.append({
             "type": "tool_use",
             "id": call.get("id", ""),

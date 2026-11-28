@@ -102,3 +102,19 @@ def test_arguments_json_roundtrip_is_not_stringified():
     block = out["content"][0]
     assert not isinstance(block["input"], str)
     assert json.dumps(block["input"], sort_keys=True) == '{"pattern": "foo"}'
+
+
+def test_dict_arguments_are_accepted_not_crashing():
+    """上游把 arguments 给成对象时不能崩。
+
+    OpenAI 规范要求 arguments 是 JSON 字符串，但少数兼容实现直接给对象。
+    json.loads(dict) 抛的是 TypeError（不是 JSONDecodeError），只 catch
+    后者的写法会让它一路冒到顶层变成 500。gemini 通道早就防住了，这里对齐。
+    """
+    out = _convert({"pattern": "foo"})
+    assert out["content"][0]["input"] == {"pattern": "foo"}
+
+
+def test_none_arguments_become_empty_object():
+    out = _convert(None)
+    assert out["content"][0]["input"] == {}
