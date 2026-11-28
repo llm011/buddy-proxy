@@ -64,6 +64,10 @@ class BaseProvider(abc.ABC):
         """返回 provider 健康状态（合并进 /health）。"""
         return {"id": self.id, "name": self.name}
 
+    def has_model_capacity(self, model: str) -> bool:
+        """本地状态是否允许尝试此模型；账号冷却等由通道自行判断。"""
+        return True
+
     def accepts_model(self, model: str, aliases: bool = True) -> bool:
         """客户端传来的 ``model`` 是否属于本通道（用于自动路由）。
 

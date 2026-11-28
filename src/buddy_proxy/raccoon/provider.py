@@ -262,6 +262,14 @@ class RaccoonProvider(BaseProvider):
 
     # ---- 转发主链路 --------------------------------------------------
 
+    def has_model_capacity(self, model: str) -> bool:
+        # 未配置账号仍交给 ensure_auth 报登录提示，不能伪装成暂时冷却。
+        if not failover.list_accounts():
+            return True
+        entry = self._resolve_model(model)
+        upstream_model = str(entry.get("upstream") or entry["id"])
+        return bool(failover.available_accounts(upstream_model))
+
     async def forward(
         self,
         body: dict[str, Any],
