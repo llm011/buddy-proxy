@@ -829,8 +829,18 @@
   .release-toast .rel-notes li { margin: 3px 0; line-height: 1.45;
       word-break: break-word; }
   .release-toast .rel-more { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  /* 更新进度 / 错误。默认不占位，写内容时才 display:block（见 releaseSetStatus） */
+  .release-toast .rel-status { display: none; margin-top: 8px; }
   .release-toast .rel-foot { display: flex; justify-content: flex-end; gap: 8px;
       margin-top: 10px; }
+  /* 更新进行中：占满整行，左侧转圈由 .spin 提供（按钮里也复用同一个） */
+  .release-toast .rel-busy { display: flex; align-items: center; gap: 7px;
+      margin-right: auto; font-size: 12px; color: var(--text); }
+  .release-toast .rel-busy .spin { width: 13px; height: 13px; border-width: 2px; }
+  /* 更新没能启动（多半是工作树脏）：红色的原因块，要能看清给的是哪几个文件 */
+  .release-toast .rel-error { color: var(--err); font-size: 12px;
+      line-height: 1.5; word-break: break-word;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
   .release-toast .rel-foot button { font-size: 12px; padding: 4px 10px;
       border-radius: 7px; border: 1px solid var(--line); background: var(--card2);
       color: var(--text); cursor: pointer; }

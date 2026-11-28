@@ -510,6 +510,13 @@ cmd_cleanup() {
 }
 
 open_ui() {
+    # 由页面「更新」按钮触发时置 1：那条路径的页面自己会 reload，再 open 一个
+    # 新标签页等于凭空多出一屏重复的管理页，还会抢走焦点。见
+    # `core/release.py` 的 `_NO_OPEN_UI_ENV`。
+    if [[ "${BUDDY_NO_OPEN_UI:-}" == "1" ]]; then
+        log "跳过打开管理页（BUDDY_NO_OPEN_UI=1）"
+        return 0
+    fi
     # 「顺手打开管理页」必须完全脱离命令生命周期。2026-11-26 实测 macOS LaunchServices
     # 的 open 已打开页面却几十分钟不退出，前台等待会把 start/restart/update 一起挂住。
     # 三路 fd 都重定向：不仅 shell 不能等它，capture_output / IDE 也不能因管道未关而等 EOF。
