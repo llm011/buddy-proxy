@@ -30,6 +30,7 @@ from buddy_proxy.loomy import credentials as cred
 from buddy_proxy.loomy import points as pts
 from buddy_proxy.loomy.provider import (
     LoomyProvider,
+    _extract_prompt,
     _log_points_usage,
     _raise_for_body,
     _strip_prefix,
@@ -676,3 +677,156 @@ def test_forward_auth_failure_maps_to_401(isolated_home, monkeypatch):
         )
     assert excinfo.value.status_code == 401
     assert "重新登录" in str(excinfo.value.detail)
+
+
+# ---------------------------------------------------------------------------
+# 生图
+# ---------------------------------------------------------------------------
+def test_extract_prompt_from_top_level():
+    assert _extract_prompt({"prompt": "a cat"}) == "a cat"
+    assert _extract_prompt({"prompt": "   "}) == ""
+
+
+def test_extract_prompt_from_last_user_message():
+    body = {
+        "messages": [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": "draw a dog"},
+        ]
+    }
+    assert _extract_prompt(body) == "draw a dog"
+
+
+def test_extract_prompt_from_multimodal_content():
+    body = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "draw "},
+                    {"type": "text", "text": "a bird"},
+                    {"type": "image_url", "image_url": {"url": "http://x/y.png"}},
+                ],
+            }
+        ]
+    }
+    assert _extract_prompt(body) == "draw a bird"
+
+
+def test_image_models_from_catalog(isolated_home):
+    support, _ = isolated_home
+    _write_session(support)
+    provider = LoomyProvider()
+    _patch_catalog(provider)
+    assert provider.image_models() == ["Hy-Image-3.5-preview"]
+
+
+def test_is_image_model(isolated_home):
+    support, _ = isolated_home
+    _write_session(support)
+    provider = LoomyProvider()
+    _patch_catalog(provider)
+    assert provider._is_image_model("Hy-Image-3.5-preview") is True
+    assert provider._is_image_model("GLM-5.3-Flash") is False
+
+
+def test_generate_image_uses_bearer_only(isolated_home, monkeypatch):
+    """生图端点**只认 Bearer**：带 token 头会回「缺少 token」（实测）。
+
+    三个端点三种脾气：chat 两个都收、/models 只认 token、生图只认 Bearer。
+    """
+    support, _ = isolated_home
+    _write_session(support, token="img-token")
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = {k.lower(): v for k, v in request.headers.items()}
+        captured["body"] = json.loads(request.content.decode())
+        captured["url"] = str(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "created": 1795889468,
+                "data": [{"url": "https://example.test/img.png"}],
+                "points_consumed": 110,
+            },
+        )
+
+    provider = LoomyProvider()
+    _patch_catalog(provider)
+    provider._session = cred.load_session()
+    provider._base_url = "https://example.test/api/v1"
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+
+    result = asyncio.run(
+        provider.generate_image("a cat", model="Hy-Image-3.5-preview", size="1024x1024")
+    )
+    assert result["points_consumed"] == 110
+    assert captured["url"].endswith("/images/generations")
+    headers = captured["headers"]
+    assert headers.get("authorization") == "Bearer img-token"
+    # 生图不能带 token 头（与 chat 相反）
+    assert "token" not in headers
+    assert captured["body"]["prompt"] == "a cat"
+    assert captured["body"]["model"] == "Hy-Image-3.5-preview"
+
+
+def test_forward_image_model_wraps_as_chat(isolated_home, monkeypatch):
+    """生图模型走 chat 协议时，结果要包成 chat completion（客户端只认 chat）。"""
+    support, _ = isolated_home
+    _write_session(support)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url).endswith("/images/generations")
+        return httpx.Response(
+            200,
+            json={
+                "created": 1,
+                "data": [{"url": "https://example.test/a.png"}],
+                "points_consumed": 110,
+            },
+        )
+
+    provider = LoomyProvider()
+    _patch_catalog(provider)
+    provider._session = cred.load_session()
+    provider._base_url = "https://example.test/api/v1"
+
+    real_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", fake_client)
+
+    response = asyncio.run(
+        provider.forward(
+            {
+                "model": "loomy/Hy-Image-3.5-preview",
+                "messages": [{"role": "user", "content": "a cat"}],
+            },
+            "openai",
+        )
+    )
+    payload = json.loads(response.body)
+    content = payload["choices"][0]["message"]["content"]
+    assert "https://example.test/a.png" in content
+    assert "110" in content
+    # 积分塞进 usage 才能被 normalize_usage 读成 credit
+    assert payload["usage"]["points_consumed"] == 110
+
+
+def test_image_points_reach_metrics():
+    """生图的 points_consumed 必须能被 metrics 读成 credit。"""
+    from buddy_proxy.core.metrics_protocol import normalize_usage
+
+    assert normalize_usage({"points_consumed": 110})["credit"] == 110.0

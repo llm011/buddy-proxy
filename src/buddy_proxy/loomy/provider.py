@@ -442,6 +442,91 @@ class LoomyProvider(BaseProvider):
             return []
 
     # ------------------------------------------------------------------
+    # 生图 / 视频
+    # ------------------------------------------------------------------
+
+    def image_models(self) -> list[str]:
+        """目录里的生图/视频模型 id（``type == "image"``）。"""
+        try:
+            return [m.id for m in self._ensure_catalog() if m.is_image]
+        except Exception:  # noqa: BLE001
+            return []
+
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        model: str = "",
+        size: str = "2304x1728",
+        n: int = 1,
+        response_format: str = "url",
+        images: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """调上游 ``/images/generations``（文生图 / 图生图）。
+
+        实测（2026-11-29）:
+
+        - **鉴权只认 ``Authorization: Bearer``**。带 ``token`` 头会回
+          ``100002 缺少 token``——与 chat（两个都收）和 ``/models``（只认
+          token）都不同。三个端点三种脾气，别想当然。
+        - **固定 110 积分/张**，与 ``size``（1024x1024 / 2304x1728）无关，
+          与 ``n`` 也无关（传 ``n=2`` 仍只回 1 张、只扣一次）。
+        - 响应是 ``{"created":..., "data":[{"url":"..."}], "points_consumed":110}``，
+          **积分不在 usage 里**，是响应体顶层字段。
+        - ``response_format`` 传 ``url`` 时给的是腾讯云 COS 预签名链接
+          （带 ``q-sign-time``，会过期），不是长期地址。
+        - **模型名不决定后端**：请求 ``doubao-seedream-5-lite`` /
+          ``qwen-image-3.0-pro`` / ``doubao-seedream-5.5`` 三个不同模型，
+          返回的 URL 里都是 ``hy_image_v3_5_preview``，账单也都记成
+          ``Hy-Image-3.5-preview``。也就是当前网关把生图请求统一路由到同一个
+          后端，模型名只是别名。所以**不要**按模型名给用户承诺不同的画质。
+        """
+        if not prompt.strip():
+            raise HTTPException(status_code=400, detail="缺少 prompt")
+        self._require_session()
+
+        payload: dict[str, Any] = {
+            "prompt": prompt,
+            "n": max(1, int(n)),
+            "size": size,
+            "response_format": response_format,
+        }
+        if model:
+            payload["model"] = _strip_prefix(model, self.id)
+        if images:
+            payload["images"] = images
+
+        url = f"{self._base_url.rstrip('/')}/images/generations"
+        # 生图端点的鉴权头：只认 Bearer（见 docstring）
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "loomy-version": creds.client_version(),
+            "Authorization": f"Bearer {self._require_session().token}",
+        }
+        # 生图很慢（实测单张 20~40s，客户端给自己留了 5 分钟），超时单独放宽
+        timeout = httpx.Timeout(connect=20.0, read=300.0, write=60.0, pool=15.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            if response.status_code >= 400:
+                detail = await _read_error(response)
+                raise HTTPException(status_code=response.status_code, detail=detail)
+            try:
+                data = response.json()
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=502, detail=f"Loomy 生图响应不是 JSON：{exc}"
+                ) from exc
+
+        _raise_for_body(data)
+        points = data.get("points_consumed")
+        if points is not None:
+            # 生图的积分在响应体顶层，不在 usage 里；单独记一条，便于和 chat 区分
+            log.info("Loomy 生图 model=%s size=%s n=%s points=%s",
+                     payload.get("model", "-"), size, payload["n"], points)
+        return data
+
+    # ------------------------------------------------------------------
     # 转发
     # ------------------------------------------------------------------
 
@@ -464,6 +549,13 @@ class LoomyProvider(BaseProvider):
         if not model:
             raise HTTPException(status_code=400, detail="缺少 model 字段")
 
+        # 生图/视频模型（type=image）走 ``/images/generations``，再包成 chat 响应。
+        # 项目惯例是**不开** ``/v1/images`` 端点（见 codex/images.py 模块说明）：
+        # 客户端统一用 chat 协议点名模型，网关负责分流。这样 dsh / Claude Code
+        # 这类只会 chat 的客户端也能生图。
+        if self._is_image_model(model):
+            return await self._forward_image(body, model, protocol, original)
+
         # 思考链会吃 max_tokens（见模块说明的坑 1）：调用方没给就兜底给足，
         # 给了就尊重——不要偷偷放大用户的预算，那会改变计费预期。
         if body.get("max_tokens") is None and body.get("max_completion_tokens") is None:
@@ -476,6 +568,116 @@ class LoomyProvider(BaseProvider):
         if stream:
             return await self._forward_stream(url, body, protocol, session)
         return await self._forward_once(url, body, protocol, session)
+
+    def _is_image_model(self, model: str) -> bool:
+        """模型是否属于生图/视频类（目录里 ``type=image``）。
+
+        目录拉不到时返回 ``False``——退化成按 chat 转发，让上游自己去报错，
+        比在这里拦下来给一个「不知道」的错误更有用。
+        """
+        try:
+            for m in self._ensure_catalog():
+                if m.id == model:
+                    return m.is_image
+        except Exception:  # noqa: BLE001
+            return False
+        return False
+
+    async def _forward_image(
+        self,
+        body: dict[str, Any],
+        model: str,
+        protocol: str,
+        original: dict[str, Any] | None,
+    ) -> StreamingResponse | JSONResponse:
+        """生图模型：调 ``/images/generations``，把结果包成 chat / Anthropic 响应。
+
+        为什么包成 chat：客户端（dsh / Claude Code / Codex）只会说 chat 协议。
+        图片是一次性产物，流式与否都只在**最后一帧**给完整 markdown 图片链接，
+        避免客户端以为卡死（与 codex 通道同口径）。
+        """
+        prompt = _extract_prompt(body)
+        if not prompt:
+            raise HTTPException(
+                status_code=400,
+                detail="生图请求缺少 prompt（放在 messages 的用户文本里）",
+            )
+
+        result = await self.generate_image(
+            prompt,
+            model=model,
+            size=str(body.get("size") or "2304x1728"),
+            n=int(body.get("n") or 1),
+            response_format="url",
+        )
+        images = result.get("data") or []
+        urls = [
+            str(item.get("url") or "").strip()
+            for item in images
+            if isinstance(item, dict) and str(item.get("url") or "").strip()
+        ]
+        if not urls:
+            raise HTTPException(status_code=502, detail="Loomy 生图未返回任何图片")
+
+        # markdown 图片语法：终端/桌面客户端都能直接渲染
+        text = "\n\n".join(f"![generated]({url})" for url in urls)
+        points = result.get("points_consumed")
+        if points is not None:
+            text += f"\n\n（本次消耗 {points} 积分）"
+
+        payload = {
+            "id": f"loomy-img-{int(time.time() * 1000)}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": text},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+                # 生图的积分在响应体顶层，塞进 usage 才能被 normalize_usage 读到
+                "points_consumed": points if points is not None else 0,
+            },
+        }
+
+        if protocol == "anthropic":
+            return JSONResponse(chat_completion_to_anthropic_message(payload, original))
+
+        if bool(body.get("stream")):
+            # 流式：先发 role 帧再发整图，客户端不会以为卡死
+            async def frames() -> AsyncIterator[bytes]:
+                first = {
+                    "id": payload["id"],
+                    "object": "chat.completion.chunk",
+                    "created": payload["created"],
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+                }
+                yield f"data: {json.dumps(first, ensure_ascii=False)}\n\n".encode()
+                last = {
+                    "id": payload["id"],
+                    "object": "chat.completion.chunk",
+                    "created": payload["created"],
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": "stop"}],
+                    "usage": payload["usage"],
+                }
+                yield f"data: {json.dumps(last, ensure_ascii=False)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+
+            return StreamingResponse(
+                frames(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+
+        return JSONResponse(payload)
 
     async def _post(
         self,
@@ -596,6 +798,41 @@ class LoomyProvider(BaseProvider):
 # ----------------------------------------------------------------------
 # 辅助函数
 # ----------------------------------------------------------------------
+
+
+def _extract_prompt(body: dict[str, Any]) -> str:
+    """从 chat / responses 请求体里抽出要画的 prompt。
+
+    - 不含对话消息时认顶层 ``prompt`` 字段（OpenAI images 语义）
+    - 否则取最后一条 user 消息的文本（多模态 content 只拼 text 部分）
+
+    与 ``codex/images.extract_prompt`` 同口径，但这里不 import 它——两个通道
+    互不依赖，生图分流逻辑各自独立演化，复制这 20 行比制造耦合划算。
+    """
+    if not body.get("messages") and not body.get("input"):
+        direct = body.get("prompt")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+
+    messages = body.get("messages")
+    if isinstance(messages, list):
+        for msg in reversed(messages):
+            if not isinstance(msg, dict) or str(msg.get("role")) != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                if content.strip():
+                    return content.strip()
+            elif isinstance(content, list):
+                parts = [
+                    str(p.get("text") or "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") in ("text", "input_text")
+                ]
+                text = "".join(parts).strip()
+                if text:
+                    return text
+    return ""
 
 
 def _strip_prefix(model: str, provider_id: str) -> str:

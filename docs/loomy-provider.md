@@ -106,10 +106,10 @@ Windows: %APPDATA%/loomy/auth-session.json
 | `Hy4-Flash` | Hy4 Flash | x0.5 | 1,000,000 |
 | `GLM-5.3-Flash` | GLM 5.3 Flash | x0.8 | 1,048,576 |
 | `qwen3.8-flash` | qwen 3.8 flash | x0.8 | 1,000,000 |
-| `Hy-Image-3.5-preview` | Hy image 3.5 preview | — | image |
-| `doubao-seedream-5-lite/5.5` | Doubao seedream | — | image |
-| `qwen-image-3.0-pro` | qwen image 3.0 pro | — | image |
-| `seedance-2-0-fast/2-0/2-5` | Seedance | — | video |
+| `Hy-Image-3.5-preview` | Hy image 3.5 preview | — | image（110 分/张） |
+| `doubao-seedream-5-lite/5.5` | Doubao seedream | — | image（路由到 Hy-Image） |
+| `qwen-image-3.0-pro` | qwen image 3.0 pro | — | image（路由到 Hy-Image） |
+| `seedance-2-0-fast/2-0/2-5` | Seedance | — | ⚠️ 未开放（404） |
 | `auto` | 自动 | — | 服务端选（实测选了 Hy4-Flash） |
 
 ### 倍率只能从显示名里正则抽
@@ -131,9 +131,58 @@ Windows: %APPDATA%/loomy/auth-session.json
 ```
 
 实测规律：**单次最低扣 1 分**，与 prompt 长度基本无关（20 → 2013 prompt
-token 都是 1 分）。
+token 都是 1 分）。长回答会涨到 2/7/8 分（思考链越长越贵）。
 
-余额与账单：
+### 生图：固定 110 积分/张
+
+```
+POST {origin}/api/v1/images/generations
+body   {"model":"...","prompt":"...","n":1,"size":"2304x1728","response_format":"url"}
+resp   {"created":1795889468,"data":[{"url":"https://...png?q-sign-time=..."}],
+        "points_consumed":110}
+```
+
+实测标定（2026-11-29，9 次调用全部一致）：
+
+| 变量 | 取值 | 扣分 |
+|---|---|---|
+| size | `1024x1024` / `2304x1728` | 110 / 110 |
+| n | `1` / `2` | 110 / 110（且 `n=2` 仍只回 1 张） |
+
+也就是**与尺寸、张数都无关，固定 110 分**。单张耗时 20–40s。
+
+三个必须记住的点：
+
+1. **鉴权只认 `Authorization: Bearer`**。带 `token` 头回
+   `100002 缺少 token`——与 chat（两个都收）、`/models`（只认 token）
+   都不同。**三个端点三种脾气**。
+2. **积分在响应体顶层，不在 `usage` 里**。`normalize_usage` 靠
+   `_credit_field` 的键名列表读，所以包装成 chat 响应时要把它塞进 `usage`。
+3. **模型名不决定后端**。请求 `doubao-seedream-5-lite` /
+   `qwen-image-3.0-pro` / `doubao-seedream-5.5` 三个不同模型，返回 URL 里
+   全是 `hy_image_v3_5_preview`，账单也都记成 `Hy-Image-3.5-preview`。
+   当前网关把生图请求统一路由到同一个后端，模型名只是别名——**不要按模型名
+   给用户承诺不同画质**。
+
+`response_format: "url"` 给的是腾讯云 COS **预签名链接**（带 `q-sign-time`，
+会过期），不是长期地址。需要长期保存得自己下载。
+
+### 视频（seedance）：网关未开放
+
+目录里 `seedance-2-0-fast` / `seedance-2-0` / `seedance-2-5` 三个模型
+`type` 都是 `chat`（不是 `image`），但调 chat 端点全部回：
+
+```json
+{"error":{"message":"该模型暂未开放，请切换其他模型","code":404}}
+```
+
+试过 `videos/generations` / `video/generations` / `videos` /
+`video-generation/generations` 四个端点，全是 `404 page not found`；客户端
+打包代码里也搜不到 `seedance` 字样（只有 image 生成服务，没有 video 服务）。
+结论：**这些模型目前只在目录里挂名，实际不可用**，本通道按「上游会回 404」
+透传，不做特殊处理。
+
+### 余额与账单
 
 ```
 GET {origin}/api/v1/points/balance
