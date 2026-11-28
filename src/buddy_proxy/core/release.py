@@ -377,8 +377,15 @@ def start_update() -> tuple[bool, int, dict[str, Any]]:
 
     # 脏工作树一律不更新：`git pull --ff-only` 要么失败、要么把别人的在途改动
     # 搅进半截状态。这个仓库主工作区经常有人同时在改，静默覆盖是数据丢失。
+    #
+    # **只拦已跟踪文件的改动**（``--untracked-files=no``）。未跟踪文件不影响
+    # ``pull --ff-only``：只要远端没新增同名文件，它压根不参与合并；真撞名了
+    # git 自己会拒绝并给出可读的报错，我们照样能把原文带回去。反过来把 ``??``
+    # 也算脏，代价很大——这个仓库常年挂着几个未跟踪的 scratch 目录（实测
+    # ``src/buddy_proxy/inkstone/`` 就在），按钮会一直 409，用户得先处理掉
+    # 一堆与更新无关的文件才能用。
     try:
-        dirty = _run_git("status", "--porcelain").strip()
+        dirty = _run_git("status", "--porcelain", "--untracked-files=no").strip()
     except RuntimeError as exc:
         return False, 409, {"message": f"无法检查工作树状态: {exc}"}
     if dirty:

@@ -829,6 +829,8 @@
   .release-toast .rel-notes li { margin: 3px 0; line-height: 1.45;
       word-break: break-word; }
   .release-toast .rel-more { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  /* 更新进度 / 错误。默认不占位，写内容时才 display:block（见 releaseSetStatus） */
+  .release-toast .rel-status { display: none; margin-top: 8px; }
   .release-toast .rel-foot { display: flex; justify-content: flex-end; gap: 8px;
       margin-top: 10px; }
   /* 更新进行中：占满整行，左侧转圈由 .spin 提供（按钮里也复用同一个） */

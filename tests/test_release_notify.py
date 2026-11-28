@@ -474,3 +474,79 @@ def test_update_endpoint_status_codes(monkeypatch):
     # 立刻再来 → 429
     r = client.post("/ui/api/release/update")
     assert r.status_code == 429
+
+
+def test_dirty_check_ignores_untracked_files(monkeypatch, tmp_path):
+    """脏树判定必须排除未跟踪文件（``??``）。
+
+    ``git pull --ff-only`` 不会被未跟踪文件挡住（除非远端新增同名文件，那时
+    git 自己会拒绝并把原因写清楚）。把它们也算脏的代价是这个仓库常年挂着
+    未跟踪的 scratch 目录，按钮会永远 409。这条锁住 ``--untracked-files=no``，
+    改回去当场红。
+    """
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "buddy").write_text("#!/bin/bash\n", encoding="utf-8")
+    monkeypatch.setattr(rel, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(rel, "_update_started_at", 0.0)
+
+    seen = []
+
+    def fake_git(*args):
+        seen.append(args)
+        return ""
+
+    monkeypatch.setattr(rel, "_run_git", fake_git)
+
+    class _P:
+        pid = 7
+
+    monkeypatch.setattr(rel.subprocess, "Popen", lambda argv, **kw: _P())
+    rel.start_update()
+
+    status_calls = [a for a in seen if a and a[0] == "status"]
+    assert status_calls, "没检查工作树状态就拉起更新了"
+    assert any("--untracked-files=no" in a for a in status_calls), (
+        "脏树判定又把未跟踪文件算进去了——这个仓库常年有 ?? 目录，按钮会一直 409")
+
+
+def test_update_status_does_not_replace_foot_buttons():
+    """更新进度必须写进独立的 `.rel-status`，不能替换 `.rel-foot`。
+
+    `.rel-foot` 里装着「不再提示 / 更新」两个按钮。早先的实现直接
+    `foot.innerHTML = ...`，按钮当场从 DOM 消失——超时后想恢复按钮都找不到
+    它，加上 `if (RELEASE_UPDATING) return;` 就变成按钮永久失效、只能手动
+    刷新页面。
+    """
+    assert 'class="rel-status"' in HTML
+    assert "releaseSetStatus" in JS
+    # 状态函数只能动 .rel-status
+    fn_at = JS.index("function releaseSetStatus")
+    body = JS[fn_at:JS.index("\n}", fn_at)]
+    assert ".rel-status" in body
+    assert "rel-foot" not in body, "又在改 .rel-foot 了，按钮会被一起干掉"
+
+
+def test_update_timeout_restores_button():
+    """超时必须把按钮恢复可用，否则用户没有重试入口。"""
+    fn_at = JS.index("async function releaseWaitForRestart")
+    body = JS[fn_at:JS.index("\nfunction releaseMuteCurrent", fn_at)]
+    assert "RELEASE_UPDATING = false" in body, "超时后标志位没复位，按钮永久失效"
+    assert "disabled = false" in body, "超时后按钮还禁用着"
+    assert "重试" in body, "超时后没有给重试入口"
+
+
+def test_update_polling_never_forces_git_fetch():
+    """轮询里不能带 `refresh=1`。
+
+    那会让服务端同步跑 `git fetch`（本机实测 4 秒左右），而这个接口是在
+    `async def` 里直接调 subprocess——4 秒内整个事件循环被占住。轮询间隔
+    1.5 秒比 fetch 还短，等于每轮都在堵，代理自己的请求也会跟着卡。
+    """
+    fn_at = JS.index("async function releaseWaitForRestart")
+    body = JS[fn_at:JS.index("\nfunction releaseMuteCurrent", fn_at)]
+    # 只看真的 `api(...)` 调用：注释里解释「为什么不能加 refresh=1」是正常的，
+    # 直接 grep 全文会误伤自己写的说明。
+    calls = re.findall(r"api\('([^']+)'", body)
+    assert calls, "轮询里一个接口都没调？"
+    assert not any("refresh=1" in c for c in calls), (
+        f"轮询里又强制 fetch 了（{calls}），会阻塞事件循环")

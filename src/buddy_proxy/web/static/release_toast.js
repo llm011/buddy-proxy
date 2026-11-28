@@ -117,14 +117,27 @@ const RELEASE_UPDATE_TIMEOUT_MS = 180000;
 let RELEASE_UPDATING = false;
 // 点「更新」那一刻服务的 uptime（秒）。新进程从 0 起算，用它判断重启是否落地。
 let RELEASE_UPTIME_BEFORE = Infinity;
+// 后端 202 里回的更新日志路径，超时时指给用户看，比让他自己找终端有用。
+let RELEASE_LOG = '';
 
+// 更新过程中的状态/错误统一写进 .rel-status 这一行。
+//
+// **不能**去改 .rel-foot 的 innerHTML：那里装着「不再提示 / 更新」两个按钮，
+// 一旦被替换成状态文字，按钮就从 DOM 里消失——超时后想恢复按钮都找不到它，
+// `if (RELEASE_UPDATING) return;` 于是让按钮永久失效，用户只能手动刷新页面。
+function releaseSetStatus(html) {
+  const el = document.querySelector('#release-toast .rel-status');
+  if (!el) return;
+  if (!html) { el.innerHTML = ''; el.style.display = 'none'; return; }
+  el.style.display = 'block';
+  el.innerHTML = html;
+}
+
+// 纯文本版（带一行小字说明）
 function releaseSetFoot(text, note) {
-  const foot = document.querySelector('#release-toast .rel-foot');
-  if (!foot) return;
-  if (!foot.dataset.orig) foot.dataset.orig = foot.innerHTML;
-  if (!text) { foot.innerHTML = foot.dataset.orig; return; }
-  foot.innerHTML = '<div class="rel-busy">' + releaseEsc(text) +
-    (note ? '<div class="rel-more">' + releaseEsc(note) + '</div>' : '') + '</div>';
+  if (!text) { releaseSetStatus(''); return; }
+  releaseSetStatus('<div class="rel-busy">' + releaseEsc(text) +
+    (note ? '<div class="rel-more">' + releaseEsc(note) + '</div>' : '') + '</div>');
 }
 
 async function releaseRunUpdate(btn) {
@@ -143,16 +156,15 @@ async function releaseRunUpdate(btn) {
   try {
     const r = await api('/ui/api/release/update', { method: 'POST' });
     started = !!(r && r.started);
+    RELEASE_LOG = (r && r.log) || '';
     releaseSetFoot('正在更新，完成后页面会自动刷新…', 'git pull → uv sync → 重启');
   } catch (e) {
     // 409 = 工作树脏。后端把 `git status --short` 原文带回来了，原样展示，
     // 用户才知道该处理哪几个文件（这条信息比「更新失败」有用得多）。
-    releaseSetFoot('', null);
+    releaseSetStatus('<div class="rel-error">更新未开始：<br>' +
+      releaseEsc(e.message).replace(/\n/g, '<br>') + '</div>');
     if (btn && btn.isConnected) { btn.disabled = false; btn.textContent = old; }
     RELEASE_UPDATING = false;
-    const box = document.querySelector('#release-toast .rel-body');
-    if (box) box.innerHTML = '<div class="rel-error">更新未开始：<br>' +
-      releaseEsc(e.message).replace(/\n/g, '<br>') + '</div>';
     return;
   }
   if (!started) { RELEASE_UPDATING = false; return; }
@@ -189,12 +201,32 @@ async function releaseWaitForRestart() {
         return;
       }
     } else {
+      // 这里**不能**加 `?refresh=1`：那会让服务端同步跑 `git fetch`
+      // （实测 4 秒左右，且是在 async 端点里直接调 subprocess，整个事件
+      // 循环都被占住）。我们 1.5 秒轮询一次，比 fetch 本身还快，等于每轮
+      // 都在堵。只读缓存的版本 0.29 秒就回，判断 current 变没变够用了。
       let data = null;
-      try { data = await api('/ui/api/release?refresh=1'); } catch (e) { continue; }
-      if (data && !data.has_update) { location.reload(); return; }
+      try { data = await api('/ui/api/release'); } catch (e) { continue; }
+      if (data && (!data.has_update ||
+          (RELEASE_CURRENT_VERSION && data.current &&
+           data.current !== RELEASE_CURRENT_VERSION))) {
+        location.reload();
+        return;
+      }
     }
   }
-  releaseSetFoot('更新可能仍在进行', '刷新页面查看，或到终端跑 buddy update');
+  // 超时不一定等于失败（uv sync 装依赖可能很慢），但**必须**把按钮恢复，
+  // 否则 `if (RELEASE_UPDATING) return;` 会让「更新」此后彻底点不动，
+  // 用户只能手动刷新页面。真失败了也要能重试。
+  RELEASE_UPDATING = false;
+  const btn = document.querySelector('#release-toast .rel-ok');
+  if (btn && btn.isConnected) {
+    btn.disabled = false;
+    btn.textContent = '重试';
+  }
+  releaseSetFoot('更新可能仍在进行', RELEASE_LOG
+    ? ('详情见 ' + RELEASE_LOG + '，或到终端跑 buddy update')
+    : '刷新页面查看，或到终端跑 buddy update');
 }
 
 function releaseMuteCurrent() {
