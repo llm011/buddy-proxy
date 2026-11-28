@@ -222,12 +222,36 @@ def test_refresh_after_interval_rechecks(monkeypatch):
 # ---------------------------------------------------------------------------
 # 前端契约
 # ---------------------------------------------------------------------------
-def test_update_button_reloads_page():
-    """更新只刷新页面，由已运行的服务决定是否已拉取新版本。"""
-    assert 'onclick="location.reload()">更新</button>' in HTML
+def test_update_button_calls_real_update():
+    """「更新」必须真的更新，而不是只刷新浏览器。
+
+    以前的实现是 ``onclick="location.reload()"``——刷新后服务端代码没变，
+    ``/ui/api/release`` 依然报「有新版」，弹窗又出现，用户看到的就是
+    「点了更新，弹窗还在」。所以这里锁住：按钮调的是会发 POST 的那个函数。
+    """
+    assert 'onclick="releaseRunUpdate(this)">更新</button>' in HTML
+    assert 'onclick="location.reload()">更新</button>' not in HTML, (
+        "按钮退回成只刷新页面了——那样服务端代码不会变，弹窗必然重现")
+    assert "/ui/api/release/update" in JS
+    assert "location.reload()" in JS, "更新完成后仍应自动刷新页面"
     assert "知道了" not in HTML
     assert "releaseDismissCurrent" not in JS
     assert "RELEASE_DISMISS_KEY" not in JS
+
+
+def test_update_polls_until_version_catches_up():
+    """点更新后要轮询等版本追平，不能固定 sleep 一下就 reload。
+
+    更新是 git pull + uv sync + 重启，耗时不定；固定等待要么白等、要么在
+    服务还没起来时就刷新，页面直接打不开。
+    """
+    assert "releaseWaitForRestart" in JS
+    # 重启期间连不上是预期的，必须 continue 而不是放弃
+    m = re.search(r"catch\s*\(\s*e\s*\)\s*\{\s*//[^\n]*\n\s*continue;", JS)
+    assert m, "重启期间请求失败就把轮询中止了——那永远等不到新版本"
+    assert "RELEASE_UPDATE_TIMEOUT_MS" in JS
+    # 用版本号变化判断，而不是只看 has_update
+    assert "RELEASE_CURRENT_VERSION" in JS
 
 
 def test_workflow_retries_push_after_concurrent_merge():
@@ -319,3 +343,134 @@ def test_release_notes_step_survives_pipe_truncation():
     # 只看真正执行的那一行（注释里会提到 head -40 作为反面例子）
     assert "| sed -n '1,40p' |" in WORKFLOW
     assert not re.search(r"^\s*\|\s*head -40", WORKFLOW, re.MULTILINE)
+
+
+# ---------------------------------------------------------------------------
+# 一键更新（POST /ui/api/release/update）
+#
+# 这条链的关键不是「能不能更新」，而是「什么时候必须拒绝更新」。这个仓库的
+# 主工作区经常有别人在途的改动，脏工作树上做 pull 是数据丢失级别的事故。
+# ---------------------------------------------------------------------------
+def test_start_update_refuses_dirty_tree(monkeypatch):
+    """工作树脏必须拒绝，并把 git status 原文回给页面。
+
+    只说「更新失败」等于让用户自己猜哪几个文件挡着；把
+    ``git status --short`` 带回去，用户才知道该提交还是 stash。
+    """
+    monkeypatch.setattr(rel, "_run_git",
+                        lambda *a: " M README.md\n?? scratch.py\n")
+    ok, status, payload = rel.start_update()
+    assert ok is False
+    assert status == 409
+    assert "README.md" in payload["message"]
+    assert "scratch.py" in payload["message"]
+
+
+def test_start_update_refuses_non_git_dir(monkeypatch, tmp_path):
+    """不是 git 仓库时给明确原因，不是 500。"""
+    monkeypatch.setattr(rel, "_REPO_ROOT", tmp_path)
+    ok, status, payload = rel.start_update()
+    assert ok is False
+    assert status == 409
+    assert "git" in payload["message"].lower()
+
+
+def test_start_update_spawns_detached_process(monkeypatch, tmp_path):
+    """更新进程必须脱离当前进程组。
+
+    更新的最后一步会重启服务——也就 ``kill`` 掉调用它的这个进程。留在同一
+    进程组里会被一起带走，更新做到一半就断。``start_new_session=True`` 是
+    这条成立的前提，所以直接锁住它。
+    """
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "buddy").write_text("#!/bin/bash\n", encoding="utf-8")
+    monkeypatch.setattr(rel, "_REPO_ROOT", tmp_path)
+    monkeypatch.setattr(rel, "_run_git", lambda *a: "")
+
+    captured = {}
+
+    class FakeProc:
+        pid = 4242
+
+    def fake_popen(argv, **kwargs):
+        captured["argv"] = argv
+        captured.update(kwargs)
+        return FakeProc()
+
+    monkeypatch.setattr(rel.subprocess, "Popen", fake_popen)
+    ok, status, payload = rel.start_update()
+    assert ok is True and status == 202
+    assert captured["start_new_session"] is True, (
+        "没脱离进程组，重启会把更新进程一起杀掉")
+    assert captured["cwd"] == str(tmp_path)
+    # 传了 BUDDY_NO_OPEN_UI=1 —— 页面自己会刷新，不该再开新标签页
+    assert captured["env"].get("BUDDY_NO_OPEN_UI") == "1"
+
+
+def test_start_update_passes_no_open_ui_flag():
+    """``BUDDY_NO_OPEN_UI`` 的名字要和 ``buddy`` 脚本里认的一致。
+
+    两边对不上时没有任何报错，只是更新完又弹一个新标签页——静默的回归，
+    只能靠测试锁。
+    """
+    script = (pathlib.Path(__file__).resolve().parents[1] / "buddy").read_text(
+        encoding="utf-8")
+    assert rel._NO_OPEN_UI_ENV == "BUDDY_NO_OPEN_UI"
+    assert 'BUDDY_NO_OPEN_UI:-' in script, "buddy 脚本没认这个开关"
+    # 开关要在真的调 opener 之前就返回
+    fn_at = script.index("open_ui() {")
+    guard_at = script.index("BUDDY_NO_OPEN_UI:-", fn_at)
+    open_at = script.index('"$opener" "$URL"', fn_at) if '"$opener" "$URL"' in script else -1
+    assert open_at == -1 or guard_at < open_at, "开关写在打开页面之后，等于没拦"
+
+
+def test_start_update_blocks_double_trigger(monkeypatch):
+    """冷却窗口内第二次请求必须被挡住。
+
+    前端会禁用按钮，但**多开一个标签页**或直接 curl 挡不住。两个
+    ``buddy update`` 并发跑会同时 ``uv sync``，可能写坏 venv——服务直接起不来。
+    """
+    monkeypatch.setattr(rel, "_update_started_at", 0.0)
+    monkeypatch.setattr(rel, "_run_git", lambda *a: "")
+    monkeypatch.setattr(rel, "_update_started_at", rel.time.time())
+    ok, status, payload = rel.start_update()
+    assert ok is False
+    assert status == 429
+    assert "秒后再试" in payload["message"]
+
+
+def test_update_endpoint_status_codes(monkeypatch):
+    """接口层状态码契约：202 已拉起 / 409 拒绝 / 429 重复。
+
+    直接测 ``start_update()`` 不够——``release_api`` 把它包成 HTTPException
+    时很容易把 202 写成 200（默认值），页面拿到 200 也照跑，但「已启动」
+    与「已完成」就分不清了。
+    """
+    from fastapi.testclient import TestClient
+
+    import buddy_proxy.web.ui.release_api  # noqa: F401 - 注册路由
+    from buddy_proxy.core.state import app
+
+    client = TestClient(app, client=("127.0.0.1", 51234))
+
+    # 脏树 → 409，且原因原文回给页面
+    monkeypatch.setattr(rel, "_run_git", lambda *a: " M a.py\n")
+    monkeypatch.setattr(rel, "_update_started_at", 0.0)
+    r = client.post("/ui/api/release/update")
+    assert r.status_code == 409
+    assert "a.py" in r.json()["detail"]["error"]["message"]
+
+    # 干净树 → 202
+    monkeypatch.setattr(rel, "_run_git", lambda *a: "")
+
+    class _P:
+        pid = 4321
+
+    monkeypatch.setattr(rel.subprocess, "Popen", lambda argv, **kw: _P())
+    r = client.post("/ui/api/release/update")
+    assert r.status_code == 202
+    assert r.json()["started"] is True
+
+    # 立刻再来 → 429
+    r = client.post("/ui/api/release/update")
+    assert r.status_code == 429

@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 import re
 import subprocess
@@ -330,6 +331,109 @@ def _load_disk_cache() -> None:
         with _lock:
             _cache = data
             _last_at = 0.0  # 视为过期，首次请求会重新检测
+
+
+#: 由页面触发更新时传给 ``buddy update`` 的环境变量。
+#:
+#: 更新完页面会自己 reload（用户明确要求「更新完刷新页面」），再让 CLI 去
+#: ``open`` 一个新标签页只会多出一屏重复的管理页——还会在用户眼前抢焦点。
+#: ``buddy`` 的 ``open_ui`` 认这个键，置 1 就整个跳过。
+_NO_OPEN_UI_ENV = "BUDDY_NO_OPEN_UI"
+
+
+def _update_log_file() -> pathlib.Path:
+    return paths.state_file("update.log")
+
+
+#: 上次成功拉起更新的时刻（``time.time()``）。用来挡住重复触发。
+_update_started_at = 0.0
+
+#: 重复触发的冷却窗口。一次更新 = pull + uv sync + 重启，通常十几秒到一分钟；
+#: 窗口内再来一次只会拉出第二个 ``buddy update`` 与第一个抢同一棵树，
+#: 两个 ``uv sync`` 并发甚至可能写坏 venv。前端会禁用按钮，但**多标签页**
+#: 或直接 curl 挡不住，所以判定必须在服务端。
+_UPDATE_COOLDOWN_S = 120.0
+
+
+def start_update() -> tuple[bool, int, dict[str, Any]]:
+    """拉起一次真实更新，**立刻返回**（不等待更新完成）。
+
+    返回 ``(ok, http_status, payload)``：``ok=False`` 时页面按 ``http_status``
+    报错，``payload["message"]`` 是给人看的原因。
+
+    为什么这样拆：更新走到最后要重启服务，也就是 ``kill`` 掉调用它的这个进程。
+    在这里同步等结果必然拿不到响应。所以 ``buddy update`` 用**独立会话**
+    （``start_new_session=True``）拉起——它不在我们的进程组里，重启时
+    ``pkill -f "buddy_proxy --host ..."`` 和 ``kill <pid>`` 都碰不到它，
+    更新能一路走完。页面靠轮询 ``/ui/api/release`` 判断什么时候起来。
+    """
+    if not (_REPO_ROOT / ".git").exists():
+        return False, 409, {
+            "message": f"{_REPO_ROOT} 不是 git 仓库，无法自动更新"}
+
+    script = _REPO_ROOT / "buddy"
+    if not script.exists():
+        return False, 409, {"message": f"找不到更新脚本 {script}"}
+
+    # 脏工作树一律不更新：`git pull --ff-only` 要么失败、要么把别人的在途改动
+    # 搅进半截状态。这个仓库主工作区经常有人同时在改，静默覆盖是数据丢失。
+    try:
+        dirty = _run_git("status", "--porcelain").strip()
+    except RuntimeError as exc:
+        return False, 409, {"message": f"无法检查工作树状态: {exc}"}
+    if dirty:
+        lines = dirty.splitlines()
+        shown = "\n".join(lines[:10])
+        more = f"\n…另有 {len(lines) - 10} 项" if len(lines) > 10 else ""
+        return False, 409, {
+            "message": "工作树有未提交改动，已中止更新（避免覆盖它们）：\n"
+                       f"{shown}{more}\n请先提交或 stash 后再试。"}
+
+    global _update_started_at
+    now = time.time()
+    if now - _update_started_at < _UPDATE_COOLDOWN_S:
+        left = int(_UPDATE_COOLDOWN_S - (now - _update_started_at))
+        return False, 429, {
+            "message": f"上一次更新还在进行中（或刚刚结束），请 {left} 秒后再试"}
+
+    log_path = _update_log_file()
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_fh = open(log_path, "w", encoding="utf-8")  # noqa: SIM115 - 交给子进程持有
+    except OSError as exc:
+        return False, 500, {"message": f"无法写更新日志 {log_path}: {exc}"}
+
+    env = {**os.environ, _NO_OPEN_UI_ENV: "1"}
+    try:
+        # 用 bash 显式解释：脚本本身有 shebang，但 PATH 里没有 `buddy` 时
+        # 相对路径调用会 ENOENT。显式给解释器更稳。
+        proc = subprocess.Popen(  # noqa: S603 - 固定脚本路径，无用户输入
+            ["bash", str(script), "update"],
+            cwd=str(_REPO_ROOT),
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,   # 脱离本进程组，重启杀不到它
+        )
+    except OSError as exc:
+        log_fh.close()
+        return False, 500, {"message": f"启动更新进程失败: {type(exc).__name__}: {exc}"}
+    finally:
+        # 子进程已继承 fd，父侧关掉不会影响它写日志
+        try:
+            log_fh.close()
+        except OSError:
+            pass
+
+    _update_started_at = now
+    _log.info("已拉起更新进程 pid=%s，日志 %s", proc.pid, log_path)
+    return True, 202, {
+        "started": True,
+        "pid": proc.pid,
+        "log": str(log_path),
+        "message": "正在更新，完成后页面会自动刷新",
+    }
 
 
 def poll_forever() -> None:
