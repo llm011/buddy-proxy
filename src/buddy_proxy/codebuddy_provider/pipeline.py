@@ -606,6 +606,27 @@ async def stream_upstream(
                             upstream_done=done_seen)
 
 
+def _arguments_complete(tc: dict[str, Any]) -> bool:
+    """这条 tool_call 的 ``arguments`` 是否完整（可安全发给客户端）。
+
+    与 ``raccoon/provider.py::_tool_arguments_complete`` 同一口径，别各写一套：
+    只有「非空字符串且 JSON 解析失败」才算截断。``dict`` / ``None`` / 空串都
+    视为完整——零参工具上游常给 ``""``，少数兼容实现直接给对象。
+    """
+    raw = (tc.get("function") or {}).get("arguments")
+    if raw is None or isinstance(raw, dict):
+        return True
+    if not isinstance(raw, str):
+        return False
+    if not raw.strip():
+        return True
+    try:
+        json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return True
+
+
 async def collect_upstream(
     url: str,
     headers: dict[str, str],
@@ -704,6 +725,20 @@ async def collect_upstream(
         v for k, v in sorted(tool_calls_dict.items())
         if v["function"]["name"]
     ]
+
+    # 被 max_tokens 截断时，arguments 是**半截 JSON**，必须整条丢掉。
+    #
+    # 这是用户 2026-11-28 报障的最后一段：raccoon 修好之后，请求被换档到
+    # codebuddy，这里没有任何截断保护，半截参数原样返回，客户端照旧报
+    # ``invalid_tool_arguments: must have required property 'pattern'``。
+    # 实测 ``kimi-k3.1-pro`` 走 codebuddy，max_tokens=45/50/55/60 全部返回
+    # ``finish_reason=length`` + 半截 arguments。
+    #
+    # 判定与 raccoon 的 ``_iter_usable_tool_calls`` 保持同一口径：只有「非空
+    # 但 JSON 解析失败」才算半截；dict / 空串 / 缺失都算完整（零参工具常给
+    # ``""``，少数实现直接给对象）。
+    if finish_reason == "length":
+        tool_calls = [tc for tc in tool_calls if _arguments_complete(tc)]
 
     # 如果检测到 DSML tool_calls，修改 finish_reason
     if tool_calls and dsml_buffer.should_emit_tool_calls():
