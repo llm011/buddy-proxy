@@ -457,6 +457,19 @@ async def ui_models(request: Request):
             _bare_model_id(str(m.get("id") or ""), str(group.get("id") or "")),
         ))
 
+    # 通道分组排序：整组停用的通道整体挪到末尾（2026-11-28 用户要求）。
+    #
+    # 组内那条「停用排最后」只管模型级 disabled_models；整通道停用
+    # （disabled_providers）原本只加 ``group["disabled"]`` 标记、不动顺序，于是
+    # 被停掉的 traeintl / qoderintl / glm 仍夹在可用通道中间——扫列表时先看到
+    # 一堆置灰的通道，才轮到能用的。
+    #
+    # 用**稳定排序**（只按 0/1 一个键）：可用组之间、停用组之间各自的相对次序
+    # 原样保留。``_model_groups`` 里刚做过「同族相邻」（codebuddy → codebuddyintl
+    # 这类），稳定排序不会把它们重新打散——除非其中一族真的被停用了，那种情况
+    # 本就该让位（停用的整组沉底优先于同族相邻）。
+    groups.sort(key=lambda g: 1 if g.get("disabled") else 0)
+
     return {"groups": groups, "default_model": default_model,
             "hidden_models": hidden_items}
 

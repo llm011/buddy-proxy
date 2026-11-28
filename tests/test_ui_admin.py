@@ -320,6 +320,40 @@ def test_models_grouped_by_provider(env):
     assert any(m["id"] == "fake-model" for m in by_id["fakeprov"]["models"])
 
 
+def test_disabled_providers_sink_to_bottom(env):
+    """整通道停用的分组排到末尾（用户 2026-11-28 要求）。
+
+    之前只给 ``group["disabled"]`` 打标记、不动顺序，被停用的 traeintl /
+    qoderintl / glm 仍夹在可用通道中间，扫列表时先看到一堆置灰的通道。
+    这里把**中间**那个通道停掉，断言它沉底——若排序键被删掉，它会留在原位
+    （索引 2），断言立刻红。
+    """
+    env.state.disabled_providers = {"fakeprov"}
+    groups = env.client.get("/ui/api/models").json()["groups"]
+    ids = [g["id"] for g in groups]
+    assert ids == ["codebuddy", "fakestream", "fakeprov"], ids
+    assert [g["disabled"] for g in groups] == [False, False, True]
+    # 数据照返回：停用的通道仍带着模型，开关还能再打开
+    assert any(m["id"] == "fake-model" for m in groups[-1]["models"])
+
+
+def test_disabled_providers_sort_keeps_relative_order(env):
+    """稳定排序：可用组之间、停用组之间各自的原有次序都不许被打乱。
+
+    两个通道一起停用时，它们的先后必须与停用前一致（这里 fakestream 原本排在
+    fakeprov 之后，停用后仍是 fakestream → fakeprov 之外的相对次序不变）。
+    """
+    before = [g["id"] for g in env.client.get("/ui/api/models").json()["groups"]]
+    env.state.disabled_providers = {"fakeprov", "fakestream"}
+    after = [g["id"] for g in env.client.get("/ui/api/models").json()["groups"]]
+    # 全部停用时顺序应当与停用前完全相同
+    assert after == before, (before, after)
+    # 只停靠后的那个：可用段与停用段的内部次序都保持原样
+    env.state.disabled_providers = {"fakestream"}
+    groups = env.client.get("/ui/api/models").json()["groups"]
+    assert [g["id"] for g in groups] == ["codebuddy", "fakeprov", "fakestream"]
+
+
 def test_only_dynamic_catalog_provider_is_refreshable(env):
     refreshable = FakeRefreshProvider()
     env.state.providers[refreshable.id] = refreshable
