@@ -361,10 +361,11 @@ def test_accepts_model_rejects_unknown(offline_provider):
     assert not offline_provider.accepts_model("")
 
 
-def test_context_window_lookup(offline_provider):
-    assert offline_provider.context_window("书生-S2.1-Flash") == 524288
-    assert offline_provider.context_window("inkstone/sage-s2.1-flash") == 524288
-    assert offline_provider.context_window("nope") is None
+def test_models_carry_context_length(offline_provider):
+    """上下文长度靠 ``models()`` 的 ``context_length`` 流出去，不单独开钩子。"""
+    rows = {m["id"]: m for m in offline_provider.models()}
+    assert rows["inkstone/书生-S2.1-Flash"]["context_length"] == 524288
+    assert rows["inkstone/GLM-5.3"]["context_length"] == 1000000
 
 
 def test_strip_prefix():

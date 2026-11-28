@@ -701,17 +701,6 @@ class InkstoneProvider(BaseProvider):
                 return True
         return False
 
-    def context_window(self, model: str) -> int | None:
-        """模型上下文窗口（``context_guard`` 截断用）。"""
-        bare = _strip_prefix(model, self.id)
-        try:
-            for m in self._ensure_catalog():
-                if bare in (m.id, m.canonical_id):
-                    return m.context_window
-        except Exception:  # noqa: BLE001
-            return None
-        return None
-
     def health(self) -> dict[str, Any]:
         session = self._session
         return {
@@ -789,7 +778,9 @@ class InkstoneProvider(BaseProvider):
 
         if stream:
             return await self._forward_stream(upstream_body, model, protocol, session)
-        return await self._forward_aggregated(upstream_body, model, protocol, session)
+        return await self._forward_aggregated(
+            upstream_body, model, protocol, session, original=body
+        )
 
     def _resolve_model_name(self, model: str) -> str:
         """把 canonical_id / 显示名归一成目录里的 ``id``。
@@ -925,6 +916,7 @@ class InkstoneProvider(BaseProvider):
         model: str,
         protocol: str,
         session: InkstoneSession,
+        original: dict[str, Any] | None = None,
     ) -> JSONResponse:
         """非流式：内部走流式、聚合后返回完整响应。
 
@@ -943,7 +935,12 @@ class InkstoneProvider(BaseProvider):
 
         payload = aggregate_stream(chunks, model)
         if protocol == "anthropic":
-            return JSONResponse(chat_completion_to_anthropic_message(payload, upstream_body))
+            # ``original`` 只用来回填响应的 ``model`` 字段：给**客户端原始请求**
+            # 才回得出它自己写的名字（可能是 ``inkstone/书生-S2.1-Flash``），
+            # 给端砚请求体就只能回剥掉前缀的内部名。
+            return JSONResponse(
+                chat_completion_to_anthropic_message(payload, original or upstream_body)
+            )
         return JSONResponse(payload)
 
     async def _open_inference(
