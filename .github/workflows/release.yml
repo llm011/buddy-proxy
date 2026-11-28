@@ -64,9 +64,34 @@ jobs:
           echo "new=$new" >> "$GITHUB_OUTPUT"
           git add pyproject.toml uv.lock
           git commit -m "chore(release): v$new"
-          git tag "v$new"
-          git push origin HEAD:main
-          git push origin "v$new"
+
+          # 两次合并靠得很近时，checkout 之后远端可能已经前进（另一个 release
+          # 跑完并推了它的 chore(release) 提交），直接 push 会被拒。这里 rebase
+          # 到最新远端再推，最多重试 5 次。
+          #
+          # 冲突时**放弃本次发版**而不是硬来：pyproject 的 version 行两边都改了，
+          # rebase 必然冲突。下一次 push 会重新触发本工作流，那时起点已是最新，
+          # 版本号自然接上——比在 CI 里猜该保留哪个版本号安全。
+          #
+          # 标签必须在 push **成功之后**才打：rebase 会重写提交 sha，先打的标签
+          # 会指向被丢弃的旧提交，指向的 commit 根本不在 main 上。
+          for i in 1 2 3 4 5; do
+            git fetch origin main --quiet
+            if git push origin HEAD:main 2>/dev/null; then
+              git tag "v$new"
+              git push origin "v$new"
+              echo "pushed v$new (attempt $i)"
+              exit 0
+            fi
+            echo "push 被拒，rebase 到最新 main 后重试（第 $i 次）"
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              echo "::warning::rebase 冲突，放弃本次自动发版，等下一次 push 重新触发"
+              exit 0
+            fi
+          done
+          echo "::error::连续 5 次推送失败，本次未发版"
+          exit 1
 
       - name: 生成 Release Notes
         if: steps.guard.outputs.skip == 'false'

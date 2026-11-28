@@ -87,13 +87,26 @@ def _read_version(text: str) -> str:
 
 
 def installed_version() -> str:
-    """当前**运行中**进程的版本（已安装包的元数据）。
+    """当前**运行中代码**的版本。
 
-    不能用 ``_REPO_ROOT/pyproject.toml``：服务可能跑在某个 worktree 里
-    （``buddy-proxy-joycode`` 之类），那份 ``pyproject.toml`` 与真正 import 的
-    包未必一致。``importlib.metadata`` 读的是实际安装进 venv 的版本，才代表
-    「页面背后这个进程是什么版本」。
+    优先读 ``_REPO_ROOT/pyproject.toml``——``_REPO_ROOT`` 由本模块的 ``__file__``
+    推导，也就是「正在跑的这一份源码」所在仓库。服务跑在 worktree 里时
+    （``PYTHONPATH=.../buddy-proxy-joycode/src``）它自然指向那个 worktree，
+    与真正被 import 的代码一致。
+
+    **不能只信** ``importlib.metadata``：那是 venv 里 ``*.dist-info`` 的记录，
+    只有 ``uv sync`` 才会更新。用户 ``git pull`` 之后没重装依赖（很常见，
+    ``buddy update`` 才会跑 sync），元数据还停在旧版本，于是「远端 2.0.5、
+    本地 dist-info 2.0.4」→ 明明已经是最新代码却一直提示有新版本。
+    所以 dist-info 只作兜底（源码树不可读时才用）。
     """
+    try:
+        text = (_REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        version = _read_version(text)
+        if version:
+            return version
+    except OSError:
+        pass
     try:
         import importlib.metadata as md
         return md.version("buddy-proxy")
@@ -268,7 +281,16 @@ def refresh(*, force: bool = False) -> dict[str, Any]:
         if not force and _cache is not None and time.time() - _last_at < POLL_INTERVAL_S:
             return dict(_cache)
         if _checking:
-            return dict(_cache) if _cache is not None else cached()
+            # 已经有一轮在跑：**只读**缓存返回，绝不能在这里调 cached()——
+            # cached() 自己也要拿 _lock，而 threading.Lock 不可重入，会在持锁
+            # 状态下自锁死（接口永久挂起，且此后每次请求都卡住）。
+            if _cache is not None:
+                return dict(_cache)
+            return {
+                "current": installed_version(), "latest": "", "has_update": False,
+                "behind": 0, "notes": [], "checked_at": 0, "error": None,
+                "fetch_ok": False, "pending": True,
+            }
         _checking = True
     try:
         result = check()

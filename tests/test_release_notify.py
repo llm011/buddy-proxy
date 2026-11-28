@@ -131,6 +131,46 @@ def test_notes_are_capped(monkeypatch):
     assert len(out["notes"]) == rel.MAX_NOTES
 
 
+def test_refresh_does_not_deadlock_when_already_checking(monkeypatch):
+    """已有一轮在跑时 refresh 必须立即返回，不能自锁死。
+
+    原来的实现走到 ``if _checking`` 分支后调了 ``cached()``，而 ``cached()``
+    也要拿同一把 ``threading.Lock``（不可重入）——于是持锁等锁，接口永久挂起，
+    且此后每次请求都卡住。
+    """
+    import threading
+
+    monkeypatch.setattr(rel, "_cache", None)
+    monkeypatch.setattr(rel, "_checking", True)
+    done = []
+    t = threading.Thread(target=lambda: (rel.refresh(force=True), done.append(1)),
+                         daemon=True)
+    t.start()
+    t.join(timeout=3)
+    assert done, "refresh 在 _checking=True 时死锁了"
+
+
+def test_installed_version_prefers_repo_pyproject(monkeypatch, tmp_path):
+    """版本要读「正在跑的这份源码」，而不是 venv 里可能陈旧的 dist-info。
+
+    ``git pull`` 后没 ``uv sync`` 时 dist-info 还停在旧版本，只信它就会
+    「明明已是最新代码却一直提示有新版本」。
+    """
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "buddy-proxy"\nversion = "9.9.9"\n', encoding="utf-8")
+    monkeypatch.setattr(rel, "_REPO_ROOT", tmp_path)
+    assert rel.installed_version() == "9.9.9"
+
+
+def test_installed_version_falls_back_to_metadata(monkeypatch, tmp_path):
+    """源码树读不到时才退回 dist-info。"""
+    monkeypatch.setattr(rel, "_REPO_ROOT", tmp_path)   # 目录里没有 pyproject.toml
+    monkeypatch.setattr(rel, "_read_version", lambda text: "")
+    import importlib.metadata as md
+    monkeypatch.setattr(md, "version", lambda name: "1.2.3")
+    assert rel.installed_version() == "1.2.3"
+
+
 def test_refresh_throttles_within_interval(monkeypatch):
     """5 分钟窗口内重复请求只打一次 git——多个标签页同时开也不该打穿。"""
     calls = []
@@ -182,6 +222,34 @@ def test_refresh_after_interval_rechecks(monkeypatch):
 # ---------------------------------------------------------------------------
 # 前端契约
 # ---------------------------------------------------------------------------
+def test_dismiss_is_session_scoped_and_keeps_polling():
+    """「知道了」必须记住，否则下一轮轮询（5 分钟后）会把同一版弹回来。
+
+    与「不再提示」的区别：这个只记在 sessionStorage（关掉页面重开还会提醒），
+    并且**不停轮询**——下一版出来还要提醒。
+    """
+    assert "RELEASE_DISMISS_KEY" in JS
+    assert "sessionStorage" in JS
+    assert "releaseDismissCurrent()" in HTML
+    # 「知道了」不能走「不再提示」的路径（那会停掉轮询）
+    assert "onclick=\"releaseHide()\">知道了" not in HTML
+    # 渲染时必须检查已忽略的版本
+    assert "releaseDismissed() === latest" in JS
+
+
+def test_workflow_retries_push_after_concurrent_merge():
+    """两次合并靠得近时远端会前进，直接 push 会被拒——必须 rebase 重试。"""
+    assert "git rebase origin/main" in WORKFLOW
+    assert "git fetch origin main --quiet" in WORKFLOW
+
+
+def test_workflow_tags_after_successful_push():
+    """标签要在 push 成功之后打：rebase 会重写 sha，先打的标签会指向被丢弃的提交。"""
+    push_at = WORKFLOW.index("if git push origin HEAD:main")
+    tag_at = WORKFLOW.index('git tag "v$new"')
+    assert tag_at > push_at, "git tag 出现在 push 成功之前，rebase 后会指向孤儿提交"
+
+
 def test_poll_interval_is_five_minutes():
     assert re.search(r"RELEASE_POLL_MS\s*=\s*5\s*\*\s*60\s*\*\s*1000", JS)
 
