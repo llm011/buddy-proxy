@@ -87,8 +87,14 @@ AUTH_ERROR_CODE = "100002"
 #: 上游业务码：成功。
 OK_CODE = "000000"
 
-#: ``desc`` 里出现这些词才算「登录真的失效了」。
-_AUTH_DESC_HINTS = ("登录已失效", "重新登录", "登录过期", "token已过期", "token 已过期")
+#: 判「登录真的失效了」用的**语义**匹配，不是固定短语。
+#:
+#: 一开始写的是短语白名单（"登录已失效" 等），但上游文案会变：换个说法
+#: （"登录已过期" / "凭证失效"）白名单就失效，又退回「一律不算登录失效」的
+#: 另一个极端。所以改成「提到登录/凭证」且「提到失效/过期/重登」两个条件同时
+#: 成立——两个方向都比白名单稳，也仍然挡得住 ``缺少 token``（不含"登录"）。
+_AUTH_SUBJECT_HINTS = ("登录", "凭证", "会话", "token", "Token", "TOKEN")
+_AUTH_STATE_HINTS = ("失效", "过期", "超时", "无效", "重新登录", "重登")
 
 
 def is_auth_failure(code: str, desc: str) -> bool:
@@ -100,7 +106,11 @@ def is_auth_failure(code: str, desc: str) -> bool:
     if str(code or "").strip() != AUTH_ERROR_CODE:
         return False
     text = str(desc or "")
-    return any(hint in text for hint in _AUTH_DESC_HINTS)
+    if not text:
+        return False
+    has_subject = any(hint in text for hint in _AUTH_SUBJECT_HINTS)
+    has_state = any(hint in text for hint in _AUTH_STATE_HINTS)
+    return has_subject and has_state
 
 
 def describe_auth_code(code: str, desc: str, action: str = "") -> str:
@@ -120,7 +130,6 @@ def describe_auth_code(code: str, desc: str, action: str = "") -> str:
             "token 头、/images 只认 Bearer），请按接口文档核对，不要重登桌面端。"
         )
     return f"{where}上游返回 code={code}：{text or '未知错误'}"
-
 
 
 class AuthError(Exception):

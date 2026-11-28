@@ -334,6 +334,26 @@ def test_is_auth_failure_distinguishes_desc():
     assert cred.is_auth_failure("", "") is False
 
 
+@pytest.mark.parametrize(
+    ("desc", "expected"),
+    [
+        # 上游文案会变，判据是语义（主语 + 状态）而不是固定短语
+        ("登录已失效，请重新登录", True),
+        ("登录已过期", True),
+        ("凭证失效", True),
+        ("token 已过期", True),
+        ("token 无效", True),
+        # 同一个码但不是登录问题：我们发错了鉴权头
+        ("缺少 token", False),
+        ("", False),
+        ("内部错误", False),
+        ("ok", False),
+    ],
+)
+def test_is_auth_failure_semantic_not_phrase_list(desc, expected):
+    assert cred.is_auth_failure("100002", desc) is expected
+
+
 def test_describe_auth_code_two_meanings():
     auth = cred.describe_auth_code("100002", "登录已失效，请重新登录")
     assert "重新登录 Loomy 桌面端" in auth
