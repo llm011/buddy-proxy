@@ -222,19 +222,12 @@ def test_refresh_after_interval_rechecks(monkeypatch):
 # ---------------------------------------------------------------------------
 # 前端契约
 # ---------------------------------------------------------------------------
-def test_dismiss_is_session_scoped_and_keeps_polling():
-    """「知道了」必须记住，否则下一轮轮询（5 分钟后）会把同一版弹回来。
-
-    与「不再提示」的区别：这个只记在 sessionStorage（关掉页面重开还会提醒），
-    并且**不停轮询**——下一版出来还要提醒。
-    """
-    assert "RELEASE_DISMISS_KEY" in JS
-    assert "sessionStorage" in JS
-    assert "releaseDismissCurrent()" in HTML
-    # 「知道了」不能走「不再提示」的路径（那会停掉轮询）
-    assert "onclick=\"releaseHide()\">知道了" not in HTML
-    # 渲染时必须检查已忽略的版本
-    assert "releaseDismissed() === latest" in JS
+def test_update_button_reloads_page():
+    """更新只刷新页面，由已运行的服务决定是否已拉取新版本。"""
+    assert 'onclick="location.reload()">更新</button>' in HTML
+    assert "知道了" not in HTML
+    assert "releaseDismissCurrent" not in JS
+    assert "RELEASE_DISMISS_KEY" not in JS
 
 
 def test_workflow_retries_push_after_concurrent_merge():
