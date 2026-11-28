@@ -323,14 +323,74 @@ const TABS = ['overview', 'log', 'models', 'order', 'checkin', 'benefits', 'runn
   if (btn) btn.textContent = saved === 'light' ? '🌙' : '☀️';
 })();
 
+function setTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  localStorage.setItem('bp_theme', theme);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = theme === 'light' ? '🌙' : '☀️';
+}
+
 window.toggleTheme = function toggleTheme() {
   const cur = document.documentElement.getAttribute('data-theme') || 'dark';
-  const next = cur === 'light' ? 'dark' : 'light';
-  document.documentElement.setAttribute('data-theme', next);
-  localStorage.setItem('bp_theme', next);
-  const btn = document.getElementById('theme-toggle');
-  if (btn) btn.textContent = next === 'light' ? '🌙' : '☀️';
+  setTheme(cur === 'light' ? 'dark' : 'light');
 };
+
+let showRunningHub = false;
+try { showRunningHub = localStorage.getItem('bp-show-runninghub') === '1'; } catch (e) {}
+
+function syncRunningHubVisibility() {
+  const tab = document.querySelector('.tab[data-tab="runninghub"]');
+  if (tab) tab.hidden = !showRunningHub;
+  if (!showRunningHub && currentTab() === 'runninghub') switchTab('overview');
+}
+
+function setRunningHubVisible(visible) {
+  showRunningHub = visible;
+  try { localStorage.setItem('bp-show-runninghub', visible ? '1' : '0'); } catch (e) {}
+  syncRunningHubVisibility();
+}
+
+async function openUiSettings() {
+  document.getElementById('modal-title').textContent = '界面设置';
+  document.getElementById('modal-body').innerHTML = '<div class="muted">加载中…</div>';
+  setModalFoot('');
+  document.getElementById('overlay').classList.add('show');
+  let cfg;
+  try {
+    cfg = await api('/ui/api/settings');
+  } catch (e) {
+    document.getElementById('modal-body').innerHTML = `<div class="error">加载失败：${esc(e.message)}</div>`;
+    return;
+  }
+  const theme = document.documentElement.getAttribute('data-theme') || 'light';
+  const providers = cfg.providers || [];
+  document.getElementById('modal-body').innerHTML = `
+    <label style="display:flex;align-items:center;justify-content:space-between;gap:16px">
+      <span>外观</span>
+      <select id="ui-theme" onchange="setTheme(this.value)">
+        <option value="light" ${theme === 'light' ? 'selected' : ''}>浅色</option>
+        <option value="dark" ${theme === 'dark' ? 'selected' : ''}>深色</option>
+      </select>
+    </label>
+    <label style="display:flex;align-items:center;gap:8px;margin-top:18px;cursor:pointer">
+      <input type="checkbox" id="show-runninghub" ${showRunningHub ? 'checked' : ''}
+             onchange="setRunningHubVisible(this.checked)">
+      显示 RunningHub 页签
+    </label>
+    <div class="muted" style="margin-top:8px;font-size:12px">页签设置仅控制控制台展示，不影响 RunningHub 接口和账号数据。</div>
+    <div style="margin-top:24px;font-weight:600">通道</div>
+    <div class="muted" style="margin:6px 0 12px;font-size:12px">关闭后禁止该通道调用，并隐藏其额度与签到；账号和模型配置都会保留。</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px 16px">
+      ${providers.map(p => `
+        <label style="display:flex;align-items:center;gap:8px;cursor:${p.id === 'codebuddy' ? 'not-allowed' : 'pointer'}">
+          <input type="checkbox" ${p.enabled ? 'checked' : ''} ${p.id === 'codebuddy' ? 'disabled' : ''}
+                 onchange='toggleProvider(${jsq(p.id)}, this.checked)'>
+          ${esc(p.name)}
+        </label>`).join('')}
+    </div>`;
+}
+
+syncRunningHubVisibility();
 
 (function initGlobalTooltip() {
   const tip = document.createElement('div');
@@ -429,7 +489,7 @@ window.toggleTheme = function toggleTheme() {
 // 范围选择器仅在总览/请求日志页有意义
 const RANGE_TABS = new Set(['overview', 'log']);
 function switchTab(name) {
-  if (!TABS.includes(name)) name = 'overview';
+  if (!TABS.includes(name) || (name === 'runninghub' && !showRunningHub)) name = 'overview';
   for (const b of document.querySelectorAll('.tab'))
     b.classList.toggle('active', b.dataset.tab === name);
   for (const s of document.querySelectorAll('.page'))

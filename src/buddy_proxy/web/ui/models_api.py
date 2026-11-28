@@ -634,7 +634,15 @@ async def ui_provider_toggle(request: Request):
         current.discard(provider)
 
     state.disabled_providers = current
-    settings_mod.save_settings({"disabled_providers": sorted(current)})
+    settings_update: dict[str, Any] = {"disabled_providers": sorted(current)}
+    if want_disabled and getattr(state, "default_provider", "codebuddy") == provider:
+        # 运行态同样要回退；只在启动时校验会让停用后的裸模型请求仍撞上 403。
+        state.default_provider = "codebuddy"
+        settings_update["default_provider"] = "codebuddy"
+    if want_disabled and str(getattr(state, "default_model", "") or "").startswith(f"{provider}/"):
+        state.default_model = None
+        settings_update["default_model"] = ""
+    settings_mod.save_settings(settings_update)
     return {"ok": True, "provider": provider, "disabled": want_disabled}
 
 

@@ -33,6 +33,7 @@
       <span class="pill"><span class="dot" id="status-dot"></span><span id="status-text">加载中…</span></span>
       <span class="spacer"></span>
       <button class="ghost" id="theme-toggle" onclick="toggleTheme()" title="切换浅色/深色主题" style="padding:4px 10px;font-size:13px;">☀️</button>
+      <button class="ghost" id="ui-settings-toggle" onclick="openUiSettings()" title="界面设置" style="padding:4px 10px;font-size:13px;">⚙️</button>
     </header>
     <nav class="tabs">
       <button class="tab active" data-tab="overview">📊 总览</button>
@@ -41,7 +42,7 @@
       <button class="tab" data-tab="order">🔀 模型顺序<span class="cnt" id="cnt-order"></span></button>
       <button class="tab" data-tab="checkin">✅ 每日签到<span class="cnt" id="cnt-checkin"></span></button>
       <button class="tab" data-tab="benefits">💳 额度<span class="cnt" id="cnt-benefits"></span></button>
-      <button class="tab" data-tab="runninghub">🎨 RunningHub</button>
+      <button class="tab" data-tab="runninghub" hidden>🎨 RunningHub</button>
     </nav>
   </div>
 </div>
