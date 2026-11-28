@@ -26,7 +26,39 @@ function _raccoon_acct_for(idx) {
   return RACCOON_ACCTS.find(a => a.index === idx) || null;
 }
 
-/** 账号副标题：手机号 / 自动续期 / 冷却。 */
+function _raccoon_manually_disabled(a) {
+  return !!(a && typeof DISABLED_ACCOUNTS !== 'undefined'
+    && (DISABLED_ACCOUNTS || []).includes(`raccoon:${a.id}`));
+}
+
+function _raccoon_unavailable(a) {
+  return !!(a && (a.available === false || (a.cooling || []).length
+    || _raccoon_manually_disabled(a)));
+}
+
+function _raccoon_acct_name(a, fallback) {
+  const name = a ? (a.alias || a.name || a.id) : fallback;
+  return `${_raccoon_unavailable(a) ? '❌ ' : ''}${name || fallback || ''}`;
+}
+
+function _raccoon_cooling_text(c) {
+  const labels = {
+    risk_control: '风控冷却',
+    quota: '额度耗尽',
+    rate: '频率窗口',
+    account: '账号冷却',
+  };
+  const seconds = c.seconds_left != null
+    ? Number(c.seconds_left) : Number(c.minutes_left) * 60;
+  let left;
+  if (!Number.isFinite(seconds) || seconds <= 0) left = '剩余时间待刷新';
+  else if (seconds >= 3600) left = `剩余 ${(seconds / 3600).toFixed(1)} 小时`;
+  else if (seconds >= 60) left = `剩余 ${(seconds / 60).toFixed(1)} 分钟`;
+  else left = `剩余 ${Math.ceil(seconds)} 秒`;
+  return `${labels[c.kind] || (c.kind ? `${c.kind} 冷却` : '冷却')} · ${left}`;
+}
+
+/** 账号副标题：手机号 / 自动续期 / 当前可用性。 */
 function _raccoon_sub_html(a) {
   if (!a) return '';
   const bits = [];
@@ -36,11 +68,26 @@ function _raccoon_sub_html(a) {
   } else {
     bits.push('<span style="color:var(--warn)">需手动重导（无密码）</span>');
   }
-  const cooling = (a.cooling || []).map(c => `${c.kind} 剩 ${c.minutes_left}min`).join(' / ');
-  if (cooling) bits.push(`<span style="color:var(--warn)">${esc(cooling)}</span>`);
-  if (!bits.length) return '';
+  const cooling = (a.cooling || []).map(_raccoon_cooling_text);
+  if (cooling.length) {
+    bits.push(`<span style="color:var(--err);font-weight:600">${esc(cooling.join(' · '))}</span>`);
+  } else if (a.available === false) {
+    bits.push('<span style="color:var(--err);font-weight:600">暂不可用</span>');
+  } else if (_raccoon_manually_disabled(a)) {
+    bits.push('<span style="color:var(--warn);font-weight:600">已手动下线</span>');
+  } else {
+    bits.push('<span style="color:var(--ok);font-weight:600">✓ 可用</span>');
+  }
   return `<div class="muted" style="font-size:11px;margin:1px 0 6px" data-raccoon-sub>` +
     bits.join(' · ') + `</div>`;
+}
+
+function _raccoon_availability_html() {
+  const accts = RACCOON_ACCTS || [];
+  if (!accts.length) return '';
+  const blocked = accts.filter(_raccoon_unavailable).length;
+  const cls = !blocked ? '' : blocked === accts.length ? ' bad' : ' warn';
+  return `<span class="tag${cls}">可用 ${accts.length - blocked}/${accts.length}</span>`;
 }
 
 function _raccoon_move_btns(idx, n, id) {
@@ -84,7 +131,7 @@ function fillRaccoonAccounts(accts) {
       ? document.querySelector('#raccoon-panel .pat-pkg-name')
       : document.querySelector(`#raccoon-panel [data-raccoon-idx="${a.index}"]`);
     if (!el) continue;
-    el.textContent = a.alias || a.name || a.id;
+    el.textContent = _raccoon_acct_name(a, a.id);
     if (el.nextElementSibling && el.nextElementSibling.hasAttribute('data-raccoon-sub')) {
       el.nextElementSibling.remove();
     }
@@ -249,6 +296,13 @@ function renderRaccoonPanel() {
   // ——2026-11-23 用户实报「还是不对呀，你要复用我多账号的逻辑」。
   const groups = new Map();
   const notices = [];
+  // 账号快照先铺空组：额度查询失败/正在风控的账号也必须留下卡片，否则它们
+  // 恰好没有 quota item 时会从面板消失，用户也就看不到名字前的 ❌ 与剩余时长。
+  const acctCount = (RACCOON_ACCTS || []).length;
+  for (const a of RACCOON_ACCTS || []) {
+    const grp = acctCount > 1 ? `小浣熊 #${a.index}` : '小浣熊';
+    if (!groups.has(grp)) groups.set(grp, []);
+  }
   for (const it of (provider.quota && provider.quota.supported ? provider.quota.items : []) || []) {
     if (it.query_failed) { notices.push(it); continue; }
     const cut = it.label.indexOf(' · ');
@@ -282,8 +336,8 @@ function renderRaccoonPanel() {
       `${acctDisableButton('raccoon', acct)}${logsBtn}${delBtn}</span>`;
     const headSum = quotaHeadSum({ items: its });
     return `
-    <div class="pat-pkg">
-      <span class="pat-pkg-name"${m ? ` data-raccoon-idx="${idx}"` : ''}>${esc(acct ? (acct.alias || acct.name || acct.id) : grp)}</span>
+    <div class="pat-pkg"${acct ? ` data-raccoon-available="${!_raccoon_unavailable(acct)}"` : ''}>
+      <span class="pat-pkg-name"${m ? ` data-raccoon-idx="${idx}"` : ''}>${esc(_raccoon_acct_name(acct, grp))}</span>
       ${_raccoon_sub_html(acct)}
       ${headSum ? `<div style="display:flex;align-items:center;margin:0 0 6px">${headSum}</div>` : ''}
       ${quotaItemsHtml(its, 'raccoon:' + grp)}
@@ -293,13 +347,16 @@ function renderRaccoonPanel() {
 
   const noticeHtml = notices.map(quotaItemHtml).join('');
   const multi = n > 1;
-  const fold = quotaProviderFold((groups.size || notices.length) ? provider.quota.items || [] : 'empty', 'raccoon');
+  // 有账号卡时强制默认展开：全部额度查询失败会被公共折叠器判成「无剩余额度」，
+  // 但此时用户最需要看到的恰恰是哪些号被风控、还要等多久。
+  const fold = quotaProviderFold(groups.size ? null
+    : (notices.length ? provider.quota.items || [] : 'empty'), 'raccoon');
 
   panel.innerHTML = `
     <div class="chart-card" style="margin-top:14px">
       <div class="pat-head">
         <span class="name">商汤小浣熊</span>
-        <span class="tag">${multi ? '多账号 · 自动切换' : 'SenseTime Raccoon'}</span>${fold.badge}
+        <span class="tag">${multi ? '多账号 · 自动切换' : 'SenseTime Raccoon'}</span>${_raccoon_availability_html()}${fold.badge}
         <span class="pat-head-mid">${quotaAccountTotal(groups)}
           <span class="muted" style="font-size:11px">积分制：按模型倍率扣分，倍率 0 = 限免</span>
         </span>

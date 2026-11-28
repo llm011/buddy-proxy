@@ -227,3 +227,96 @@ console.log(JSON.stringify({
     assert data["hasQhead"], "没走组件的 qhead 结构"
     assert data["hasBar"], (
         "进度条没渲染出来——组件要求 used+total 同时有值才画 qbar")
+
+
+def test_cooling_account_gets_blocked_name_and_remaining_time():
+    """风控号名字前加 ❌，副标题明确写风控与剩余时长；健康号仍标可用。"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [{
+  id: 'raccoon', name: '商汤小浣熊', disabled: false,
+  quota: {supported: true, items: [
+    {label: '小浣熊 #1 · 积分总额', remaining: 100, total: 100, used: 0, percent: 0},
+    {label: '小浣熊 #2 · 积分总额', remaining: 200, total: 200, used: 0, percent: 0},
+  ]},
+}]};
+globalThis.api = async () => ({enabled: true, accounts: [
+  {id:'u1', name:'一号', alias:'', index:1, auto_renew:false, available:false,
+   cooling:[{kind:'risk_control', seconds_left:125, minutes_left:2.1}]},
+  {id:'u2', name:'二号', alias:'', index:2, auto_renew:true, available:true, cooling:[]},
+]});
+renderRaccoonPanel();
+await new Promise(r => setTimeout(r, 80));
+const html = document.getElementById('raccoon-panel').innerHTML;
+console.log(JSON.stringify({
+  blockedName: html.includes('❌ 一号'),
+  healthyName: html.includes('二号') && !html.includes('❌ 二号'),
+  riskText: html.includes('风控冷却 · 剩余 2.1 分钟'),
+  availableText: html.includes('✓ 可用'),
+  summary: html.includes('可用 1/2'),
+  blockedCard: html.includes('data-raccoon-available="false"'),
+}));
+""")
+    data = json.loads(out)
+    assert data["blockedName"], "不可用账号必须在名字前加 ❌"
+    assert data["healthyName"], "可用账号不能被误标成 ❌"
+    assert data["riskText"], "要明确显示风控状态和剩余时长"
+    assert data["availableText"] and data["summary"], "可用账号与汇总都要一眼可见"
+    assert data["blockedCard"], "卡片状态属性要与后端 available 一致"
+
+
+def test_cooling_account_without_quota_still_renders_card():
+    """额度查询失败时也不能把正在风控的账号从面板里弄丢。"""
+    out = _run_js("""
+globalThis.BENEFITS = {providers: [{
+  id: 'raccoon', name: '商汤小浣熊', disabled: false,
+  quota: {supported: true, items: [
+    {label: '小浣熊 · 查询失败', remaining: '查询失败', query_failed: true,
+     used: null, total: null, percent: null},
+  ]},
+}]};
+globalThis.api = async () => ({enabled: true, accounts: [
+  {id:'u1', name:'风控号', alias:'', index:1, auto_renew:true, available:false,
+   cooling:[{kind:'risk_control', seconds_left:1799, minutes_left:30}]},
+]});
+renderRaccoonPanel();
+await new Promise(r => setTimeout(r, 80));
+const html = document.getElementById('raccoon-panel').innerHTML;
+console.log(JSON.stringify({
+  hasCard: html.includes('class="pat-pkg"'),
+  blockedName: html.includes('❌ 风控号'),
+  riskText: html.includes('风控冷却'),
+  notice: html.includes('查询失败'),
+}));
+""")
+    data = json.loads(out)
+    assert data["hasCard"] and data["blockedName"], "风控账号没有额度数据也要渲染账号卡"
+    assert data["riskText"], "账号卡必须显示风控状态"
+    assert data["notice"], "额度查询失败说明仍要保留"
+
+
+def test_manually_disabled_account_is_not_counted_available():
+    """手动下线不参与转发，面板不能仍把「✓ 可用」和可用汇总送给它。"""
+    out = _run_js("""
+globalThis.DISABLED_ACCOUNTS = ['raccoon:u1'];
+globalThis.BENEFITS = {providers: [{
+  id: 'raccoon', name: '商汤小浣熊', disabled: false,
+  quota: {supported: true, items: [
+    {label: '小浣熊 · 积分总额', remaining: 100, total: 100, used: 0, percent: 0},
+  ]},
+}]};
+globalThis.api = async () => ({enabled: true, accounts: [
+  {id:'u1', name:'下线号', alias:'', index:1, auto_renew:true, available:true, cooling:[]},
+]});
+renderRaccoonPanel();
+await new Promise(r => setTimeout(r, 80));
+const html = document.getElementById('raccoon-panel').innerHTML;
+console.log(JSON.stringify({
+  blockedName: html.includes('❌ 下线号'),
+  disabledText: html.includes('已手动下线'),
+  noAvailableBadge: !html.includes('✓ 可用'),
+  summary: html.includes('可用 0/1'),
+}));
+""")
+    data = json.loads(out)
+    assert data["blockedName"] and data["disabledText"], "手动下线账号要明确标成不可用"
+    assert data["noAvailableBadge"] and data["summary"], "可用标记与汇总必须和转发过滤一致"

@@ -23,7 +23,8 @@ from buddy_proxy.raccoon import failover
 
 def _risk_control(acct: str) -> float:
     return failover.mark_cooldown(
-        acct, retry_after="1800", reason="账号风控: {\"error\":{\"code\":200108}}")
+        acct, retry_after="1800", risk_control=True,
+        reason="账号风控: {\"error\":{\"code\":200108}}")
 
 
 def _swap_tracker(monkeypatch):
@@ -49,8 +50,42 @@ def test_risk_control_cooldown_survives_restart(tmp_path, monkeypatch):
     restarted = failover._new_tracker()
     left, kind = restarted.left("pu-a")
     assert 1790 <= left <= 1800.01, "按墙钟差扣减，不能重置回满 30 分钟"
-    assert kind == "account"
+    assert kind == "risk_control"
     assert restarted.is_cooling("pu-a") is True
+
+
+def test_accounts_status_exposes_risk_and_rate_window(tmp_path, monkeypatch):
+    """面板要能区分风控与本地频率窗口，并且两者都算账号不可用。"""
+    from buddy_proxy.raccoon import rate_limit
+    from buddy_proxy.raccoon.credentials import AccountRef
+
+    monkeypatch.setenv("RACCOON_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(failover, "list_accounts", lambda: [
+        AccountRef(id="pu-risk", name="风控号", priority=1, added_at=1),
+        AccountRef(id="pu-ok", name="可用号", priority=2, added_at=2),
+    ])
+    monkeypatch.setattr(failover, "load_account_cred", lambda _aid: {})
+    _swap_tracker(monkeypatch)
+    _risk_control("pu-risk")
+
+    class _Window:
+        def recovery_in(self, account_id):
+            return 42.0 if account_id == "pu-ok" else 0.0
+
+    monkeypatch.setattr(rate_limit, "window", lambda: _Window())
+    accounts = {a["id"]: a for a in failover.accounts_status()["accounts"]}
+
+    risk = accounts["pu-risk"]
+    assert risk["available"] is False
+    assert risk["cooling"][0]["kind"] == "risk_control"
+    assert risk["cooling"][0]["seconds_left"] == pytest.approx(1800, abs=1)
+    assert risk["cooling"][0]["minutes_left"] == pytest.approx(30, abs=0.1)
+
+    limited = accounts["pu-ok"]
+    assert limited["available"] is False
+    assert limited["cooling"] == [{
+        "kind": "rate", "seconds_left": 42.0, "minutes_left": 0.7,
+    }]
 
 
 def test_short_cooldown_does_not_hit_disk(tmp_path, monkeypatch):

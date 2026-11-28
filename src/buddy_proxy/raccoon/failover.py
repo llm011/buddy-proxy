@@ -3,8 +3,10 @@
 核心冷却状态机收敛到 :class:`buddy_proxy.core.account_failover.CooldownTracker`
 （antigravity/qoder/trae/kimi 共用）。本模块只保留 raccoon 自己的失败语义：
 
-- **账号级冷却**（60s）：401/403——会话失效或被风控。
+- **账号级冷却**（60s）：401/403——会话失效或普通上游拒绝。
 - **额度冷却**（300s）：402 / 积分耗尽。
+- **风控冷却**（30min）：``200108``——上游明确判定整号异常调用，不能
+  和普通账号冷却混为一谈；管理页要据此显示「风控冷却」与剩余时长。
 - **模型级冷却**（``账号\\x00模型``）：``429 user_model_rate_limited``——这是
   **账号×模型**的频率窗口，恢复中位数 25 分钟，只挡这一个模型，不该把整号
   摘掉（同账号其它模型仍可用）。
@@ -31,6 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.account_failover import CooldownTracker, diagnose_available
+from . import rate_limit
 from .credentials import (
     AccountRef,
     has_relogin_cred,
@@ -162,11 +165,16 @@ def is_credit_exhausted(code: int, error_code: str = "", message: str = "") -> b
 
 
 def mark_cooldown(account_id: str, *, retry_after: str | None = None,
-                  quota: bool = False, reason: str = "") -> float:
-    """把账号冷却一段时间。``retry_after``（Retry-After 头）优先于默认时长。"""
+                  quota: bool = False, risk_control: bool = False,
+                  reason: str = "") -> float:
+    """把账号冷却一段时间。``retry_after``（Retry-After 头）优先于默认时长。
+
+    ``risk_control`` 单独留档，避免面板把 200108 风控和 60s 网络/会话抖动
+    都显示成同一种「账号冷却」；这个类别也会随长冷却一起落盘。
+    """
+    kind = "risk_control" if risk_control else "quota" if quota else "account"
     return _tracker.mark(account_id, retry_after=retry_after,
-                         kind="quota" if quota else "account",
-                         reason=reason, log=log)
+                         kind=kind, reason=reason, log=log)
 
 
 def mark_model_cooldown(account_id: str, model: str, *,
@@ -229,7 +237,10 @@ def available_accounts(model: str = "") -> list[AccountRef]:
 
 def cooldown_report() -> str:
     """全部账号冷却状态的一句话画像（通道耗尽报错用）。"""
-    return _tracker.report([a.id for a in list_accounts()])
+    return _tracker.report(
+        [a.id for a in list_accounts()],
+        labels={"risk_control": "风控冷却"},
+    )
 
 
 def model_cooldown_report(model: str) -> str:
@@ -245,12 +256,29 @@ def model_cooldown_report(model: str) -> str:
 def accounts_status() -> dict[str, Any]:
     """UI 账号状态面板数据（纯本地，不触网、不含秘密）。"""
     accounts = list_accounts()
+    rate_win = rate_limit.window()
     items: list[dict[str, Any]] = []
     for i, a in enumerate(accounts):
         cred = load_account_cred(a.id) or {}
         exp = token_expiry_epoch(cred)
         hours_left = round((exp - time.time()) / 3600, 1) if exp > 0 else None
+        cooling: list[dict[str, Any]] = []
         left, kind = cooldown_left(a.id)
+        if left > 0:
+            cooling.append({
+                "kind": kind,
+                "seconds_left": round(left, 1),
+                "minutes_left": round(left / 60, 1),
+            })
+        # 滑动窗口到顶时转发会直接跳过该账号，但它不会写进 CooldownTracker。
+        # 面板若只看 cooling，会把这种「暂时不可用」误报成可用，所以一并透出。
+        rate_left = rate_win.recovery_in(a.id)
+        if rate_left > 0:
+            cooling.append({
+                "kind": "rate",
+                "seconds_left": round(rate_left, 1),
+                "minutes_left": round(rate_left / 60, 1),
+            })
         items.append({
             "id": a.id,
             "name": a.alias or a.name or a.id,
@@ -262,8 +290,8 @@ def accounts_status() -> dict[str, Any]:
             # 有密码 = 能自动续期，面板据此显示「自动续期」而不是「需重新导入」
             "auto_renew": has_relogin_cred(cred),
             "hours_left": max(hours_left, 0.0) if hours_left is not None else None,
-            "cooling": ([{"kind": kind, "minutes_left": round(left / 60, 1)}]
-                        if left > 0 else []),
+            "available": not cooling,
+            "cooling": cooling,
         })
     return {"enabled": bool(items), "accounts": items}
 
