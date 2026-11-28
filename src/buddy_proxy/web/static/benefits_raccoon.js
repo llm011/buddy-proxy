@@ -26,8 +26,14 @@ function _raccoon_acct_for(idx) {
   return RACCOON_ACCTS.find(a => a.index === idx) || null;
 }
 
+function _raccoon_manually_disabled(a) {
+  return !!(a && typeof DISABLED_ACCOUNTS !== 'undefined'
+    && (DISABLED_ACCOUNTS || []).includes(`raccoon:${a.id}`));
+}
+
 function _raccoon_unavailable(a) {
-  return !!(a && (a.available === false || (a.cooling || []).length));
+  return !!(a && (a.available === false || (a.cooling || []).length
+    || _raccoon_manually_disabled(a)));
 }
 
 function _raccoon_acct_name(a, fallback) {
@@ -67,6 +73,8 @@ function _raccoon_sub_html(a) {
     bits.push(`<span style="color:var(--err);font-weight:600">${esc(cooling.join(' · '))}</span>`);
   } else if (a.available === false) {
     bits.push('<span style="color:var(--err);font-weight:600">暂不可用</span>');
+  } else if (_raccoon_manually_disabled(a)) {
+    bits.push('<span style="color:var(--warn);font-weight:600">已手动下线</span>');
   } else {
     bits.push('<span style="color:var(--ok);font-weight:600">✓ 可用</span>');
   }

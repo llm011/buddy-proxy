@@ -292,3 +292,31 @@ console.log(JSON.stringify({
     assert data["hasCard"] and data["blockedName"], "风控账号没有额度数据也要渲染账号卡"
     assert data["riskText"], "账号卡必须显示风控状态"
     assert data["notice"], "额度查询失败说明仍要保留"
+
+
+def test_manually_disabled_account_is_not_counted_available():
+    """手动下线不参与转发，面板不能仍把「✓ 可用」和可用汇总送给它。"""
+    out = _run_js("""
+globalThis.DISABLED_ACCOUNTS = ['raccoon:u1'];
+globalThis.BENEFITS = {providers: [{
+  id: 'raccoon', name: '商汤小浣熊', disabled: false,
+  quota: {supported: true, items: [
+    {label: '小浣熊 · 积分总额', remaining: 100, total: 100, used: 0, percent: 0},
+  ]},
+}]};
+globalThis.api = async () => ({enabled: true, accounts: [
+  {id:'u1', name:'下线号', alias:'', index:1, auto_renew:true, available:true, cooling:[]},
+]});
+renderRaccoonPanel();
+await new Promise(r => setTimeout(r, 80));
+const html = document.getElementById('raccoon-panel').innerHTML;
+console.log(JSON.stringify({
+  blockedName: html.includes('❌ 下线号'),
+  disabledText: html.includes('已手动下线'),
+  noAvailableBadge: !html.includes('✓ 可用'),
+  summary: html.includes('可用 0/1'),
+}));
+""")
+    data = json.loads(out)
+    assert data["blockedName"] and data["disabledText"], "手动下线账号要明确标成不可用"
+    assert data["noAvailableBadge"] and data["summary"], "可用标记与汇总必须和转发过滤一致"
