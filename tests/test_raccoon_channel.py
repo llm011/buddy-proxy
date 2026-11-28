@@ -1654,3 +1654,37 @@ def test_mark_cooldown_risk_control_uses_escalation():
     finally:
         failover.note_risk_recovered(acct)
         failover.clear_cooldown(acct)
+
+
+def test_risk_streak_advances_even_with_retry_after():
+    """上游给了 ``Retry-After`` 时也必须推进连续计数。
+
+    review 时发现的坑：第一版写成 ``if risk_control and not retry_after``，
+    带了 Retry-After 就整条跳过计数。而 200108 的响应是**可能**带这个头的——
+    一旦带，那些「解封即再犯」的账号会永远停在 12h、按 12h 周期反复撞，递进
+    等于没做。
+    """
+    from buddy_proxy.raccoon import failover
+
+    acct = "test-acct-retry-after"
+    failover.note_risk_recovered(acct)
+    try:
+        # 上游给 600s：时长用它，但计数要涨
+        first = failover.mark_cooldown(acct, risk_control=True,
+                                       retry_after="600", reason="t")
+        assert first == 600.0
+        assert failover.risk_streak(acct) == 1
+        failover.clear_cooldown(acct)
+
+        second = failover.mark_cooldown(acct, risk_control=True,
+                                        retry_after="600", reason="t")
+        assert second == 600.0
+        assert failover.risk_streak(acct) == 2, "带 Retry-After 时计数没推进"
+
+        failover.clear_cooldown(acct)
+        # 第三次上游没给 Retry-After → 用递进值，此时应已到 24h 档
+        third = failover.mark_cooldown(acct, risk_control=True, reason="t")
+        assert third == 86400.0
+    finally:
+        failover.note_risk_recovered(acct)
+        failover.clear_cooldown(acct)

@@ -235,11 +235,16 @@ def mark_cooldown(account_id: str, *, retry_after: str | None = None,
     都显示成同一种「账号冷却」；这个类别也会随长冷却一起落盘。
     """
     kind = "risk_control" if risk_control else "quota" if quota else "account"
-    if risk_control and not retry_after:
-        # 风控走递进档位（12h → 24h）。``retry_after`` 若上游明确给了
-        # Retry-After 就尊重它——那是更可信的一手信息。
-        seconds = _risk_cooldown_seconds(account_id)
-        return _tracker.mark(account_id, retry_after=str(int(seconds)),
+    if risk_control:
+        # 计数**必须**先推进，与有没有 Retry-After 无关。
+        #
+        # 一开始写成 ``if risk_control and not retry_after``——review 时发现上游
+        # 200108 是可能带 Retry-After 头的，那条路径不推进计数，于是「解封即
+        # 再犯」的账号会永远停在 12h、按 12h 周期反复撞，递进形同虚设。
+        escalated = _risk_cooldown_seconds(account_id)
+        # 时长仍优先尊重上游给的 Retry-After（那是一手信息），没有才用递进值。
+        seconds = retry_after or str(int(escalated))
+        return _tracker.mark(account_id, retry_after=seconds,
                              kind=kind, reason=reason, log=log)
     return _tracker.mark(account_id, retry_after=retry_after,
                          kind=kind, reason=reason, log=log)
