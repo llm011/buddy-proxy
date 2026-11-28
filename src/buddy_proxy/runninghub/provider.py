@@ -151,7 +151,8 @@ class RunningHubProvider:
         出现在额度页）。
 
         显式给 ``supported: False``：``**quota`` 会覆盖掉外层那个 True。
-        保留 ``accounts`` 是因为 ``auth/login.py`` 登录流程要用它读余额。
+        ``accounts`` / ``items`` 字段留着——排查和 CLI 诊断还会读它，去掉只是
+        让这条路径少一个可用信息源。
         """
         accounts = get_active_accounts()
         return {

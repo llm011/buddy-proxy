@@ -25,8 +25,8 @@ def test_runninghub_does_not_claim_quota_support():
         "RunningHub 自报支持额度，额度页会多出一张空卡（用户已报障两次）")
 
 
-def test_runninghub_quota_still_reports_accounts_for_login():
-    """``accounts`` 要留着：``auth/login.py`` 登录流程靠它读余额。"""
+def test_runninghub_quota_still_reports_accounts():
+    """``accounts`` 要留着：排查和 CLI 诊断还读它。"""
     q = RunningHubProvider().quota()
     assert "accounts" in q
     assert isinstance(q["accounts"], int)
