@@ -59,6 +59,38 @@ def test_read_version_picks_project_version():
     assert rel._read_version(text) == "3.4.5"
 
 
+def test_since_ref_prefers_version_tag(monkeypatch):
+    """有 ``v<当前版本>`` 标签时用它锚定，而不是本地 HEAD。
+
+    服务可能跑在功能分支上，那里的 HEAD 含着一堆没合进 main 的提交，
+    用 HEAD 算差集会列出无关改动。
+    """
+    calls = []
+
+    def fake_git(*args, **kw):
+        calls.append(args)
+        return ""          # rev-parse 成功（标签存在）
+
+    monkeypatch.setattr(rel, "_run_git", fake_git)
+    assert rel._since_ref("2.0.4") == "v2.0.4"
+
+
+def test_since_ref_falls_back_to_head_without_tag(monkeypatch):
+    def fake_git(*args, **kw):
+        raise RuntimeError("unknown revision")
+
+    monkeypatch.setattr(rel, "_run_git", fake_git)
+    assert rel._since_ref("2.0.4") == "HEAD"
+
+
+def test_notes_drop_release_commits(monkeypatch):
+    """自动发版提交不该出现在「更新信息」里——那不是用户关心的改动。"""
+    monkeypatch.setattr(rel, "_run_git", lambda *a, **kw: (
+        "feat: 新功能\nchore(release): v2.0.5\nfix: 修个 bug\n"))
+    notes = rel._git_log_notes("2.0.4")
+    assert notes == ["feat: 新功能", "fix: 修个 bug"]
+
+
 def test_check_reports_no_update_on_git_failure(monkeypatch):
     """fetch 失败（断网/墙）绝不能误报有新版本。"""
     def boom(*a, **kw):
@@ -73,8 +105,8 @@ def test_check_reports_no_update_on_git_failure(monkeypatch):
 def test_check_reports_update_when_remote_is_newer(monkeypatch):
     monkeypatch.setattr(rel, "installed_version", lambda: "2.0.4")
     monkeypatch.setattr(rel, "_run_git", lambda *a, **kw: 'version = "2.0.5"')
-    monkeypatch.setattr(rel, "_git_count_ahead", lambda: 3)
-    monkeypatch.setattr(rel, "_git_log_notes", lambda limit=8: ["feat: 新功能"])
+    monkeypatch.setattr(rel, "_git_count_ahead", lambda cur: 3)
+    monkeypatch.setattr(rel, "_git_log_notes", lambda cur, limit=8: ["feat: 新功能"])
     out = rel.check(fetch=True)
     assert out["has_update"] is True
     assert out["current"] == "2.0.4" and out["latest"] == "2.0.5"
@@ -93,8 +125,8 @@ def test_notes_are_capped(monkeypatch):
     """发布说明只列几点，不能把几十条 commit 全塞进弹窗。"""
     monkeypatch.setattr(rel, "installed_version", lambda: "2.0.4")
     monkeypatch.setattr(rel, "_run_git", lambda *a, **kw: 'version = "2.0.5"')
-    monkeypatch.setattr(rel, "_git_count_ahead", lambda: 50)
-    monkeypatch.setattr(rel, "_git_log_notes", lambda limit=8: [f"c{i}" for i in range(limit)])
+    monkeypatch.setattr(rel, "_git_count_ahead", lambda cur: 50)
+    monkeypatch.setattr(rel, "_git_log_notes", lambda cur, limit=8: [f"c{i}" for i in range(limit)])
     out = rel.check(fetch=True)
     assert len(out["notes"]) == rel.MAX_NOTES
 

@@ -133,26 +133,50 @@ def is_newer(candidate: str, base: str) -> bool:
     return a + (0,) * (n - len(a)) > b + (0,) * (n - len(b))
 
 
-def _git_log_notes(limit: int = MAX_NOTES) -> list[str]:
-    """从「本地 HEAD 之后的 origin/main 提交」里提取发布说明。
+def _since_ref(current: str) -> str:
+    """算「我这一版之后有哪些改动」时的起点。
+
+    优先用 ``v<当前版本>`` 标签：那才是「我装的这个版本」在主线上的位置。
+    退而求其次用 ``HEAD``。
+
+    为什么不能一律用 ``HEAD``：服务可能跑在某个 worktree 的功能分支上
+    （``buddy-proxy-joycode`` 之类），那里的 ``HEAD`` 含着一堆还没合进 main 的
+    提交，``HEAD..origin/main`` 算出来的差集既不是「新版本带来的改动」，也会把
+    同一批 commit 重复列出来。用标签锚定主线才稳定。
+    """
+    if current:
+        tag = f"v{current}"
+        try:
+            _run_git("rev-parse", "--verify", "--quiet", f"{tag}^{{commit}}")
+            return tag
+        except RuntimeError:
+            pass  # 没有这个标签（首次发版前/本地开发态），回退到 HEAD
+    return "HEAD"
+
+
+def _git_log_notes(current: str, limit: int = MAX_NOTES) -> list[str]:
+    """从「当前版本之后的 origin/main 提交」里提取发布说明。
 
     取提交标题（squash 合并后一条 PR 就是一条提交，标题里已带 PR 号），
-    去掉合并噪音。倒序（最新在前）由 git 默认给出，页面直接按序展示。
+    去掉合并噪音与自动发版提交。git 默认倒序（最新在前），页面按序展示。
     """
     try:
         raw = _run_git(
             "log", f"--max-count={limit}", "--no-merges",
-            "--pretty=format:%s", "HEAD..origin/main",
+            "--pretty=format:%s", f"{_since_ref(current)}..origin/main",
         )
     except RuntimeError:
         return []
-    notes = [line.strip() for line in raw.splitlines() if line.strip()]
+    notes = [
+        line.strip() for line in raw.splitlines()
+        if line.strip() and not line.strip().startswith("chore(release):")
+    ]
     return notes[:limit]
 
 
-def _git_count_ahead() -> int:
+def _git_count_ahead(current: str) -> int:
     try:
-        raw = _run_git("rev-list", "--count", "HEAD..origin/main").strip()
+        raw = _run_git("rev-list", "--count", f"{_since_ref(current)}..origin/main").strip()
         return int(raw or 0)
     except (RuntimeError, ValueError):
         return 0
@@ -194,8 +218,8 @@ def check(*, fetch: bool = True) -> dict[str, Any]:
     result["latest"] = latest
     if latest and is_newer(latest, result["current"]):
         result["has_update"] = True
-        result["behind"] = _git_count_ahead()
-        result["notes"] = _git_log_notes()
+        result["behind"] = _git_count_ahead(result["current"])
+        result["notes"] = _git_log_notes(result["current"])
     return result
 
 
