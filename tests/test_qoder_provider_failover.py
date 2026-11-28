@@ -377,15 +377,24 @@ def test_all_accounts_cooldown_fast_fail(monkeypatch):
     assert "冷却" in str(exc_info.value.detail)
 
 
-def test_no_account_in_region_gives_401(monkeypatch):
-    """主区域无可用账号（账号都在其它区域）：401 提示跨区不自动切换。"""
+def test_no_account_in_region_gives_400_not_401(monkeypatch):
+    """主区域无可用账号（账号都在其它区域）：400 提示跨区不自动切换。
+
+    **不能用 401/authentication_error**：那是「凭据失效」的语义，客户端
+    （Kimi）会直接弹 ``provider.auth_error`` 让人重新登录，而真正该做的是
+    「把账号导入对应区域子通道」。这是配置问题，不是鉴权问题，且属于确定性
+    错误——换号重试都不会成功，所以用 400。
+    """
     _write_account("gl-a", region="global")
     with pytest.raises(HTTPException) as exc_info:
         _run(monkeypatch, {}, {"model": "qwen3.8-flash",
                                "messages": [{"role": "user", "content": "hi"}],
               "stream": False})
-    assert exc_info.value.status_code == 401
-    assert "跨区" in str(exc_info.value.detail)
+    exc = exc_info.value
+    assert exc.status_code == 400, "区域不匹配是配置问题，不该伪装成鉴权失败"
+    assert "跨区" in str(exc.detail)
+    assert "authentication_error" not in str(exc.detail), (
+        "authentication_error 会触发客户端重新登录流程，掩盖真因")
 
 
 # ---------------------------------------------------------------------------

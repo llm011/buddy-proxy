@@ -772,6 +772,8 @@ def chat_completion_to_anthropic_message(
     choice = (data.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     content = message.get("content") or ""
+    # 上游的收尾原因：``length`` = 输出被 max_tokens 截断（参数可能是半截 JSON）。
+    finish_reason = choice.get("finish_reason") or ""
 
     thinking, text = _split_leading_think(content)
     reasoning = str(message.get("reasoning_content") or "").strip()
@@ -793,10 +795,21 @@ def chat_completion_to_anthropic_message(
             content_blocks.append(block)
     for call in message.get("tool_calls") or []:
         fn = call.get("function") or {}
+        raw_args = fn.get("arguments", "{}")
         try:
-            arguments = json.loads(fn.get("arguments", "{}"))
+            arguments = json.loads(raw_args)
         except json.JSONDecodeError:
-            arguments = fn.get("arguments", "")
+            # 参数是**半截 JSON**（上游 max_tokens 截断，finish_reason=length）。
+            #
+            # 原来把原始字符串直接塞进 ``input``，可 Anthropic 协议里 ``input``
+            # 必须是**对象**。客户端拿到 ``"input": "{\"path\":\"src"`` 后解析不出
+            # 任何字段，报的就是「must have required property 'pattern'」——
+            # 看着像代理把参数弄丢了，其实参数本来就没传完（实测
+            # max_tokens=40/50 时上游返回 '{"path":"src'）。
+            #
+            # 给 {} 而不是原字符串：形状合法、客户端按「没传参数」处理并重试；
+            # 真因（被截断）由 stop_reason=length 表达，不该伪装成工具参数错误。
+            arguments = {}
         content_blocks.append({
             "type": "tool_use",
             "id": call.get("id", ""),
@@ -817,13 +830,26 @@ def chat_completion_to_anthropic_message(
     credit = _credit_field(usage)
     if credit is not None:
         usage_out["credit"] = credit
+    # stop_reason 优先看 finish_reason：
+    #
+    # 原来只按「有没有 tool_calls」定，截断时也报 tool_use——客户端于是把
+    # **半截参数**当成完整调用去执行（``input`` 只能是 {}，必填字段全缺），
+    # 报出来的就是「must have required property 'pattern'」。上游说
+    # finish_reason=length，就该如实转成 max_tokens，让客户端按截断重试。
+    # 流式路径（AnthropicStreamConverter.finish）已是这个口径，两条路径对齐。
+    if finish_reason == "length":
+        stop_reason = "max_tokens"
+    elif message.get("tool_calls"):
+        stop_reason = "tool_use"
+    else:
+        stop_reason = "end_turn"
     return {
         "id": _rand_id("msg_"),
         "type": "message",
         "role": "assistant",
         "model": (original or {}).get("model", data.get("model", "default")),
         "content": content_blocks,
-        "stop_reason": "tool_use" if message.get("tool_calls") else "end_turn",
+        "stop_reason": stop_reason,
         "stop_sequence": None,
         "usage": usage_out,
     }
